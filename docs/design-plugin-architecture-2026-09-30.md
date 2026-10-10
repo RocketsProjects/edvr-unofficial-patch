@@ -12,16 +12,16 @@
   implementations, generated config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `39c2e02c` is merged. The offline
-  policy/lifecycle checkpoint passes the full build; receipt `286de0b9`
-  matches. Last measured Steam build: `6ab758d2`. Sean must approve any
-  install.
-- **Module progress:** Performance owns the OpenXR resolution policy.
-  Cockpit owns RemLok; Diagnostics owns scheduler capture. Comfort owns
-  exposure, scanners, transition flash and terrain pose policy. On-foot
-  owns footprint sampling; shared sizing stays core. Explorer Cam owns
-  its archive/lifecycle. All selections remain unavailable; draw
-  migration and installer/runtime selection stay open.
+- **Current integration:** main `39c2e02c`; full build passed with
+  receipt `03114f60` in
+  `build/full-plugin-performance-policies-offline-20261010-r4.log`. Last
+  measured Steam build: `6ab758d2`; install needs Sean approval.
+- **Module progress:** Performance owns OpenXR resolution, the FOV
+  engine and settings resolver, and sampler; Cockpit owns RemLok;
+  Diagnostics owns scheduler. Comfort owns exposure, scanners,
+  transition flash and terrain pose. On-foot owns footprint sampling;
+  shared sizing stays core; Explorer Cam owns lifecycle. Selections stay
+  unavailable; draw migration and installer/runtime selection stay open.
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
   Capture uses consumed values; unarmed paths construct no predicate payload.
@@ -4572,3 +4572,70 @@ installer selections remain unavailable. Remaining feature ownership,
 selection bootstrap and UI, whole-ladder parity, lifecycle cost coverage
 and final runtime CPU/GPU acceptance stay open. Performance's FOV and
 sampler policies remain to migrate.
+
+### 2026-10-10 — Performance FOV and sampler policy integration
+
+Performance owns the OpenXR FOV trim engine, its headset-specific
+settings resolver, and texture sampler policy behind fixed-record APIs.
+The FOV engine keeps real-render parity; bounded source comparison found
+it byte-for-byte equivalent apart from its class rename and
+shared-helper qualification. Selected FOV settings use module-owned
+opaque state, created lazily, retained across close/reacquire, and
+destroyed on replacement or disable; the frame host exposes cached
+output snapshots. Selected-state creation failure makes `beginFrame`
+fail before callbacks or output mutation. Absent selection bypasses
+label, config, parser, and logging work. Absent or malformed policy
+output preserves raw-FOV identity behavior while core retains mandatory
+valid/even game-facing dimensions. Pre-build review repaired the policy
+include path and odd-size facade fallback, and the settings resolver now
+owns the three literal FOV Config reads. `cycleShape.width/height`
+remain adoption-only `fovTrim.lastSubmitted`; actual submit ROI
+continues separately through core `submitSample` and `timingFrame`.
+
+Sampler ownership preserves `advanced.texture_anisotropy` and
+`advanced.texture_lod_bias`, existing defaults and profile-filtered
+config behavior, and profile-independent device-hook admission.
+`fix.temporal_aa` remains Temporal-owned and supplies the `auto`
+default. The policy keeps the existing filter classes, 0..16 anisotropy
+clamp, ordered [-4,+4] bias clamp, and auto-only multiplier provider.
+The host's cached default-off `rewriteEnabled` fast path skips POD
+construction and the rewrite callback; the core hook retains shared
+census, real forwarding, and its single D3D call. Source pins check host
+ordering and bypasses; native fixtures execute the actual FOV engine,
+settings resolver, frame provider, and sampler policy, while the full
+host callback/COM path remains source-pinned. The completed log reported
+96 native-frame, 353 FOV-engine, 65 FOV-settings, and 125 sampler
+checks, all with zero failures. The full build and installer validation
+passed; receipt
+`03114f60337a82f5428b566abaaa0c4e6d98dd812f2ced0dc1cfdbbcb6796e56`
+matches the completed log and current inputs.
+
+R1 compiled the graphics and flat production targets, then stopped at
+the OpenXR runtime compile with C2668 ambiguities for
+`nativeTrimRouteName` (lines 1178 and 1201) and `nativeTrimNudgeName`
+(line 1187) in `native_runtime_host.h`. The facade had local forwarding
+wrappers while aliased enum arguments also found the Performance
+functions through ADL. The source repair re-exports the canonical
+Performance helpers with `using` declarations in `native_fov_trim.h`; it
+changes name lookup only, with no settings or behavior change. R2
+compiled graphics and flat production, then stopped at
+`openxr_native_test.exe` link: its fixture referenced
+`performance::nativeFovTrimOpsV1()` but the extracted-engine object was
+missing from that fixture recipe (LNK2019/LNK1120). The scoped repair
+adds the production `fov_trim_policy.cpp` source to that native/stereo
+compile loop and pins the recipe with a negative mutation in the
+lifecycle source gate; its 42-mutation self-test passed. This is fixture
+linkage only and does not alter runtime behavior or settings. R1, R2,
+and R3 are failed/incomplete builds and none is accepted as completion
+evidence. R3 ran 353 `native_trim_test` checks with one failure at line
+607 (`selectedCounts.order` expected `B01B`), and 105 of 161 jobs
+completed. The only source change for that failure is the fixture's
+expected order string, corrected from `B01B` to `B01BB`; no production
+behavior changed. Only the fresh R4 full-pass receipt, exact
+marker/digest, and fixture counts qualify below.
+
+Performance remains catalog-only: selections and hook points are empty
+and cost budgets are unmeasured. These offline checks do not prove
+runtime selection, whole-plugin uninstalled cost, or CPU/GPU benefit.
+The final matched performance comparison remains deferred to
+rendering-code freeze. No install or flight occurred.

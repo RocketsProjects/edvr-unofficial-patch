@@ -492,7 +492,10 @@
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
       "rigs": [
         "native_render_settings_test",
-        "native_frame_test"
+        "native_frame_test",
+        "native_trim_test",
+        "performance_sampler_test",
+        "fov_trim_settings_test"
       ],
       "implementationStatus": "catalog-only",
       "selectionAvailableProfiles": [],

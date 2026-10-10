@@ -12,6 +12,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SLICE_PATHS = {
+    "build": ROOT / "build.bat",
     "remlok_header": ROOT / "src/plugins/cockpit_visuals/remlok_lifecycle.h",
     "remlok": ROOT / "src/plugins/cockpit_visuals/remlok_fix.cpp",
     "scheduler_header": ROOT / "src/plugins/diagnostics/scheduler_lifecycle.h",
@@ -22,6 +23,14 @@ SLICE_PATHS = {
     "native_settings": ROOT / "src/d3d11/native_render_settings.cpp",
     "native_policy_header": ROOT / "src/d3d11/native_render_policy.h",
     "native_policy": ROOT / "src/plugins/performance/openxr_resolution_policy.cpp",
+    "fov_settings_header": ROOT / "src/plugins/performance/fov_trim_settings_policy.h",
+    "fov_settings": ROOT / "src/plugins/performance/fov_trim_settings_policy.cpp",
+    "native_frame_fov_adapter": ROOT / "src/d3d11/native_frame_fov_trim_policy.h",
+    "native_frame": ROOT / "src/d3d11/native_frame.cpp",
+    "fov_settings_fixture": ROOT / "tools/fov_trim_settings_test/fov_trim_settings_test.cpp",
+    "native_frame_fixture": ROOT / "tools/native_frame_test/native_frame_test.cpp",
+    "fov_facade": ROOT / "src/openxr/native_fov_trim.h",
+    "trim_fixture": ROOT / "tools/native_trim_test/native_trim_test.cpp",
     "relay_header": ROOT / "src/d3d11/scheduler_relay.h",
     "relay_host": ROOT / "src/d3d11/kinematic_eval_hook.cpp",
     "vscreen": ROOT / "src/d3d11/vscreen.cpp",
@@ -270,12 +279,20 @@ def check_module_slices(sources: dict[str, str]) -> None:
     native_settings = sources["native_settings"]
     native_policy_h = sources["native_policy_header"]
     native_policy = sources["native_policy"]
+    fov_settings_h = sources["fov_settings_header"]
+    fov_settings = sources["fov_settings"]
+    native_frame_fov_adapter = sources["native_frame_fov_adapter"]
+    native_frame = sources["native_frame"]
+    fov_settings_fixture = sources["fov_settings_fixture"]
+    native_frame_fixture = sources["native_frame_fixture"]
+    fov_facade = sources["fov_facade"]
+    trim_fixture = sources["trim_fixture"]
     relay_h = sources["relay_header"]
     relay = sources["relay_host"]
     vscreen = sources["vscreen"]
     device = sources["device"]
     registry = sources["registry"]
-    build = (ROOT / "build.bat").read_text(encoding="utf-8")
+    build = sources["build"]
     flat_proxy = (ROOT / "tools/build_flat_sdk_bench_proxy.py").read_text(encoding="utf-8")
 
     if "const EdvrPluginLifecycleOps& remlokLifecycleOps();" not in rem_h:
@@ -401,6 +418,88 @@ def check_module_slices(sources: dict[str, str]) -> None:
         raise AssertionError("Performance implementation must own resolution config reads and reports")
     if "static_assert(sizeof(OpsV1) == 32" not in native_policy_h:
         raise AssertionError("native render policy bridge must keep its fixed POD record")
+
+    fov_keys = ("experimental.fov_trim_vertical", "experimental.fov_trim_outer",
+                "experimental.fov_trim_nasal")
+    if any(fov_settings.count(f'getString("{key}"') != 1 for key in fov_keys):
+        raise AssertionError("Performance FOV settings policy must own each literal Config read once")
+    if any(key in native_frame for key in fov_keys):
+        raise AssertionError("core native-frame host must not retain FOV settings Config reads")
+    for token in ("sizeof(FovTrimSettingsInputV1) == 76",
+                  "sizeof(FovTrimSettingsPolicyOpsV1) == 32",
+                  "CreateFovTrimSettingsV1 create;",
+                  "DestroyFovTrimSettingsV1 destroy;",
+                  "ResolveFovTrimSettingsV1 resolve;"):
+        if token not in fov_settings_h:
+            raise AssertionError(f"FOV settings policy ABI/lifetime pin missing: {token}")
+    if "setNativeFrameFovTrimSettingsPolicyOpsV1" not in native_frame_fov_adapter:
+        raise AssertionError("private native-frame FOV policy adapter disappeared")
+    resolve_trim = body(native_frame, "HRESULT resolveTrim(uint32_t out[3])")
+    if "if (!g_trimPolicyPresent)" not in resolve_trim:
+        raise AssertionError("absent FOV selection must return before policy or label work")
+    ordered(resolve_trim, "if (!g_trimPolicyPresent)",
+            "fovTrimSettingsPolicyOpsV1()", "if (!g_trimPolicyState)",
+            "g_trimPolicyOps.create()", "nativeRenderLabels(&labels)",
+            "g_trimPolicyOps.resolve(g_trimPolicyState")
+    if "edvr::Config::get()" in resolve_trim:
+        raise AssertionError("FOV settings Config reads must remain inside Performance")
+    resolve_policy = body(fov_settings, "bool resolve(")
+    ordered(resolve_policy, "if (!output) return false;", "if (!policyContext ||",
+            "input->structSize != sizeof(*input)",
+            "return false;\n    }\n\n    auto& state",
+            'getString("experimental.fov_trim_vertical"',
+            'getString("experimental.fov_trim_outer"',
+            'getString("experimental.fov_trim_nasal"')
+    for token in ("input->version != kFovTrimSettingsPolicyVersion1",
+                  "input->haveHeadset > 1",
+                  "std::memchr(input->runtimeToken", "std::memchr(input->systemToken"):
+        if token not in resolve_policy:
+            raise AssertionError(f"FOV settings input validation disappeared before Config reads: {token}")
+    begin = body(native_frame,
+                 "HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,")
+    ordered(begin, "return E_INVALIDARG;", "resolveTrim(trim)")
+    setter = body(native_frame, "bool setNativeFrameFovTrimSettingsPolicyOpsV1(")
+    ordered(setter, "if (ops && !validTrimOps(*ops)) return false;",
+            "if (g_trimPolicyState) g_trimPolicyOps.destroy(g_trimPolicyState);",
+            "g_trimPolicyState = nullptr;",
+            "g_trimPolicyOps = ops ? *ops : FovTrimSettingsPolicyOpsV1{};",
+            "g_trimPolicyPresent = ops != nullptr;")
+    factory = body(fov_settings, "const FovTrimSettingsPolicyOpsV1* fovTrimSettingsPolicyOpsV1()")
+    if "static const FovTrimSettingsPolicyOpsV1 ops" not in factory or "create()" in factory:
+        raise AssertionError("FOV settings factory must return an immutable table without creating state")
+    for callback in ("&create", "&destroy", "&resolve"):
+        if callback not in factory:
+            raise AssertionError(f"FOV settings factory lost callback {callback}")
+    ordered(begin, "return E_INVALIDARG;", "resolveTrim(trim)",
+            "result.trimVerticalDeg", "result.trimOuterDeg", "result.trimNasalDeg")
+    ordered(begin, "if (FAILED(trimStatus)) return trimStatus;",
+            "result.trimVerticalDeg", "result.trimOuterDeg", "result.trimNasalDeg")
+    close = body(native_frame, "HRESULT WINAPI close(")
+    if "g_trimPolicyOps.destroy" in close:
+        raise AssertionError("FOV policy state must survive close/reacquire")
+    cleanup = body(native_frame, "~TrimPolicyCleanup()")
+    ordered(cleanup, "if (g_trimPolicyState)",
+            "g_trimPolicyOps.destroy(g_trimPolicyState);")
+    if "g_mutex" in cleanup or "lock_guard" in cleanup:
+        raise AssertionError("CRT FOV policy teardown must not wait on the host mutex")
+
+    # The optional FOV implementation may be absent, but Elite's mandatory
+    # game-facing size rounding still belongs to the core facade's identity
+    # path. Keep raw dimensions for runtime geometry and round only the values
+    # exposed as game recommendations.
+    identity = body(fov_facade, "void resetIdentity(")
+    ordered(identity, "gameFacingDimension(dims[eye].width)",
+            "gameFacingDimension(dims[eye].height)",
+            "out.trueRecommended = gameDims", "out.recommended = gameDims",
+            "out.treatedFor = gameDims")
+    if "out.recommended = dims[eye]" in identity:
+        raise AssertionError("absent FOV policy must retain mandatory game-facing size rounding")
+    for token in ("NativeFovTrim absent(nullptr)",
+                  "absent.beginFrame(seanIni,sean,menuDims,9,false)",
+                  "absent.recommended(eye).width==evenWidth",
+                  "absent.treatedFor(eye).height==3914"):
+        if token not in trim_fixture:
+            raise AssertionError(f"native trim fixture lost absent-policy rounding coverage: {token}")
     if "static_assert(edvr::native_render_policy::kPerformanceManifestIndex ==" not in proxy or \
             "edvr::plugins::kPluginPerformance," not in proxy:
         raise AssertionError("proxy policy bootstrap must stay tied to the generated Performance manifest index")
@@ -417,12 +516,85 @@ def check_module_slices(sources: dict[str, str]) -> None:
         "src\\plugins\\diagnostics\\scheduler_stack_hook.cpp",
         "src\\plugins\\diagnostics\\scheduler_lifecycle.cpp",
         "src\\plugins\\performance\\openxr_resolution_policy.cpp",
+        "src\\plugins\\performance\\fov_trim_policy.cpp",
+        "src\\plugins\\performance\\fov_trim_settings_policy.cpp",
+        "src\\plugins\\performance\\texture_sampler_policy.cpp",
     )
     for path in required_build_sources:
         if build.count(path) < 2:
             raise AssertionError(f"build must compile/archive and preserve direct rig source coverage for {path}")
     if "plugin_performance.lib" not in build or "plugin_performance.lib" not in flat_proxy:
         raise AssertionError("Performance archive must feed production and flat SDK bench links")
+    runtime_start = build.find("echo [edvr] === edvr_openxr_runtime.dll ===")
+    runtime_end = build.find("REM Shared by the installer and installer_test rigs below.", runtime_start + 1)
+    runtime_compile = build[runtime_start:runtime_end if runtime_end >= 0 else None]
+    if runtime_start < 0 or \
+            '"src\\plugins\\performance\\fov_trim_policy.cpp"' not in runtime_compile:
+        raise AssertionError("OpenXR production DLL must compile the Performance FOV policy TU")
+    trim_start = build.find(":rig_native_trim_test")
+    trim_end = build.find("\n:rig_", trim_start + 1)
+    trim_rig = build[trim_start:trim_end if trim_end >= 0 else None]
+    if trim_start < 0 or \
+            '"src\\plugins\\performance\\fov_trim_policy.cpp"' not in trim_rig:
+        raise AssertionError("native trim rig must link the production FOV policy TU")
+    native_start = build.find(":rig_openxr_native_tests")
+    native_end = build.find("\n:rig_", native_start + 1)
+    native_rig = build[native_start:native_end if native_end >= 0 else None]
+    if native_start < 0 or \
+            '"src\\plugins\\performance\\fov_trim_policy.cpp"' not in native_rig:
+        raise AssertionError("OpenXR native host fixture must link the Performance FOV factory")
+    performance_archive = build[
+        build.find('if not exist "%OBJ%\\plugins\\performance"'):
+        build.find('if not exist "%OBJ%\\plugins\\intro"',
+                   build.find('if not exist "%OBJ%\\plugins\\performance"'))]
+    if '"src\\plugins\\performance\\fov_trim_settings_policy.cpp"' not in performance_archive or \
+            '"%OBJ%\\plugins\\performance\\fov_trim_settings_policy.obj"' not in performance_archive:
+        raise AssertionError("FOV settings policy must be compiled into the production Performance archive")
+    if '"src\\plugins\\performance\\texture_sampler_policy.cpp"' not in performance_archive or \
+            '"%OBJ%\\plugins\\performance\\texture_sampler_policy.obj"' not in performance_archive:
+        raise AssertionError("sampler policy must be compiled into the production Performance archive")
+    sampler_start = build.find(":rig_performance_sampler_test")
+    sampler_end = build.find("\n:rig_", sampler_start + 1)
+    sampler_rig = build[sampler_start:sampler_end if sampler_end >= 0 else None]
+    for token in ('"tools\\performance_sampler_test\\texture_sampler_policy_test.cpp"',
+                  '"src\\plugins\\performance\\texture_sampler_policy.cpp"',
+                  '"src\\common\\config.cpp"', '"src\\common\\log.cpp"',
+                  '"%BUILD%\\performance_sampler_test.exe" --dry-run',
+                  '"%BUILD%\\performance_sampler_test.exe" --self-test'):
+        if token not in sampler_rig:
+            raise AssertionError(f"native sampler rig recipe lost {token}")
+    frame_start = build.find(":rig_native_frame_test")
+    frame_end = build.find("\n:rig_", frame_start + 1)
+    frame_rig = build[frame_start:frame_end if frame_end >= 0 else None]
+    if frame_start < 0 or \
+            '"src\\plugins\\performance\\fov_trim_settings_policy.cpp"' not in frame_rig:
+        raise AssertionError("native-frame fixture must link the production FOV settings resolver")
+    fov_start = build.find(":rig_fov_trim_settings_test")
+    fov_end = build.find("\n:rig_", fov_start + 1)
+    fov_rig = build[fov_start:fov_end if fov_end >= 0 else None]
+    for token in ('"tools\\fov_trim_settings_test\\fov_trim_settings_test.cpp"',
+                  '"src\\plugins\\performance\\fov_trim_settings_policy.cpp"',
+                  '"src\\common\\config.cpp"', '"src\\common\\log.cpp"',
+                  '"%BUILD%\\fov_trim_settings_test.exe" --dry-run',
+                  '"%BUILD%\\fov_trim_settings_test.exe" --self-test'):
+        if token not in fov_rig:
+            raise AssertionError(f"native FOV settings policy rig recipe lost {token}")
+    if "ops->create()" not in fov_settings_fixture or \
+            "ops->destroy(state)" not in fov_settings_fixture or \
+            "ops.resolve(state" not in fov_settings_fixture:
+        raise AssertionError("FOV settings fixture must execute the production create/resolve/destroy API")
+    for token in ("g_trimPolicyCounts.creates == 0",
+                  "selected Performance lazily creates once",
+                  "provider output matches the temporal accessor",
+                  "provider close retains the selected module state",
+                  "the real policy cache and note cadence persist across provider close/reacquire",
+                  "absent selection after replacement does no callback",
+                  "install a valid test policy whose module-state allocator fails",
+                  "allocationFailure.trimVerticalDeg == -41.0f",
+                  "allocationFailure.trimOuterDeg == -42.0f",
+                  "allocationFailure.trimNasalDeg == -43.0f"):
+        if token not in native_frame_fixture:
+            raise AssertionError(f"native-frame FOV settings fixture lost lifetime coverage: {token}")
     probe_start = build.find(":rig_scheduler_stack_probe_test")
     probe_end = build.find("\n:rig_", probe_start + 1)
     probe_rig = build[probe_start:probe_end if probe_end >= 0 else None]
@@ -454,6 +626,67 @@ def expect_slice(label: str, sources: dict[str, str]) -> None:
 
 
 def self_test_slices(sources: dict[str, str]) -> None:
+    changed = dict(sources)
+    build = changed["build"]
+    native_start = build.find(":rig_openxr_native_tests")
+    native_end = build.find("\n:rig_", native_start + 1)
+    native_rig = build[native_start:native_end if native_end >= 0 else None]
+    changed["build"] = (build[:native_start] + once(
+        native_rig, '"src\\plugins\\performance\\fov_trim_policy.cpp" ^',
+        '"src\\plugins\\performance\\missing_fov_trim_policy.cpp" ^') +
+        (build[native_end:] if native_end >= 0 else ""))
+    expect_slice("OpenXR native host fixture links the Performance FOV factory", changed)
+
+    changed = dict(sources)
+    changed["fov_settings"] = once(changed["fov_settings"],
+        'getString("experimental.fov_trim_vertical", "")',
+        'getString("experimental.fov_trim_wrong", "")')
+    expect_slice("Performance owns the literal FOV Config keys", changed)
+
+    changed = dict(sources)
+    changed["native_frame"] = once(changed["native_frame"],
+        "if (!g_trimPolicyPresent)", "if (false)")
+    expect_slice("absent FOV policy bypasses module and label work", changed)
+
+    changed = dict(sources)
+    changed["native_frame"] = once(changed["native_frame"],
+        "g_trimPolicyState = g_trimPolicyOps.create();",
+        "g_trimPolicyState = nullptr;")
+    expect_slice("FOV policy state is created lazily on the selected path", changed)
+
+    changed = dict(sources)
+    changed["native_frame"] = once(changed["native_frame"],
+        "if (g_trimPolicyState) g_trimPolicyOps.destroy(g_trimPolicyState);",
+        "/* old FOV policy state not destroyed */")
+    expect_slice("FOV policy state is destroyed when replaced or disabled", changed)
+
+    changed = dict(sources)
+    changed["native_frame"] = once(changed["native_frame"],
+        "g_trimPolicyOps = ops ? *ops : FovTrimSettingsPolicyOpsV1{};",
+        "/* retain borrowed FOV policy ops pointer */")
+    expect_slice("native-frame host copies the immutable FOV policy table", changed)
+
+    changed = dict(sources)
+    changed["fov_settings"] = once(changed["fov_settings"],
+        "input->structSize != sizeof(*input)", "false")
+    expect_slice("malformed settings input is rejected before Config reads", changed)
+
+    changed = dict(sources)
+    changed["native_frame"] = once(changed["native_frame"],
+        "if (FAILED(trimStatus)) return trimStatus;", "/* continue after failed trim resolve */")
+    expect_slice("failed trim resolution leaves caller output unchanged", changed)
+
+    changed = dict(sources)
+    changed["native_frame"] = once(changed["native_frame"],
+        "if (g_trimPolicyState) {",
+        "std::lock_guard<std::mutex> lock(g_mutex);\n        if (g_trimPolicyState) {")
+    expect_slice("CRT teardown does not wait on the native-frame mutex", changed)
+
+    changed = dict(sources)
+    changed["fov_facade"] = once(changed["fov_facade"],
+        "out.recommended = gameDims;", "out.recommended = dims[eye];")
+    expect_slice("absent FOV fallback preserves game-facing size rounding", changed)
+
     changed = dict(sources)
     changed["registry"] = replace_body(changed["registry"],
         "bool pluginRegistryRegisterLifecycle(",
@@ -575,7 +808,7 @@ def main() -> int:
     if args.self_test:
         self_test(sources)
         self_test_slices(slice_sources)
-        print("PASS: grouped lifecycle wiring and module boundaries (32 mutations)")
+        print("PASS: grouped lifecycle wiring and module boundaries (42 mutations)")
     else:
         print("DRY RUN: grouped lifecycle and module-boundary pins passed; no files written")
     return 0

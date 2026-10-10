@@ -85,7 +85,9 @@ EXPECTED_RIGS = {
                 'fss_predicate_test', 'fss_reveal_api_test', 'native_temporal_test',
                 'transition_flash_prevent_test', 'plugin_dispatch_test'),
     'explorer-cam': ('explorer_cam_test', 'explorer_cam_fade_test', 'plugin_dispatch_test'),
-    'performance': ('native_render_settings_test', 'native_frame_test'),
+    'performance': ('native_render_settings_test', 'native_frame_test',
+                    'native_trim_test', 'performance_sampler_test',
+                    'fov_trim_settings_test'),
     'diagnostics': ('pixel_probe_test', 'scheduler_stack_probe_test',
                     'scheduler_stack_json_test', 'kinematic_probe_test',
                     'plugin_dispatch_test'),
@@ -840,12 +842,15 @@ def self_test():
               not any(retired in performance['description'].lower()
                       for retired in ('guard', 'settlement', 'static props')) and
               not {'exposure', 'scanners'} & set(EXPECTED_IDS))
-        check('Performance remains catalog-only with both native render policy rigs',
+        check('Performance lists actual policy rigs while remaining catalog-only',
               performance['implementationStatus'] == 'catalog-only' and
               performance['selectionAvailableProfiles'] == [] and
               performance['hookPoints'] == [] and
-              all(rig in performance['rigs'] for rig in
-                  ('native_render_settings_test', 'native_frame_test')))
+              performance['costBudget']['state'] == 'unmeasured' and
+              tuple(performance['rigs']) == EXPECTED_RIGS['performance'])
+        check('Performance owns all three retained FOV settings keys',
+              {'experimental.fov_trim_vertical', 'experimental.fov_trim_outer',
+               'experimental.fov_trim_nasal'} <= set(performance['ownedConfigKeys']))
         diagnostics_index = EXPECTED_IDS.index('diagnostics')
         diagnostics = original['plugins'][diagnostics_index]
         check('Diagnostics lifecycle owns scheduler probes while remaining non-selectable',

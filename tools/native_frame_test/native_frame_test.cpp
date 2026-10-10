@@ -4,7 +4,9 @@
 #include "../../src/common/config.h"
 #include "../../src/common/native_render_settings.h"
 #include "../../src/d3d11/native_render_policy.h"
+#include "../../src/d3d11/native_frame_fov_trim_policy.h"
 #include "../../src/plugins/performance/openxr_resolution_policy.h"
+#include "../../src/plugins/performance/fov_trim_settings_policy.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/journal_watch.h"
 
@@ -15,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <string>
 #include <thread>
 
@@ -38,6 +41,87 @@ static EdvrNativeFrameInput input(uint64_t generation, uint64_t reference,
     const float identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
     std::memcpy(result.physicalHead, identity, sizeof(identity));
     return result;
+}
+
+struct TrimPolicyCounts {
+    const edvr::plugins::performance::FovTrimSettingsPolicyOpsV1* real = nullptr;
+    unsigned creates = 0, destroys = 0, resolves = 0, notes = 0;
+    bool failCreate = false, failResolve = false;
+};
+
+struct CountedTrimPolicyState {
+    TrimPolicyCounts* counts = nullptr;
+    void* realState = nullptr;
+    void* noteHost = nullptr;
+    edvr::plugins::performance::NoteFovTrimSettingsV1 realNote = nullptr;
+};
+
+static TrimPolicyCounts g_trimPolicyCounts;
+
+static void* countedTrimCreate() {
+    ++g_trimPolicyCounts.creates;
+    if (g_trimPolicyCounts.failCreate || !g_trimPolicyCounts.real) return nullptr;
+    auto* state = new (std::nothrow) CountedTrimPolicyState{};
+    if (!state) return nullptr;
+    state->counts = &g_trimPolicyCounts;
+    state->realState = g_trimPolicyCounts.real->create();
+    if (!state->realState) {
+        delete state;
+        return nullptr;
+    }
+    return state;
+}
+
+static void countedTrimDestroy(void* context) {
+    auto* state = static_cast<CountedTrimPolicyState*>(context);
+    if (!state) return;
+    ++state->counts->destroys;
+    state->counts->real->destroy(state->realState);
+    delete state;
+}
+
+static void countedTrimNote(void* context,
+                            edvr::plugins::performance::FovTrimSettingsNoteV1 kind,
+                            uint32_t keyIndex, const char* keyName, const char* token,
+                            const char* headsetKey, uint32_t vertical,
+                            uint32_t outer, uint32_t nasal, const char* entries) {
+    auto* state = static_cast<CountedTrimPolicyState*>(context);
+    ++state->counts->notes;
+    state->realNote(state->noteHost, kind, keyIndex, keyName, token, headsetKey,
+                    vertical, outer, nasal, entries);
+}
+
+static bool countedTrimResolve(
+    void* context, void* hostContext,
+    edvr::plugins::performance::NoteFovTrimSettingsV1 note,
+    const edvr::plugins::performance::FovTrimSettingsInputV1* input,
+    edvr::plugins::performance::FovTrimSettingsOutputV1* output) {
+    auto* state = static_cast<CountedTrimPolicyState*>(context);
+    ++state->counts->resolves;
+    if (state->counts->failResolve) return false;
+    state->noteHost = hostContext;
+    state->realNote = note;
+    return state->counts->real->resolve(state->realState, state, &countedTrimNote,
+                                        input, output);
+}
+
+static void* failedTrimCreate() {
+    ++g_trimPolicyCounts.creates;
+    return nullptr;
+}
+
+static void failedTrimDestroy(void*) { ++g_trimPolicyCounts.destroys; }
+
+static bool failedTrimResolve(
+    void*, void*, edvr::plugins::performance::NoteFovTrimSettingsV1,
+    const edvr::plugins::performance::FovTrimSettingsInputV1*,
+    edvr::plugins::performance::FovTrimSettingsOutputV1*) {
+    ++g_trimPolicyCounts.resolves;
+    return false;
+}
+
+static uint32_t countTrimNotes(const TrimPolicyCounts& counts) {
+    return counts.notes;
 }
 
 int wmain(int argc, wchar_t** argv) {
@@ -74,6 +158,21 @@ int wmain(int argc, wchar_t** argv) {
           "WARP device");
     if (!device) return 1;
     std::puts("native_frame_test: device ready");
+
+    const auto* realTrimOps = edvr::plugins::performance::fovTrimSettingsPolicyOpsV1();
+    check(realTrimOps && realTrimOps->create && realTrimOps->destroy && realTrimOps->resolve,
+          "real Performance trim settings policy is available to the provider fixture");
+    if (!realTrimOps) return 1;
+    g_trimPolicyCounts = {};
+    g_trimPolicyCounts.real = realTrimOps;
+    static const edvr::plugins::performance::FovTrimSettingsPolicyOpsV1 countedTrimOps = {
+        sizeof(edvr::plugins::performance::FovTrimSettingsPolicyOpsV1),
+        edvr::plugins::performance::kFovTrimSettingsOpsVersion1,
+        &countedTrimCreate, &countedTrimDestroy, &countedTrimResolve};
+    static const edvr::plugins::performance::FovTrimSettingsPolicyOpsV1 failedTrimOps = {
+        sizeof(edvr::plugins::performance::FovTrimSettingsPolicyOpsV1),
+        edvr::plugins::performance::kFovTrimSettingsOpsVersion1,
+        &failedTrimCreate, &failedTrimDestroy, &failedTrimResolve};
 
     // Reset the process channel so every assertion below observes this
     // provider's session rather than an earlier native-frame run.
@@ -158,6 +257,36 @@ int wmain(int argc, wchar_t** argv) {
     edvr::publishGameDevice(device.Get());
     edvr::announceSceneArrived();
 
+    check(setNativeFrameFovTrimSettingsPolicyOpsV1(nullptr),
+          "install the absent Performance policy state");
+    EdvrNativeFrameOutput absentTrimOutput{sizeof(absentTrimOutput),
+                                           EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameInput absentTrimFrame = input(41, 7, 1);
+    check(table.beginFrame(table.context, &absentTrimFrame, &absentTrimOutput) == S_OK &&
+              absentTrimOutput.trimVerticalDeg == 0.0f &&
+              absentTrimOutput.trimOuterDeg == 0.0f &&
+              absentTrimOutput.trimNasalDeg == 0.0f,
+          "absent selection writes zero trim asks through the real native-frame provider");
+    uint32_t absentTrimAccessor[3] = {99, 99, 99};
+    edvr::nativeFrameFovTrimDegrees(absentTrimAccessor);
+    check(absentTrimAccessor[0] == 0 && absentTrimAccessor[1] == 0 &&
+              absentTrimAccessor[2] == 0 && g_trimPolicyCounts.creates == 0 &&
+              g_trimPolicyCounts.resolves == 0 && g_trimPolicyCounts.notes == 0,
+          "absent selection skips Performance create/resolve/note callbacks and keeps the in-DLL accessor zero");
+    auto copiedTrimOps = countedTrimOps;
+    check(setNativeFrameFovTrimSettingsPolicyOpsV1(&copiedTrimOps),
+          "copy a valid selected Performance policy table into the provider");
+    copiedTrimOps = {};
+    EdvrNativeFrameOutput invalidBeforeTrim{sizeof(invalidBeforeTrim),
+                                            EDVR_NATIVE_FRAME_VERSION_5};
+    invalidBeforeTrim.trimVerticalDeg = -51.0f;
+    EdvrNativeFrameInput invalidBeforeTrimFrame = input(99, 7, 2);
+    check(table.beginFrame(table.context, &invalidBeforeTrimFrame,
+                           &invalidBeforeTrim) == E_INVALIDARG &&
+              invalidBeforeTrim.trimVerticalDeg == -51.0f &&
+              g_trimPolicyCounts.creates == 0 && g_trimPolicyCounts.resolves == 0,
+          "invalid native-frame input is rejected before lazy policy allocation or resolution");
+
     // Acquire on this thread, then run the complete CPU callback sequence from
     // a different XR-owner thread.  The provider must not use a producer-ID
     // gate for callbacks.
@@ -168,10 +297,10 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameDecision firstDecision{
         sizeof(firstDecision), EDVR_NATIVE_FRAME_VERSION_1};
     std::thread owner([&] {
-        EdvrNativeFrameInput frame = input(41, 7, 1);
+        EdvrNativeFrameInput frame = input(41, 7, 2);
         workerBegin = table.beginFrame(table.context, &frame, &firstOutput);
         edvr::markGlitchFrame();
-        workerLatch = table.latchSubmit(table.context, 1, &firstDecision);
+        workerLatch = table.latchSubmit(table.context, 2, &firstDecision);
     });
     owner.join();
     check(workerBegin == S_OK, "XR owner can begin after producer acquire");
@@ -199,6 +328,12 @@ int wmain(int argc, wchar_t** argv) {
               firstOutput.trimNasalDeg == 0.0f &&
               firstOutput.trimVerticalDeg == 0.0f,
           "the worn headset's trim entry applies; out of range and a bare number do not");
+    uint32_t firstTrimAccessor[3] = {99, 99, 99};
+    edvr::nativeFrameFovTrimDegrees(firstTrimAccessor);
+    check(firstTrimAccessor[0] == 0 && firstTrimAccessor[1] == 7 &&
+              firstTrimAccessor[2] == 0 && g_trimPolicyCounts.creates == 1 &&
+              g_trimPolicyCounts.resolves == 1 && g_trimPolicyCounts.notes == 3,
+          "selected Performance lazily creates once and provider output matches the temporal accessor");
     check(firstDecision.withhold && firstDecision.jumpOnly,
           "marked frame is withheld as jump-only");
 
@@ -207,7 +342,7 @@ int wmain(int argc, wchar_t** argv) {
     edvr::clearGlitchFrame();
     EdvrNativeFrameDecision cached{
         sizeof(cached), EDVR_NATIVE_FRAME_VERSION_1};
-    check(table.latchSubmit(table.context, 1, &cached) == S_OK &&
+    check(table.latchSubmit(table.context, 2, &cached) == S_OK &&
               std::memcmp(&cached, &firstDecision, sizeof(cached)) == 0,
           "second latch returns cached decision");
     check(edvr::glitchConsumerPresent(), "valid latch announces consumer");
@@ -215,7 +350,7 @@ int wmain(int argc, wchar_t** argv) {
     // Invalid physical tracking is a valid frame boundary but does not
     // publish a new pose.
     edvr::markGlitchFrame();
-    EdvrNativeFrameInput lost = input(41, 7, 2, false);
+    EdvrNativeFrameInput lost = input(41, 7, 3, false);
     lost.physicalHead[0] = std::numeric_limits<float>::quiet_NaN();
     EdvrNativeFrameOutput lostOutput{sizeof(lostOutput),
                                      EDVR_NATIVE_FRAME_VERSION_5};
@@ -223,10 +358,10 @@ int wmain(int argc, wchar_t** argv) {
           "lost pose succeeds");
     EdvrNativeFrameDecision lostDecision{
         sizeof(lostDecision), EDVR_NATIVE_FRAME_VERSION_1};
-    check(table.latchSubmit(table.context, 2, &lostDecision) == S_OK &&
+    check(table.latchSubmit(table.context, 3, &lostDecision) == S_OK &&
               !lostDecision.withhold,
           "begin clears a mark from the previous frame");
-    EdvrNativeFrameInput bad = input(41, 7, 3);
+    EdvrNativeFrameInput bad = input(41, 7, 4);
     bad.physicalHead[0] = 2.0f;
     EdvrNativeFrameOutput badOutput{sizeof(badOutput),
                                     EDVR_NATIVE_FRAME_VERSION_5};
@@ -325,6 +460,11 @@ int wmain(int argc, wchar_t** argv) {
               trimOutput.trimVerticalDeg == 3.0f && trimOutput.trimOuterDeg == 0.0f &&
               trimOutput.trimNasalDeg == 0.0f,
           "a runtime-only trim entry applies; an empty list and another headset's entry do not");
+    uint32_t changedTrimAccessor[3] = {99, 99, 99};
+    edvr::nativeFrameFovTrimDegrees(changedTrimAccessor);
+    check(changedTrimAccessor[0] == 3 && changedTrimAccessor[1] == 0 &&
+              changedTrimAccessor[2] == 0,
+          "the temporal-pass accessor agrees with changed v2+ frame trim fields");
 
     // fix.weapon_stability && the journal watcher's on-foot signal select
     // EdvrNativeFrameOutput::deferredPacing (version 3 and later). The journal
@@ -463,9 +603,72 @@ int wmain(int argc, wchar_t** argv) {
 
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
           "close retires announced consumer");
+    check(g_trimPolicyCounts.creates == 1 && g_trimPolicyCounts.destroys == 0,
+          "provider close retains the selected module state across provider generations");
     check(table.close(table.context) == S_FALSE, "close is idempotent");
     check(table.beginFrame(table.context, &next, &lostOutput) == E_INVALIDARG,
           "closed context rejects callbacks");
+
+    EdvrNativeFrameRequest nextRequest{
+        sizeof(nextRequest), EDVR_NATIVE_FRAME_VERSION_1, device.Get(), 42};
+    EdvrNativeFrameTable nextTable{sizeof(nextTable), EDVR_NATIVE_FRAME_VERSION_1};
+    check(edvrAcquireNativeFrame(&nextRequest, &nextTable) == S_OK &&
+              nextTable.context && nextTable.beginFrame && nextTable.close,
+          "a later provider generation can acquire while the Performance state remains selected");
+    const uint32_t notesBeforeGeneration = countTrimNotes(g_trimPolicyCounts);
+    EdvrNativeFrameOutput generationOutput{sizeof(generationOutput),
+                                           EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameInput generationFrame = input(42, 8, 1);
+    check(nextTable.beginFrame(nextTable.context, &generationFrame,
+                               &generationOutput) == S_OK &&
+              g_trimPolicyCounts.creates == 1 && g_trimPolicyCounts.resolves > 1 &&
+              countTrimNotes(g_trimPolicyCounts) == notesBeforeGeneration,
+          "the real policy cache and note cadence persist across provider close/reacquire");
+
+    check(setNativeFrameFovTrimSettingsPolicyOpsV1(nullptr) &&
+              g_trimPolicyCounts.destroys == 1,
+          "explicit absence destroys the one selected opaque module state");
+    EdvrNativeFrameOutput absentAgain{sizeof(absentAgain),
+                                      EDVR_NATIVE_FRAME_VERSION_5};
+    EdvrNativeFrameInput absentAgainFrame = input(42, 8, 2);
+    const unsigned resolvesBeforeAbsent = g_trimPolicyCounts.resolves;
+    check(nextTable.beginFrame(nextTable.context, &absentAgainFrame,
+                               &absentAgain) == S_OK &&
+              absentAgain.trimVerticalDeg == 0.0f && absentAgain.trimOuterDeg == 0.0f &&
+              absentAgain.trimNasalDeg == 0.0f &&
+              g_trimPolicyCounts.resolves == resolvesBeforeAbsent &&
+              g_trimPolicyCounts.destroys == 1,
+          "absent selection after replacement does no callback and writes the zero triple");
+    uint32_t absentAgainAccessor[3] = {99, 99, 99};
+    edvr::nativeFrameFovTrimDegrees(absentAgainAccessor);
+    check(absentAgainAccessor[0] == 0 && absentAgainAccessor[1] == 0 &&
+              absentAgainAccessor[2] == 0,
+          "the in-DLL trim accessor clears when the selected policy is removed");
+    check(setNativeFrameFovTrimSettingsPolicyOpsV1(nullptr) &&
+              g_trimPolicyCounts.destroys == 1,
+          "repeated absence does not destroy the same module state twice");
+
+    check(setNativeFrameFovTrimSettingsPolicyOpsV1(&failedTrimOps),
+          "install a valid test policy whose module-state allocator fails");
+    EdvrNativeFrameOutput allocationFailure{sizeof(allocationFailure),
+                                             EDVR_NATIVE_FRAME_VERSION_5};
+    allocationFailure.trimVerticalDeg = -41.0f;
+    allocationFailure.trimOuterDeg = -42.0f;
+    allocationFailure.trimNasalDeg = -43.0f;
+    EdvrNativeFrameInput allocationFailureFrame = input(42, 8, 3);
+    const unsigned resolvesBeforeFailure = g_trimPolicyCounts.resolves;
+    check(nextTable.beginFrame(nextTable.context, &allocationFailureFrame,
+                               &allocationFailure) == E_OUTOFMEMORY &&
+              allocationFailure.trimVerticalDeg == -41.0f &&
+              allocationFailure.trimOuterDeg == -42.0f &&
+              allocationFailure.trimNasalDeg == -43.0f &&
+              g_trimPolicyCounts.resolves == resolvesBeforeFailure,
+          "module-state allocation failure returns before callback and leaves caller output untouched");
+    check(setNativeFrameFovTrimSettingsPolicyOpsV1(nullptr) &&
+              g_trimPolicyCounts.destroys == 1,
+          "failed allocation has no opaque state to destroy");
+    check(nextTable.close(nextTable.context) == S_OK,
+          "later provider generation closes cleanly after absence and allocation refusal");
 
     // advanced.slow_test_ms's end-frame hold (frame_flag.h, v36): d3d11 -> openvr, 0 is no hold, and the
     // runtime never holds a frame for more than five seconds whatever is asked.

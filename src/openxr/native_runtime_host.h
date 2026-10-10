@@ -162,8 +162,12 @@ inline uint64_t nextRenderSizingGeneration() {
 }
 class NativeRuntimeHost : public SystemSource, public FrameSink, public CompositorSource, public AuxiliarySource, public RuntimeBackend {
  public:
-  NativeRuntimeHost(OwnerService& owner,RenderThreadDispatcher& dispatcher,RenderRoute& route,ID3D11Device* supplied=nullptr)
-      :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied){}
+  NativeRuntimeHost(OwnerService& owner,RenderThreadDispatcher& dispatcher,RenderRoute& route,
+      ID3D11Device* supplied=nullptr,
+      const edvr::plugins::performance::NativeFovTrimOpsV1* fovTrimOps=
+          edvr::plugins::performance::nativeFovTrimOpsV1())
+      :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied),
+       fovTrim(fovTrimOps){}
   OwnerService& service;
   RenderRoute& renderRoute;
   CountedGraphics graphicsCalls;
@@ -2638,6 +2642,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return clean;
   }
   bool open(const RuntimeOptions& options) {
+    if(!fovTrim.ready()) {
+      nativeTracePuts("native_fov_trim,error=policy_state_create");
+      return false;
+    }
     startupSteps=StartupSteps{};
     auto step=StepClock::now();
     // SteamVR decides what to call this process at the connect inside

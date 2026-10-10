@@ -2,13 +2,97 @@
 #include <cstdio>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
+#include <string>
 
 using namespace edvr::openxr;
 
 unsigned checks=0,failures=0;
 #define CHECK(value) do { ++checks; if(!(value)){++failures;std::printf("FAIL: line %d: %s\n",__LINE__,#value);} }while(false)
+
+using TrimOps = edvr::plugins::performance::NativeFovTrimOpsV1;
+using TrimSnapshot = edvr::plugins::performance::NativeFovTrimSnapshotV1;
+using TrimInput = edvr::plugins::performance::NativeFovTrimInputV1;
+struct OpsCounts {
+  const TrimOps* base = nullptr;
+  unsigned creates = 0, destroys = 0, allocations = 0;
+  unsigned begins = 0, submits = 0, standDowns = 0;
+  bool failCreate = false;
+  bool failBegin = false, corruptBegin = false;
+  bool failSubmit = false, corruptSubmit = false;
+  char order[16]{};
+  unsigned orderSize = 0;
+};
+void appendOrder(OpsCounts& c, char value) noexcept {
+  if (c.orderSize + 1 < sizeof(c.order)) {
+    c.order[c.orderSize++] = value;
+    c.order[c.orderSize] = 0;
+  }
+}
+void* countedCreate(void* opaque) noexcept {
+  auto& c = *static_cast<OpsCounts*>(opaque);
+  ++c.creates;
+  if (c.failCreate) return nullptr;
+  void* state = c.base->create(c.base->context);
+  if (state) ++c.allocations;
+  return state;
+}
+void countedDestroy(void* opaque, void* state) noexcept {
+  auto& c = *static_cast<OpsCounts*>(opaque);
+  ++c.destroys;
+  if (state) --c.allocations;
+  c.base->destroy(c.base->context, state);
+}
+uint32_t countedBegin(void* opaque, void* state, const TrimInput* input,
+                      TrimSnapshot* output) noexcept {
+  auto& c = *static_cast<OpsCounts*>(opaque);
+  ++c.begins; appendOrder(c,'B');
+  const uint32_t ok=c.base->beginFrame(c.base->context, state, input, output);
+  if (c.corruptBegin && ok) output->reserved=1;
+  return c.failBegin ? 0u : ok;
+}
+uint32_t countedSubmit(void* opaque, void* state, uint32_t eye,
+                       uint32_t width, uint32_t height,
+                       TrimSnapshot* output) noexcept {
+  auto& c = *static_cast<OpsCounts*>(opaque);
+  ++c.submits; appendOrder(c,static_cast<char>('0' + eye));
+  const uint32_t ok=c.base->noteSubmittedSize(c.base->context, state, eye, width, height, output);
+  if (c.corruptSubmit && ok) output->reserved=1;
+  return c.failSubmit ? 0u : ok;
+}
+void countedStandDown(void* opaque, void* state) noexcept {
+  auto& c = *static_cast<OpsCounts*>(opaque);
+  ++c.standDowns;
+  c.base->standDown(c.base->context, state);
+}
+TrimOps countedOps(OpsCounts& c) {
+  c.base = edvr::plugins::performance::nativeFovTrimOpsV1();
+  TrimOps ops{};
+  ops.context = &c;
+  ops.create = &countedCreate;
+  ops.destroy = &countedDestroy;
+  ops.beginFrame = &countedBegin;
+  ops.noteSubmittedSize = &countedSubmit;
+  ops.standDown = &countedStandDown;
+  return ops;
+}
+std::string readSource(const char* path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+bool sourceOrder(const std::string& source,
+                 const char* const* tokens, size_t count) {
+  size_t at = 0;
+  for (size_t i = 0; i < count; ++i) {
+    at = source.find(tokens[i], at);
+    if (at == std::string::npos) return false;
+    at += std::strlen(tokens[i]);
+  }
+  return true;
+}
 int main(int argc,char** argv) {
   if(argc!=2)return 2;
   if(!std::strcmp(argv[1],"--dry-run")){std::puts("native_trim_test: dry-run (no device or files)");return 0;}
@@ -497,5 +581,136 @@ int main(int argc,char** argv) {
   earlyTrim.standDown();
   CHECK(earlyTrim.beginFrame(seanIni,sean,seanDims,1,true)==NativeTrimStage::Inert&&earlyTrim.route()==NativeTrimRoute::None);
   CHECK(earlyTrim.recommended(0).width==3070&&earlyTrim.recommended(0).height==3032);
+
+  // ---- opaque Performance ownership, actual adapter lifecycle ------------
+  // The production table allocates one policy state, receives the real frame
+  // and submitted-eye sequence, and releases that state with its owner.
+  OpsCounts selectedCounts;
+  TrimOps selectedOps = countedOps(selectedCounts);
+  {
+    NativeFovTrim selected(&selectedOps);
+    CHECK(selected.requested() && selected.ready());
+    CHECK(selectedCounts.creates==1 && selectedCounts.allocations==1);
+    CHECK(selected.beginFrame(seanIni,sean,seanDims,7,false)==NativeTrimStage::Adopting);
+    const auto ask0=selected.recommended(0),ask1=selected.recommended(1);
+    CHECK(ask0.width<seanDims[0].width && ask0.height<seanDims[0].height);
+    selected.noteSubmittedSize(0,ask0.width,ask0.height);
+    selected.noteSubmittedSize(1,ask1.width,ask1.height);
+    CHECK(selected.lastSubmitted(0).width==ask0.width && selected.lastSubmitted(1).height==ask1.height);
+    CHECK(selected.beginFrame(seanIni,sean,seanDims,7,false)==NativeTrimStage::Live);
+    CHECK(selected.trimmed() && selected.contentFrustum(0).left!=sean[0].left);
+    CHECK(selected.placementBounds(0).left>0.0f && selected.placementBounds(0).right<1.0f);
+    selected.standDown();
+    CHECK(selectedCounts.standDowns==1);
+    CHECK(selected.beginFrame(seanIni,sean,seanDims,7,true)==NativeTrimStage::Inert);
+    CHECK(selectedCounts.begins==3 && selectedCounts.submits==2);
+    CHECK(std::strcmp(selectedCounts.order,"B01BB")==0);
+  }
+  CHECK(selectedCounts.destroys==1 && selectedCounts.allocations==0);
+
+  // A requested but unavailable implementation fails closed. The OpenXR host
+  // pins its ready check before it loads the runtime or begins queries.
+  OpsCounts failedCounts;
+  failedCounts.failCreate=true;
+  TrimOps failedOps=countedOps(failedCounts);
+  {
+    NativeFovTrim failed(&failedOps);
+    CHECK(failed.requested() && !failed.ready());
+    CHECK(failedCounts.creates==1 && failedCounts.allocations==0);
+  }
+  CHECK(failedCounts.destroys==0 && failedCounts.allocations==0);
+
+  OpsCounts malformedCounts;
+  malformedCounts.corruptBegin=true;
+  TrimOps malformedOps=countedOps(malformedCounts);
+  {
+    NativeFovTrim malformed(&malformedOps);
+    CHECK(malformed.beginFrame(seanIni,sean,menuDims,8,false)==NativeTrimStage::Off);
+    CHECK(!malformed.ready() && !malformed.trimmed());
+    CHECK(malformed.gameFrustum(0).left==sean[0].left);
+    CHECK(malformed.trueRecommended(0).width==3964 && malformed.trueRecommended(0).height==3914);
+    CHECK(malformed.recommended(1).width==3966 && malformed.recommended(1).height==3914);
+    CHECK(malformed.treatedFor(1).width==3966 && malformed.treatedFor(1).height==3914);
+    CHECK(malformedCounts.destroys==1 && malformedCounts.allocations==0);
+  }
+  CHECK(malformedCounts.destroys==1);
+
+  OpsCounts failedSubmitCounts;
+  failedSubmitCounts.failSubmit=true;
+  TrimOps failedSubmitOps=countedOps(failedSubmitCounts);
+  {
+    NativeFovTrim failedSubmit(&failedSubmitOps);
+    CHECK(failedSubmit.beginFrame(seanIni,sean,seanDims,8,false)==NativeTrimStage::Adopting);
+    failedSubmit.noteSubmittedSize(0,1234,1234);
+    CHECK(!failedSubmit.ready() && failedSubmit.stage()==NativeTrimStage::Off);
+    CHECK(failedSubmit.contentFrustum(0).right==sean[0].right);
+    CHECK(failedSubmit.placementBounds(0).left==0.0f);
+    CHECK(failedSubmitCounts.destroys==1 && failedSubmitCounts.allocations==0);
+  }
+
+  TrimOps invalidOps{};
+  invalidOps.version=0;
+  {
+    NativeFovTrim invalidModule(&invalidOps);
+    CHECK(invalidModule.requested() && !invalidModule.ready());
+  }
+
+  // No implementation means no callback/state, unchanged located frusta and
+  // identity placement. Mandatory even game-facing sizes still apply.
+  {
+    NativeFovTrim absent(nullptr);
+    CHECK(!absent.requested() && absent.ready());
+    CHECK(absent.beginFrame(seanIni,sean,menuDims,9,false)==NativeTrimStage::Off);
+    CHECK(!absent.changed() && !absent.trimmed() && absent.route()==NativeTrimRoute::None);
+    for(unsigned eye=0;eye<2;++eye) {
+      const auto placement=absent.placementBounds(eye);
+      CHECK(absent.runtimeFrustum(eye).left==sean[eye].left);
+      CHECK(absent.gameFrustum(eye).right==sean[eye].right);
+      CHECK(absent.contentFrustum(eye).down==sean[eye].down);
+      const uint32_t evenWidth=eye==0?3964u:3966u;
+      CHECK(absent.trueRecommended(eye).width==evenWidth &&
+            absent.trueRecommended(eye).height==3914);
+      CHECK(absent.recommended(eye).width==evenWidth &&
+            absent.recommended(eye).height==3914);
+      CHECK(absent.treatedFor(eye).width==evenWidth &&
+            absent.treatedFor(eye).height==3914);
+      CHECK(placement.left==0.0f && placement.top==0.0f &&
+            placement.right==1.0f && placement.bottom==1.0f);
+    }
+    NativeTrimDimensions boundedDims[2]{{16385,16383},{0,16384}};
+    CHECK(absent.beginFrame(offSettings,sean,boundedDims,10,false)==NativeTrimStage::Off);
+    CHECK(absent.recommended(0).width==0 && absent.recommended(0).height==16384);
+    CHECK(absent.treatedFor(1).width==0 && absent.treatedFor(1).height==16384);
+    CHECK(boundedDims[0].width==16385 && boundedDims[1].height==16384);
+    absent.noteSubmittedSize(0,100,100);
+    absent.standDown();
+    CHECK(absent.lastSubmitted(0).width==0 && absent.stage()==NativeTrimStage::Off);
+  }
+
+  // Pin the production host's geometry, submit, trace, and lifecycle ordering
+  // against the moved policy's fixed-record adapter.
+  const std::string host=readSource("src/openxr/native_runtime_host.h");
+  const char* hostOrder[]={
+      "fovTrim.lastSubmitted(i)",
+      "fovTrim.beginFrame(settings,frusta,dimensions,poses.read().originGeneration,asks!=0);",
+      "geometry.recommend(gameGeometry.width,gameGeometry.height);",
+      "const auto dims=fovTrim.treatedFor(e);",
+      "const bool placed=fovTrim.stage()==NativeTrimStage::Live&&fovTrim.trimmed();",
+      "fovTrim.noteSubmittedSize(unsigned(eye),submittedWidth,submittedHeight);"};
+  CHECK(!host.empty() && sourceOrder(host,hostOrder,sizeof(hostOrder)/sizeof(hostOrder[0])));
+  const char* startupOrder[]={
+      "if(!fovTrim.ready())",
+      "nativeTracePuts(\"native_fov_trim,error=policy_state_create\");",
+      "SteamIdentityLoan identity;"};
+  CHECK(sourceOrder(host,startupOrder,sizeof(startupOrder)/sizeof(startupOrder[0])));
+  CHECK(host.find("native_trim,stage=%u,factors=")!=std::string::npos);
+  CHECK(host.find("native_trim_nudge,%s,told=%u,asked=%u,floor=%u\\n")!=std::string::npos);
+  CHECK(host.find("native_trim_adopting,frames=%u,route=%s,baseline=%ux%u,for=%ux%u,ask=%ux%u,last=%ux%u\\n")!=std::string::npos);
+  CHECK(host.find("trim_stage=%u")!=std::string::npos);
+  // Cycle shape remains adoption-only trim telemetry; core ROI telemetry is
+  // still populated independently at the existing submit site.
+  CHECK(host.find("for(unsigned i=0;i<2;++i){const auto submitted=fovTrim.lastSubmitted(i);cycleShape.width[i]=submitted.width;cycleShape.height[i]=submitted.height;")!=std::string::npos);
+  CHECK(host.find("submitSample.width[unsigned(eye)]=submittedWidth;submitSample.height[unsigned(eye)]=submittedHeight;")!=std::string::npos);
+  CHECK(host.find("timingFrame.inputWidth[unsigned(eye)]=submittedWidth;")!=std::string::npos);
   std::printf("native_trim_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

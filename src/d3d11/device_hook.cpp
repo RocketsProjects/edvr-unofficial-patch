@@ -45,6 +45,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "plugin_registry.h"
 #include "../plugins/comfort/comfort_lifecycle.h"
 #include "../plugins/explorer_cam/explorer_cam_lifecycle.h"
+#include "../plugins/performance/texture_sampler_policy.h"
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
@@ -221,16 +222,10 @@ struct State {
     uint64_t     samplerFirstMs = 0;
     uint32_t     samplerCensusPrints = 0;
     uint32_t     samplerPrintedShapes = 0;
-    // The overrides, both default-off. anisotropy promotes a plainly
-    // linear or already-anisotropic sampler; bias shifts its mip choice,
-    // positive for blurrier and quieter. Neither touches a comparison,
-    // minimum or maximum filter (shadows and depth reductions), nor a
-    // point sampler, whose look is deliberate.
-    int          samplerAniso = 0;
-    float        samplerBias = 0.0f;
-    char         samplerBiasWhy[220] = {};   // where the bias came from, for the log
-    bool         samplerBiasAuto = false;    // derived from Elite's own multiplier
-    float        samplerBiasMult = 0.0f;     // ...and the multiplier it was derived from
+    // Performance's immutable sampler settings snapshot; the hook retains
+    // ownership of the D3D descriptor, census and real COM call.
+    const plugins::performance::TextureSamplerPolicyOpsV1* samplerPolicy = nullptr;
+    plugins::performance::TextureSamplerSettingsV1 samplerSettings{};
     bool         samplerForceNoted = false;
     // The shader-swap arc's dump mode: while armed, every vertex and pixel
     // shader blob the game creates is written to <logdir>\shaders by hash,
@@ -2309,16 +2304,16 @@ bool eliteHmdMultiplier(float* mult, float* ssaa, char* fileOut, size_t fileLen)
     return gotMult;
 }
 
+bool samplerReadEliteHmdMultiplier(void*, float* mult, float* ssaa,
+                                   char* file, uint32_t fileCapacity) {
+    return eliteHmdMultiplier(mult, ssaa, file,
+                              static_cast<size_t>(fileCapacity));
+}
+
 // The reduction type lives in bits 7-8 of a D3D11_FILTER: 0 standard,
 // 1 comparison, 2 minimum, 3 maximum. Only a standard filter is ours to
 // touch, and only a linear or anisotropic one -- promoting a point
 // sampler would soften artwork that was asked for sharp.
-bool samplerIsOurs(uint32_t filter) {
-    if ((filter & 0x180u) != 0u) return false;
-    return filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR ||
-           filter == D3D11_FILTER_ANISOTROPIC;
-}
-
 const char* samplerFilterName(uint32_t f) {
     switch (f) {
         case D3D11_FILTER_MIN_MAG_MIP_POINT: return "point";
@@ -2391,15 +2386,35 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
                 ++s.samplerOther;
             }
         }
-        // The overrides. Off by default, so the census costs the game a
-        // comparison and nothing else.
-        if ((s.samplerAniso > 0 || s.samplerBias != 0.0f) && samplerIsOurs(filter)) {
-            if (s.samplerAniso > 0) {
-                d.Filter = D3D11_FILTER_ANISOTROPIC;
-                d.MaxAnisotropy = static_cast<UINT>(s.samplerAniso);
+        // The Performance callback is absent-safe. The host constructs a
+        // fixed-width copy only when the selected policy is present; the
+        // original descriptor and its one real COM call stay in core.
+        if (s.samplerSettings.rewriteEnabled && s.samplerPolicy &&
+            s.samplerPolicy->structSize ==
+                                   sizeof(*s.samplerPolicy) &&
+            s.samplerPolicy->version ==
+                plugins::performance::kTextureSamplerPolicyOpsVersion1 &&
+            s.samplerPolicy->rewrite) {
+            plugins::performance::TextureSamplerDescV1 input{};
+            input.filter = filter;
+            input.addressU = static_cast<uint32_t>(desc->AddressU);
+            input.addressV = static_cast<uint32_t>(desc->AddressV);
+            input.addressW = static_cast<uint32_t>(desc->AddressW);
+            input.mipLodBias = desc->MipLODBias;
+            input.maxAnisotropy = desc->MaxAnisotropy;
+            input.comparisonFunc = static_cast<uint32_t>(desc->ComparisonFunc);
+            for (size_t i = 0; i < 4; ++i) input.borderColor[i] = desc->BorderColor[i];
+            input.minLod = desc->MinLOD;
+            input.maxLod = desc->MaxLOD;
+            plugins::performance::TextureSamplerDescV1 output{};
+            const bool rewritten = s.samplerPolicy->rewrite(
+                s.samplerPolicy->context, &s.samplerSettings, &input, &output);
+            if (rewritten) {
+                d.Filter = static_cast<D3D11_FILTER>(output.filter);
+                d.MaxAnisotropy = output.maxAnisotropy;
+                d.MipLODBias = output.mipLodBias;
             }
-            d.MipLODBias = desc->MipLODBias + s.samplerBias;
-            if (!s.samplerForceNoted) {
+            if (rewritten && !s.samplerForceNoted) {
                 s.samplerForceNoted = true;
                 Log::get().note(
                     "texture filtering: the game's linear and anisotropic samplers are "
@@ -2407,8 +2422,10 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
                     "(%s). Point, comparison, minimum and maximum filters are left alone. A "
                     "positive bias trades sharpness for quiet on distant repeating "
                     "detail; a negative one does the reverse.",
-                    s.samplerAniso, static_cast<double>(s.samplerBias),
-                    s.samplerBiasWhy[0] ? s.samplerBiasWhy : "no bias asked for");
+                    s.samplerSettings.anisotropy,
+                    static_cast<double>(s.samplerSettings.bias),
+                    s.samplerSettings.biasWhy[0] ? s.samplerSettings.biasWhy :
+                                                   "no bias asked for");
             }
         }
         // Once the creates have settled: a renderer makes its samplers up
@@ -2629,27 +2646,19 @@ void hookDevice(ID3D11Device* device) {
     EDVR_HOOK_DEV_CREATE(kDevCreateDsv, true);
 #undef EDVR_HOOK_DEV_CREATE
     {
-        const int aniso = sentinelCfg.getIntInRange("advanced.texture_anisotropy", 0, 0, 16);
-        const bool temporal = temporalModeEnabled(sentinelCfg.getString("fix.temporal_aa", "off"));
-        const std::string biasKey = sentinelCfg.getString("advanced.texture_lod_bias", temporal ? "auto" : "0");
-        float bias = 0.0f;
-        if (_stricmp(biasKey.c_str(), "auto") == 0) {
-            float mult = 0.0f, ssaa = 0.0f;
-            char file[80] = {};
-            if (eliteHmdMultiplier(&mult, &ssaa, file, sizeof(file))) {
-                bias = log2f(mult);
-                s.samplerBiasAuto = true;
-                s.samplerBiasMult = mult;
-                snprintf(s.samplerBiasWhy, sizeof(s.samplerBiasWhy),
-                         "auto: Elite renders at %.3f of the size the runtime recommends "
-                         "(HMDRenderTargetMultiplier in %s; its SSAAMultiplier is %.3f), and "
-                         "log2 of that is the bias the mips want",
-                         static_cast<double>(mult), file[0] ? file : "its graphics preset",
-                         static_cast<double>(ssaa));
-            } else {
-                // Say it here rather than leave it to the sampler line: a
-                // failed auto leaves the bias at zero, which switches the
-                // whole override off, which would print nothing at all.
+        s.samplerPolicy = plugins::performance::textureSamplerPolicyOpsV1();
+        if (s.samplerPolicy &&
+            s.samplerPolicy->structSize == sizeof(*s.samplerPolicy) &&
+            s.samplerPolicy->version ==
+                plugins::performance::kTextureSamplerPolicyOpsVersion1 &&
+            s.samplerPolicy->configure) {
+            s.samplerPolicy->configure(s.samplerPolicy->context, nullptr,
+                                       &samplerReadEliteHmdMultiplier,
+                                       &s.samplerSettings);
+            if (s.samplerSettings.biasAutoRequested &&
+                !s.samplerSettings.autoSourceAvailable) {
+                // Preserve the historical startup warning. The module has
+                // already resolved the failed auto value to zero.
                 Log::get().note(
                     "texture filtering: advanced.texture_lod_bias = auto, but Elite's graphics "
                     "preset gave no HMDRenderTargetMultiplier (Options\\Graphics\\*.fxcfg under "
@@ -2657,14 +2666,8 @@ void hookDevice(ID3D11Device* device) {
                     "Set a number instead, or check the game has written its settings once.");
             }
         } else {
-            bias = static_cast<float>(atof(biasKey.c_str()));
-            snprintf(s.samplerBiasWhy, sizeof(s.samplerBiasWhy),
-                     "advanced.texture_lod_bias = %s", biasKey.c_str());
+            s.samplerPolicy = nullptr;
         }
-        if (!(bias > -4.0f)) bias = -4.0f;
-        if (!(bias < 4.0f)) bias = 4.0f;
-        s.samplerAniso = aniso;
-        s.samplerBias = bias;
     }
     s.deviceHook.replace(kDevCreateSamplerState, &hookedCreateSamplerState,
                          reinterpret_cast<void**>(&s.realCreateSamplerState));
@@ -3106,9 +3109,9 @@ bool deviceHookPanelSettings(float* hmd, float* ssaa, uint32_t* displayW, uint32
 
 bool deviceHookAutoBiasSource(float* multiplier, float* bias) {
     State& s = ensureState();
-    if (!s.samplerBiasAuto) return false;
-    if (multiplier) *multiplier = s.samplerBiasMult;
-    if (bias) *bias = s.samplerBias;
+    if (!s.samplerSettings.biasAuto) return false;
+    if (multiplier) *multiplier = s.samplerSettings.autoMultiplier;
+    if (bias) *bias = s.samplerSettings.bias;
     return true;
 }
 

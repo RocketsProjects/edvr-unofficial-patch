@@ -324,9 +324,13 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
     --require-source src\plugins\diagnostics\scheduler_stack_hook.cpp ^
     --require-source src\plugins\diagnostics\scheduler_lifecycle.cpp ^
     --require-plugin performance --require-source src\plugins\performance\openxr_resolution_policy.cpp ^
+    --require-source src\plugins\performance\fov_trim_policy.cpp ^
+    --require-source src\plugins\performance\fov_trim_settings_policy.cpp ^
+    --require-source src\plugins\performance\texture_sampler_policy.cpp ^
     --include-dir "%GEN%" || exit /b 1
 python "tools\plugin_lifecycle_wiring_test.py" --dry-run || exit /b 1
 python "tools\plugin_lifecycle_wiring_test.py" --self-test || exit /b 1
+python "tools\performance_sampler_test\source_test.py" --self-test || exit /b 1
 
 if not exist "%OBJ%\plugins\cockpit_visuals" mkdir "%OBJ%\plugins\cockpit_visuals"
 del /q "%OBJ%\plugins\cockpit_visuals\*.obj" 2>nul
@@ -419,10 +423,14 @@ if errorlevel 1 ( echo [edvr] ERROR: diagnostics plugin library failed & exit /b
 if not exist "%OBJ%\plugins\performance" mkdir "%OBJ%\plugins\performance"
 del /q "%OBJ%\plugins\performance\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\performance\\" ^
-    "src\plugins\performance\openxr_resolution_policy.cpp"
+    "src\plugins\performance\openxr_resolution_policy.cpp" ^
+    "src\plugins\performance\fov_trim_settings_policy.cpp" ^
+    "src\plugins\performance\texture_sampler_policy.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: performance plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\performance\plugin_performance.lib" ^
-    "%OBJ%\plugins\performance\openxr_resolution_policy.obj"
+    "%OBJ%\plugins\performance\openxr_resolution_policy.obj" ^
+    "%OBJ%\plugins\performance\fov_trim_settings_policy.obj" ^
+    "%OBJ%\plugins\performance\texture_sampler_policy.obj"
 if errorlevel 1 ( echo [edvr] ERROR: performance plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\intro" mkdir "%OBJ%\plugins\intro"
@@ -785,6 +793,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_
     /I"third_party\openxr\include" /I"%GEN%" /Fo"%OBJ%\openxr_module\\" ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" ^
+    "src\plugins\performance\fov_trim_policy.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
     "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
@@ -1043,6 +1052,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\native_frame\\" /Fe"%BUILD%\native_frame_test.exe" ^
     "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
     "src\d3d11\native_render_settings.cpp" "src\plugins\performance\openxr_resolution_policy.cpp" ^
+    "src\plugins\performance\fov_trim_settings_policy.cpp" ^
     "src\common\vscreen_auto_state.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
@@ -1082,10 +1092,38 @@ echo [edvr] === native_trim_test.exe ===
 if not exist "%OBJ%\native_trim" mkdir "%OBJ%\native_trim"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_trim\\" /Fe"%BUILD%\native_trim_test.exe" ^
-    "tools\native_trim_test\native_trim_test.cpp" /link /INCREMENTAL:NO
+    "tools\native_trim_test\native_trim_test.cpp" "src\plugins\performance\fov_trim_policy.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: native FOV trim policy test build failed & exit /b 1 )
 "%BUILD%\native_trim_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_trim_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_performance_sampler_test
+echo [edvr] === performance_sampler_test.exe ===
+if not exist "%OBJ%\performance_sampler" mkdir "%OBJ%\performance_sampler"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\performance_sampler\\" /Fe"%BUILD%\performance_sampler_test.exe" ^
+    "tools\performance_sampler_test\texture_sampler_policy_test.cpp" ^
+    "src\plugins\performance\texture_sampler_policy.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: performance sampler policy test build failed & exit /b 1 )
+"%BUILD%\performance_sampler_test.exe" --dry-run || exit /b 1
+"%BUILD%\performance_sampler_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_fov_trim_settings_test
+echo [edvr] === fov_trim_settings_test.exe ===
+if not exist "%OBJ%\fov_trim_settings" mkdir "%OBJ%\fov_trim_settings"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\fov_trim_settings\\" /Fe"%BUILD%\fov_trim_settings_test.exe" ^
+    "tools\fov_trim_settings_test\fov_trim_settings_test.cpp" ^
+    "src\plugins\performance\fov_trim_settings_policy.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: FOV trim settings policy test build failed & exit /b 1 )
+"%BUILD%\fov_trim_settings_test.exe" --dry-run || exit /b 1
+"%BUILD%\fov_trim_settings_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_dlaa_mode_test
@@ -3377,6 +3415,7 @@ for %%T in (native stereo) do (
     cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
         /I"third_party\openxr\include" /I"%GEN%" /Fo"%OBJ%\openxr_native_tests\\" ^
         /Fe"%BUILD%\openxr_%%T_test.exe" "tools\openxr_%%T_test\openxr_%%T_test.cpp" ^
+        "src\plugins\performance\fov_trim_policy.cpp" ^
         "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
         "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
         "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
