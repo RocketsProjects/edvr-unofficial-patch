@@ -302,6 +302,7 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
     --require-source src\plugins\intro\loader_panel.cpp ^
     --require-source src\plugins\intro\splash_dim.cpp ^
     --require-plugin on_foot_panel --require-source src\plugins\on_foot_panel\weapon_motion.cpp ^
+    --require-source src\plugins\on_foot_panel\vscreen_footprint.cpp ^
     --require-plugin comfort --require-source src\plugins\comfort\transition_flash_eye_base.cpp ^
     --require-source src\plugins\comfort\exposure\exposure_shape.cpp ^
     --require-source src\plugins\comfort\exposure\exposure_dispatch.cpp ^
@@ -310,6 +311,8 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
     --require-source src\plugins\comfort\scanners\fss_heal.cpp ^
     --require-source src\plugins\comfort\scanners\fss_panel.cpp ^
     --require-source src\plugins\comfort\scanners\fss_reveal.cpp ^
+    --require-source src\plugins\comfort\scanners\fss_res.cpp ^
+    --require-source src\plugins\comfort\scanners\scanner_claim.cpp ^
     --require-source src\plugins\comfort\scanners\scanner_lifecycle.cpp ^
     --require-source src\plugins\comfort\comfort_lifecycle.cpp ^
     --require-plugin explorer_cam --require-source src\plugins\explorer_cam\explorer_cam.cpp ^
@@ -332,10 +335,12 @@ if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin library failed & exi
 if not exist "%OBJ%\plugins\on_foot_panel" mkdir "%OBJ%\plugins\on_foot_panel"
 del /q "%OBJ%\plugins\on_foot_panel\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\on_foot_panel\\" ^
-    "src\plugins\on_foot_panel\weapon_motion.cpp"
+    "src\plugins\on_foot_panel\weapon_motion.cpp" ^
+    "src\plugins\on_foot_panel\vscreen_footprint.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: on-foot-panel plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
-    "%OBJ%\plugins\on_foot_panel\weapon_motion.obj"
+    "%OBJ%\plugins\on_foot_panel\weapon_motion.obj" ^
+    "%OBJ%\plugins\on_foot_panel\vscreen_footprint.obj"
 if errorlevel 1 ( echo [edvr] ERROR: on-foot-panel plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\comfort" mkdir "%OBJ%\plugins\comfort"
@@ -348,6 +353,8 @@ cl.exe %CFLAGS% /Fo"%OBJ%\plugins\comfort\\" ^
     "src\plugins\comfort\scanners\fss_heal.cpp" ^
     "src\plugins\comfort\scanners\fss_panel.cpp" ^
     "src\plugins\comfort\scanners\fss_reveal.cpp" ^
+    "src\plugins\comfort\scanners\fss_res.cpp" ^
+    "src\plugins\comfort\scanners\scanner_claim.cpp" ^
     "src\plugins\comfort\scanners\scanner_lifecycle.cpp" ^
     "src\plugins\comfort\transition_flash_eye_base.cpp" ^
     "src\plugins\comfort\comfort_lifecycle.cpp"
@@ -360,6 +367,8 @@ lib.exe /nologo /OUT:"%OBJ%\plugins\comfort\plugin_comfort.lib" ^
     "%OBJ%\plugins\comfort\fss_heal.obj" ^
     "%OBJ%\plugins\comfort\fss_panel.obj" ^
     "%OBJ%\plugins\comfort\fss_reveal.obj" ^
+    "%OBJ%\plugins\comfort\fss_res.obj" ^
+    "%OBJ%\plugins\comfort\scanner_claim.obj" ^
     "%OBJ%\plugins\comfort\scanner_lifecycle.obj" ^
     "%OBJ%\plugins\comfort\transition_flash_eye_base.obj" ^
     "%OBJ%\plugins\comfort\comfort_lifecycle.obj"
@@ -657,7 +666,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\render_boundary.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\shader_registry.cpp" "src\d3d11\vscreen.cpp" "src\d3d11\plugin_registry.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
-    "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
+    "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
     "src\d3d11\journal_watch.cpp" "src\d3d11\terrain_checkerboard.cpp" ^
@@ -669,7 +678,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\skin_entity_hook.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
-    "src\d3d11\fss_res.cpp" ^
     "src\d3d11\vertex_resync_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
@@ -1898,6 +1906,20 @@ cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: holo predicate test build failed & exit /b 1 )
 "%BUILD%\holo_predicate_test.exe" --dry-run || exit /b 1
 "%BUILD%\holo_predicate_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_scanner_claim_test
+echo [edvr] === scanner_claim_test.exe ===
+if not exist "%OBJ%\scannerclaim" mkdir "%OBJ%\scannerclaim"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\scannerclaim\\" /Fe"%BUILD%\scanner_claim_test.exe" ^
+    "tools\scanner_claim_test\scanner_claim_test.cpp" ^
+    "src\plugins\comfort\scanners\scanner_claim.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF
+if errorlevel 1 ( echo [edvr] ERROR: scanner claim test build failed & exit /b 1 )
+"%BUILD%\scanner_claim_test.exe" --dry-run || exit /b 1
+"%BUILD%\scanner_claim_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_fss_predicate_test
@@ -3268,7 +3290,7 @@ exit /b 0
 
 :rig_vscreen_footprint_glue_test
 echo [edvr] === vscreen_footprint_glue_test.exe ===
-REM The footprint instrument's glue (src\d3d11\vscreen_footprint.cpp; design doc section 82, the "vscreen auto-fit" entry) compiled for
+REM The footprint instrument's glue (src\plugins\on_foot_panel\vscreen_footprint.cpp; design doc section 82, the "vscreen auto-fit" entry) compiled for
 REM real with the real Config, Log and fault guard, and stubs for what it calls (the runtime's published eye size, the hooks' bypass
 REM flag): the four sources a composite draw binds (the model rows, the clip rows at their real offsets, the quad, the SIZE record) on a
 REM WARP device read back through the staging copy and the DO_NOT_WAIT map, the 30 s line, the stored median, the sources that are not
@@ -3278,7 +3300,7 @@ REM src\common\system_d3d11.h, so it links without d3d11.lib.
 if not exist "%OBJ%\vscreenfpglue" mkdir "%OBJ%\vscreenfpglue"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" ^
     /Fo"%OBJ%\vscreenfpglue\\" /Fe"%OBJ%\vscreenfpglue\vscreen_footprint_glue_test.exe" ^
-    "tools\vscreen_footprint_glue_test\vscreen_footprint_glue_test.cpp" "src\d3d11\vscreen_footprint.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "tools\vscreen_footprint_glue_test\vscreen_footprint_glue_test.cpp" "src\plugins\on_foot_panel\vscreen_footprint.cpp" "src\common\vscreen_auto_state.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: vscreen_footprint_glue_test build failed & exit /b 1 )

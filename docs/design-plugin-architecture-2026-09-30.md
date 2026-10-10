@@ -12,16 +12,15 @@
   implementations, generated config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `a1609f2b` is merged. The offline
-  Comfort and Explorer regrouping passes the full build, including
-  native rigs, config, exports and installer gates; receipt `55dc54a5`
-  matches. Last measured Steam build: `6ab758d2`. Sean must approve any
-  install.
+- **Current integration:** main `39c2e02c` is merged. The offline
+  scanner selector and on-foot ownership checkpoint passes the full
+  build; receipt `74af1613` matches. Last measured Steam build:
+  `6ab758d2`. Sean must approve any install.
 - **Module progress:** Comfort owns exposure, scanners, transition flash
-  and terrain-pose policy. Explorer Cam owns its archive and lifecycle.
-  Components preserve host order. All eight selections remain
-  unavailable. Draw-claim migration, installer UI and runtime selection
-  remain open.
+  and terrain pose policy. On-foot owns the footprint instrument; shared
+  sizing stays core. Explorer Cam owns its archive and lifecycle. All
+  eight selections remain unavailable; draw migration, installer UI and
+  runtime selection stay open.
 
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
@@ -4427,3 +4426,61 @@ untouched, and no new flight is requested. The feature branch stays
 separate from main until shipping approval. Remaining draw-claim
 migration, whole-ladder replay, runtime selection and the final matched
 CPU/GPU acceptance comparison are still open.
+
+### 2026-10-10 — scanner selector and on-foot instrument ownership
+
+Comfort now owns the scanner-resolution implementation and the selector
+decisions at FSS panel/reveal sites 57 and 58. On-foot owns its
+virtual-screen footprint sampler and persistence instrument. Both moved
+implementation bodies are byte-identical to the previous checkpoint
+after relative include rebasing; the public core headers and callers
+remain in place. The shared resolution patch, resolver and UI budget
+stay core because Intro and other UI paths also consume them. No config
+key, default or feature was removed or renamed. The include-graph gate
+caught four wrongly rebased scanner-resolution includes before
+compilation; the corrected paths resolve to the original headers and the
+implementation byte proof still holds.
+
+The scanner evaluator borrows host frame fields for one synchronous call
+and does not retain them. Normal evaluation preserves the legacy
+repeated field reads; observed evaluation preserves the consumed
+snapshots and short-circuit availability. Each route calls the
+corresponding existing helper once. The mode latch is read only on an
+eligible jump branch. Core retains arrival-counter mutation, trace
+append, verdict conversion and Begin/original/End forwarding at their
+existing positions. Site 1, version-16 wire facts, the independent
+frozen Python replay and historical cost layouts are unchanged.
+
+The actual-source scanner rig checks selector windows, unsigned wrap,
+mode and helper short-circuiting, fault facts and helper results.
+Production source pins check the host-field/fact/sink adapter and
+forwarding/restoration order. A review caught the initial pin confusing
+an earlier draw-lambda definition with its execution; the repaired pin
+follows the invocation and both End branches. The new rig uses
+controlled helper/service stubs; the existing actual-helper fixtures and
+frozen replay remain independent coverage. These offline checks do not
+claim that the rig executes the production runtime caller or establishes
+whole-ladder equivalence.
+
+The first native attempt stopped at 55 of 159 jobs on four reveal
+assertions. The fixture reset its globals but retained referenced
+host-frame fields from prior cases, preventing the expected helper call.
+Those cases now establish fresh eligible body windows while preserving
+their assertions; the production selector is unchanged. The failed
+attempt is preserved in
+`build/full-plugin-scanner-selectors-first-fixture-failure-20261010.log`.
+
+Main's `39c2e02c` draw-census tooling update is merged into this branch.
+The aggregate full build passes all 159 native jobs, production DLLs,
+Python gates, config/export checks and the self-contained installer.
+Source receipt
+`74af1613ac18eaffce9b969ef332d0080a09f3827dfa7efb3a741fe1f5928978`
+matches. The log is
+`build/full-plugin-scanner-selectors-offline-20261010.log`.
+
+This is a validated ownership checkpoint. Generic scanner claim
+arbitration, remaining module boundaries, installer choices,
+cross-runtime selection and uninstalled-zero-work remain open. All eight
+availability lists stay empty and budgets stay unmeasured. The Steam
+approval hold remains: no install, promotion, live INI edit or flight
+was performed. The branch stays separate from main.

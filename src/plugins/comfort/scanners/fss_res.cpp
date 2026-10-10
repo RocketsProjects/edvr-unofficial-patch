@@ -1,12 +1,12 @@
-#include "fss_res.h"
+#include "../../../d3d11/fss_res.h"
 
 #include <windows.h>
 
 #include <d3d11.h>
 
-#include "../common/config.h"
-#include "../common/frame_flag.h"   // eyeTextureSize: the published per-eye size
-#include "../common/log.h"
+#include "../../../common/config.h"
+#include "../../../common/frame_flag.h"   // eyeTextureSize: the published per-eye size
+#include "../../../common/log.h"
 
 namespace edvr {
 

@@ -2,7 +2,7 @@
 // section 82, the "vscreen auto-fit" entry of 2026-10-01).
 //
 // THE PURE HALF. Everything that DECIDES is here: no D3D, no Config, no file I/O, no log. The DLL's resolver
-// (src/d3d11/vscreen_res.cpp), the footprint instrument (src/d3d11/vscreen_footprint.cpp) and the state file
+// (src/d3d11/vscreen_res.cpp), the footprint instrument (src/plugins/on_foot_panel/vscreen_footprint.cpp) and the state file
 // (vscreen_auto_state.cpp) all call the code below, and tools\vscreen_fit_test runs the very same code, so the rig
 // pins what flies. tools\vscreen_fit_test\mutants.py breaks each rule of it on purpose and requires the rig to notice.
 //

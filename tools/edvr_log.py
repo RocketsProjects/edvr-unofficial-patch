@@ -4577,7 +4577,7 @@ def resolve_target(spec):
 # ---------------------------------------------------------------------------------------------------------------------------------------
 # --vscreen-fit: fix.vscreen_res_width = auto, fitted to what each eye shows (design doc section 82, the "vscreen auto-fit" entry).
 # src/common/vscreen_fit.h writes the `vScreen resolution: auto = ...` rule line and the `vscreen footprint 30s:` line; the armed line
-# is src/d3d11/vscreen_footprint.cpp's. tools\vscreen_fit_test holds the formatters to tools\vscreen_fit_fixture.log, the file this
+# is src/plugins/on_foot_panel/vscreen_footprint.cpp's. tools\vscreen_fit_test holds the formatters to tools\vscreen_fit_fixture.log, the file this
 # reader's own self-test reads. The constants below are that header's (kMultiplier, kFloorWidth, kLegacyMultiplier, the calibration
 # point, the stored quantile); the rig pins the header, and self_test_vscreen_fit pins this copy of it to the header's text.
 # What the log's session-frac1= and persisted= tokens carry is the session's p10 (the head-on floor), not a median: a window's own

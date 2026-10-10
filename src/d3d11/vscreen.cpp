@@ -38,6 +38,7 @@
 #include "plugin_registry.h"
 #include "intro_lifecycle.h"
 #include "../plugins/comfort/scanners/scanner_lifecycle.h"
+#include "../plugins/comfort/scanners/scanner_claim.h"
 #include "../plugins/comfort/comfort_lifecycle.h"
 #include "plugin_dispatch.h"
 #include "device_hook.h"  // contextHookModeFor
@@ -3329,94 +3330,48 @@ struct VScreenDrawLadderVisitor {
                 backdropOnComposite(self, kind, count, instances)) return claimed(id, DrawVerdict::kBackdrop);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kFssPanelClaim) {
+            const plugins::comfort::scanners::ScannerClaimHostView host{
+                s->fssBodyFrame, s->frameNo, s->fssJumpFrame, s->frameNo};
             if constexpr (TracePolicy::enabled) {
                 FssObservation fact{};
                 fact.kind = FssTraceFactKind::kPanel;
                 fact.handlerInvoked = true;
-                auto& observed = fact.panel;
-                bool matches = false;
-                const bool enabled = fssPanelWantsDraws();
-                observeFssRead(observed.outerEnabled, enabled);
-                if (enabled) {
-                    const std::uint32_t bodyFrame = s->fssBodyFrame;
-                    observeFssRead(observed.bodyFrame, bodyFrame);
-                    if (bodyFrame != 0) {
-                        const std::uint32_t frameNo = s->frameNo;
-                        observeFssRead(observed.frameNo, frameNo);
-                        if (frameNo - bodyFrame <= 2)
-                            matches = fssPanelOnEyeDrawObserved(
-                                self, kind, count, instances, observed);
-                    }
-                }
+                const bool matches = plugins::comfort::scanners::scannerPanelClaim(
+                    self, kind, count, instances, host, &fact.panel);
                 trace.fssFact(fact);
                 if (matches) return claimed(id, DrawVerdict::kFssPanel);
             } else {
-                if (fssPanelWantsDraws() && s->fssBodyFrame != 0 &&
-                    s->frameNo - s->fssBodyFrame <= 2 &&
-                    fssPanelOnEyeDraw(self, kind, count, instances))
+                if (plugins::comfort::scanners::scannerPanelClaim(
+                        self, kind, count, instances, host, nullptr))
                     return claimed(id, DrawVerdict::kFssPanel);
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kFssRevealClaim) {
+            const plugins::comfort::scanners::ScannerClaimHostView host{
+                s->fssBodyFrame, s->frameNo, s->fssJumpFrame, s->frameNo};
             if constexpr (TracePolicy::enabled) {
                 FssObservation fact{};
                 fact.kind = FssTraceFactKind::kReveal;
                 fact.handlerInvoked = true;
                 auto& observed = fact.reveal;
-                bool matches = false;
-                const bool steady = detail::g_fssRevealSteady;
-                observeFssRead(observed.outerSteady, steady);
-                bool lockstep = false;
-                if (!steady) {
-                    lockstep = detail::g_fssRevealLockstep;
-                    observeFssRead(observed.outerLockstep, lockstep);
-                }
-                if (steady || lockstep) {
-                    const std::uint32_t bodyFrame = s->fssBodyFrame;
-                    observeFssRead(observed.bodyFrame, bodyFrame);
-                    bool inWindow = false;
-                    if (bodyFrame != 0) {
-                        const std::uint32_t bodyFrameNo = s->frameNo;
-                        observeFssRead(observed.bodyFrameNo, bodyFrameNo);
-                        inWindow = bodyFrameNo - bodyFrame <= 2;
-                    }
-                    if (!inWindow) {
-                        const std::uint32_t jumpFrame = s->fssJumpFrame;
-                        observeFssRead(observed.jumpFrame, jumpFrame);
-                        if (jumpFrame != 0) {
-                            const std::uint32_t jumpFrameNo = s->frameNo;
-                            observeFssRead(observed.jumpFrameNo, jumpFrameNo);
-                            if (jumpFrameNo - jumpFrame <= 600) {
-                                const bool modeLatch = deviceHookFssModeLatch();
-                                observeFssRead(observed.modeLatch, modeLatch);
-                                inWindow = modeLatch;
-                            }
-                        }
-                    }
-                    if (inWindow) {
-                        matches = fssRevealOnEyeDrawObserved(
-                            self, kind, count, instances, observed);
-                        if (matches) {
-                            const bool arrivalOpen = s->fssArrivalOpen;
-                            observeFssRead(observed.arrivalOpen, arrivalOpen);
-                            if (arrivalOpen) {
-                                const std::uint32_t before = s->fssArrivalRecogs;
-                                observeFssRead(observed.arrivalBefore, before);
-                                ++s->fssArrivalRecogs;
-                                observeFssRead(observed.arrivalAfter,
-                                               s->fssArrivalRecogs);
-                            }
-                        }
+                const bool matches = plugins::comfort::scanners::scannerRevealClaim(
+                    self, kind, count, instances, host, &observed);
+                if (matches) {
+                    const bool arrivalOpen = s->fssArrivalOpen;
+                    observeFssRead(observed.arrivalOpen, arrivalOpen);
+                    if (arrivalOpen) {
+                        const std::uint32_t before = s->fssArrivalRecogs;
+                        observeFssRead(observed.arrivalBefore, before);
+                        ++s->fssArrivalRecogs;
+                        observeFssRead(observed.arrivalAfter,
+                                       s->fssArrivalRecogs);
                     }
                 }
                 trace.fssFact(fact);
                 if (matches) return claimed(id, DrawVerdict::kFssReveal);
             } else {
-                if (fssRevealWantsDraws() &&
-                    ((s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2) ||
-                     (s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
-                      deviceHookFssModeLatch())) &&
-                    fssRevealOnEyeDraw(self, kind, count, instances)) {
+                if (plugins::comfort::scanners::scannerRevealClaim(
+                        self, kind, count, instances, host, nullptr)) {
                     if (s->fssArrivalOpen) ++s->fssArrivalRecogs;
                     return claimed(id, DrawVerdict::kFssReveal);
                 }

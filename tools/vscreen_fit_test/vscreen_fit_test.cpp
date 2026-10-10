@@ -1,6 +1,6 @@
 // fix.vscreen_res_width = auto, fitted to what each eye shows: the rule, its inputs, its footprint arithmetic, its stored state,
 // its log text (src/common/vscreen_fit.h, vscreen_auto_state.cpp, and the wiring in vscreen_res.cpp / vscreen.cpp /
-// vscreen_footprint.cpp; docs/design-flat-temporal-aa-2026-09-23.md, section 82, the "vscreen auto-fit" entry).
+// src/plugins/on_foot_panel/vscreen_footprint.cpp; docs/design-flat-temporal-aa-2026-09-23.md, section 82, the "vscreen auto-fit" entry).
 //
 // The pure half is the very code the DLL runs: this file includes src\common\vscreen_fit.h and calls it. Nothing here fakes a
 // decision. tools\vscreen_fit_test\mutants.py breaks each rule of the header on purpose (and the wiring pins by editing copies
@@ -1057,7 +1057,7 @@ void caseR12() {
     const std::string route = readFile("src\\d3d11\\vr_world_route.cpp");
     const std::string layer = readFile("src\\d3d11\\ui_layer.cpp");
     const std::string vs = readFile("src\\d3d11\\vscreen.cpp");
-    const std::string fp = readFile("src\\d3d11\\vscreen_footprint.cpp");
+    const std::string fp = readFile("src\\plugins\\on_foot_panel\\vscreen_footprint.cpp");
     const std::string ini = readFile("edvr.ini");
     const std::string flatRuntime = readFile("src\\d3d11\\flat_runtime.cpp");
     const std::string authState = readFile("src\\common\\vscreen_auto_state.cpp");

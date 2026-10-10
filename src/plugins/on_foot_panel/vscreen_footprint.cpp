@@ -13,7 +13,7 @@
 // (the first three of a session) and, on every 30 s line from then on, `save-failed=N` (the count so far; absent until the first
 // failure) beside `persisted=` -- which says `no`, or the last value that DID reach the file, never a value that did not. The next window
 // tries again whether or not the p10 has moved. A build without this prints persisted=<value> whether or not the write happened.
-#include "vscreen_footprint.h"
+#include "../../d3d11/vscreen_footprint.h"
 
 #include <windows.h>
 #include <d3d11_1.h>
@@ -23,14 +23,14 @@
 #include <cstring>
 #include <string>
 
-#include "../common/config.h"
-#include "../common/guard.h"
-#include "../common/log.h"
-#include "../common/native_render_settings.h"
-#include "../common/runtime_profile.h"
-#include "../common/vscreen_auto_state.h"
-#include "../common/vscreen_fit.h"
-#include "flat_compute_readback.h"   // FlatComputeInternalScope: the hooks step past the instrument's own copies and Map
+#include "../../common/config.h"
+#include "../../common/guard.h"
+#include "../../common/log.h"
+#include "../../common/native_render_settings.h"
+#include "../../common/runtime_profile.h"
+#include "../../common/vscreen_auto_state.h"
+#include "../../common/vscreen_fit.h"
+#include "../../d3d11/flat_compute_readback.h"   // FlatComputeInternalScope: the hooks step past the instrument's own copies and Map
 
 namespace edvr {
 

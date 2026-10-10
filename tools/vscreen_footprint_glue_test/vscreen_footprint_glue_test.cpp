@@ -1,4 +1,4 @@
-// The footprint instrument, run for real (src/d3d11/vscreen_footprint.cpp; design doc section 82, the "vscreen auto-fit" entry).
+// The footprint instrument, run for real (src/plugins/on_foot_panel/vscreen_footprint.cpp; design doc section 82, the "vscreen auto-fit" entry).
 //
 // tools\vscreen_fit_test runs the pure half (the rule, the corner arithmetic, the text) and scans the source. What it cannot run is
 // the glue itself: the D3D11 readback (four sources copied into one staging buffer at the composite draw, mapped later without
