@@ -130,15 +130,25 @@ bool policyChecks() {
     static_assert(edvr::panel_distance_cost::id(edvr::panel_distance_cost::Site::RestoreVSSetCB) == 125);
     static_assert(static_cast<uint8_t>(pc::Owner::Core) == 9);
     static_assert(static_cast<uint8_t>(pc::ApiClass::ReadQuery) == 3);
-    static_assert(static_cast<uint8_t>(pc::Owner::TemporalAa) == edvr::plugins::kPluginTemporalAa);
-    static_assert(static_cast<uint8_t>(pc::Owner::CockpitVisuals) == edvr::plugins::kPluginCockpitVisuals);
-    static_assert(static_cast<uint8_t>(pc::Owner::Exposure) == edvr::plugins::kPluginExposure);
-    static_assert(static_cast<uint8_t>(pc::Owner::Scanners) == edvr::plugins::kPluginScanners);
-    static_assert(static_cast<uint8_t>(pc::Owner::Intro) == edvr::plugins::kPluginIntro);
-    static_assert(static_cast<uint8_t>(pc::Owner::OnFootPanel) == edvr::plugins::kPluginOnFootPanel);
-    static_assert(static_cast<uint8_t>(pc::Owner::Comfort) == edvr::plugins::kPluginComfort);
-    static_assert(static_cast<uint8_t>(pc::Owner::Performance) == edvr::plugins::kPluginPerformance);
-    static_assert(static_cast<uint8_t>(pc::Owner::Diagnostics) == edvr::plugins::kPluginDiagnostics);
+    static_assert(static_cast<uint8_t>(pc::Owner::TemporalAa) == 0);
+    static_assert(static_cast<uint8_t>(pc::Owner::CockpitVisuals) == 1);
+    static_assert(static_cast<uint8_t>(pc::Owner::Exposure) == 2);
+    static_assert(static_cast<uint8_t>(pc::Owner::Scanners) == 3);
+    static_assert(static_cast<uint8_t>(pc::Owner::Intro) == 4);
+    static_assert(static_cast<uint8_t>(pc::Owner::OnFootPanel) == 5);
+    static_assert(static_cast<uint8_t>(pc::Owner::Comfort) == 6);
+    static_assert(static_cast<uint8_t>(pc::Owner::Performance) == 7);
+    static_assert(static_cast<uint8_t>(pc::Owner::Diagnostics) == 8);
+    static_assert(pc::currentPluginIndex(pc::Owner::TemporalAa) == edvr::plugins::kPluginTemporalAa);
+    static_assert(pc::currentPluginIndex(pc::Owner::CockpitVisuals) == edvr::plugins::kPluginCockpitVisuals);
+    static_assert(pc::currentPluginIndex(pc::Owner::Exposure) == edvr::plugins::kPluginComfort);
+    static_assert(pc::currentPluginIndex(pc::Owner::Scanners) == edvr::plugins::kPluginComfort);
+    static_assert(pc::currentPluginIndex(pc::Owner::Intro) == edvr::plugins::kPluginIntro);
+    static_assert(pc::currentPluginIndex(pc::Owner::OnFootPanel) == edvr::plugins::kPluginOnFootPanel);
+    static_assert(pc::currentPluginIndex(pc::Owner::Comfort) == edvr::plugins::kPluginComfort);
+    static_assert(pc::currentPluginIndex(pc::Owner::Performance) == edvr::plugins::kPluginPerformance);
+    static_assert(pc::currentPluginIndex(pc::Owner::Diagnostics) == edvr::plugins::kPluginDiagnostics);
+    static_assert(pc::currentPluginIndex(pc::Owner::Core) == pc::kNoCurrentPluginIndex);
 
     uint64_t handlers = 0;
     pc::NoCpu::template note<pc::Owner::CockpitVisuals, 7>(pc::SiteEvent::Reached);
@@ -1151,7 +1161,9 @@ bool panelDistanceApiPolicyChecks() {
         edvr::panel_distance_cost::Site::OverrideVSSetCB);
     constexpr uint16_t restore = edvr::panel_distance_cost::id(
         edvr::panel_distance_cost::Site::RestoreVSSetCB);
-    static_assert(owner == edvr::plugins::kPluginOnFootPanel);
+    static_assert(owner == 5, "PanelDistance retains its stable cost-window owner row.");
+    static_assert(pc::currentPluginIndex(static_cast<pc::Owner>(owner)) ==
+                  edvr::plugins::kPluginOnFootPanel);
     static_assert(static_cast<uint8_t>(pc::ApiClass::Transfer) == 1);
     static_assert(static_cast<uint8_t>(pc::ApiClass::State) == 2);
 

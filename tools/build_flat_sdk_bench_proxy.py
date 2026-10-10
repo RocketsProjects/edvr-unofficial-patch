@@ -34,10 +34,9 @@ def plan(root: Path, env: dict[str, str]) -> tuple[list[str], Path]:
     plugin_specs = (
         ("cockpit visuals", objdir / "plugins" / "cockpit_visuals" / "plugin_cockpit_visuals.lib"),
         ("intro", objdir / "plugins" / "intro" / "plugin_intro.lib"),
-        ("exposure", objdir / "plugins" / "exposure" / "plugin_exposure.lib"),
         ("on-foot-panel", objdir / "plugins" / "on_foot_panel" / "plugin_on_foot_panel.lib"),
-        ("scanners", objdir / "plugins" / "scanners" / "plugin_scanners.lib"),
         ("comfort", objdir / "plugins" / "comfort" / "plugin_comfort.lib"),
+        ("explorer-cam", objdir / "plugins" / "explorer_cam" / "plugin_explorer_cam.lib"),
         ("temporal-aa", objdir / "plugins" / "temporal_aa" / "plugin_temporal_aa.lib"),
         ("diagnostics", objdir / "plugins" / "diagnostics" / "plugin_diagnostics.lib"),
     )
@@ -113,10 +112,9 @@ def self_test() -> None:
         plugin_libs = {
             "cockpit visuals": root / "build" / "obj" / "plugins" / "cockpit_visuals" / "plugin_cockpit_visuals.lib",
             "intro": root / "build" / "obj" / "plugins" / "intro" / "plugin_intro.lib",
-            "exposure": root / "build" / "obj" / "plugins" / "exposure" / "plugin_exposure.lib",
             "on-foot-panel": root / "build" / "obj" / "plugins" / "on_foot_panel" / "plugin_on_foot_panel.lib",
-            "scanners": root / "build" / "obj" / "plugins" / "scanners" / "plugin_scanners.lib",
             "comfort": root / "build" / "obj" / "plugins" / "comfort" / "plugin_comfort.lib",
+            "explorer-cam": root / "build" / "obj" / "plugins" / "explorer_cam" / "plugin_explorer_cam.lib",
             "temporal-aa": root / "build" / "obj" / "plugins" / "temporal_aa" / "plugin_temporal_aa.lib",
             "diagnostics": root / "build" / "obj" / "plugins" / "diagnostics" / "plugin_diagnostics.lib",
         }

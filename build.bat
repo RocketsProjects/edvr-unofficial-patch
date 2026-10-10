@@ -302,18 +302,23 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
     --require-source src\plugins\intro\loader_panel.cpp ^
     --require-source src\plugins\intro\splash_dim.cpp ^
     --require-plugin on_foot_panel --require-source src\plugins\on_foot_panel\weapon_motion.cpp ^
-    --require-plugin scanners --require-source src\plugins\scanners\fss_heal.cpp ^
-    --require-source src\plugins\scanners\fss_panel.cpp ^
-    --require-source src\plugins\scanners\fss_reveal.cpp ^
     --require-plugin comfort --require-source src\plugins\comfort\transition_flash_eye_base.cpp ^
-    --require-source src\plugins\comfort\explorer_cam.cpp ^
+    --require-source src\plugins\comfort\exposure\exposure_shape.cpp ^
+    --require-source src\plugins\comfort\exposure\exposure_dispatch.cpp ^
+    --require-source src\plugins\comfort\exposure\exposure_actions.cpp ^
+    --require-source src\plugins\comfort\exposure\exposure_lifecycle.cpp ^
+    --require-source src\plugins\comfort\scanners\fss_heal.cpp ^
+    --require-source src\plugins\comfort\scanners\fss_panel.cpp ^
+    --require-source src\plugins\comfort\scanners\fss_reveal.cpp ^
+    --require-source src\plugins\comfort\scanners\scanner_lifecycle.cpp ^
+    --require-source src\plugins\comfort\comfort_lifecycle.cpp ^
+    --require-plugin explorer_cam --require-source src\plugins\explorer_cam\explorer_cam.cpp ^
+    --require-source src\plugins\explorer_cam\explorer_cam_lifecycle.cpp ^
     --require-plugin temporal_aa --require-source src\plugins\temporal_aa\sharpen_pass.cpp ^
     --require-plugin diagnostics --require-source src\plugins\diagnostics\pixel_probe.cpp ^
-    --require-plugin exposure --require-source src\plugins\exposure\exposure_shape.cpp ^
-    --require-source src\plugins\exposure\exposure_dispatch.cpp ^
-    --require-source src\plugins\exposure\exposure_actions.cpp ^
-    --require-source src\plugins\exposure\exposure_lifecycle.cpp ^
     --include-dir "%GEN%" || exit /b 1
+python "tools\plugin_lifecycle_wiring_test.py" --dry-run || exit /b 1
+python "tools\plugin_lifecycle_wiring_test.py" --self-test || exit /b 1
 
 if not exist "%OBJ%\plugins\cockpit_visuals" mkdir "%OBJ%\plugins\cockpit_visuals"
 del /q "%OBJ%\plugins\cockpit_visuals\*.obj" 2>nul
@@ -333,27 +338,43 @@ lib.exe /nologo /OUT:"%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
     "%OBJ%\plugins\on_foot_panel\weapon_motion.obj"
 if errorlevel 1 ( echo [edvr] ERROR: on-foot-panel plugin library failed & exit /b 1 )
 
-if not exist "%OBJ%\plugins\scanners" mkdir "%OBJ%\plugins\scanners"
-del /q "%OBJ%\plugins\scanners\*.obj" 2>nul
-cl.exe %CFLAGS% /Fo"%OBJ%\plugins\scanners\\" ^
-    "src\plugins\scanners\fss_heal.cpp" ^
-    "src\plugins\scanners\fss_panel.cpp" "src\plugins\scanners\fss_reveal.cpp"
-if errorlevel 1 ( echo [edvr] ERROR: scanners plugin compile failed & exit /b 1 )
-lib.exe /nologo /OUT:"%OBJ%\plugins\scanners\plugin_scanners.lib" ^
-    "%OBJ%\plugins\scanners\fss_heal.obj" ^
-    "%OBJ%\plugins\scanners\fss_panel.obj" "%OBJ%\plugins\scanners\fss_reveal.obj"
-if errorlevel 1 ( echo [edvr] ERROR: scanners plugin library failed & exit /b 1 )
-
 if not exist "%OBJ%\plugins\comfort" mkdir "%OBJ%\plugins\comfort"
 del /q "%OBJ%\plugins\comfort\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\comfort\\" ^
+    "src\plugins\comfort\exposure\exposure_shape.cpp" ^
+    "src\plugins\comfort\exposure\exposure_dispatch.cpp" ^
+    "src\plugins\comfort\exposure\exposure_actions.cpp" ^
+    "src\plugins\comfort\exposure\exposure_lifecycle.cpp" ^
+    "src\plugins\comfort\scanners\fss_heal.cpp" ^
+    "src\plugins\comfort\scanners\fss_panel.cpp" ^
+    "src\plugins\comfort\scanners\fss_reveal.cpp" ^
+    "src\plugins\comfort\scanners\scanner_lifecycle.cpp" ^
     "src\plugins\comfort\transition_flash_eye_base.cpp" ^
-    "src\plugins\comfort\explorer_cam.cpp"
+    "src\plugins\comfort\comfort_lifecycle.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: comfort plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\comfort\plugin_comfort.lib" ^
+    "%OBJ%\plugins\comfort\exposure_shape.obj" ^
+    "%OBJ%\plugins\comfort\exposure_dispatch.obj" ^
+    "%OBJ%\plugins\comfort\exposure_actions.obj" ^
+    "%OBJ%\plugins\comfort\exposure_lifecycle.obj" ^
+    "%OBJ%\plugins\comfort\fss_heal.obj" ^
+    "%OBJ%\plugins\comfort\fss_panel.obj" ^
+    "%OBJ%\plugins\comfort\fss_reveal.obj" ^
+    "%OBJ%\plugins\comfort\scanner_lifecycle.obj" ^
     "%OBJ%\plugins\comfort\transition_flash_eye_base.obj" ^
-    "%OBJ%\plugins\comfort\explorer_cam.obj"
+    "%OBJ%\plugins\comfort\comfort_lifecycle.obj"
 if errorlevel 1 ( echo [edvr] ERROR: comfort plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\explorer_cam" mkdir "%OBJ%\plugins\explorer_cam"
+del /q "%OBJ%\plugins\explorer_cam\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\explorer_cam\\" ^
+    "src\plugins\explorer_cam\explorer_cam.cpp" ^
+    "src\plugins\explorer_cam\explorer_cam_lifecycle.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: Explorer Cam plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\explorer_cam\plugin_explorer_cam.lib" ^
+    "%OBJ%\plugins\explorer_cam\explorer_cam.obj" ^
+    "%OBJ%\plugins\explorer_cam\explorer_cam_lifecycle.obj"
+if errorlevel 1 ( echo [edvr] ERROR: Explorer Cam plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\temporal_aa" mkdir "%OBJ%\plugins\temporal_aa"
 del /q "%OBJ%\plugins\temporal_aa\*.obj" 2>nul
@@ -393,17 +414,6 @@ lib.exe /nologo /OUT:"%OBJ%\plugins\intro\plugin_intro.lib" ^
     "%OBJ%\plugins\intro\loader_panel.obj" ^
     "%OBJ%\plugins\intro\splash_dim.obj"
 if errorlevel 1 ( echo [edvr] ERROR: intro plugin library failed & exit /b 1 )
-
-if not exist "%OBJ%\plugins\exposure" mkdir "%OBJ%\plugins\exposure"
-del /q "%OBJ%\plugins\exposure\*.obj" 2>nul
-cl.exe %CFLAGS% /Fo"%OBJ%\plugins\exposure\\" ^
-    "src\plugins\exposure\exposure_shape.cpp" "src\plugins\exposure\exposure_dispatch.cpp" ^
-    "src\plugins\exposure\exposure_actions.cpp" "src\plugins\exposure\exposure_lifecycle.cpp"
-if errorlevel 1 ( echo [edvr] ERROR: exposure plugin compile failed & exit /b 1 )
-lib.exe /nologo /OUT:"%OBJ%\plugins\exposure\plugin_exposure.lib" ^
-    "%OBJ%\plugins\exposure\exposure_shape.obj" "%OBJ%\plugins\exposure\exposure_dispatch.obj" ^
-    "%OBJ%\plugins\exposure\exposure_actions.obj" "%OBJ%\plugins\exposure\exposure_lifecycle.obj"
-if errorlevel 1 ( echo [edvr] ERROR: exposure plugin library failed & exit /b 1 )
 
 echo [edvr] === d3d11.dll ===
 REM The settings schema -- the installer's window AND the in-headset menu's
@@ -708,9 +718,10 @@ if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the runtime version resour
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\d3d11.pdb" ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
     "%OBJ%\d3d11\*.obj" "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
-    "%OBJ%\plugins\intro\plugin_intro.lib" "%OBJ%\plugins\exposure\plugin_exposure.lib" ^
+    "%OBJ%\plugins\intro\plugin_intro.lib" ^
     "%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
-    "%OBJ%\plugins\scanners\plugin_scanners.lib" "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
+    "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
+    "%OBJ%\plugins\explorer_cam\plugin_explorer_cam.lib" ^
     "%OBJ%\plugins\temporal_aa\plugin_temporal_aa.lib" "%OBJ%\plugins\diagnostics\plugin_diagnostics.lib" ^
     "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
@@ -1027,7 +1038,7 @@ echo [edvr] === native_fss_gpu_test.exe ===
 if not exist "%OBJ%\native_fss_gpu" mkdir "%OBJ%\native_fss_gpu"
 cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_fss_gpu\\" /Fe"%BUILD%\native_fss_gpu_test.exe" ^
-    "tools\native_fss_test\native_fss_gpu_test.cpp" "src\d3d11\native_fss.cpp" "src\plugins\scanners\fss_heal.cpp" ^
+    "tools\native_fss_test\native_fss_gpu_test.cpp" "src\d3d11\native_fss.cpp" "src\plugins\comfort\scanners\fss_heal.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: native FSS shader test build failed & exit /b 1 )
@@ -1083,10 +1094,11 @@ exit /b 0
 echo [edvr] === native_temporal_test.exe ===
 if not exist "%OBJ%\native_temporal" mkdir "%OBJ%\native_temporal"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_test.exe" ^
     "tools\native_temporal_test\native_temporal_test.cpp" "src\d3d11\native_temporal.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\vr_runtime.cpp" "src\plugins\comfort\transition_flash_eye_base.cpp" ^
+    "src\plugins\comfort\comfort_lifecycle.cpp" ^
     "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
@@ -1772,8 +1784,10 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNO
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\plugindispatch\\" ^
     /Fe"%BUILD%\plugin_dispatch_test.exe" "tools\plugin_dispatch_test\plugin_dispatch_test.cpp" ^
     "src\d3d11\plugin_registry.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" "src\common\guard.cpp" ^
-    "src\plugins\exposure\exposure_actions.cpp" "src\plugins\exposure\exposure_dispatch.cpp" ^
-    "src\plugins\exposure\exposure_lifecycle.cpp" ^
+    "src\plugins\comfort\exposure\exposure_actions.cpp" "src\plugins\comfort\exposure\exposure_dispatch.cpp" ^
+    "src\plugins\comfort\exposure\exposure_lifecycle.cpp" ^
+    "src\plugins\comfort\scanners\scanner_lifecycle.cpp" "src\plugins\comfort\comfort_lifecycle.cpp" ^
+    "src\plugins\explorer_cam\explorer_cam_lifecycle.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: plugin dispatch rig build failed & exit /b 1 )
 "%BUILD%\plugin_dispatch_test.exe" --self-test || (
@@ -1850,7 +1864,7 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\exposuredispatch\\" /Fe"%BUILD%\exposure_dispatch_test.exe" ^
     "tools\exposure_dispatch_test\exposure_dispatch_test.cpp" ^
-    "src\plugins\exposure\exposure_dispatch.cpp" /link /INCREMENTAL:NO
+    "src\plugins\comfort\exposure\exposure_dispatch.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: exposure dispatch test build failed & exit /b 1 )
 "%BUILD%\exposure_dispatch_test.exe" --dry-run || exit /b 1
 "%BUILD%\exposure_dispatch_test.exe" --self-test || exit /b 1
@@ -1894,7 +1908,8 @@ cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /DEDVR_BINDING_SHADOW_EXTERNAL /DEDVR_FSS_PREDICATE_TEST ^
     /Fo"%OBJ%\fsspredicate\\" /Fe"%BUILD%\fss_predicate_test.exe" ^
     "tools\fss_predicate_test\fss_predicate_test.cpp" ^
-    "src\plugins\scanners\fss_panel.cpp" "src\plugins\scanners\fss_reveal.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\plugins\comfort\scanners\fss_panel.cpp" "src\plugins\comfort\scanners\fss_reveal.cpp" ^
+    "src\plugins\comfort\scanners\scanner_lifecycle.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\proxy.cpp" ^
     "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO /OPT:REF user32.lib version.lib
@@ -2943,9 +2958,10 @@ link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\target_sharp.obj" "%OBJ%\vscreenpredicate\sunglare_fix.obj" ^
     @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
     "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
-    "%OBJ%\plugins\intro\plugin_intro.lib" "%OBJ%\plugins\exposure\plugin_exposure.lib" ^
+    "%OBJ%\plugins\intro\plugin_intro.lib" ^
     "%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
-    "%OBJ%\plugins\scanners\plugin_scanners.lib" "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
+    "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
+    "%OBJ%\plugins\explorer_cam\plugin_explorer_cam.lib" ^
     "%OBJ%\plugins\temporal_aa\plugin_temporal_aa.lib" "%OBJ%\plugins\diagnostics\plugin_diagnostics.lib" ^
     kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test build failed & exit /b 1 )
@@ -4037,7 +4053,8 @@ if not exist "%OBJ%\explorercam" mkdir "%OBJ%\explorercam"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_EXPLORER_CAM_TEST /I"%GEN%" ^
     /Fo"%OBJ%\explorercam"\ /Fe"%BUILD%\explorer_cam_test.exe" ^
-    "tools\explorer_cam_test\explorer_cam_test.cpp" "src\plugins\comfort\explorer_cam.cpp" "src\d3d11\elite_binds.cpp" ^
+    "tools\explorer_cam_test\explorer_cam_test.cpp" "src\plugins\explorer_cam\explorer_cam.cpp" ^
+    "src\plugins\explorer_cam\explorer_cam_lifecycle.cpp" "src\d3d11\elite_binds.cpp" ^
     "src\common\hotkey.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: explorer cam test build failed & exit /b 1 )
@@ -4513,7 +4530,9 @@ cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fo"%OBJ%\fssrevealapi\\" /Fe"%BUILD%\fss_reveal_api_test.exe" ^
     "tools\fss_reveal_api_test\fss_reveal_api_test.cpp" ^
-    "src\plugins\scanners\fss_reveal.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\plugins\comfort\scanners\fss_reveal.cpp" ^
+    "src\plugins\comfort\scanners\scanner_lifecycle.cpp" ^
+    "src\d3d11\plugin_cost.cpp" ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: FSS Reveal API test build failed & exit /b 1 )

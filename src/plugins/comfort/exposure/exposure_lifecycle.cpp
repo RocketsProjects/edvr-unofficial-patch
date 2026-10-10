@@ -2,7 +2,7 @@
 
 #include "exposure_dispatch.h"
 
-#include "../../common/config.h"
+#include "../../../common/config.h"
 
 namespace edvr::plugins::exposure {
 namespace {
@@ -48,8 +48,8 @@ void initializeExposureLifecycleOps(EdvrPluginLifecycleOps* ops,
     if (!ops) return;
     *ops = {
         sizeof(EdvrPluginLifecycleOps),
-        plugins::kPluginExposure,
-        "exposure",
+        plugins::kPluginComfort,
+        "comfort",
         state,
         nullptr,
         frame,
@@ -58,6 +58,7 @@ void initializeExposureLifecycleOps(EdvrPluginLifecycleOps* ops,
         frameStage,
         nullptr,
         configureState,
+        edvr::kComfortExposureLifecycleComponent,
     };
 }
 

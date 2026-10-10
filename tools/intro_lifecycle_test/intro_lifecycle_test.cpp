@@ -103,7 +103,8 @@ int main(int argc, char** argv) {
 
     const EdvrPluginLifecycleOps* ops = edvr::introVideoLifecycleOps();
     if (!ops || ops != edvr::introVideoLifecycleOps() ||
-        ops->structSize != sizeof(*ops) || ops->manifestIndex != 4 ||
+        ops->structSize != sizeof(*ops) ||
+        ops->manifestIndex != edvr::plugins::kPluginIntro ||
         !ops->manifestId || std::string(ops->manifestId) != "intro" ||
         !ops->configure || !ops->frame || !ops->shutdown ||
         !ops->configureStage || !ops->frameStage || !ops->shutdownStage) {

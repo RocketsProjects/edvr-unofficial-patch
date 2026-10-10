@@ -133,18 +133,40 @@ uint8_t edvrPluginCostFrameBoundaryV2(uint32_t frameNo,
 namespace edvr { namespace plugin_cost {
 
 enum class Owner : uint8_t {
-    TemporalAa = static_cast<uint8_t>(plugins::kPluginTemporalAa),
-    CockpitVisuals = static_cast<uint8_t>(plugins::kPluginCockpitVisuals),
-    Exposure = static_cast<uint8_t>(plugins::kPluginExposure),
-    Scanners = static_cast<uint8_t>(plugins::kPluginScanners),
-    Intro = static_cast<uint8_t>(plugins::kPluginIntro),
-    OnFootPanel = static_cast<uint8_t>(plugins::kPluginOnFootPanel),
-    Comfort = static_cast<uint8_t>(plugins::kPluginComfort),
-    Performance = static_cast<uint8_t>(plugins::kPluginPerformance),
-    Diagnostics = static_cast<uint8_t>(plugins::kPluginDiagnostics),
-    Core = static_cast<uint8_t>(plugins::kPluginIndexCount),
-    Count = static_cast<uint8_t>(plugins::kPluginIndexCount + 1)
+    // These row IDs are a versioned cost-report ABI. Keep the historical
+    // source/component rows stable when public plugin groups are consolidated.
+    TemporalAa = 0,
+    CockpitVisuals = 1,
+    Exposure = 2,
+    Scanners = 3,
+    Intro = 4,
+    OnFootPanel = 5,
+    Comfort = 6,
+    Performance = 7,
+    Diagnostics = 8,
+    Core = 9,
+    Count = 10
 };
+
+constexpr uint8_t kNoCurrentPluginIndex = 0xffu;
+
+// Map stable cost rows to current public catalog groups for attribution.
+// Exposure and Scanners retain distinct cost rows while rolling up to Comfort.
+constexpr uint8_t currentPluginIndex(Owner owner) noexcept {
+    switch (owner) {
+    case Owner::TemporalAa: return static_cast<uint8_t>(plugins::kPluginTemporalAa);
+    case Owner::CockpitVisuals: return static_cast<uint8_t>(plugins::kPluginCockpitVisuals);
+    case Owner::Exposure:
+    case Owner::Scanners:
+    case Owner::Comfort: return static_cast<uint8_t>(plugins::kPluginComfort);
+    case Owner::Intro: return static_cast<uint8_t>(plugins::kPluginIntro);
+    case Owner::OnFootPanel: return static_cast<uint8_t>(plugins::kPluginOnFootPanel);
+    case Owner::Performance: return static_cast<uint8_t>(plugins::kPluginPerformance);
+    case Owner::Diagnostics: return static_cast<uint8_t>(plugins::kPluginDiagnostics);
+    case Owner::Core: return kNoCurrentPluginIndex;
+    default: return kNoCurrentPluginIndex;
+    }
+}
 
 enum class SiteEvent : uint8_t {
     Reached = 1,
@@ -257,8 +279,26 @@ struct SampledCpu {
     };
 };
 
-static_assert(plugins::kPluginIndexCount == 9, "Cost owner indices must cover the canonical nine plugins.");
-static_assert(static_cast<uint8_t>(Owner::Count) == kOwnerCount, "Cost owner count must include Core after all plugins.");
+static_assert(plugins::kPluginIndexCount == 8, "Current public plugin index count changed.");
+static_assert(static_cast<uint8_t>(Owner::TemporalAa) == 0 &&
+              static_cast<uint8_t>(Owner::CockpitVisuals) == 1 &&
+              static_cast<uint8_t>(Owner::Exposure) == 2 &&
+              static_cast<uint8_t>(Owner::Scanners) == 3 &&
+              static_cast<uint8_t>(Owner::Intro) == 4 &&
+              static_cast<uint8_t>(Owner::OnFootPanel) == 5 &&
+              static_cast<uint8_t>(Owner::Comfort) == 6 &&
+              static_cast<uint8_t>(Owner::Performance) == 7 &&
+              static_cast<uint8_t>(Owner::Diagnostics) == 8 &&
+              static_cast<uint8_t>(Owner::Core) == 9,
+              "Historical cost owner row IDs changed.");
+static_assert(static_cast<uint8_t>(Owner::Count) == kOwnerCount, "Cost owner rows including Core changed.");
+static_assert(currentPluginIndex(Owner::Exposure) == plugins::kPluginComfort &&
+              currentPluginIndex(Owner::Scanners) == plugins::kPluginComfort &&
+              currentPluginIndex(Owner::Comfort) == plugins::kPluginComfort &&
+              currentPluginIndex(Owner::Core) == kNoCurrentPluginIndex &&
+              currentPluginIndex(Owner::Count) == kNoCurrentPluginIndex &&
+              currentPluginIndex(static_cast<Owner>(0xfeu)) == kNoCurrentPluginIndex,
+              "Cost source rows must map to current public owners without changing ABI rows.");
 static_assert(static_cast<uint8_t>(ApiClass::Count) == kApiClassCount, "Cost API class count changed without ABI review.");
 static_assert(kMaxSiteId < 2 * 64, "Cost site IDs must fit two fixed coverage words.");
 static_assert(kMaxApiSiteId < 4 * 64, "API site IDs must fit four V2 coverage words.");

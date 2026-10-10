@@ -2,10 +2,10 @@
 
 #include <iterator>
 
-#include "../../common/config.h"
-#include "../../common/log.h"
-#include "../../d3d11/binding_shadow.h"
-#include "../../d3d11/shader_registry.h"
+#include "../../../common/config.h"
+#include "../../../common/log.h"
+#include "../../../d3d11/binding_shadow.h"
+#include "../../../d3d11/shader_registry.h"
 #include "exposure_shape.h"
 
 namespace edvr {

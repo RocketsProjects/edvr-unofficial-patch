@@ -21,6 +21,8 @@
 #include "../../src/d3d11/exposure_fix.h"
 #include "../../src/d3d11/fss_reveal.h"
 #include "../../src/d3d11/fss_reveal_cost_sites.h"
+#include "../../src/d3d11/fss_panel.h"
+#include "../../src/plugins/comfort/scanners/scanner_lifecycle.h"
 
 using Microsoft::WRL::ComPtr;
 namespace pc = edvr::plugin_cost;
@@ -173,7 +175,12 @@ struct Fixture final {
 
 void configure(const char* value) {
     g_configValue = value;
-    edvr::fssRevealConfigure(edvr::Config::get());
+    edvr::plugins::scanners::scannerLifecycleOps().configure(
+        &edvr::Config::get());
+}
+
+void scannerFrameBoundary() {
+    edvr::plugins::scanners::scannerLifecycleOps().frame(nullptr, 0);
 }
 
 void startCollector(ID3D11DeviceContext* owner, bool nextApiSample = true) {
@@ -381,8 +388,8 @@ bool copiedTextureMatches(Fixture& fixture, ID3D11ShaderResourceView* view) {
 
 bool captureColdAndWarm(Fixture& fixture) {
     configure("off");
-    edvr::fssRevealShutdown();
-    edvr::fssRevealFrameBoundary();
+    edvr::plugins::scanners::scannerLifecycleOps().shutdown(nullptr);
+    scannerFrameBoundary();
     configure("sync");
     fixture.bind(fixture.immediate.Get());
     edvr::VTableHook mapHook;
@@ -853,6 +860,8 @@ bool runSelfTest() {
 } // namespace
 
 namespace edvr {
+void fssPanelConfigure(Config&) {}
+void fssPanelShutdown() {}
 Config& Config::get() { static Config config; return config; }
 std::string Config::getString(const char*, const char*) const { return ::g_configValue; }
 Log& Log::get() { static Log logger; return logger; }

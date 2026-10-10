@@ -898,9 +898,15 @@ int boundarySourceChecks(const std::string& root) {
     // transport-only, that function never runs, and F5 did nothing -- whatever hotkey.explorer_cam held. Moving it back under vScreen (or behind a condition) makes this fail.
     // (tools\test_openxr_transport.py drives the same minimal config through the real d3d11.dll and asks for the boundary's lines: the behaviour, not just this text.)
     const std::string flatTicks = withoutSpaces(tickBody);
+    const std::string explorerTick =
+        "tkExplorerCam.run([]{"
+        "constuint32_tframeNo=static_cast<uint32_t>(g_state->frameCounter);"
+        "if(pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)){"
+        "pluginRegistryFrameLifecycle(plugins::kPluginExplorerCam,frameNo);"
+        "}else{explorerCamFrameBoundary(frameNo);}});";
     verify(withoutSpaces(hookText).find("EDVR_BOUNDARY_TICK(tkExplorerCam,\"explorer_cam\");") != std::string::npos &&
-               flatTicks.find("tkExplorerCam.run([]{explorerCamFrameBoundary(static_cast<uint32_t>(g_state->frameCounter));});") != std::string::npos,
-           "Explorer Cam's frame tick is declared in device_hook.cpp and run at the top level of presentFrameBoundary(), with the frame counter");
+               flatTicks.find(explorerTick) != std::string::npos,
+           "Explorer Cam's device tick forwards the frame counter to the registered lifecycle or exactly one direct fallback");
     verify(flatTicks.find("tkEliteBinds.run(") < flatTicks.find("tkExplorerCam.run(") &&
                flatTicks.find("tkExplorerCam.run(") < flatTicks.find("tkMenu.run(") && flatTicks.find("tkExplorerCam.run(") < flatTicks.find("tkVscreenRest.run("),
            "...after the Elite binds it reads, and before the menu and vScreen's boundary");

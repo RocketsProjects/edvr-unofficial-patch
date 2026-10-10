@@ -2,8 +2,8 @@
 #include "../../src/common/log.h"
 #include "../../src/d3d11/binding_shadow.h"
 #include "../../src/d3d11/shader_registry.h"
-#include "../../src/plugins/exposure/exposure_dispatch.h"
-#include "../../src/plugins/exposure/exposure_shape.h"
+#include "../../src/plugins/comfort/exposure/exposure_dispatch.h"
+#include "../../src/plugins/comfort/exposure/exposure_shape.h"
 
 #include <algorithm>
 #include <array>

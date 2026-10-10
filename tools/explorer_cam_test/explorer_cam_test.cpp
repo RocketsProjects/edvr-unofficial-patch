@@ -1,4 +1,4 @@
-// Explorer Cam's rig (src/d3d11/explorer_cam_core.h, src/plugins/comfort/explorer_cam.cpp, elite_binds.cpp; hotkey.explorer_cam).
+// Explorer Cam's rig (src/d3d11/explorer_cam_core.h, src/plugins/explorer_cam/explorer_cam.cpp, elite_binds.cpp; hotkey.explorer_cam).
 //
 // Part A drives the pure half the DLL compiles: the build-332841 identity and CodeHook's reading of all five prologues, the eye
 // keys' clamp, the sixteen floats written into the free camera's commander-local pose, the placement machine on scripted state
@@ -46,6 +46,7 @@
 #include "../../src/d3d11/explorer_cam_follow_core.h"
 #include "../../src/d3d11/explorer_cam_fade_core.h"
 #include "../../src/common/comfort_fade.h"
+#include "../../src/plugins/explorer_cam/explorer_cam_lifecycle.h"
 
 using namespace edvr;
 
@@ -2564,7 +2565,9 @@ void testConfigPath(const Pages& p) {
     g.ctlUpdate = reinterpret_cast<FnObj>(p.ctlG);
     g.uiUpdate = reinterpret_cast<FnObj>(p.uiG);
     // Defaults: nothing set. The ini ships `hotkey.explorer_cam = F5`, which arms Explorer Cam; the code default agrees.
-    explorerCamFrameBoundary(1);
+    const auto& explorerOps = plugins::explorer_cam::explorerCamLifecycleOps();
+    check(explorerOps.frame != nullptr, "Explorer Cam lifecycle exposes its normal frame callback");
+    explorerOps.frame(explorerOps.state, 1);
     check(t::placeActive(), "no keys set: Explorer Cam is ON by default");
     check(t::hotkeyVk() == VK_F5, "...and hotkey.explorer_cam defaults to F5");
     // The eye keys reach the hook. The wrapper's F5 is the real keyboard, so the session is switched on through the seam.

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../d3d11/plugin_registry.h"
+#include "../../../d3d11/plugin_registry.h"
 #include "exposure_actions.h"
 
 namespace edvr::plugins::exposure {

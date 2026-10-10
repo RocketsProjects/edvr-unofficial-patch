@@ -20,6 +20,7 @@
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/glitch_frame.h"
 #include "../../src/d3d11/transition_flash_eye_base.h"
+#include "../../src/plugins/comfort/comfort_lifecycle.h"
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeTemporal")
 using Microsoft::WRL::ComPtr;
 unsigned checks=0,failures=0,dumps=0;
@@ -167,7 +168,10 @@ void glueStep(GlueRig& r,bool consumeReset,unsigned headFills,unsigned worldFill
     else{check(treat(*r.t,r.seq,eye,r.src)==S_OK,"glue: an unheld eye is treated");++r.treated;if(calls.back().flags&1)++r.resets;}
   }
   edvr::glitchFrameBoundary(0);
-  edvr::transitionFlashEyeBaseFrameBoundary(++r.boundary);
+  const auto& comfortOps=edvr::plugins::comfort::comfortLifecycleOps();
+  comfortOps.frameStage(comfortOps.state,
+      edvr::plugins::comfort::kComfortLifecycleTransitionFlashFrame,
+      nullptr,++r.boundary);
 }
 void glueSettle(GlueRig& r){for(unsigned i=0;i<8;++i)glueStep(r,false,0,1);}
 struct GlueNums{uint64_t events,held,noHead,notHonoured,skipped,kept,returned,unjudged;};

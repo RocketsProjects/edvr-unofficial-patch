@@ -53,14 +53,21 @@ namespace detail {
 bool g_perfMonitorSampleDraws = false;
 }  // namespace detail
 
-static_assert(plugin_cost::kOwnerCount == plugins::kPluginIndexCount + 1,
-              "plugin-cost owner slots must follow the manifest plus Core");
+static_assert(plugin_cost::kOwnerCount == 10,
+              "plugin-cost V2 retains its ten historical owner rows");
 static_assert(sizeof(EdvrPluginCostOwnerV2) == 144,
               "plugin-cost V2 owner record is a fixed 144-byte POD");
 static_assert(sizeof(EdvrPluginCostWindowV2) == 1488,
               "plugin-cost V2 window record is a fixed 1488-byte POD");
 
 namespace {
+
+// Cost rows are a versioned report ABI. Public catalog groups can change
+// without changing the source labels attached to historical row IDs.
+constexpr const char* kStableCostOwnerNames[plugin_cost::kOwnerCount] = {
+    "temporal-aa", "cockpit-visuals", "exposure", "scanners", "intro",
+    "on-foot-panel", "comfort", "performance", "diagnostics", "core",
+};
 
 // Ten seconds at 90 Hz for the statistics; the graph shows the tail.
 constexpr int kRing = 900;
@@ -1292,8 +1299,7 @@ void perfMonitorPluginCostFrameBoundary(uint32_t frameNo, bool closedCpuSampleFr
         for (unsigned i = 0; i < plugin_cost::kOwnerCount; ++i) {
             const EdvrPluginCostOwnerV2& owner = pluginCostWindow.owners[i];
             if (!owner.cpuObserved && !owner.apiObserved) continue;
-            const char* ownerName = i < plugins::kPluginCount
-                ? plugins::kManifest[i].id : "core";
+            const char* ownerName = kStableCostOwnerNames[i];
             const unsigned coveredCpuSites =
                 countMaskBits(owner.cpuSiteMask[0]) + countMaskBits(owner.cpuSiteMask[1]);
             if (owner.cpuObserved) {

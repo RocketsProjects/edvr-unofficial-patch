@@ -1,8 +1,15 @@
 #include "../../src/d3d11/plugin_dispatch.h"
 #include "../../src/d3d11/plugin_registry.h"
 #include "../../src/d3d11/binding_shadow.h"
-#include "../../src/plugins/exposure/exposure_dispatch.h"
-#include "../../src/plugins/exposure/exposure_lifecycle.h"
+#include "../../src/plugins/comfort/exposure/exposure_dispatch.h"
+#include "../../src/plugins/comfort/exposure/exposure_lifecycle.h"
+#include "../../src/plugins/comfort/scanners/scanner_lifecycle.h"
+#include "../../src/plugins/comfort/comfort_lifecycle.h"
+#include "../../src/plugins/explorer_cam/explorer_cam_lifecycle.h"
+#include "../../src/d3d11/fss_panel.h"
+#include "../../src/d3d11/fss_reveal.h"
+#include "../../src/d3d11/explorer_cam.h"
+#include "../../src/d3d11/transition_flash_eye_base.h"
 #include "../../src/common/config.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/common/log.h"
@@ -16,7 +23,80 @@
 #include <type_traits>
 #include <windows.h>
 
-namespace edvr { uint32_t loggerNoteCalls = 0; }
+namespace edvr {
+uint32_t loggerNoteCalls = 0;
+
+enum LifecycleModuleEvent : uint32_t {
+    kScannerPanelConfigure = 1,
+    kScannerRevealConfigure,
+    kScannerRevealFrame,
+    kScannerPanelShutdown,
+    kScannerRectanglesShutdown,
+    kScannerRevealShutdown,
+    kComfortFlashConfigure,
+    kComfortFlashFrame,
+    kComfortExplorerFrame,
+    kComfortExplorerShutdown,
+    kComfortFlashShutdown,
+};
+struct LifecycleModuleTrace {
+    LifecycleModuleEvent events[32]{};
+    uint32_t count = 0;
+    uint32_t frameNo = 0;
+    Config* config = nullptr;
+    bool scannerDetachedAtRevealShutdown = false;
+    bool comfortDetachedAtFlashShutdown = false;
+};
+LifecycleModuleTrace lifecycleModuleTrace;
+
+void noteLifecycleModule(LifecycleModuleEvent event) {
+    if (lifecycleModuleTrace.count <
+        sizeof(lifecycleModuleTrace.events) / sizeof(lifecycleModuleTrace.events[0]))
+        lifecycleModuleTrace.events[lifecycleModuleTrace.count++] = event;
+}
+
+void fssPanelConfigure(Config& cfg) {
+    lifecycleModuleTrace.config = &cfg;
+    noteLifecycleModule(kScannerPanelConfigure);
+}
+void fssRevealConfigure(Config& cfg) {
+    lifecycleModuleTrace.config = &cfg;
+    noteLifecycleModule(kScannerRevealConfigure);
+}
+void fssRevealFrameBoundary() {
+    noteLifecycleModule(kScannerRevealFrame);
+}
+void fssPanelShutdown() {
+    noteLifecycleModule(kScannerPanelShutdown);
+}
+void fssRevealShutdown() {
+    lifecycleModuleTrace.scannerDetachedAtRevealShutdown =
+        !pluginRegistryHasLifecycleComponent(
+            plugins::kPluginComfort, kComfortScannersLifecycleComponent);
+    noteLifecycleModule(kScannerRevealShutdown);
+}
+void transitionFlashEyeBaseConfigure(Config& cfg) {
+    lifecycleModuleTrace.config = &cfg;
+    noteLifecycleModule(kComfortFlashConfigure);
+}
+void transitionFlashEyeBaseFrameBoundary(uint32_t frameNo) {
+    lifecycleModuleTrace.frameNo = frameNo;
+    noteLifecycleModule(kComfortFlashFrame);
+}
+void transitionFlashEyeBaseShutdown() {
+    lifecycleModuleTrace.comfortDetachedAtFlashShutdown =
+        !pluginRegistryHasLifecycleComponent(
+            plugins::kPluginComfort, kComfortTransitionFlashLifecycleComponent);
+    noteLifecycleModule(kComfortFlashShutdown);
+}
+void explorerCamFrameBoundary(uint32_t frameNo) {
+    lifecycleModuleTrace.frameNo = frameNo;
+    noteLifecycleModule(kComfortExplorerFrame);
+}
+void explorerCamShutdown() {
+    noteLifecycleModule(kComfortExplorerShutdown);
+}
+}  // namespace edvr
 
 namespace {
 constexpr uint32_t kPlugin = edvr::plugins::kPluginCockpitVisuals;
@@ -121,8 +201,11 @@ static_assert(sizeof(ShutdownStageLifecycleOpsPrefix) ==
                   offsetof(EdvrPluginLifecycleOps, configureState),
               "configureState must append after the staged lifecycle ABI");
 static_assert(sizeof(ConfigureStateLifecycleOpsPrefix) ==
-                  sizeof(EdvrPluginLifecycleOps),
-              "configureState fixture must end at the new ABI boundary");
+                  offsetof(EdvrPluginLifecycleOps, componentIndex),
+              "legacy full lifecycle record must end before componentIndex");
+static_assert(offsetof(EdvrPluginLifecycleOps, componentIndex) ==
+                  sizeof(ConfigureStateLifecycleOpsPrefix),
+              "componentIndex must append after the complete pre-component ABI");
 static_assert(offsetof(EdvrPluginLifecycleOps, configure) ==
                   offsetof(LegacyEdvrPluginLifecycleOpsPrefix, configure) &&
               offsetof(EdvrPluginLifecycleOps, frame) ==
@@ -364,13 +447,19 @@ void replayMatrix() {
 }
 
 void costBudgetMetadata() {
-    check(edvr::plugins::kPluginCount == 9 &&
+    constexpr const char* kExpectedIds[] = {
+        "temporal-aa", "cockpit-visuals", "intro", "on-foot-panel",
+        "comfort", "explorer-cam", "performance", "diagnostics",
+    };
+    check(edvr::plugins::kPluginCount == 8 &&
               edvr::plugins::kPluginIndexCount == edvr::plugins::kPluginCount,
-          "budget metadata remains attached to the complete stable catalog");
+          "budget metadata remains attached to the complete eight-group catalog");
     for (uint32_t i = 0; i < edvr::plugins::kPluginCount; ++i) {
         const auto& plugin = edvr::plugins::kManifest[i];
         const auto* budget = plugin.costBudget;
-        check(plugin.costNote && *plugin.costNote && budget &&
+        check(i < sizeof(kExpectedIds) / sizeof(kExpectedIds[0]) &&
+                  plugin.id && std::strcmp(plugin.id, kExpectedIds[i]) == 0 &&
+                  plugin.costNote && *plugin.costNote && budget &&
                   budget->state == edvr::plugins::kCostBudgetUnmeasured &&
                   budget->reference == nullptr && budget->metrics && budget->metricCount == 3,
               "all plugins retain costNote and an unmeasured, reference-free cost budget");
@@ -688,7 +777,7 @@ void registryLifecycle() {
 
 void lifecycleRegistryDispatch() {
     constexpr uint32_t kIntro = edvr::plugins::kPluginIntro;
-    constexpr uint32_t kExposure = edvr::plugins::kPluginExposure;
+    constexpr uint32_t kExposure = edvr::plugins::kPluginComfort;
     edvr::pluginRegistryShutdownLifecycle(kIntro);
     lifecycleState = {};
     lifecycleState.manifestIndex = kIntro;
@@ -809,14 +898,17 @@ void lifecycleRegistryDispatch() {
     auto* const configureStatePrefix = new (
         static_cast<uint8_t*>(pageEnd) - sizeof(ConfigureStateLifecycleOpsPrefix))
         ConfigureStateLifecycleOpsPrefix{
-            {{sizeof(EdvrPluginLifecycleOps), kIntro, "intro", &lifecycleState,
+            {{sizeof(ConfigureStateLifecycleOpsPrefix), kIntro, "intro", &lifecycleState,
               nullptr, &lifecycleFrame, &lifecycleShutdown},
              nullptr, nullptr, nullptr},
             &lifecycleConfigureState};
     const auto* configureStateOps = reinterpret_cast<
         const EdvrPluginLifecycleOps*>(configureStatePrefix);
     check(edvr::pluginRegistryRegisterLifecycle(configureStateOps),
-          "stateful-only lifecycle record registers at its declared boundary");
+          "pre-component full lifecycle record registers at its declared boundary");
+    check(edvr::pluginRegistryHasLifecycleComponent(kIntro, 0) &&
+              !edvr::pluginRegistryHasLifecycleComponent(kIntro, 1),
+          "pre-component records default to component zero without reading beyond their extent");
     bool statefulConfig = true;
     edvr::pluginRegistryConfigureLifecycle(kIntro, &statefulConfig);
     check(lifecycleState.configureStateCalls == 1 &&
@@ -826,7 +918,26 @@ void lifecycleRegistryDispatch() {
           "stateful configure forwards registered state and config through normal dispatch");
     edvr::pluginRegistryShutdownLifecycle(kIntro);
 
-    auto statefulPreferred = *configureStateOps;
+    // The new selector is optional as a whole, but its uint32 field cannot be
+    // partially present at a host boundary.
+    EdvrPluginLifecycleOps partialComponent = ops;
+    partialComponent.structSize = offsetof(EdvrPluginLifecycleOps, componentIndex) + 1;
+    check(!edvr::pluginRegistryRegisterLifecycle(&partialComponent),
+          "lifecycle registry rejects a partial componentIndex extent");
+    EdvrPluginLifecycleOps invalidComponent = ops;
+    invalidComponent.structSize = sizeof(EdvrPluginLifecycleOps);
+    invalidComponent.componentIndex = edvr::kPluginLifecycleComponentCount;
+    check(!edvr::pluginRegistryRegisterLifecycle(&invalidComponent),
+          "lifecycle registry rejects an out-of-range component index");
+    invalidComponent = ops;
+    invalidComponent.structSize = sizeof(EdvrPluginLifecycleOps);
+    invalidComponent.componentIndex = 1;
+    check(!edvr::pluginRegistryRegisterLifecycle(&invalidComponent),
+          "lifecycle registry rejects nonzero components outside Comfort");
+
+    EdvrPluginLifecycleOps statefulPreferred{};
+    std::memcpy(&statefulPreferred, configureStatePrefix,
+                sizeof(ConfigureStateLifecycleOpsPrefix));
     statefulPreferred.configure = &lifecycleConfigure;
     lifecycleState = {};
     lifecycleState.manifestIndex = kIntro;
@@ -862,7 +973,7 @@ void lifecycleRegistryDispatch() {
     check(!edvr::pluginRegistryRegisterLifecycle(&invalid),
           "lifecycle registry rejects records with neither configure callback");
     EdvrPluginLifecycleOps catalogOnly = {
-        sizeof(EdvrPluginLifecycleOps), edvr::plugins::kPluginScanners, "scanners", &lifecycleState,
+        sizeof(EdvrPluginLifecycleOps), edvr::plugins::kPluginPerformance, "performance", &lifecycleState,
         &lifecycleConfigure, &lifecycleFrame, &lifecycleShutdown};
     check(!edvr::pluginRegistryRegisterLifecycle(&catalogOnly),
           "lifecycle registry rejects catalog-only implementations");
@@ -985,37 +1096,46 @@ void lifecycleRegistryDispatch() {
 }
 
 void exposureLifecycleRegistryDispatch() {
-    constexpr uint32_t kExposure = edvr::plugins::kPluginExposure;
-    edvr::pluginRegistryShutdownLifecycle(kExposure);
+    constexpr uint32_t kComfort = edvr::plugins::kPluginComfort;
+    constexpr uint32_t kExposureComponent =
+        edvr::kComfortExposureLifecycleComponent;
+    edvr::pluginRegistryShutdownLifecycleComponent(kComfort, kExposureComponent);
     edvr::plugins::exposure::ExposureActionState state;
     state.dampPrevValid = true;
     state.dampHaveMean = true;
     EdvrPluginLifecycleOps ops{};
     edvr::plugins::exposure::initializeExposureLifecycleOps(&ops, &state);
-    check(ops.state == &state && ops.manifestIndex == kExposure &&
+    check(ops.state == &state && ops.manifestIndex == kComfort &&
+              ops.componentIndex == kExposureComponent &&
               ops.configure == nullptr && ops.configureState != nullptr,
           "production Exposure lifecycle record binds its embedded stateful callback");
 
     const auto savedProfile = edvr::g_runtimeProfile;
     edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
     check(!edvr::pluginRegistryRegisterLifecycle(&ops) &&
-              !edvr::pluginRegistryHasLifecycle(kExposure),
+              !edvr::pluginRegistryHasLifecycleComponent(kComfort,
+                                                         kExposureComponent),
           "Exposure lifecycle profile rejection publishes no registry state");
     edvr::g_runtimeProfile = savedProfile;
     check(edvr::pluginRegistryRegisterLifecycle(&ops) &&
               edvr::pluginRegistryRegisterLifecycle(&ops) &&
-              edvr::pluginRegistryHasLifecycle(kExposure),
+              edvr::pluginRegistryHasLifecycleComponent(kComfort,
+                                                         kExposureComponent),
           "production Exposure lifecycle registers and retries idempotently");
 
     exposureDampingConfig = 4.0f;
     exposureTauConfig = 0.0f;
-    edvr::pluginRegistryConfigureLifecycle(kExposure, &edvr::Config::get());
+    edvr::pluginRegistryConfigureLifecycleComponent(kComfort,
+                                                     kExposureComponent,
+                                                     &edvr::Config::get());
     check(state.dampK == 1.0f && state.dampTau == 1.0f,
           "registered Exposure configure clamps damping high and tau low");
 
     exposureDampingConfig = -2.0f;
     exposureTauConfig = 900.0f;
-    edvr::pluginRegistryConfigureLifecycle(kExposure, &edvr::Config::get());
+    edvr::pluginRegistryConfigureLifecycleComponent(kComfort,
+                                                     kExposureComponent,
+                                                     &edvr::Config::get());
     check(state.dampK == 0.0f && state.dampTau == 600.0f &&
               !state.dampPrevValid && !state.dampHaveMean,
           "registered Exposure configure clamps values and resets damper state when disabled");
@@ -1027,7 +1147,8 @@ void exposureLifecycleRegistryDispatch() {
     state.everExamined.emplace(0xE001);
     state.firstEye[0] = reinterpret_cast<ID3D11UnorderedAccessView*>(
         static_cast<uintptr_t>(0xE100));
-    edvr::pluginRegistryFrameLifecycle(kExposure, 123);
+    edvr::pluginRegistryFrameLifecycleComponent(kComfort, kExposureComponent,
+                                                123);
     check(state.detectStreak == 4 && state.seenThisFrame == 0 &&
               state.firstEye[0] == nullptr &&
               state.shapeVerdict.count(0xE001) == 0 &&
@@ -1040,14 +1161,297 @@ void exposureLifecycleRegistryDispatch() {
     state.dampStaging[0] = reinterpret_cast<ID3D11Texture2D*>(&first);
     state.dampStaging[1] = reinterpret_cast<ID3D11Texture2D*>(&second);
     fakeExposureReleases = 0;
-    edvr::pluginRegistryShutdownLifecycle(kExposure);
-    check(!edvr::pluginRegistryHasLifecycle(kExposure) &&
+    edvr::pluginRegistryShutdownLifecycleComponent(kComfort,
+                                                   kExposureComponent);
+    check(!edvr::pluginRegistryHasLifecycleComponent(kComfort,
+                                                      kExposureComponent) &&
               state.dampStaging[0] == nullptr && state.dampStaging[1] == nullptr &&
               fakeExposureReleases == 2,
           "production Exposure shutdown detaches and releases/nulls each staging texture");
-    edvr::pluginRegistryShutdownLifecycle(kExposure);
+    edvr::pluginRegistryShutdownLifecycleComponent(kComfort,
+                                                   kExposureComponent);
     check(fakeExposureReleases == 2,
           "repeated Exposure shutdown does not release staging textures twice");
+}
+
+void comfortComponentRegistryDispatch() {
+    constexpr uint32_t kComfort = edvr::plugins::kPluginComfort;
+    const uint32_t legacyConfigureCallsBefore = lifecycleState.configureCalls;
+    LifecycleState states[edvr::kPluginLifecycleComponentCount]{};
+    EdvrPluginLifecycleOps ops[edvr::kPluginLifecycleComponentCount]{};
+    for (uint32_t component = 0; component < edvr::kPluginLifecycleComponentCount;
+         ++component) {
+        edvr::pluginRegistryShutdownLifecycleComponent(kComfort, component);
+        states[component].manifestIndex = kComfort;
+        // The legacy configure fixture writes global lifecycleState. Use the
+        // stateful callback to observe each independently registered component.
+        ops[component] = {
+            sizeof(EdvrPluginLifecycleOps), kComfort, "comfort", &states[component],
+            &lifecycleConfigure, &lifecycleFrame,
+            &lifecycleShutdown, &lifecycleConfigureStage,
+            &lifecycleFrameStage, &lifecycleShutdownStage,
+            &lifecycleConfigureState, component};
+    }
+    check(edvr::pluginRegistryRegisterLifecycle(&ops[0]) &&
+              edvr::pluginRegistryRegisterLifecycle(&ops[1]) &&
+              edvr::pluginRegistryRegisterLifecycle(&ops[2]),
+          "Comfort accepts three independently registered lifecycle components");
+    check(edvr::pluginRegistryRegisterLifecycle(&ops[1]) &&
+              edvr::pluginRegistryRegisterLifecycle(&ops[2]),
+          "exact lifecycle pointers retry idempotently within their own component slots");
+    EdvrPluginLifecycleOps duplicate = ops[1];
+    check(!edvr::pluginRegistryRegisterLifecycle(&duplicate) &&
+              edvr::pluginRegistryHasLifecycle(kComfort) &&
+              edvr::pluginRegistryHasLifecycleComponent(kComfort, 0) &&
+              edvr::pluginRegistryHasLifecycleComponent(kComfort, 1) &&
+              edvr::pluginRegistryHasLifecycleComponent(kComfort, 2),
+          "component slots coexist and reject a different pointer without replacing any slot");
+    edvr::pluginRegistryShutdown();
+    check(edvr::pluginRegistryHasLifecycleComponent(kComfort, 0) &&
+              edvr::pluginRegistryHasLifecycleComponent(kComfort, 1) &&
+              edvr::pluginRegistryHasLifecycleComponent(kComfort, 2) &&
+              states[0].shutdownCalls == 0 && states[1].shutdownCalls == 0 &&
+              states[2].shutdownCalls == 0,
+          "generic draw shutdown leaves every lifecycle component attached");
+
+    bool enabled = true;
+    edvr::pluginRegistryConfigureLifecycle(kComfort, &enabled);
+    edvr::pluginRegistryFrameLifecycle(kComfort, 0x101u);
+    check(states[0].configureStateCalls == 1 &&
+              states[0].lastState == &states[0] &&
+              states[0].lastStateConfig == &enabled &&
+              states[0].frameCalls == 1 && states[0].lastFrame == 0x101u &&
+              states[1].configureStateCalls == 0 && states[1].frameCalls == 0 &&
+              states[2].configureStateCalls == 0 && states[2].frameCalls == 0 &&
+              lifecycleState.configureCalls == legacyConfigureCallsBefore,
+          "legacy lifecycle wrappers preserve component-zero dispatch");
+    edvr::pluginRegistryConfigureLifecycleComponent(kComfort, 1, &enabled);
+    edvr::pluginRegistryFrameLifecycleComponent(kComfort, 1, 0x202u);
+    edvr::pluginRegistryConfigureLifecycleComponent(kComfort, 2, &enabled);
+    edvr::pluginRegistryFrameLifecycleComponent(kComfort, 2, 0x303u);
+    check(states[0].configureStateCalls == 1 && states[0].frameCalls == 1 &&
+              states[0].lastFrame == 0x101u &&
+              states[1].configureStateCalls == 1 &&
+              states[1].lastState == &states[1] &&
+              states[1].lastStateConfig == &enabled &&
+              states[1].frameCalls == 1 && states[1].lastFrame == 0x202u &&
+              states[2].configureStateCalls == 1 &&
+              states[2].lastState == &states[2] &&
+              states[2].lastStateConfig == &enabled &&
+              states[2].frameCalls == 1 && states[2].lastFrame == 0x303u &&
+              lifecycleState.configureCalls == legacyConfigureCallsBefore,
+          "explicit component dispatch reaches only the selected Comfort module");
+
+    auto* const expectedContext = reinterpret_cast<ID3D11DeviceContext*>(
+        static_cast<uintptr_t>(0x77880));
+    bool stagedConfig = true;
+    check(edvr::pluginRegistryConfigureLifecycleComponentStage(
+              kComfort, 1, 0x111u, &stagedConfig) &&
+              states[1].lastStage == 0x111u && states[1].lastConfig == &stagedConfig &&
+              edvr::pluginRegistryFrameLifecycleComponentStage(
+                  kComfort, 2, 0x222u, expectedContext, 0x333u) &&
+              states[2].lastStage == 0x222u &&
+              states[2].lastContext == expectedContext &&
+              states[2].lastStageSceneFrame == 0x333u &&
+              edvr::pluginRegistryShutdownLifecycleComponentStage(kComfort, 1,
+                                                                   0x444u) &&
+              states[1].lastStage == 0x444u &&
+              edvr::pluginRegistryHasLifecycleComponent(kComfort, 1),
+          "component staged APIs preserve group/component/stage and legacy argument order");
+    check(!edvr::pluginRegistryHasLifecycleComponent(UINT32_MAX, 0) &&
+              !edvr::pluginRegistryHasLifecycleComponent(kComfort,
+                                                          edvr::kPluginLifecycleComponentCount) &&
+              !edvr::pluginRegistryConfigureLifecycleComponentStage(
+                  kComfort, edvr::kPluginLifecycleComponentCount, 1, nullptr) &&
+              !edvr::pluginRegistryFrameLifecycleComponentStage(
+                  kComfort, UINT32_MAX, 1, nullptr, 2) &&
+              !edvr::pluginRegistryShutdownLifecycleComponentStage(
+                  UINT32_MAX, 0, 1),
+          "component lookups and staged dispatch are bounded for invalid indices");
+
+    edvr::pluginRegistryShutdownLifecycleComponent(kComfort, 1);
+    check(!edvr::pluginRegistryHasLifecycleComponent(kComfort, 1) &&
+              edvr::pluginRegistryHasLifecycleComponent(kComfort, 0) &&
+              edvr::pluginRegistryHasLifecycleComponent(kComfort, 2) &&
+              states[1].shutdownCalls == 1,
+          "component shutdown detaches and retires only its own slot");
+    states[0].reenterShutdown = true;
+    edvr::pluginRegistryShutdownLifecycle(kComfort);
+    check(!edvr::pluginRegistryHasLifecycleComponent(kComfort, 0) &&
+              edvr::pluginRegistryHasLifecycleComponent(kComfort, 2) &&
+              states[0].shutdownCalls == 1,
+          "default shutdown affects only component zero");
+    edvr::pluginRegistryShutdownLifecycleComponent(kComfort, 2);
+    check(!edvr::pluginRegistryHasLifecycleComponent(kComfort, 2) &&
+              states[2].shutdownCalls == 1,
+          "last component can be retired independently");
+}
+
+bool lifecycleEventsAre(const edvr::LifecycleModuleEvent* expected,
+                        uint32_t count) {
+    if (edvr::lifecycleModuleTrace.count != count) return false;
+    for (uint32_t i = 0; i < count; ++i)
+        if (edvr::lifecycleModuleTrace.events[i] != expected[i]) return false;
+    return true;
+}
+
+void scannerComfortLifecycleDispatch() {
+    constexpr uint32_t kComfort = edvr::plugins::kPluginComfort;
+    constexpr uint32_t kExplorerCam = edvr::plugins::kPluginExplorerCam;
+    edvr::plugins::exposure::ExposureActionState exposureState;
+    EdvrPluginLifecycleOps exposureOps{};
+    edvr::plugins::exposure::initializeExposureLifecycleOps(&exposureOps,
+                                                             &exposureState);
+    const auto& scannerOps = edvr::plugins::scanners::scannerLifecycleOps();
+    const auto& comfortOps = edvr::plugins::comfort::comfortLifecycleOps();
+    const auto& explorerOps =
+        edvr::plugins::explorer_cam::explorerCamLifecycleOps();
+    check(exposureOps.manifestIndex == kComfort &&
+              exposureOps.componentIndex ==
+                  edvr::kComfortExposureLifecycleComponent &&
+              exposureOps.manifestId && strcmp(exposureOps.manifestId, "comfort") == 0 &&
+              scannerOps.manifestIndex == kComfort &&
+              scannerOps.componentIndex ==
+                  edvr::kComfortScannersLifecycleComponent &&
+              scannerOps.manifestId && strcmp(scannerOps.manifestId, "comfort") == 0 &&
+              comfortOps.manifestIndex == kComfort &&
+              comfortOps.componentIndex ==
+                  edvr::kComfortTransitionFlashLifecycleComponent &&
+              comfortOps.manifestId && strcmp(comfortOps.manifestId, "comfort") == 0 &&
+              explorerOps.manifestIndex == kExplorerCam &&
+              explorerOps.manifestId &&
+              strcmp(explorerOps.manifestId, "explorer-cam") == 0 &&
+              explorerOps.configure == nullptr &&
+              explorerOps.configureState == nullptr,
+          "production records bind Comfort components and a configure-free Explorer group");
+
+    const auto savedProfile = edvr::g_runtimeProfile;
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    check(!edvr::pluginRegistryRegisterLifecycle(&exposureOps) &&
+              !edvr::pluginRegistryHasLifecycleComponent(
+                  kComfort, edvr::kComfortExposureLifecycleComponent) &&
+              !edvr::pluginRegistryRegisterLifecycle(&scannerOps) &&
+              !edvr::pluginRegistryHasLifecycleComponent(
+                  kComfort, edvr::kComfortScannersLifecycleComponent) &&
+              !edvr::pluginRegistryRegisterLifecycle(&comfortOps) &&
+              !edvr::pluginRegistryHasLifecycleComponent(
+                  kComfort, edvr::kComfortTransitionFlashLifecycleComponent) &&
+              !edvr::pluginRegistryRegisterLifecycle(&explorerOps) &&
+              !edvr::pluginRegistryHasLifecycle(kExplorerCam),
+          "VR-only Comfort components and Explorer registration publish no lifecycle state");
+    edvr::g_runtimeProfile = savedProfile;
+    check(edvr::pluginRegistryRegisterLifecycle(&exposureOps) &&
+              edvr::pluginRegistryRegisterLifecycle(&scannerOps) &&
+              edvr::pluginRegistryRegisterLifecycle(&scannerOps) &&
+              edvr::pluginRegistryRegisterLifecycle(&comfortOps) &&
+              edvr::pluginRegistryRegisterLifecycle(&comfortOps) &&
+              edvr::pluginRegistryRegisterLifecycle(&explorerOps) &&
+              edvr::pluginRegistryRegisterLifecycle(&explorerOps),
+          "production Comfort and Explorer records register and retry idempotently");
+    check(edvr::pluginRegistryHasLifecycleComponent(kComfort, 0) &&
+              edvr::pluginRegistryHasLifecycleComponent(kComfort, 1) &&
+              edvr::pluginRegistryHasLifecycleComponent(kComfort, 2),
+          "all three production Comfort module records coexist under one manifest group");
+
+    edvr::lifecycleModuleTrace = {};
+    auto& config = edvr::Config::get();
+    edvr::pluginRegistryConfigureLifecycleComponent(
+        kComfort, edvr::kComfortScannersLifecycleComponent, &config);
+    const edvr::LifecycleModuleEvent scannerConfigure[] = {
+        edvr::kScannerPanelConfigure, edvr::kScannerRevealConfigure};
+    check(lifecycleEventsAre(scannerConfigure, 2) &&
+              edvr::lifecycleModuleTrace.config == &config,
+          "normal Scanner configure forwards panel then reveal exactly once");
+
+    edvr::lifecycleModuleTrace = {};
+    check(edvr::pluginRegistryConfigureLifecycleComponentStage(
+              kComfort, edvr::kComfortScannersLifecycleComponent,
+              edvr::plugins::scanners::kScannerLifecycleConfigurePanel, &config) &&
+              edvr::pluginRegistryConfigureLifecycleComponentStage(
+                  kComfort, edvr::kComfortScannersLifecycleComponent,
+                  edvr::plugins::scanners::kScannerLifecycleConfigureReveal,
+                  &config),
+          "staged Scanner configure accepts each host-owned original position");
+    check(lifecycleEventsAre(scannerConfigure, 2) &&
+              edvr::lifecycleModuleTrace.config == &config,
+          "staged Scanner configure preserves panel-before-reveal order without duplicate module calls");
+
+    edvr::lifecycleModuleTrace = {};
+    edvr::pluginRegistryFrameLifecycleComponent(
+        kComfort, edvr::kComfortScannersLifecycleComponent, 0x12345678u);
+    check(edvr::lifecycleModuleTrace.count == 1 &&
+              edvr::lifecycleModuleTrace.events[0] == edvr::kScannerRevealFrame,
+          "normal Scanner frame forwards the real reveal boundary once");
+    edvr::lifecycleModuleTrace = {};
+    check(edvr::pluginRegistryFrameLifecycleComponentStage(
+              kComfort, edvr::kComfortScannersLifecycleComponent,
+              edvr::plugins::scanners::kScannerLifecycleRevealFrame, nullptr,
+              0x23456789u) &&
+              edvr::lifecycleModuleTrace.count == 1 &&
+              edvr::lifecycleModuleTrace.events[0] == edvr::kScannerRevealFrame,
+          "staged Scanner frame forwards the reveal boundary once");
+
+    edvr::lifecycleModuleTrace = {};
+    check(edvr::pluginRegistryShutdownLifecycleComponentStage(
+              kComfort, edvr::kComfortScannersLifecycleComponent,
+              edvr::plugins::scanners::kScannerLifecycleShutdownPanel),
+          "Scanner panel teardown stage dispatches while the record is attached");
+    edvr::noteLifecycleModule(edvr::kScannerRectanglesShutdown);
+    edvr::pluginRegistryShutdownLifecycleComponent(
+        kComfort, edvr::kComfortScannersLifecycleComponent);
+    const edvr::LifecycleModuleEvent scannerShutdown[] = {
+        edvr::kScannerPanelShutdown,
+        edvr::kScannerRectanglesShutdown,
+        edvr::kScannerRevealShutdown};
+    check(lifecycleEventsAre(scannerShutdown, 3) &&
+              edvr::lifecycleModuleTrace.scannerDetachedAtRevealShutdown &&
+              !edvr::pluginRegistryHasLifecycleComponent(
+                  kComfort, edvr::kComfortScannersLifecycleComponent),
+          "Scanner shutdown preserves staged panel then host-gap then final detached reveal cleanup");
+
+    edvr::lifecycleModuleTrace = {};
+    edvr::pluginRegistryConfigureLifecycleComponent(
+        kComfort, edvr::kComfortTransitionFlashLifecycleComponent, &config);
+    check(edvr::lifecycleModuleTrace.count == 1 &&
+              edvr::lifecycleModuleTrace.events[0] == edvr::kComfortFlashConfigure &&
+              edvr::lifecycleModuleTrace.config == &config,
+          "normal Comfort configure forwards Transition Flash exactly once");
+
+    edvr::lifecycleModuleTrace = {};
+    check(edvr::pluginRegistryFrameLifecycleComponentStage(
+              kComfort, edvr::kComfortTransitionFlashLifecycleComponent,
+              edvr::plugins::comfort::kComfortLifecycleTransitionFlashFrame,
+              nullptr, 0x456789ABu) &&
+              edvr::lifecycleModuleTrace.count == 1 &&
+              edvr::lifecycleModuleTrace.events[0] == edvr::kComfortFlashFrame &&
+              edvr::lifecycleModuleTrace.frameNo == 0x456789ABu,
+          "staged Comfort frame forwards the exact Transition Flash frame number once");
+    edvr::lifecycleModuleTrace = {};
+    edvr::pluginRegistryShutdownLifecycleComponent(
+        kComfort, edvr::kComfortTransitionFlashLifecycleComponent);
+    check(edvr::lifecycleModuleTrace.count == 1 &&
+              edvr::lifecycleModuleTrace.events[0] == edvr::kComfortFlashShutdown &&
+              edvr::lifecycleModuleTrace.comfortDetachedAtFlashShutdown &&
+              !edvr::pluginRegistryHasLifecycleComponent(
+                  kComfort, edvr::kComfortTransitionFlashLifecycleComponent) &&
+              edvr::pluginRegistryHasLifecycleComponent(
+                  kComfort, edvr::kComfortExposureLifecycleComponent),
+          "Transition Flash shutdown detaches only its component after independent dispatch");
+
+    edvr::lifecycleModuleTrace = {};
+    edvr::pluginRegistryFrameLifecycle(kExplorerCam, 0x3456789Au);
+    check(edvr::lifecycleModuleTrace.count == 1 &&
+              edvr::lifecycleModuleTrace.events[0] == edvr::kComfortExplorerFrame &&
+              edvr::lifecycleModuleTrace.frameNo == 0x3456789Au,
+          "standalone Explorer Cam frame dispatch forwards the exact frame number");
+    edvr::pluginRegistryShutdownLifecycle(kExplorerCam);
+    check(edvr::lifecycleModuleTrace.count == 2 &&
+              edvr::lifecycleModuleTrace.events[1] == edvr::kComfortExplorerShutdown &&
+              !edvr::pluginRegistryHasLifecycle(kExplorerCam),
+          "standalone configure-free Explorer Cam lifecycle shuts down independently");
+    edvr::pluginRegistryShutdownLifecycleComponent(
+        kComfort, edvr::kComfortExposureLifecycleComponent);
+    edvr::g_runtimeProfile = savedProfile;
 }
 }
 
@@ -1086,6 +1490,8 @@ int main(int argc, char** argv) {
     registryLifecycle();
     lifecycleRegistryDispatch();
     exposureLifecycleRegistryDispatch();
+    comfortComponentRegistryDispatch();
+    scannerComfortLifecycleDispatch();
     std::printf("PASS: plugin dispatch (%u checks)\n", checks);
     return 0;
 }

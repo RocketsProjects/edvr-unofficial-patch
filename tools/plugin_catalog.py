@@ -23,8 +23,8 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFEST = os.path.join(ROOT, 'src', 'plugins', 'plugin_manifest.json')
 EXPECTED_IDS = (
-    'temporal-aa', 'cockpit-visuals', 'exposure', 'scanners', 'intro',
-    'on-foot-panel', 'comfort', 'performance', 'diagnostics',
+    'temporal-aa', 'cockpit-visuals', 'intro', 'on-foot-panel',
+    'comfort', 'explorer-cam', 'performance', 'diagnostics',
 )
 PROFILES = ('vr', 'flat')
 METRIC_SPECS = {
@@ -52,36 +52,35 @@ _BUILD_ID_RE = re.compile(
 EXPECTED_PROFILES = {
     'temporal-aa': ('vr', 'flat'),
     'cockpit-visuals': ('vr',),
-    'exposure': ('vr',),
-    'scanners': ('vr',),
     'intro': ('vr',),
     'on-foot-panel': ('vr',),
     'comfort': ('vr',),
+    'explorer-cam': ('vr',),
     'performance': ('vr',),
     'diagnostics': ('vr', 'flat'),
 }
 EXPECTED_IMPLEMENTATION = {
     'temporal-aa': 'catalog-only',
     'cockpit-visuals': 'phase1-pilot',
-    'exposure': 'phase1-lifecycle',
-    'scanners': 'catalog-only',
     'intro': 'phase1-lifecycle',
     'on-foot-panel': 'catalog-only',
-    'comfort': 'catalog-only',
+    'comfort': 'phase1-lifecycle',
+    'explorer-cam': 'phase1-lifecycle',
     'performance': 'catalog-only',
     'diagnostics': 'catalog-only',
 }
 EXPECTED_HOOK_POINTS = {
-    'exposure': ('lifecycle.configure', 'lifecycle.frame', 'lifecycle.shutdown'),
     'intro': ('lifecycle.configure', 'lifecycle.frame', 'lifecycle.shutdown'),
+    'comfort': ('lifecycle.configure', 'lifecycle.frame', 'lifecycle.shutdown'),
+    'explorer-cam': ('lifecycle.frame', 'lifecycle.shutdown'),
 }
 EXPECTED_RIGS = {
     'temporal-aa': ('flat_sharpen_pass_test',),
-    'scanners': ('native_fss_gpu_test', 'fss_predicate_test', 'fss_reveal_api_test'),
-    'comfort': ('native_temporal_test', 'transition_flash_prevent_test',
-                'explorer_cam_test', 'explorer_cam_fade_test'),
+    'comfort': ('exposure_dispatch_test', 'exposure_cost_test', 'native_fss_gpu_test',
+                'fss_predicate_test', 'fss_reveal_api_test', 'native_temporal_test',
+                'transition_flash_prevent_test', 'plugin_dispatch_test'),
+    'explorer-cam': ('explorer_cam_test', 'explorer_cam_fade_test', 'plugin_dispatch_test'),
     'diagnostics': ('pixel_probe_test',),
-    'exposure': ('exposure_dispatch_test', 'exposure_cost_test', 'plugin_dispatch_test'),
     'intro': ('plugin_dispatch_test', 'intro_lifecycle_test'),
 }
 DEFAULT_INSTALL = {
@@ -796,24 +795,47 @@ def self_test():
               intro['claims'] == [] and
               all(rig in intro['rigs'] for rig in
                   ('plugin_dispatch_test', 'intro_lifecycle_test')))
-        exposure_index = EXPECTED_IDS.index('exposure')
-        exposure = original['plugins'][exposure_index]
-        check('exposure lifecycle is implemented while remaining non-selectable',
-              exposure['implementationStatus'] == 'phase1-lifecycle' and
-              exposure['selectionAvailableProfiles'] == [] and
-              tuple(exposure['hookPoints']) == EXPECTED_HOOK_POINTS['exposure'] and
-              exposure['claims'] == [] and
-              all(rig in exposure['rigs'] for rig in EXPECTED_RIGS['exposure']))
-        bad = copy.deepcopy(original)
-        bad['plugins'][exposure_index]['selectionAvailableProfiles'] = ['vr']
-        check('exposure lifecycle remains unavailable for selection',
-              any('exposure selection is not available during Phase 1' in p
-                  for p in validate_manifest(bad, documented)))
-        bad = copy.deepcopy(original)
-        bad['plugins'][exposure_index]['hookPoints'] = ['draw.classify']
-        check('exposure lifecycle rejects unexpected hook metadata',
-              any('exposure.hookPoints must be lifecycle.configure, lifecycle.frame, lifecycle.shutdown' in p
-                  for p in validate_manifest(bad, documented)))
+        comfort_index = EXPECTED_IDS.index('comfort')
+        comfort = original['plugins'][comfort_index]
+        check('comfort lifecycle owns Exposure, Scanners, and Transition Flash while remaining non-selectable',
+              comfort['implementationStatus'] == 'phase1-lifecycle' and
+              comfort['selectionAvailableProfiles'] == [] and
+              tuple(comfort['hookPoints']) == EXPECTED_HOOK_POINTS['comfort'] and
+              comfort['runtimeRequirement']['vr'] == 'partial' and
+              comfort['claims'] == [] and
+              all(rig in comfort['rigs'] for rig in EXPECTED_RIGS['comfort']) and
+              {'fix.share_exposure', 'experimental.fss_res', 'fix.transition_flash'} <=
+              set(comfort['ownedConfigKeys']))
+        explorer_index = EXPECTED_IDS.index('explorer-cam')
+        explorer = original['plugins'][explorer_index]
+        check('Explorer Cam is a required independent lifecycle module with no configure hook',
+              explorer['implementationStatus'] == 'phase1-lifecycle' and
+              explorer['selectionAvailableProfiles'] == [] and
+              tuple(explorer['hookPoints']) == EXPECTED_HOOK_POINTS['explorer-cam'] and
+              explorer['runtimeRequirement']['vr'] == 'required' and
+              explorer['claims'] == [] and
+              all(rig in explorer['rigs'] for rig in EXPECTED_RIGS['explorer-cam']) and
+              {'advanced.camera_buffer_bytes', 'advanced.camera_buffer_offset',
+               'hotkey.explorer_cam', 'fix.explorer_cam_eye_up'} <=
+              set(explorer['ownedConfigKeys']))
+        performance = original['plugins'][EXPECTED_IDS.index('performance')]
+        check('Performance metadata names only retained functions',
+              not any(retired in performance['description'].lower()
+                      for retired in ('guard', 'settlement', 'static props')) and
+              not {'exposure', 'scanners'} & set(EXPECTED_IDS))
+        for pid, index in (('comfort', comfort_index), ('explorer-cam', explorer_index)):
+            plugin = original['plugins'][index]
+            bad = copy.deepcopy(original)
+            bad['plugins'][index]['selectionAvailableProfiles'] = ['vr']
+            check('%s lifecycle remains unavailable for selection' % pid,
+                  any('%s selection is not available during Phase 1' % pid in p
+                      for p in validate_manifest(bad, documented)))
+            bad = copy.deepcopy(original)
+            bad['plugins'][index]['hookPoints'] = ['draw.classify']
+            expected = ', '.join(EXPECTED_HOOK_POINTS[pid])
+            check('%s lifecycle rejects unexpected hook metadata' % pid,
+                  any('%s.hookPoints must be %s' % (pid, expected) in p
+                      for p in validate_manifest(bad, documented)))
         for missing_rig in ('plugin_dispatch_test', 'intro_lifecycle_test'):
             bad = copy.deepcopy(original)
             bad['plugins'][intro_index]['rigs'].remove(missing_rig)
@@ -845,8 +867,8 @@ def self_test():
         check('lifecycle module rejects availability on an unsupported profile',
               any('intro.selectionAvailableProfiles references unsupported profile flat' in p
                   for p in validate_manifest(bad, documented)))
-        check('all nine plugin cost budgets are explicitly unmeasured',
-              len(original['plugins']) == 9 and all(
+        check('all eight plugin cost budgets are explicitly unmeasured',
+              len(original['plugins']) == 8 and all(
                   plugin['costBudget']['state'] == 'unmeasured' and
                   plugin['costBudget']['reference'] is None and
                   all(metric['state'] == 'unmeasured' and
@@ -979,8 +1001,9 @@ def self_test():
             {'id': 'temporal-aa', 'kind': 'soft'}, {'id': 'temporal-aa', 'kind': 'hard'}]
         check('duplicate conflict rejected', any('duplicate conflict' in p for p in validate_manifest(bad, documented)))
         bad = copy.deepcopy(original)
-        bad['plugins'][5]['dependencies'][0]['kind'] = 'hard'
-        bad['plugins'][5]['selectionAvailableProfiles'] = ['vr']
+        on_foot_index = EXPECTED_IDS.index('on-foot-panel')
+        bad['plugins'][on_foot_index]['dependencies'][0]['kind'] = 'hard'
+        bad['plugins'][on_foot_index]['selectionAvailableProfiles'] = ['vr']
         check('hard dependency availability checked for selectable profiles',
               any('hard dependency temporal-aa is unavailable in a selectable profile' in p
                   for p in validate_manifest(bad, documented)))
@@ -1006,7 +1029,7 @@ def self_test():
             _write_or_report(target, content, True)
             check('dry run creates no directory', not os.path.exists(os.path.dirname(target)))
         check('generated metadata has stable indices', '0, "temporal-aa"' in content and
-                  '8, "diagnostics"' in content and 'kPluginIndexCount = 9' in content and
+                  '7, "diagnostics"' in content and 'kPluginIndexCount = 8' in content and
                   '0xFCF7BD2896751D96ull' in content and
                   'kCoreOwnedConfigKeyCount' in content and
                   'kPluginTemporalAa = 0' in content and
@@ -1023,13 +1046,20 @@ def self_test():
               'k_intro_hook_points[] = {\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
               'k_intro_claims, 0' in content and 'k_intro_rigs, 2' in content and
               'k_intro_rigs[] = {\n    "plugin_dispatch_test",\n    "intro_lifecycle_test",' in content)
-        exposure_record = next((line for line in content.splitlines()
-                                if '"exposure"' in line and '"phase1-lifecycle"' in line), '')
-        check('generated exposure metadata stays lifecycle-only and non-selectable',
-              '"phase1-lifecycle"' in exposure_record and '0x0u' in exposure_record and
-              'k_exposure_hook_points[] = {\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
-              'k_exposure_claims, 0' in content and 'k_exposure_rigs, 3' in content and
-              'k_exposure_rigs[] = {\n    "exposure_dispatch_test",\n    "exposure_cost_test",\n    "plugin_dispatch_test",' in content)
+        comfort_record = next((line for line in content.splitlines()
+                               if '"comfort"' in line and '"phase1-lifecycle"' in line), '')
+        check('generated Comfort metadata carries merged lifecycle rigs',
+              '"phase1-lifecycle"' in comfort_record and '0x0u' in comfort_record and
+              'k_comfort_hook_points[] = {\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
+              'k_comfort_claims, 0' in content and
+              'k_comfort_rigs[] = {\n    "exposure_dispatch_test",\n    "exposure_cost_test",\n    "native_fss_gpu_test",' in content)
+        explorer_record = next((line for line in content.splitlines()
+                                if '"explorer-cam"' in line and '"phase1-lifecycle"' in line), '')
+        check('generated Explorer Cam metadata has only real frame/shutdown hooks',
+              '"phase1-lifecycle"' in explorer_record and '0x0u' in explorer_record and
+              'k_explorer_cam_hook_points[] = {\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
+              'k_explorer_cam_claims, 0' in content and
+              'k_explorer_cam_rigs[] = {\n    "explorer_cam_test",\n    "explorer_cam_fade_test",' in content)
     except Exception as exc:
         failures.append('unexpected exception: %s' % exc)
 

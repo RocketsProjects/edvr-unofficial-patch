@@ -8,19 +8,20 @@
 - **Goal (Sean):** every fix/performance item belongs to one selectable plugin.
   An uninstalled plugin costs nothing. The layer must improve CPU cost and not
   regress GPU cost before shipping.
-- **Decided:** nine monolithic first-party modules inside the graphics DLL,
-  generated manifests/config ownership, subscription-driven dispatch and a
+- **Decided:** eight first-party plugin groups across the graphics and runtime
+  implementations, generated config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `a1609f2b` is merged. The latest
-  ownership batch passes 158 full-build jobs plus config, exports and
-  installer gates; receipt `784229db` matches. Last measured Steam
-  build: `6ab758d2`. Sean must approve any install.
-- **Module progress:** Intro and Exposure own lifecycle work. Scanner,
-  comfort, temporal-AA, on-foot and diagnostic implementations now build
-  in their archives. Selection records are versioned; remaining
-  group/draw-claim migration and selection UI/runtime gating stay open.
-  Availability is unchanged.
+- **Current integration:** main `a1609f2b` is merged. The offline
+  Comfort and Explorer regrouping passes the full build, including
+  native rigs, config, exports and installer gates; receipt `55dc54a5`
+  matches. Last measured Steam build: `6ab758d2`. Sean must approve any
+  install.
+- **Module progress:** Comfort owns exposure, scanners, transition flash
+  and terrain-pose policy. Explorer Cam owns its archive and lifecycle.
+  Components preserve host order. All eight selections remain
+  unavailable. Draw-claim migration, installer UI and runtime selection
+  remain open.
 
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
@@ -49,7 +50,8 @@
   remaining lifecycle cost and runtime CPU/GPU acceptance stay open; this
   checkpoint does not claim Phase 1 completion or shipping acceptance.
 - **Upstream retirements:** main-retired features/keys stay retired; the
-  original design tables describe September 30. FOV trim keeps its own engine.
+  historical entries retain their original grouping. FOV trim keeps its
+  own engine.
   Temporary branch key `advanced.draw_replay` stays off. Its diagnostic pools
   allocate only when enabled, with none allocated when off. Removing this key
   requires Scope control.
@@ -87,12 +89,11 @@ default first):
 | Temporal | temporal AA (TAA/DLSS/FSR) with engine motion, camera jitter, screen/weapon motion (the celestial/terrain hook retired 2026-10-01); sharpening (RCAS); UI, smoke and hologram depth; the flat adapter | VF |
 | Interface | UI quality (layer, panel scale, hologram remaps) | V |
 | Cockpit visuals | sun glare, particle billboards and witchspace stars, RemLok lines, wake pulse, target indicator, night vision | V |
-| Light | exposure share and damping | V |
-| Scanners | FSS eye sync (heal, reveal, panel, res), scanner body | V |
 | Intro and loading | intro video, splash backdrop, loading dim, loading hologram | V |
 | On-foot panel | black void, screen resolution, panel distance, curvature, weapon stability | V |
-| Comfort | transition flash, Explorer Cam | V |
-| Performance | cull guard, FOV trim, OpenXR resolution, settlement detail, static props | V |
+| Comfort | exposure share and damping, transition flash, FSS eye sync and scanner body, terrain pose correction | V |
+| Explorer Cam | external camera, following, stereo eye placement and fades | V |
+| Performance | FOV trim, OpenXR render resolution, texture LOD and anisotropy | V |
 | Always | F8 menu and FPS overlay, input gate, diagnostics (census, dumps, probes) | VF |
 
 How it hangs together now:
@@ -176,12 +177,11 @@ temporal pass's frame state never crosses a plugin boundary.
 |---|---|---|---|---|
 | temporal-aa | TAA, DLSS, FSR, engine motion, camera jitter (VR frustum, flat camera path), screen and weapon motion (the celestial/terrain hook retired 2026-10-01), UI/smoke/hologram depth, UI quality (the layer, panel scale, hologram remaps; VR), sharpening, the flat adapter (stand-down, F8 warning) | VF | NGX DLL for DLSS | installed, mode off, UI quality 100 / installed |
 | cockpit-visuals | sun glare, particles and witchspace stars, RemLok, wake pulse, target indicator, night vision | V | - | on / - |
-| exposure | exposure share and damping | V | - | on / - |
-| scanners | FSS eye sync family, scanner body | V | - | on / - |
 | intro | intro video, splash backdrop, loading dim, loading hologram (`holo_pattern`) | V | - | on / - |
 | on-foot-panel | black void, screen resolution, panel distance, curvature, weapon stability | V | temporal-aa for weapon stability's motion half (soft) | on / - |
-| comfort | transition flash, Explorer Cam | V | - | on / - |
-| performance | cull guard, FOV trim, OpenXR resolution, settlement detail, static props | V | - | installed, off / - |
+| comfort | exposure share and damping, transition flash, FSS eye sync family and scanner body, terrain pose correction | V | - | on / - |
+| explorer-cam | external camera, following, stereo eye placement and fades | V | - | on / - |
+| performance | FOV trim, OpenXR render resolution, texture LOD and anisotropy | V | - | installed, off / - |
 | diagnostics | probes, eye dumps, developer instruments | VF | - | off / off |
 
 The per-frame census lines (GPU census, flat CPU census, LONG FRAME) stay in
@@ -210,12 +210,11 @@ behaviour, not crashes.
 |---|---|---|
 | temporal-aa | R: TAA, DLSS, FSR, jitter, sharpening and UI quality run at the runtime's Submit (treatEye, the door) | native_temporal.cpp:282, 380 |
 | cockpit-visuals | D particles, witchspace, wake pulse; G sun glare, night vision, target indicator, RemLok (eye-branch fixes need eye recognition) | vscreen.cpp:1976-2001, 2060 |
-| exposure | D | exposure_fix.cpp:735-940 |
-| scanners | G scanner body; R FSS eye sync (the heal is a runtime door, and the body-layer stamp reads the published eye size) | native_fss.cpp:120; vscreen.cpp:2275 |
 | intro | D skip, backdrop blit; G movie, loader panel, scrim; R splash dim, loading hologram | intro_skip.cpp; splash_dim.cpp:113-119; holo_fix.cpp:159 |
 | on-foot-panel | G black void, panel distance, curvature; D fixed resolution, R `auto`; R weapon stability | vscreen.cpp:2843; vscreen_res.cpp:358; native_frame.cpp:404-413 |
-| comfort | R: the flash withhold and Explorer Cam's offset happen in the runtime | native_frame.cpp:497-509; head_offset_gate.cpp:1046-1061 |
-| performance | R cull guard, FOV trim, OpenXR resolution; D static props, settlement detail `reduced`; G `auto` (holds at 1.0 without timing) | native_cull_guard.h; lod_governor.cpp:1273-1279 |
+| comfort | D exposure; G scanner body; R FSS eye sync, transition withholding and terrain pose correction | exposure_fix.cpp; native_fss.cpp; native_frame.cpp; openvr_system.cpp |
+| explorer-cam | R: camera offset happens in the runtime | explorer_cam.cpp; head_offset_gate.cpp |
+| performance | R FOV trim and OpenXR resolution; D texture LOD and anisotropy | native_fov_trim.h; native_frame.cpp; device_hook.cpp |
 | diagnostics | D census and probes; R eye dumps | temporal_pass.h:90-98 |
 | core: F8 menu | R: no door, and the anchor pose comes from the runtime | menu.cpp:3222-3232; native_menu.cpp:77 |
 
@@ -229,8 +228,9 @@ hand.
 Install components. Graphics (d3d11.dll) for every plugin. The runtime set
 (`Openvr\win64\openvr_api.dll` with the game's original renamed aside,
 `openxr_loader.dll`, its license, `edvr_openxr.ini`) for temporal-aa,
-comfort, scanners' FSS sync, and performance's cull guard, FOV trim and
-resolution; intro and on-foot-panel use it only for their R rows. The NGX DLL
+Explorer Cam, Comfort's FSS sync, transition withholding and terrain pose
+correction, and Performance's FOV trim and resolution; intro and on-foot-panel
+use it only for their R rows. The NGX DLL
 (`nvngx_dlss.dll`) for DLSS only. Profile and ini always. Flat already
 installs as graphics + profile + ini (+ NGX) with no runtime (plan.cpp:314,
 571; install_edvr.py:1186-1189).
@@ -325,10 +325,11 @@ when ReShade was removed). The rules:
   a subscriber the list forgets starves silently), and static props and the
   scheduler stack probe stop hanging off `temporalPassConfigure`
   (temporal_pass.cpp 6149-6154), or deselecting temporal-aa orphans them.
-- **Phase 2:** move the other groups one at a time, each with its rigs and
-  one flight: cockpit-visuals, exposure, scanners, intro, on-foot-panel,
-  comfort, performance, temporal-aa (with UI quality) last. Each move adds a
-  verdict replay fixture for the features that have no rig today.
+- **Phase 2:** move the remaining groups with their offline rigs and verdict
+  replay fixtures: cockpit-visuals, intro, on-foot-panel, comfort, Explorer Cam,
+  performance, and temporal-aa (with UI quality) last. Use targeted flights
+  when a rendering boundary changes, then a matched performance comparison
+  at rendering-code freeze.
 - **Phase 3:** installer component selection (profile-filtered, dependencies
   auto-selected, a recommended set), receipts that list plugins and
   versions, Modify without touching settings, F8 rows only for installed
@@ -366,7 +367,7 @@ when ReShade was removed). The rules:
   binary, inlinable dispatch, simple installs and plugin toggles without a
   reinstall; the build enforces the boundaries. Revisit only if independent
   plugin updates or third-party draw-level plugins become real needs.
-- **Q2 (decided 2026-09-30): the nine plugins of section 4.** temporal-aa
+- **Q2 (updated 2026-10-10): the eight plugins of section 4.** temporal-aa
   stays one plugin: its parts share per-draw state, the camera and the
   history, and splitting them would put that traffic on a plugin boundary,
   against the north star. Sean regrouped the same day: the intro fixes
@@ -374,6 +375,9 @@ when ReShade was removed). The rules:
   the on-foot panel (black void, screen resolution, panel distance,
   curvature, weapon stability) become plugins of their own, replacing
   "screens", and UI quality ships only with temporal AA, inside that plugin.
+  On October 10 Sean split the revamped Explorer Cam into its own plugin and
+  placed exposure, scanners, transition flash and the terrain pose fix in
+  Comfort. The retired terrain guard stays retired.
 - **Q3 (decided): defaults reproduce today's shipped behaviour exactly.**
   The recommended VR set is every plugin but diagnostics, with temporal-aa
   and performance installed and their features at today's defaults; flat
@@ -4323,3 +4327,103 @@ The feature branch remains isolated from main. Remaining work includes
 shared group boundaries, lifecycle/draw-claim migration, selection
 UI/runtime consumption and whole-ladder replay; take the final matched
 performance comparison at rendering-code freeze.
+
+### 2026-10-10 — Comfort regrouping and standalone Explorer Cam
+
+Sean requested the revamped 0.19.0 Explorer Cam as an independent plugin
+and Comfort as the owner of exposure, transition flash, the scanner
+family and the black-terrain correction. The current design tables and
+generated catalog now describe eight groups. Performance retains FOV
+trimming, OpenXR render resolution and texture LOD/anisotropy. Its stale
+description no longer lists the retired terrain guard, settlement-detail
+or static-prop features. No feature, config key, default or setting
+value changes in this regrouping.
+
+The actual Exposure and Scanner implementation files move under Comfort
+and build into its archive. Explorer Cam builds into its own archive and
+has a record with its actual frame and shutdown callbacks. It still
+reads settings at its existing frame boundary; no dummy configure
+callback is introduced. Comfort's transition-flash record calls only
+transition-flash APIs.
+
+The private lifecycle registry has three fixed components per group.
+Comfort uses component 0 for State-owned Exposure, 1 for Scanners and 2
+for transition flash. Old record extents retain component 0; malformed
+partial component fields and invalid component IDs are rejected. Every
+core host addresses its own component, preserves the original
+frame/configure/cleanup position and direct fallback, and detaches only
+its own slot before final cleanup. No group multicast, reordered
+teardown, core-State backedge, heap allocation or draw-path lookup is
+added. Explorer registration and retirement are independent of VScreen
+registration. Failed VScreen installation retains its immutable,
+stateless Scanner record for an exact-pointer retry. The original
+no-State cleanup behavior is preserved; that record has no core-State
+backedge and cannot run VScreen draw/frame work without a valid host.
+
+The shipped terrain head-pose timing policy is owned by Comfort. The
+OpenXR runtime continues to own caller observation, frame timing/cache
+and locating poses. The public runtime header remains a compatibility
+include; the policy and its behavior are preserved. This is ownership
+work: graphics lifecycle registration does not pretend to select or
+disable a separate runtime's policy. Cross-runtime selection remains a
+required gate.
+
+Cost-window layouts and historical component IDs remain stable. Explicit
+mapping assigns Exposure and Scanner components to Comfort without
+relabeling historical flight samples as measured whole-group costs.
+Every catalog budget stays unmeasured and every selection-availability
+list stays empty.
+
+Actual module fixtures, component coexistence/rejection/extent tests and
+source-order mutation gates cover the new boundaries. The first native
+attempt stopped at 37 of 158 jobs because the existing `gate_test`
+required the former direct Explorer call spelling. Its source fixture
+now checks the registry and direct-fallback routes while retaining
+frame-counter, top-level tick and neighbor ordering checks. Production
+rendering code was not changed to satisfy that fixture. The failed
+attempt is preserved in
+`build/full-plugin-comfort-explorer-regroup-first-gate-failure-20261010.log`.
+The second attempt stopped at 85 of 158 jobs on a local PanelDistance
+fixture assertion that equated a historical cost-row ID with a current
+catalog index. The fixture now pins stable row 5 and checks the explicit
+catalog mapping; all 121 runtime checks and cost-window layout
+assertions are retained. A higher-tier audit of 1,083 source/tool files
+and the native build recipes found no further stale row/index
+assumptions, old module paths or generated-header dependency gaps. This
+failure is preserved in
+`build/full-plugin-comfort-explorer-regroup-second-cost-failure-20261010.log`.
+The third attempt passed those checks and stopped at 88 of 158 jobs
+because Intro's lifecycle fixture still hard-coded its former catalog
+index 4. The fixture now checks the generated Intro identity (current
+index 2), preserving all metadata and callback checks. The remaining
+lifecycle and catalog fixture identities were audited together before
+the final rerun. This failure is in
+`build/full-plugin-comfort-explorer-regroup-third-intro-failure-20261010.log`.
+That aggregate audit also caught a fixture copying an enlarged lifecycle
+record from a frozen prefix beside a protected page. The fixture now
+copies only the declared legacy extent into a zero-initialized current
+record, preserving its page-boundary and callback-preference checks.
+Production extent handling is unchanged. The fourth attempt reached 90
+of 158 jobs and exposed a new fixture mismatch: its legacy configure
+callback writes a separate global state, while its assertions inspected
+local per-component states. The fixture now uses the existing stateful
+configure callback and checks each component's state/config pointers,
+frame isolation and unchanged global legacy counter. The registry's
+callback routing was correct and is unchanged. The later staged and
+shutdown expectations were reviewed together. The failure log is
+`build/full-plugin-comfort-explorer-regroup-fourth-dispatch-failure-20261010.log`.
+The fifth attempt passed dispatch and reached 92 of 158 jobs, then
+rejected the FSS Reveal fixture's two-argument call to the one-argument
+legacy configure callback. The fixture now passes its Config pointer
+directly. Direct lifecycle call signatures across the moved module
+fixtures were checked together; actual module callbacks and collector
+checks are preserved. The failure is in
+`build/full-plugin-comfort-explorer-regroup-fifth-fss-failure-20261010.log`.
+The independent review and full native rerun pass; source receipt
+`55dc54a5a0f260c49b04174fff1039a8da5f9567c02918099d1d316ad12c7535`
+matches. The build includes the production DLLs and actual
+self-contained installer. Steam, live INIs and game sessions are
+untouched, and no new flight is requested. The feature branch stays
+separate from main until shipping approval. Remaining draw-claim
+migration, whole-ladder replay, runtime selection and the final matched
+CPU/GPU acceptance comparison are still open.

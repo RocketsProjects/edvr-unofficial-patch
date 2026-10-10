@@ -37,6 +37,8 @@
 #include "weapon_motion.h"
 #include "plugin_registry.h"
 #include "intro_lifecycle.h"
+#include "../plugins/comfort/scanners/scanner_lifecycle.h"
+#include "../plugins/comfort/comfort_lifecycle.h"
 #include "plugin_dispatch.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
@@ -985,6 +987,8 @@ State* g_state = nullptr;
 bool g_vScreenInstallAttempted = false;
 bool g_transportSelected = false;
 bool g_introLifecycleRegistered = false;
+bool g_scannerLifecycleRegistered = false;
+bool g_comfortLifecycleRegistered = false;
 
 constexpr uint32_t kIntroPluginIndex = plugins::kPluginIntro;
 
@@ -1048,6 +1052,89 @@ void shutdownIntroVideoLifecycle() {
     }
     introUpscaleShutdown();
     introSkipShutdown();
+}
+
+constexpr uint32_t kComfortPluginIndex = plugins::kPluginComfort;
+
+bool ensureScannerLifecycle() {
+    if (!g_state) return false;
+    return pluginRegistryRegisterLifecycle(
+        &plugins::scanners::scannerLifecycleOps());
+}
+
+void selectScannerLifecycle() {
+    g_scannerLifecycleRegistered = ensureScannerLifecycle();
+}
+
+void configureScannerLifecycleStage(uint32_t stage, Config& cfg,
+                                    void (*fallback)(Config&)) {
+    if (g_scannerLifecycleRegistered &&
+        pluginRegistryConfigureLifecycleComponentStage(
+            kComfortPluginIndex, edvr::kComfortScannersLifecycleComponent,
+            stage, &cfg))
+        return;
+    fallback(cfg);
+}
+
+void frameScannerLifecycleStage(uint32_t stage, uint32_t sceneFrame,
+                                void (*fallback)()) {
+    if (g_scannerLifecycleRegistered &&
+        pluginRegistryFrameLifecycleComponentStage(
+            kComfortPluginIndex, edvr::kComfortScannersLifecycleComponent,
+            stage, nullptr, sceneFrame))
+        return;
+    fallback();
+}
+
+void shutdownScannerLifecycleStage(uint32_t stage, void (*fallback)()) {
+    if (g_scannerLifecycleRegistered &&
+        pluginRegistryShutdownLifecycleComponentStage(
+            kComfortPluginIndex, edvr::kComfortScannersLifecycleComponent,
+            stage))
+        return;
+    fallback();
+}
+
+void shutdownScannerLifecycle() {
+    const bool registered = g_scannerLifecycleRegistered;
+    g_scannerLifecycleRegistered = false;
+    if (registered) {
+        pluginRegistryShutdownLifecycleComponent(
+            kComfortPluginIndex, edvr::kComfortScannersLifecycleComponent);
+        return;
+    }
+    fssRevealShutdown();
+}
+
+bool ensureComfortLifecycle() {
+    if (!g_state) return false;
+    return pluginRegistryRegisterLifecycle(
+        &plugins::comfort::comfortLifecycleOps());
+}
+
+void selectComfortLifecycle() {
+    g_comfortLifecycleRegistered = ensureComfortLifecycle();
+}
+
+void configureComfortLifecycle(Config& cfg) {
+    if (g_comfortLifecycleRegistered) {
+        pluginRegistryConfigureLifecycleComponent(
+            kComfortPluginIndex,
+            edvr::kComfortTransitionFlashLifecycleComponent, &cfg);
+        return;
+    }
+    transitionFlashEyeBaseConfigure(cfg);
+}
+
+void frameComfortLifecycleStage(uint32_t stage, uint32_t sceneFrame,
+                                void (*fallback)(uint32_t)) {
+    if (g_comfortLifecycleRegistered &&
+        pluginRegistryFrameLifecycleComponentStage(
+            kComfortPluginIndex,
+            edvr::kComfortTransitionFlashLifecycleComponent, stage,
+            nullptr, sceneFrame))
+        return;
+    fallback(sceneFrame);
 }
 
 // One budget per thing that can fail, not one for the file.
@@ -8596,12 +8683,18 @@ void vScreenRefreshConfig() {
     depthProbeConfigure(cfg);
     configureIntroLifecycleStage(kIntroLifecycleBackdrop, cfg,
                                  backdropConfigure);
-    fssPanelConfigure(cfg);
-    fssRevealConfigure(cfg);
+    selectScannerLifecycle();
+    configureScannerLifecycleStage(
+        plugins::scanners::kScannerLifecycleConfigurePanel, cfg,
+        fssPanelConfigure);
+    configureScannerLifecycleStage(
+        plugins::scanners::kScannerLifecycleConfigureReveal, cfg,
+        fssRevealConfigure);
+    selectComfortLifecycle();
     // fix.transition_flash: the engine fix (transition_flash_eye_base.cpp). The
     // first call installs its consumer hook when the key is on and reports
     // Armed or Lost to the detector; later calls do nothing.
-    transitionFlashEyeBaseConfigure(cfg);
+    configureComfortLifecycle(cfg);
     // The settings menu: its own keys, then the reload's diff -- every row's
     // value, the restart snapshot, and a toast for what changed from outside.
     menuConfigure(cfg);
@@ -8982,7 +9075,11 @@ void vScreenFrameBoundary() {
     // Before this frame's counters are read or reset: a pending census starts
     // here, a running one advances, a spent one writes its tables.
     tkDrawCensusBoundary.run([&] { drawCensusFrameBoundary(s->frameNo); });
-    tkFssReveal.run([&] { fssRevealFrameBoundary(); });
+    tkFssReveal.run([&] {
+        frameScannerLifecycleStage(
+            plugins::scanners::kScannerLifecycleRevealFrame, s->frameNo,
+            fssRevealFrameBoundary);
+    });
 
     // FSS frame pacing (round 31): the left-only squares are now measured
     // to be runtime-side (both submitted images carry the flicker equally),
@@ -9755,7 +9852,9 @@ void vScreenFrameBoundary() {
     // a held frame, closes its event window, and owes the temporal pass its
     // verdict once a held frame's eyes have been handed over. After
     // glitchFrameBoundary, which closes the same frame.
-    transitionFlashEyeBaseFrameBoundary(s->frameNo);
+    frameComfortLifecycleStage(
+        plugins::comfort::kComfortLifecycleTransitionFlashFrame, s->frameNo,
+        transitionFlashEyeBaseFrameBoundary);
     s->eyeDrawsThisFrame = 0;
     s->sceneDrawsThisFrame = 0;
     ++s->frameNo;
@@ -9893,10 +9992,16 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     depthProbeConfigure(cfg);
     configureIntroLifecycleStage(kIntroLifecycleBackdrop, cfg,
                                  backdropConfigure);
-    fssPanelConfigure(cfg);
-    fssRevealConfigure(cfg);
+    selectScannerLifecycle();
+    configureScannerLifecycleStage(
+        plugins::scanners::kScannerLifecycleConfigurePanel, cfg,
+        fssPanelConfigure);
+    configureScannerLifecycleStage(
+        plugins::scanners::kScannerLifecycleConfigureReveal, cfg,
+        fssRevealConfigure);
+    selectComfortLifecycle();
     // The engine fix. See the other call site's comment above.
-    transitionFlashEyeBaseConfigure(cfg);
+    configureComfortLifecycle(cfg);
     {
         g_state->censusFssJump =
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
@@ -10261,9 +10366,10 @@ void shutdownVScreenFixes() {
     shutdownIntroLifecycleStage(kIntroLifecycleLoader, loaderPanelShutdown);
     shutdownIntroLifecycleStage(kIntroLifecycleSplashDim, splashDimShutdown);
     shutdownIntroLifecycleStage(kIntroLifecycleBackdrop, backdropShutdown);
-    fssPanelShutdown();
+    shutdownScannerLifecycleStage(
+        plugins::scanners::kScannerLifecycleShutdownPanel, fssPanelShutdown);
     fssPanelRectShutdown();
-    fssRevealShutdown();
+    shutdownScannerLifecycle();
     gpuCensusShutdown();
     billboardShutdown();
     // Both halves of the intro. Neither was on this roll-call, so a session

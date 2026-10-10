@@ -1,6 +1,6 @@
 #include "exposure_shape.h"
 
-#include "../../d3d11/binding_shadow.h"
+#include "../../../d3d11/binding_shadow.h"
 
 namespace edvr::plugins::exposure {
 namespace {

@@ -189,125 +189,6 @@
     },
     {
       "index": 2,
-      "id": "exposure",
-      "name": "Exposure",
-      "description": "Exposure sharing and damping.",
-      "profiles": [
-        "vr"
-      ],
-      "recommendedProfiles": [
-        "vr"
-      ],
-      "defaultInstallProfiles": [
-        "vr"
-      ],
-      "runtimeRequirement": {
-        "vr": "none",
-        "flat": "none"
-      },
-      "dependencies": [],
-      "conflicts": [],
-      "ownedConfigKeys": [
-        "advanced.exposure_shader",
-        "experimental.exposure_damping",
-        "experimental.exposure_damping_tau",
-        "fix.share_exposure"
-      ],
-      "hookPoints": [
-        "lifecycle.configure",
-        "lifecycle.frame",
-        "lifecycle.shutdown"
-      ],
-      "claims": [],
-      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
-      "rigs": [
-        "exposure_dispatch_test",
-        "exposure_cost_test",
-        "plugin_dispatch_test"
-      ],
-      "implementationStatus": "phase1-lifecycle",
-      "selectionAvailableProfiles": [],
-      "costBudget": {
-        "state": "unmeasured",
-        "reference": null,
-        "metrics": {
-          "cpu": {
-            "state": "unmeasured",
-            "unit": "milliseconds per frame",
-            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
-          },
-          "issuedGpuWork": {
-            "state": "unmeasured",
-            "unit": "EDVR-issued D3D11 calls per frame",
-            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
-          },
-          "directGpu": {
-            "state": "unmeasured",
-            "unit": "GPU milliseconds per frame",
-            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
-          }
-        }
-      }
-    },
-    {
-      "index": 3,
-      "id": "scanners",
-      "name": "Scanners",
-      "description": "FSS eye synchronization and scanner body.",
-      "profiles": [
-        "vr"
-      ],
-      "recommendedProfiles": [
-        "vr"
-      ],
-      "defaultInstallProfiles": [
-        "vr"
-      ],
-      "runtimeRequirement": {
-        "vr": "partial",
-        "flat": "none"
-      },
-      "dependencies": [],
-      "conflicts": [],
-      "ownedConfigKeys": [
-        "experimental.fss_panel_distance",
-        "experimental.fss_res",
-        "fix.fss_eye_sync"
-      ],
-      "hookPoints": [],
-      "claims": [],
-      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
-      "rigs": [
-        "native_fss_gpu_test",
-        "fss_predicate_test",
-        "fss_reveal_api_test"
-      ],
-      "implementationStatus": "catalog-only",
-      "selectionAvailableProfiles": [],
-      "costBudget": {
-        "state": "unmeasured",
-        "reference": null,
-        "metrics": {
-          "cpu": {
-            "state": "unmeasured",
-            "unit": "milliseconds per frame",
-            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
-          },
-          "issuedGpuWork": {
-            "state": "unmeasured",
-            "unit": "EDVR-issued D3D11 calls per frame",
-            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
-          },
-          "directGpu": {
-            "state": "unmeasured",
-            "unit": "GPU milliseconds per frame",
-            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
-          }
-        }
-      }
-    },
-    {
-      "index": 4,
       "id": "intro",
       "name": "Intro and loading",
       "description": "Intro video, splash backdrop, loading dim, and loading hologram.",
@@ -368,7 +249,7 @@
       }
     },
     {
-      "index": 5,
+      "index": 3,
       "id": "on-foot-panel",
       "name": "On-foot panel",
       "description": "Black void, screen resolution, panel distance, curvature, and weapon stability.",
@@ -436,10 +317,81 @@
       }
     },
     {
-      "index": 6,
+      "index": 4,
       "id": "comfort",
       "name": "Comfort",
-      "description": "Transition flash and Explorer Cam.",
+      "description": "Exposure sharing and damping, FSS scanner behavior, transition flash, and black terrain culling.",
+      "profiles": [
+        "vr"
+      ],
+      "recommendedProfiles": [
+        "vr"
+      ],
+      "defaultInstallProfiles": [
+        "vr"
+      ],
+      "runtimeRequirement": {
+        "vr": "partial",
+        "flat": "none"
+      },
+      "dependencies": [],
+      "conflicts": [],
+      "ownedConfigKeys": [
+        "advanced.exposure_shader",
+        "experimental.exposure_damping",
+        "experimental.exposure_damping_tau",
+        "experimental.fss_panel_distance",
+        "experimental.fss_res",
+        "fix.fss_eye_sync",
+        "fix.share_exposure",
+        "fix.transition_flash"
+      ],
+      "hookPoints": [
+        "lifecycle.configure",
+        "lifecycle.frame",
+        "lifecycle.shutdown"
+      ],
+      "claims": [],
+      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
+      "rigs": [
+        "exposure_dispatch_test",
+        "exposure_cost_test",
+        "native_fss_gpu_test",
+        "fss_predicate_test",
+        "fss_reveal_api_test",
+        "native_temporal_test",
+        "transition_flash_prevent_test",
+        "plugin_dispatch_test"
+      ],
+      "implementationStatus": "phase1-lifecycle",
+      "selectionAvailableProfiles": [],
+      "costBudget": {
+        "state": "unmeasured",
+        "reference": null,
+        "metrics": {
+          "cpu": {
+            "state": "unmeasured",
+            "unit": "milliseconds per frame",
+            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
+          },
+          "issuedGpuWork": {
+            "state": "unmeasured",
+            "unit": "EDVR-issued D3D11 calls per frame",
+            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
+          },
+          "directGpu": {
+            "state": "unmeasured",
+            "unit": "GPU milliseconds per frame",
+            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
+          }
+        }
+      }
+    },
+    {
+      "index": 5,
+      "id": "explorer-cam",
+      "name": "Explorer Cam",
+      "description": "Free camera placement, follow behavior, and camera-buffer configuration.",
       "profiles": [
         "vr"
       ],
@@ -465,19 +417,20 @@
         "fix.explorer_cam_eye_trim_up",
         "fix.explorer_cam_eye_up",
         "fix.explorer_cam_follow_smoothing_ms",
-        "fix.transition_flash",
         "hotkey.explorer_cam"
       ],
-      "hookPoints": [],
+      "hookPoints": [
+        "lifecycle.frame",
+        "lifecycle.shutdown"
+      ],
       "claims": [],
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
       "rigs": [
-        "native_temporal_test",
-        "transition_flash_prevent_test",
         "explorer_cam_test",
-        "explorer_cam_fade_test"
+        "explorer_cam_fade_test",
+        "plugin_dispatch_test"
       ],
-      "implementationStatus": "catalog-only",
+      "implementationStatus": "phase1-lifecycle",
       "selectionAvailableProfiles": [],
       "costBudget": {
         "state": "unmeasured",
@@ -502,10 +455,10 @@
       }
     },
     {
-      "index": 7,
+      "index": 6,
       "id": "performance",
       "name": "Performance",
-      "description": "Cull guard, FOV trim, OpenXR resolution, settlement detail, and static props.",
+      "description": "FOV trim, OpenXR render resolution, texture LOD bias, and anisotropy.",
       "profiles": [
         "vr"
       ],
@@ -558,7 +511,7 @@
       }
     },
     {
-      "index": 8,
+      "index": 7,
       "id": "diagnostics",
       "name": "Diagnostics",
       "description": "Developer probes, eye dumps, and diagnostic instruments.",

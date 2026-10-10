@@ -64,6 +64,9 @@ struct EdvrPluginLifecycleOps {
     // Appended after staged callbacks so the legacy lifecycle prefix and
     // existing staged-record extents remain valid.
     EdvrPluginConfigureStateFn configureState;
+    // Optional component selector appended after the complete prior ABI.
+    // Omitted by older records, which retain component zero.
+    uint32_t componentIndex;
 };
 static_assert(offsetof(EdvrPluginLifecycleOps, configureStage) ==
                   offsetof(EdvrPluginLifecycleOps, shutdown) +
@@ -73,6 +76,10 @@ static_assert(offsetof(EdvrPluginLifecycleOps, configureState) ==
                   offsetof(EdvrPluginLifecycleOps, shutdownStage) +
                       sizeof(EdvrPluginShutdownStageFn),
               "stateful configure must append after every staged callback");
+static_assert(offsetof(EdvrPluginLifecycleOps, componentIndex) ==
+                  offsetof(EdvrPluginLifecycleOps, configureState) +
+                      sizeof(EdvrPluginConfigureStateFn),
+              "lifecycle component selector must append after configureState");
 
 struct EdvrPluginOps {
     uint32_t structSize;
@@ -129,22 +136,49 @@ enum : uint32_t {
     kCockpitVisualsPluginIndex = plugins::kPluginCockpitVisuals,
 };
 
+enum : uint32_t {
+    kComfortExposureLifecycleComponent = 0,
+    kComfortScannersLifecycleComponent = 1,
+    kComfortTransitionFlashLifecycleComponent = 2,
+    kPluginLifecycleComponentCount = 3,
+};
+
 // Core-owned fixed-capacity registry. Calls that inspect subscribers happen
 // at configure/frame boundaries or shader binds. The draw path only reads the
 // cached candidate mask and visits claims named by that mask.
 bool pluginRegistryRegister(const EdvrPluginOps* ops);
 bool pluginRegistryRegisterLifecycle(const EdvrPluginLifecycleOps* ops);
 bool pluginRegistryHasLifecycle(uint32_t manifestIndex);
+bool pluginRegistryHasLifecycleComponent(uint32_t manifestIndex,
+                                         uint32_t componentIndex);
 void pluginRegistryConfigureLifecycle(uint32_t manifestIndex, void* config);
+void pluginRegistryConfigureLifecycleComponent(uint32_t manifestIndex,
+                                               uint32_t componentIndex,
+                                               void* config);
 void pluginRegistryFrameLifecycle(uint32_t manifestIndex, uint32_t sceneFrame);
+void pluginRegistryFrameLifecycleComponent(uint32_t manifestIndex,
+                                           uint32_t componentIndex,
+                                           uint32_t sceneFrame);
 void pluginRegistryShutdownLifecycle(uint32_t manifestIndex);
+void pluginRegistryShutdownLifecycleComponent(uint32_t manifestIndex,
+                                             uint32_t componentIndex);
 bool pluginRegistryConfigureLifecycleStage(uint32_t manifestIndex,
                                            uint32_t stage, void* config);
+bool pluginRegistryConfigureLifecycleComponentStage(uint32_t manifestIndex,
+                                                    uint32_t componentIndex,
+                                                    uint32_t stage,
+                                                    void* config);
 bool pluginRegistryFrameLifecycleStage(uint32_t manifestIndex, uint32_t stage,
                                        ID3D11DeviceContext* context,
                                        uint32_t sceneFrame);
+bool pluginRegistryFrameLifecycleComponentStage(
+    uint32_t manifestIndex, uint32_t componentIndex, uint32_t stage,
+    ID3D11DeviceContext* context, uint32_t sceneFrame);
 bool pluginRegistryShutdownLifecycleStage(uint32_t manifestIndex,
                                           uint32_t stage);
+bool pluginRegistryShutdownLifecycleComponentStage(uint32_t manifestIndex,
+                                                   uint32_t componentIndex,
+                                                   uint32_t stage);
 bool pluginRegistryProfileSupports(uint32_t manifestIndex);
 bool pluginRegistryWantsStartupHooks(void* config);
 bool pluginRegistryRegisterLegacyDrawGate(const char* stableName,

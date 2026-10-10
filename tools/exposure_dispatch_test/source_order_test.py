@@ -12,12 +12,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE = ROOT / "src/d3d11/exposure_fix.cpp"
-MODULE = ROOT / "src/plugins/exposure/exposure_dispatch.cpp"
-HEADER = ROOT / "src/plugins/exposure/exposure_dispatch.h"
-ACTION = ROOT / "src/plugins/exposure/exposure_actions.cpp"
-ACTION_HEADER = ROOT / "src/plugins/exposure/exposure_actions.h"
-LIFECYCLE = ROOT / "src/plugins/exposure/exposure_lifecycle.cpp"
-LIFECYCLE_HEADER = ROOT / "src/plugins/exposure/exposure_lifecycle.h"
+MODULE = ROOT / "src/plugins/comfort/exposure/exposure_dispatch.cpp"
+HEADER = ROOT / "src/plugins/comfort/exposure/exposure_dispatch.h"
+ACTION = ROOT / "src/plugins/comfort/exposure/exposure_actions.cpp"
+ACTION_HEADER = ROOT / "src/plugins/comfort/exposure/exposure_actions.h"
+LIFECYCLE = ROOT / "src/plugins/comfort/exposure/exposure_lifecycle.cpp"
+LIFECYCLE_HEADER = ROOT / "src/plugins/comfort/exposure/exposure_lifecycle.h"
 
 
 def code_only(source):
@@ -225,9 +225,9 @@ def pins(core_source, module_source, header_source, action_source, action_header
                 "share-resource-compatibility-and-direction")
 
         frame = function(core, "exposureFixFrameBoundary")
-        reset_stage = r"pluginRegistryFrameLifecycleStage\s*\(\s*plugins::kPluginExposure\s*,\s*plugins::exposure::kExposureLifecycleResetPairing"
-        expire_stage = r"pluginRegistryFrameLifecycleStage\s*\(\s*plugins::kPluginExposure\s*,\s*plugins::exposure::kExposureLifecycleExpireVerdicts"
-        require(len(occurrences(frame, "pluginRegistryFrameLifecycleStage")) == 2,
+        reset_stage = r"pluginRegistryFrameLifecycleComponentStage\s*\(\s*plugins::kPluginComfort\s*,\s*edvr::kComfortExposureLifecycleComponent\s*,\s*plugins::exposure::kExposureLifecycleResetPairing"
+        expire_stage = r"pluginRegistryFrameLifecycleComponentStage\s*\(\s*plugins::kPluginComfort\s*,\s*edvr::kComfortExposureLifecycleComponent\s*,\s*plugins::exposure::kExposureLifecycleExpireVerdicts"
+        require(len(occurrences(frame, "pluginRegistryFrameLifecycleComponentStage")) == 2,
                 "lifecycle-frame-stage-count")
         require(ordered(frame, reset_stage,
                         r"\bs->dispatchOccSeen\s*\[\s*i\s*\]\s*=\s*0\s*;",
@@ -237,8 +237,8 @@ def pins(core_source, module_source, header_source, action_source, action_header
                 "lifecycle-frame-order")
         require(len(occurrences(frame, "Log::get().note")) == 1,
                 "lifecycle-frame-log-count")
-        require(bool(re.search(r"!s->lifecycleRegistered\s*\|\|\s*!pluginRegistryFrameLifecycleStage\s*\([^;]*kExposureLifecycleResetPairing[^;]*\)\s*\)\s*\{\s*exposurePluginResetDispatchFrame\s*\(\s*observer\s*\)", frame, re.S)) and
-                bool(re.search(r"!s->lifecycleRegistered\s*\|\|\s*!pluginRegistryFrameLifecycleStage\s*\([^;]*kExposureLifecycleExpireVerdicts[^;]*\)\s*\)\s*\{\s*exposurePluginExpireDispatchVerdicts\s*\(\s*observer\s*\)", frame, re.S)),
+        require(bool(re.search(r"!s->lifecycleRegistered\s*\|\|\s*!pluginRegistryFrameLifecycleComponentStage\s*\([^;]*kComfortExposureLifecycleComponent[^;]*kExposureLifecycleResetPairing[^;]*\)\s*\)\s*\{\s*exposurePluginResetDispatchFrame\s*\(\s*observer\s*\)", frame, re.S)) and
+                bool(re.search(r"!s->lifecycleRegistered\s*\|\|\s*!pluginRegistryFrameLifecycleComponentStage\s*\([^;]*kComfortExposureLifecycleComponent[^;]*kExposureLifecycleExpireVerdicts[^;]*\)\s*\)\s*\{\s*exposurePluginExpireDispatchVerdicts\s*\(\s*observer\s*\)", frame, re.S)),
                 "lifecycle-frame-fallback")
 
         lifecycle_frame = function(lifecycle, "frame")
@@ -260,7 +260,7 @@ def pins(core_source, module_source, header_source, action_source, action_header
         configure = function(core, "exposureConfigure")
         require(ordered(configure,
                         r"if\s*\(\s*s->lifecycleRegistered\s*\)",
-                        r"pluginRegistryConfigureLifecycle\s*\(\s*plugins::kPluginExposure\s*,\s*&cfg\s*\)",
+                        r"pluginRegistryConfigureLifecycleComponent\s*\(\s*plugins::kPluginComfort\s*,\s*edvr::kComfortExposureLifecycleComponent\s*,\s*&cfg\s*\)",
                         r"exposurePluginConfigure\s*\(\s*state\s*,\s*cfg\s*\)"),
                 "lifecycle-configure-fallback")
         install = function(core, "installExposureFix")
@@ -271,7 +271,7 @@ def pins(core_source, module_source, header_source, action_source, action_header
                 register_call.start() > commit_block[1], "lifecycle-register-after-commit")
         shutdown = function(core, "shutdownExposureFix")
         require(ordered(shutdown,
-                        r"pluginRegistryShutdownLifecycle\s*\(\s*plugins::kPluginExposure\s*\)",
+                        r"pluginRegistryShutdownLifecycleComponent\s*\(\s*plugins::kPluginComfort\s*,\s*edvr::kComfortExposureLifecycleComponent\s*\)",
                         r"g_state->lifecycleRegistered\s*=\s*false",
                         r"exposurePluginShutdownResources\s*\(",
                         r"g_state->hook\.uninstall\s*\(\s*\)"),
@@ -413,8 +413,9 @@ def self_test(core, module, header, action, action_header, lifecycle_source,
             lifecycle_source, lifecycle_header):
         raise AssertionError("lifecycle registration before hook commit escaped")
     frame_reset = ("    if (!s->lifecycleRegistered ||\n"
-                   "        !pluginRegistryFrameLifecycleStage(\n"
-                   "            plugins::kPluginExposure,\n"
+                   "        !pluginRegistryFrameLifecycleComponentStage(\n"
+                   "            plugins::kPluginComfort,\n"
+                   "            edvr::kComfortExposureLifecycleComponent,\n"
                    "            plugins::exposure::kExposureLifecycleResetPairing, nullptr, 0)) {")
     moved = replace_once(core, frame_reset, "    Log::get().note();\n" + frame_reset)
     if "lifecycle-frame-log-count" not in pins(

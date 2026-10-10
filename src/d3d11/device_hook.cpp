@@ -41,7 +41,10 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../common/hotkey.h"
 #include "fss_res.h"
 #include "journal_watch.h"
-#include "explorer_cam.h"   // explorerCamFrameBoundary (the frame tick) and explorerCamShutdown (the avatar dither-fade global goes back at an unload)
+#include "explorer_cam.h"   // Explorer Cam's public API remains stable across module ownership.
+#include "plugin_registry.h"
+#include "../plugins/comfort/comfort_lifecycle.h"
+#include "../plugins/explorer_cam/explorer_cam_lifecycle.h"
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
@@ -1553,7 +1556,14 @@ void presentFrameBoundary() {
     tkCelestialStatus.run(tickCelestialStatus);
     // Explorer Cam (Phase 1), after the journal's tick it reads (on foot, GuiFocus, gameplay). Unconditional: an EMPTY hotkey.explorer_cam is read here
     // every frame too, so binding it live arms the feature on the next one.
-    tkExplorerCam.run([] { explorerCamFrameBoundary(static_cast<uint32_t>(g_state->frameCounter)); });
+    tkExplorerCam.run([] {
+        const uint32_t frameNo = static_cast<uint32_t>(g_state->frameCounter);
+        if (pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)) {
+            pluginRegistryFrameLifecycle(plugins::kPluginExplorerCam, frameNo);
+        } else {
+            explorerCamFrameBoundary(frameNo);
+        }
+    });
     tkFssModeLatch.run(tickFssModeLatch);
     // The settings menu (docs/settings-menu.md): its summon key, its
     // navigation keys and head-aim, its fade, the keyboard gate that
@@ -2674,6 +2684,11 @@ void hookDevice(ID3D11Device* device) {
         return;
     }
     s.device = device;
+    // Explorer Cam ticks on the device-owned Present path, even when vScreen
+    // never installs. Publish its immutable record as soon as this device's
+    // hooks are valid and before any swapchain can install Present.
+    pluginRegistryRegisterLifecycle(
+        &plugins::explorer_cam::explorerCamLifecycleOps());
     // SAID, so the format-support log can be read without guessing (format_support_log.h).
     // A session with no "format support (game #N)" lines is either a game that asked
     // nothing or hooks that never went on, and only this line, present or absent, tells
@@ -3149,7 +3164,11 @@ void shutdownDeviceHooks() {
     journalWatchShutdown();
     // Explorer Cam: the avatar dither-fade global goes back to -1 if EDVR still holds it at 0 (explorer_cam.h). The hooks are CodeHooks
     // and come off with their own destructors.
-    explorerCamShutdown();
+    if (pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)) {
+        pluginRegistryShutdownLifecycle(plugins::kPluginExplorerCam);
+    } else {
+        explorerCamShutdown();
+    }
     // The probe's reference on the device. Read-only for its whole life, so
     // there is nothing to put back -- only the reference to let go.
     if (g_state && g_state->multithread) {
@@ -3173,7 +3192,15 @@ void shutdownDeviceHooks() {
     uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
     vertexResyncShutdown();  // the vertex-buffer resync's session line (the hook itself stays; the game's process exit says the line through Log::setExitLine)
     shutdownGlitchFrameFix();
-    transitionFlashEyeBaseShutdown();
+    if (pluginRegistryHasLifecycleComponent(
+            plugins::kPluginComfort,
+            edvr::kComfortTransitionFlashLifecycleComponent)) {
+        pluginRegistryShutdownLifecycleComponent(
+            plugins::kPluginComfort,
+            edvr::kComfortTransitionFlashLifecycleComponent);
+    } else {
+        transitionFlashEyeBaseShutdown();
+    }
     shutdownVScreenFixes();
     shutdownExposureFix();
     // The swap-only or live-only probe's bare table, if that was what ran

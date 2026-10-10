@@ -3,12 +3,12 @@
 #include <cmath>
 #include <cstring>
 
-#include "../../common/config.h"
-#include "../../common/log.h"
-#include "../../common/plugin_cost.h"
-#include "../../common/timing.h"
-#include "../../d3d11/binding_shadow.h"
-#include "../../d3d11/sunglare_fix.h"
+#include "../../../common/config.h"
+#include "../../../common/log.h"
+#include "../../../common/plugin_cost.h"
+#include "../../../common/timing.h"
+#include "../../../d3d11/binding_shadow.h"
+#include "../../../d3d11/sunglare_fix.h"
 
 namespace edvr::plugins::exposure {
 namespace {

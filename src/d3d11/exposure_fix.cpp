@@ -24,8 +24,8 @@
                           // writers through THIS module's Dispatch hook,
                           // because slot 41 is already ours and a second
                           // patch on it would be a second thing to reclaim
-#include "../plugins/exposure/exposure_actions.h"
-#include "../plugins/exposure/exposure_lifecycle.h"
+#include "../plugins/comfort/exposure/exposure_actions.h"
+#include "../plugins/comfort/exposure/exposure_lifecycle.h"
 
 namespace edvr {
 namespace {
@@ -446,7 +446,9 @@ void exposureConfigure(Config& cfg) {
 
     auto* state = static_cast<plugins::exposure::ExposureActionState*>(s);
     if (s->lifecycleRegistered) {
-        pluginRegistryConfigureLifecycle(plugins::kPluginExposure, &cfg);
+        pluginRegistryConfigureLifecycleComponent(
+            plugins::kPluginComfort,
+            edvr::kComfortExposureLifecycleComponent, &cfg);
     } else {
         plugins::exposure::exposurePluginConfigure(state, cfg);
     }
@@ -458,8 +460,9 @@ void exposureFixFrameBoundary() {
     auto* observer =
         static_cast<plugins::exposure::ExposureDispatchObserverState*>(s);
     if (!s->lifecycleRegistered ||
-        !pluginRegistryFrameLifecycleStage(
-            plugins::kPluginExposure,
+        !pluginRegistryFrameLifecycleComponentStage(
+            plugins::kPluginComfort,
+            edvr::kComfortExposureLifecycleComponent,
             plugins::exposure::kExposureLifecycleResetPairing, nullptr, 0)) {
         exposurePluginResetDispatchFrame(observer);
     }
@@ -486,8 +489,9 @@ void exposureFixFrameBoundary() {
     // Yes answers are kept: those are confirmed across frames anyway, and a
     // shader that matched the shape once does not stop having matched it.
     if (!s->lifecycleRegistered ||
-        !pluginRegistryFrameLifecycleStage(
-            plugins::kPluginExposure,
+        !pluginRegistryFrameLifecycleComponentStage(
+            plugins::kPluginComfort,
+            edvr::kComfortExposureLifecycleComponent,
             plugins::exposure::kExposureLifecycleExpireVerdicts, nullptr, 0)) {
         exposurePluginExpireDispatchVerdicts(observer);
     }
@@ -709,7 +713,9 @@ void shutdownExposureFix() {
     if (!g_state) return;
     g_state->enabled = false;
     if (g_state->lifecycleRegistered) {
-        pluginRegistryShutdownLifecycle(plugins::kPluginExposure);
+        pluginRegistryShutdownLifecycleComponent(
+            plugins::kPluginComfort,
+            edvr::kComfortExposureLifecycleComponent);
         g_state->lifecycleRegistered = false;
     } else {
         // Profile rejection retains the old direct module shutdown path.

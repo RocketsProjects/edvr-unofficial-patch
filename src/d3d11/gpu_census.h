@@ -106,6 +106,28 @@ enum class GpuCensusOwner : uint8_t {
     Count = 10
 };
 
+// Census owner IDs and log labels remain stable component/source identities.
+// This map rolls those rows into the current public groups without changing
+// historical census ownership or creating a separate Explorer cost bucket.
+// Keep the public ID map independent of generated catalog headers: census
+// consumers include this header without the catalog's generated include path.
+constexpr const char* gpuCensusCurrentPluginId(GpuCensusOwner owner) noexcept {
+    switch (owner) {
+    case GpuCensusOwner::TemporalAa: return "temporal-aa";
+    case GpuCensusOwner::CockpitVisuals: return "cockpit-visuals";
+    case GpuCensusOwner::Exposure:
+    case GpuCensusOwner::Scanners:
+    case GpuCensusOwner::Comfort: return "comfort";
+    case GpuCensusOwner::Intro: return "intro";
+    case GpuCensusOwner::OnFootPanel: return "on-foot-panel";
+    case GpuCensusOwner::Performance: return "performance";
+    case GpuCensusOwner::Diagnostics: return "diagnostics";
+    case GpuCensusOwner::Core: return nullptr;
+    case GpuCensusOwner::Count: break;
+    }
+    return nullptr;
+}
+
 enum class GpuCensusAttribution : uint8_t {
     Direct = 0,          // EDVR-issued GPU work, eligible for owner cost totals
     NestedBreakdown,     // already included by a parent direct scope; never add to totals

@@ -4,7 +4,7 @@
 #define EDVR_BINDING_SHADOW_EXTERNAL 1
 #define EDVR_EXPOSURE_DAMP_TEST 1
 #include "../../src/d3d11/exposure_fix.cpp"
-#include "../../src/plugins/exposure/exposure_actions.cpp"
+#include "../../src/plugins/comfort/exposure/exposure_actions.cpp"
 #include "../../src/d3d11/shader_registry.cpp"
 #include "../../src/common/system_d3d11.h"
 

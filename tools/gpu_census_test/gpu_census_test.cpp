@@ -130,6 +130,28 @@ void ownershipMapAndAggregateCases() {
                   static_cast<uint8_t>(GpuCensusOwner::Core) == 9 &&
                   static_cast<uint8_t>(GpuCensusOwner::Count) == 10,
                   "logical owner IDs are stable");
+    const char* const stableLabels[] = {
+        "temporal-aa", "cockpit-visuals", "exposure", "scanners", "intro",
+        "on-foot-panel", "comfort", "performance", "diagnostics", "core"
+    };
+    const char* const currentIds[] = {
+        "temporal-aa", "cockpit-visuals", "comfort", "comfort", "intro",
+        "on-foot-panel", "comfort", "performance", "diagnostics", nullptr
+    };
+    static_assert(sizeof(stableLabels) / sizeof(stableLabels[0]) == static_cast<size_t>(O::Count) &&
+                  sizeof(currentIds) / sizeof(currentIds[0]) == static_cast<size_t>(O::Count),
+                  "every stable GPU census owner has an expected label and current public ID");
+    for (size_t i = 0; i < static_cast<size_t>(O::Count); ++i) {
+        const auto owner = static_cast<O>(i);
+        const char* const id = gpuCensusCurrentPluginId(owner);
+        check(std::strcmp(gpuCensusOwnerName(owner), stableLabels[i]) == 0 &&
+                  ((id == nullptr && currentIds[i] == nullptr) ||
+                   (id && currentIds[i] && std::strcmp(id, currentIds[i]) == 0)),
+              "stable GPU census labels and current public IDs coexist without row renumbering");
+    }
+    check(gpuCensusCurrentPluginId(O::Count) == nullptr &&
+              gpuCensusCurrentPluginId(static_cast<O>(0xfeu)) == nullptr,
+          "sentinel and invalid owners have no current public plugin ID");
     static_assert(sizeof(expected) / sizeof(expected[0]) ==
                   static_cast<size_t>(GpuCensusSection::Count),
                   "the test pins every concrete census section exactly once");
