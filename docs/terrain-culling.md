@@ -42,21 +42,19 @@
   the call falls to now. H-overshoot: the cache had advanced. H-mix: the call is served
   on the owner thread, which may be blocked in the frame wait when it arrives; served
   before the next publish it is answered D(N)+P, after it D(N+1)+P, a period apart.
-- **TEST BUILD (claude/cull-late-frames, NOT FLOWN):** runtime log `pose slot:` (each
-  "now" call against the frame that came next after it was served) and `pose arrival:`
-  (by what was true when it ARRIVED: Between, Straddled, Render, Other; queue ms; where
-  it sat against the first frame after arrival) lines, always on (journal 2026-10-10).
-  Temporary key `advanced.cull_pose_timing = next | slot | arrival` (live; remove when
-  the arc closes): slot = the next display slot at or after now + the frame's lead;
-  arrival = slot, plus a period for a call that arrived between frames and was served
-  before the publish. FLIGHT: Quest 3 via VD, planet descent and low flight with head
-  turns, three segments of ~4 min (next, slot, arrival), flashes noted per segment, then
-  the key back at next (a change closes the window; the game's exit may not); read
-  `python tools\edvr_log.py --target <t> --tally pose`.
-- **Next:** that flight. `pose arrival:` under next: Between calls a real share with
-  >1 deg = H-mix, `arrival` should clear it; nearly all Straddled = not the mix.
-  `pose slot:` short-1p >1 deg rising with late frames = H-late; fallback stale >1 deg =
-  H-stale; long >1 deg = H-overshoot; all near zero with flashes = not the pose timing.
+- **TEST BUILD FLOWN (claude/cull-late-frames f24ca5d0, Frontier, Q3 via VD 72 Hz,
+  log edvr_openxr_20261010_171008_107_23432):** `pose slot:` / `pose arrival:` lines
+  and the temporary key `advanced.cull_pose_timing = next | slot | arrival` (remove at
+  close). Steady flight (17:13 on): 0 late frames, 0 fallbacks; tid 28956 97% Straddled,
+  tid 25756 100% Between, every call in the same class each frame; next = slot there.
+  The 282 stale fallbacks (up to 12 deg) fell in the load minute only. Pilot: "several
+  flashes in each segment", in flat areas only; `arrival` (25756 a period later) no change.
+- **Ruled out:** the pose timing (H-late, H-stale, H-overshoot, H-mix) as the cause of
+  the VD flashes, because the answers were consistent in steady flight and the flashes
+  came alike under next, slot and arrival.
+- **Next:** temporary AA off (EDVR's DLSS out of the chain); the same flat low flight on
+  the Crystal Super and in flat mode (is it Elite's own, on any rig?); then terrain
+  generation latency, which a culling margin would hide.
 
 ## The bug in short
 
@@ -1042,3 +1040,16 @@ for each class on time, late, stale, at the cap, on an overflow of the extra per
 store, unresolved paths, window and mode split, the exact line, tools\pose_arrival_fixture.log), tools\openxr_native_test (the stamp; a straddle made as production makes one,
 the owner held in a job while the call queues behind it; Between, Render, Straddled, Other and the owner-thread path under `next` and `arrival`; the real Submit setting
 submitSeq in frame_end_overlap_cases.h), the log tool's `--self-test`. Not flown.
+
+**Flown 2026-10-10 17:10-17:25 local (Sean, Frontier, Quest 3 via VD at 72 Hz, f24ca5d0; runtime log
+edvr_openxr_20261010_171008_107_23432.log).** Segments: next 17:10-17:16 (the game load inside it), slot 17:16-17:20, arrival
+17:20-17:24, next again from 17:24:16. Two Elite threads call from exe+0x4E3881: tid 25756 (~5 calls a frame, 100% Between, queue
+0.00 ms mean) and tid 28956 (~1.3 a frame, 97% Straddled with a 5.7 ms mean queue, 3% Render once in flight). The load minute carried
+395 late frames and 282 stale fallbacks on 28956 (the worst 11.9 deg from the next drawn pose); the next minute 14, then none. From
+17:13 on, every window had 0 fallbacks and 0 to 12 late frames a minute, so `slot` gave the very answers `next` gave, and each thread
+sat in one class frame after frame: no mix. `arrival` moved 25756 one period later (720 calls a minute above 1 deg from the next drawn
+pose, by construction). The pilot saw "several flashes in each segment", alike, and only over flat ground. **Ruled out:** the pose
+timing (late frames, the stale fallback, overshoot, the arrival mix) as the cause of these flashes, because the answers were steady
+and consistent where the flashes came, and moving one thread a whole period changed nothing. The stale fallback during loads is real
+but harmless (no terrain then). Flat ground only fits large tiles, where one late or dropped tile is a big square: next are temporal
+AA off, the same flight on the Crystal Super and in flat mode, then terrain-generation latency.
