@@ -3,62 +3,59 @@
 ## Status
 
 - **State (2026-10-09, flights 4 and 5): CLOSED. The head-pose fix ships as
-  behaviour, with no key and no write to the game: Elite's "now" requests are
-  located at the latest frame's display time PLUS that frame's display period
-  (`next`).** Elite's game thread asks the runtime for the head pose "now"
-  (GetDeviceToAbsoluteTrackingPose, return RVA 0x4E3881, prediction about 0 s)
-  and culls planet terrain with it, while the frame is drawn with the pose at
-  its display time. Flight 3: that pose was **41 to 44 ms** older than the drawn
-  one, up to **4.1 deg** off, r = **+0.98** with head speed. Answering at the
-  display time (`display`) stopped the squares on gaze switches; rapid turns on
-  planet approach still showed some.
+  behaviour (no key, no write to the game): Elite's "now" requests are located at
+  the latest frame's display time PLUS that frame's period (`next`).** Elite's game
+  thread asks GetDeviceToAbsoluteTrackingPose (return RVA 0x4E3881, prediction ~0 s)
+  and culls planet terrain with it; the frame is drawn at its display time. Flight 3:
+  that pose was **41 to 44 ms** older, up to **4.1 deg** off, r = **+0.98** with head
+  speed. `display` stopped the gaze-switch squares; rapid turns still showed some.
 - **What ships.** A call is answered at display time + period when its return
-  address is inside the game's own image and its prediction is under 5 ms either
-  way; any other caller is located as it always was. No build gate. The
-  freshness guard is judged on the CACHED frame's display time, not on the
-  target. With no frame, a stale frame, no period (or an overflow), or a
-  reference-space change between the two there is no target: the call is located
-  at now + prediction (a counted fallback; the same as the test branch's
-  `next`). A TIME_INVALID is retried once at now + prediction. First-sight
-  line: `head pose: Elite's "now" requests are answered one display period after
-  the drawn frame's display time (first from exe+0x...)`, up to 8 further
-  callers likewise. The 60 s `pose gap:` line (`edvr_log.py --tally pose`)
-  stays; Elite's caller now reads a gap of about +1 period and an angle to the
-  drawn pose of about head speed x that period.
-- **Why (the model, pilot-judged).** Elite's game thread calls
-  GetDeviceToAbsoluteTrackingPose directly BETWEEN frames, for work that feeds
-  the NEXT frame, so it needs D_N + period. While a frame renders it reads its
-  own latched WaitGetPoses pose of that frame, already right for what it
-  computes then (the scanner UI included). `next` gives each path the right
-  pose; `display` left the direct calls a period short; forcing the latched
-  readers onto the direct path (the engine patch) put them a period ahead.
-- **Field results (same test build e3692ed4; table in the dated entry).**
-  `display` (main): squares on rapid turns. `next_direct`: squares, and the DSS
-  scanner UI followed the head. `display_direct`: a black flash on a rapid turn.
-  `next` (no bypass): no flash on a repeat test, and the scanner UI stays put.
-- **Caution (review finding 3).** This is a pilot-judged comparison that fits
-  every observation. It is NOT a direct observation of the cull camera's final
-  consumer, and a terrain-generation latency could still contribute rare flashes.
+  address is inside the game's image and its prediction is under 5 ms either way;
+  others are located as ever. No build gate. Freshness is judged on the CACHED frame.
+  No frame, a stale frame, no period (or an overflow) or a reference-space change in
+  between: located at now + prediction (a counted fallback); TIME_INVALID is retried
+  once the same way. First-sight line `head pose: Elite's "now" requests are answered
+  one display period after the drawn frame's display time (first from exe+0x...)`.
+  The 60 s `pose gap:` line (`--tally pose`) stays.
+- **Why (the model, pilot-judged).** The game thread calls the pose function BETWEEN
+  frames, for work that feeds the NEXT frame, so it needs D_N + period; while a frame
+  renders it reads its own latched WaitGetPoses pose, already right. `display` left
+  the direct calls a period short; forcing the latched readers onto the direct path
+  (the engine patch) put them a period ahead. Field (test build e3692ed4): `display`
+  squares on rapid turns; `next_direct` squares and the DSS scanner UI followed the
+  head; `display_direct` a flash on a rapid turn; `next` no flash on a repeat test,
+  scanner UI put. It fits every observation but is NOT a direct observation of the
+  cull camera's consumer (review finding 3): terrain-generation latency could add rare flashes.
 - **Not shipped:** the latch-bypass patch (RVA 0x4E36EE), `advanced.cull_pose`,
-  `HandedOutPoses`: branches claude/cull-pose-next-frame, claude/cull-display-direct-bypass.
-- **Removed (2026-10-09):** the terrain guard and its six keys (`fix.cull_guard*`,
-  `advanced.cull_guard_channel`) and `advanced.cull_probe`; the FOV trim is untouched.
+  `HandedOutPoses` (branches claude/cull-pose-next-frame, claude/cull-display-direct-bypass).
+  **Removed (2026-10-09):** the terrain guard and its six keys (`fix.cull_guard*`,
+  `advanced.cull_guard_channel`), `advanced.cull_probe`; the FOV trim is untouched.
 - **Ruled out** (evidence under "Status detail"): a static frustum deficit, the
   fov getter as the culler's input, the 09-23 "same +19.4% ask" premise, H3, the
   union model, H2, FUN_13ACC40 as the consumer. **UNRELIABLE:** the 09-23
   verdict "the culler follows `GetProjectionRaw`, not the matrix" (a pilot's
   judgement under flicker, a 10-degree trim, 1.6%).
 - **Separate:** the flight-4 boarding crash is Elite's allocator (no EDVR frames).
-- **Field report (2026-10-10, v0.19.0):** Quest 3 via Virtual Desktop, 72 Hz,
-  RTX 4070 Ti SUPER, steady 72 fps: "significant black blocking in the periphery".
-  The fix engaged (exe+0x4E3881; steady gap +13.89 ms = one period), but the log
-  has little planet time. Their terrain checkerboard is ON, but Sean's Q3 at 72 Hz
-  with it ON showed no blocks at one planet (10-10): it does not reproduce alone.
-  Hypotheses: terrain generation latency on a slower GPU (the old guard's margin hid
-  it); checkerboard on their GPU; VD timewarp edges; not the cull at all. To ask: a
-  picture, where the blocks sit, 0.18 guard values, a descent log with the blocks.
-- **Next:** the reporter's answers. If checkerboard off clears it, the existing
-  checkerboard notice already covers it; if not, a descent log with the blocks.
+- **Field report (2026-10-10, v0.19.0):** Quest 3 via VD, 72 Hz: "significant black
+  blocking in the periphery" with the fix engaged. Their terrain checkerboard is ON;
+  Sean's Q3 at 72 Hz with it ON showed no blocks at one planet: not alone. Also
+  open: terrain-generation latency, VD timewarp edges. To ask: a picture, a descent log.
+- **Late frames (2026-10-10, Quest 3 via VD, 72 and 90 Hz):** infrequent quick black
+  flashes at the outer edges on head turns; the fix is engaged, but the game misses
+  display slots 40-60 times a minute and one Elite thread logs 4-44 fallbacks a
+  minute. H-late: a late frame shows at D+2P, `next` is a period short. H-stale: D goes
+  stale, the call falls to now (40+ ms short). H-overshoot: the cache had advanced.
+- **TEST BUILD (claude/cull-late-frames, NOT FLOWN):** `pose slot:` lines in the
+  runtime log (both modes) compare each "now" call with the frame that really came
+  next (journal 2026-10-10). Temporary key `advanced.cull_pose_slot = off | on` (live;
+  remove when the arc closes): on locates the call at the next display slot at or
+  after now + the frame's lead. FLIGHT: Quest 3 via VD, planet descent and low flight
+  with head turns, ~5 min off then ~5 min on, flashes noted per half, then the key off
+  again (a change closes the window; the game's exit may not); read
+  `python tools\edvr_log.py --target <t> --tally pose`.
+- **Next:** that flight. Short-1p above 1 deg rising with late frames = H-late; fallback
+  stale above 1 deg = H-stale; long above 1 deg = H-overshoot; all near zero while
+  flashes persist = not the pose timing (then the reporter's answers).
 
 ## The bug in short
 
@@ -946,3 +943,68 @@ instant it was handed, a refused target, a reference change, unflagged callers s
 
 **A crash in the same session.** The pilot's boarding crash that session was traced to Elite's allocator on a job thread; no EDVR frame was on the stack. It is
 under separate check and is not part of this arc.
+
+## 2026-10-10 — late frames: `pose slot:` and `advanced.cull_pose_slot` (test build, branch claude/cull-late-frames)
+
+**Evidence.** A Quest 3 via Virtual Desktop (runtime `VirtualDesktopXR`) at 72 and at 90 Hz shows infrequent quick black flashes at the outer edges of either eye
+on head turns. The logs show the fix engaged and one period ahead in steady windows, but the game misses display slots 40 to 60 times a minute, and steady
+windows still show 4 to 44 fallbacks a minute on one of Elite's two calling threads. Sean's own Quest 3 at 72 Hz with the checkerboard ON showed no blocks at one
+planet, so the checkerboard alone does not explain it.
+
+**Hypotheses.** All three give one frame culled with a pose older or newer than the frame it is drawn in, which is a flash at the edge. The instrument below
+measures each; none is a finding yet.
+
+| | mechanism | what `pose slot:` shows |
+|---|---|---|
+| H-late | the game misses a slot; the next frame is shown at D+2P (or later), so `next` (D+P) is a period short for it | answered calls that are `short` by one period (1p) with the angle above 1 degree, rising with the window's late frames |
+| H-stale | the cached D goes more than a period behind now (the late frame's own wait is still pending), the freshness guard drops the call to now + prediction, 40+ ms short | `fallback` with reason `stale` and the angle above 1 degree |
+| H-overshoot | the cache had already advanced when the call came, so D+P is a frame ahead | `long` with the angle above 1 degree |
+| none | the pose timing is not the cause | every class near zero in the windows where the pilot saw flashes |
+
+**The instrument (always on, both modes).** For every call the fix handles (a return address inside the game's image and a prediction under 5 ms: answered at an
+instant of its own OR fallen back to now + prediction) the runtime remembers the instant it was located at (T), the reason it had none of its own if it had none,
+the calling thread and the orientation it returned (pose_slot.h `noteCall`, from `locateHeadOwned`, owner thread, no allocation, no lock; a fixed store of 256
+calls, the rest counted unresolved). At the next WaitGetPoses (the next time the cached frame changes: `publishPoseGap`) every call made since the previous one is
+resolved against that frame, before the cache is replaced: delta = T - D', and the angle between the orientation the call returned and the one EDVR located for D'
+(the pose that frame is drawn with). Classes, with P' the next frame's period: `match` |delta| < P'/4; `short` delta <= -P'/4 (`1p` within 1.5 periods, `2p+`
+beyond); `long` delta >= +P'/4. A call that fell back is its own class by reason (`none` no frame yet or an unreadable clock, `stale`, `period` no usable period or lead
+or an overflow, `cross` a reference-space change, `cap` slot mode past 250 ms, `refused` the runtime refused the instant with XR_ERROR_TIME_INVALID and the call was
+retried at now + prediction), and is also split by its delta. calls = match + short + long + fallback + unresolved. The cache being dropped (a session, origin or
+geometry change), a next frame with no usable period, a full store and the end of the run leave a call unresolved. One line per calling thread per 60 s window, in the
+runtime log next to the unchanged `pose gap:` line; a mode change closes the window at the change so a line has one mode, and a window with calls always writes its line,
+zeros included (no line at all means the instrument never ran):
+
+`pose slot: tid T mode next|slot calls N match M short S (1p a, 2p+ b) long L (1p c, 2p+ d) fallback F (none e, stale f, period g, cross h, cap i, refused j; delta match k,
+short l, long m) unresolved U; >1deg match .. short .. (1p .., 2p+ ..) long .. (1p .., 2p+ ..) fallback .. (none .., stale .., period .., cross .., cap .., refused ..); >2deg ...;
+max X deg (class); late frames n; window S s`
+
+`late frames` is the runtime's late-frame count (frame_boundary.h) over the window, `window` its length (60 s, less for a window cut short by a mode change or the end of
+the run, which writes its last lines at close). `python tools\edvr_log.py --target <t> --tally pose` tables them per mode and thread with per-minute rates after the
+`pose gap:` table. Tests: tools\openxr_pose_test (the classification at the quarter-period and 1.5-period boundaries on both signs, the thresholds, the store and its
+overflow, the unresolved paths, the window and the mode split, the exact line, tools\pose_slot_fixture.log held byte for byte), tools\openxr_native_test (the same through
+the host), the log tool's `--self-test`.
+
+**The candidate (`advanced.cull_pose_slot = on`).** `next` is D + P. The slot answer is the next display slot the next frame will really take, as far as it can be told
+from the cached frame (head_pose_time.h `slotAnswerTime`): L is the frame's lead, its display time minus the runtime time at which the xrWaitFrame that produced it returned
+(read the moment `boundary.waitAndBegin` comes back, `noteWaitReturned`, from the clock a pose call reads, and kept with the frame; on a turbo-paced frame, which
+the runtime opens at once with a synthesized display time, it is that time less the moment of opening); e = now + L is when a frame whose wait
+returns now would be shown; k = max(1, ceil((e - D) / P)); T = D + k*P. With no frame, no period, or L unknown or not positive it falls back to now + prediction as `next`
+does (reasons `none`, `period`); k beyond 250 ms / P (at least 1) is a `cap` fallback (a stall or a loading screen, where `next` would have said `stale`); an overflow is
+`period`; a reference-space change between D and T is `cross`. The freshness guard is not applied (k replaces it). In steady flight a call comes within a period of the wait
+that returned D, so e <= D + P and k = 1: exactly `next`. It differs only after a late or stale frame (k = 2 for a call 1.2 periods after the wait, 3 for 2.5, and so on).
+Off is bit-identical to the shipped answer (`answerTime` is now `answerTimeWhy` and its yes/no; the cells of the shipped behaviour are unchanged).
+
+**The key.** `advanced.cull_pose_slot = off | on` in [advanced] (default off), TEMPORARY: it goes when the arc closes and its winning value ships as behaviour. It is read by
+the graphics half at every `beginFrame` (like fix.weapon_stability) from the live-reloaded config and handed to the runtime in version 4's word of EdvrNativeFrameOutput,
+retired 2026-10-09 with the terrain guard and put to use again (`cullPoseSlot`), so there is no new ABI version and a half from before this key reads off either way;
+the runtime takes it at the next WaitGetPoses publish, and the calls after that publish are made under it. The graphics log writes `cull pose slot: on|off (<what it does>)`
+at the session's first frame and on every change.
+
+**Protocol.** Quest 3 via Virtual Desktop (72 or 90 Hz), planet descent and low flight with head turns, about 5 minutes with the key off, then about 5 minutes with it on
+(edit edvr.ini in the game folder while flying; it is live), the pilot noting flashes in each half, then the key off again before leaving the game: a mode change
+closes and writes the window, whereas a window still open when the game exits (up to the last 59 s) is written only if the runtime's `close()` runs (the end-of-run
+flush is there; no rig reaches it, and whether Elite's exit does is not known; `pose gap:` has no end-of-run flush at all). Read `--tally pose`: the `next` rows say which hypothesis (if any) the
+calls support; the `slot` rows say whether the candidate removed it; the pilot's flashes per half say whether either mattered. Reading: short 1p above 1 degree rising with
+late frames under `next` and gone under `slot` is H-late; fallback stale above 1 degree is H-stale (under `slot` it becomes a slot or a `cap`); long above 1 degree is
+H-overshoot; every class near zero in both modes while the flashes persist means the pose timing is not the cause and the reporter's other questions (terrain-generation
+latency, VD's timewarp edges) are next. Not flown.
