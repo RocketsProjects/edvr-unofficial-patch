@@ -52,10 +52,11 @@
 - **Field report (2026-10-10, v0.19.0):** Quest 3 via Virtual Desktop, 72 Hz,
   RTX 4070 Ti SUPER, steady 72 fps: "significant black blocking in the periphery".
   The fix engaged (exe+0x4E3881; steady gap +13.89 ms = one period), but the log
-  has little planet time. Their terrain checkerboard is ON; every clean `next`
-  flight had it OFF. Hypotheses: checkerboard reconstruction at the newly exposed
-  edge; terrain generation latency on a slower GPU (the old guard's margin hid it);
-  VD timewarp edges. To ask: a descent with checkerboard off, 0.18 guard values.
+  has little planet time. Their terrain checkerboard is ON, but Sean's Q3 at 72 Hz
+  with it ON showed no blocks at one planet (10-10): it does not reproduce alone.
+  Hypotheses: terrain generation latency on a slower GPU (the old guard's margin hid
+  it); checkerboard on their GPU; VD timewarp edges; not the cull at all. To ask: a
+  picture, where the blocks sit, 0.18 guard values, a descent log with the blocks.
 - **Next:** the reporter's answers. If checkerboard off clears it, the existing
   checkerboard notice already covers it; if not, a descent log with the blocks.
 
