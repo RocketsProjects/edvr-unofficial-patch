@@ -39,24 +39,25 @@
 - **Caution (review finding 3).** This is a pilot-judged comparison that fits
   every observation. It is NOT a direct observation of the cull camera's final
   consumer, and a terrain-generation latency could still contribute rare flashes.
-- **Not shipped.** The latch-bypass hot patch (`0F 84` to `90 E9` at RVA
-  0x4E36EE), `advanced.cull_pose` and its modes, `angle-to-next-drawn` and
-  `HandedOutPoses`: branches claude/cull-pose-next-frame (81e26374) and
-  claude/cull-display-direct-bypass (a19f0406). With no engine write, review
-  findings 1 and 5 and the patch-lifetime note are moot.
-- **Removed (2026-10-09):** the terrain guard with all six keys (`fix.cull_guard`,
-  `_percent`, `_fraction_h`, `_fraction_v`, `_headsets`, `advanced.cull_guard_channel`;
-  an old line is carried as "no longer used") and `advanced.cull_probe`. The FOV
-  trim is untouched (`native_fov_trim.h`).
+- **Not shipped:** the latch-bypass patch (RVA 0x4E36EE), `advanced.cull_pose`,
+  `HandedOutPoses`: branches claude/cull-pose-next-frame, claude/cull-display-direct-bypass.
+- **Removed (2026-10-09):** the terrain guard and its six keys (`fix.cull_guard*`,
+  `advanced.cull_guard_channel`) and `advanced.cull_probe`; the FOV trim is untouched.
 - **Ruled out** (evidence under "Status detail"): a static frustum deficit, the
   fov getter as the culler's input, the 09-23 "same +19.4% ask" premise, H3, the
   union model, H2, FUN_13ACC40 as the consumer. **UNRELIABLE:** the 09-23
   verdict "the culler follows `GetProjectionRaw`, not the matrix" (a pilot's
   judgement under flicker, a 10-degree trim, 1.6%).
-- **Separate:** a boarding crash in the flight-4 session was traced to Elite's
-  allocator on a job thread, with no EDVR frames; under separate check.
-- **Next:** fly the shipped build (nothing to set), ideally on the Quest 3 too:
-  squares gone on rapid turns, no flash, scanner UI steady.
+- **Separate:** the flight-4 boarding crash is Elite's allocator (no EDVR frames).
+- **Field report (2026-10-10, v0.19.0):** Quest 3 via Virtual Desktop, 72 Hz,
+  RTX 4070 Ti SUPER, steady 72 fps: "significant black blocking in the periphery".
+  The fix engaged (exe+0x4E3881; steady gap +13.89 ms = one period), but the log
+  has little planet time. Their terrain checkerboard is ON; every clean `next`
+  flight had it OFF. Hypotheses: checkerboard reconstruction at the newly exposed
+  edge; terrain generation latency on a slower GPU (the old guard's margin hid it);
+  VD timewarp edges. To ask: a descent with checkerboard off, 0.18 guard values.
+- **Next:** the reporter's answers. If checkerboard off clears it, the existing
+  checkerboard notice already covers it; if not, a descent log with the blocks.
 
 ## The bug in short
 
