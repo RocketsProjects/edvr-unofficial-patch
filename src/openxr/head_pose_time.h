@@ -116,7 +116,7 @@ inline bool answerTime(int64_t latestDisplayTime, int64_t periodNs, int64_t now,
   return answerTimeWhy(latestDisplayTime, periodNs, now, addPeriod, crosses, out) == PoseAnswer::Answered;
 }
 
-// THE SLOT INSTANT (TEMPORARY: advanced.cull_pose_slot = on; docs\terrain-culling.md, 2026-10-10). `next` answers one period past the cached frame's
+// THE SLOT INSTANT (TEMPORARY: advanced.cull_pose_timing = slot; docs\terrain-culling.md, 2026-10-10). `next` answers one period past the cached frame's
 // display time, which is the next frame's display time only while that frame is on time. When the game misses a display slot the next frame is
 // shown at D + 2P or later, so `next` is a period short for it, and once D is a period behind now the freshness guard drops the call to now +
 // prediction, 40 ms short. This answers at the display slot the NEXT frame will really be shown at, as far as it can be told from the cached frame:
@@ -128,12 +128,13 @@ inline bool answerTime(int64_t latestDisplayTime, int64_t periodNs, int64_t now,
 // puts now a period or more past that wait and k grows with it. The freshness guard is not applied (k replaces it); a gap longer than
 // kSlotCapNs (a stall, a loading screen) is a counted fallback (Cap), the same as the stale fallback it replaces. No display time, no usable
 // period or lead, an overflow, or a reference-space change between D and the instant (`crosses(from, to)`, reference_changes.h) fall back
-// to now + prediction as well. `periodsOut`, when given, receives k on success.
+// to now + prediction as well. `extraPeriods` (0 for `slot`; 1 for `arrival` on a call that arrived between frames) is added to k AFTER the cap
+// is judged on k, with its own overflow check, and the crossing check covers the final span. `periodsOut`, when given, receives k + extra on success.
 constexpr int64_t kSlotCapNs = 250000000;
 
 template <class Crosses>
 inline PoseAnswer slotAnswerTime(int64_t latestDisplayTime, int64_t periodNs, int64_t leadNs, int64_t now, Crosses&& crosses, int64_t* out,
-                                 int64_t* periodsOut = nullptr) {
+                                 int64_t* periodsOut = nullptr, int64_t extraPeriods = 0) {
   int64_t display = 0;
   if (!displayTimeTarget(latestDisplayTime, &display)) return PoseAnswer::NoFrame;
   if (periodNs <= 0 || leadNs <= 0) return PoseAnswer::Period;
@@ -148,13 +149,74 @@ inline PoseAnswer slotAnswerTime(int64_t latestDisplayTime, int64_t periodNs, in
   int64_t most = kSlotCapNs / periodNs;                             // (a period past the cap still gets its one slot: k = 1 is `next`)
   if (most < 1) most = 1;
   if (k > most) return PoseAnswer::Cap;
-  const int64_t step = k * periodNs;                                // (k > 1 only when k * period <= kSlotCapNs: no overflow)
+  if (extraPeriods < 0) extraPeriods = 0;
+  const int64_t n = k + extraPeriods;                               // (k <= most, extra is 0 or 1 in use: no overflow here)
+  if (periodNs > INT64_MAX / n) return PoseAnswer::Period;          // (a period past the cap has k = 1 and may be huge: the extra one can overflow)
+  const int64_t step = n * periodNs;
   if (step > INT64_MAX - display) return PoseAnswer::Period;
   const int64_t target = display + step;
   if (crosses(display, target)) return PoseAnswer::Cross;
   *out = target;
-  if (periodsOut) *periodsOut = k;
+  if (periodsOut) *periodsOut = n;
   return PoseAnswer::Answered;
+}
+
+// WHICH INSTANT, AND FOR WHICH CALL (TEMPORARY: advanced.cull_pose_timing = next | slot | arrival; docs\terrain-culling.md, 2026-10-10).
+// Elite's pose call is served on the owner thread, which may be blocked in the frame wait for the next frame when the call arrives. A call that
+// arrives between Elite's Submit of frame N and the publish of frame N+1 and is served before that publish is answered relative to N; the same call
+// served after it is answered relative to N+1 -- a period apart for the same place in Elite's pipeline. `PoseArrival` says which it was, from two
+// sequence numbers read when the call ARRIVED (publishSeq: frames published so far; submitSeq: the publishSeq of the last frame Elite began to
+// submit) and the publishSeq when it was SERVED:
+//   Between    submitSeq >= publishSeq at arrival (the latest frame was already submitted), and no publish happened while it queued.
+//   Straddled  the same, but a publish did happen while it queued: it is served against the frame published during its wait.
+//   Render     submitSeq < publishSeq at arrival (published, not yet submitted), no publish while it queued.
+//   Other      a Render call that straddled a publish.
+enum class PoseArrival : uint8_t { Between = 0, Straddled, Render, Other };
+constexpr unsigned kPoseArrivals = 4;
+
+inline const char* poseArrivalName(PoseArrival a) {
+  switch (a) {
+    case PoseArrival::Between: return "between";
+    case PoseArrival::Straddled: return "straddled";
+    case PoseArrival::Render: return "render";
+    case PoseArrival::Other: return "other";
+  }
+  return "?";
+}
+
+inline PoseArrival classifyPoseArrival(uint64_t submitSeqAtArrival, uint64_t publishSeqAtArrival, uint64_t publishSeqAtService) {
+  const bool submitted = submitSeqAtArrival >= publishSeqAtArrival;
+  const bool straddled = publishSeqAtService != publishSeqAtArrival;
+  if (submitted) return straddled ? PoseArrival::Straddled : PoseArrival::Between;
+  return straddled ? PoseArrival::Other : PoseArrival::Render;
+}
+
+// The three timings: `next` (shipped; D + P), `slot` (the next display slot at or after now + lead), `arrival` (slot, plus one period for a call that
+// arrived between frames and was NOT served after a publish, so that every between-frames call is answered at D(first frame published after it
+// arrived) + P whether or not it queued behind the wait; Straddled, Render and Other calls get the slot target unchanged, Render being `next`).
+enum class PoseTiming : uint8_t { Next = 0, Slot = 1, Arrival = 2 };
+
+inline const char* poseTimingName(PoseTiming m) {
+  switch (m) {
+    case PoseTiming::Next: return "next";
+    case PoseTiming::Slot: return "slot";
+    case PoseTiming::Arrival: return "arrival";
+  }
+  return "?";
+}
+// The word the graphics half hands the runtime (EdvrNativeFrameOutput::cullPoseTiming): anything past 2 reads as `next`.
+inline PoseTiming poseTimingFromWord(uint32_t word) { return word == 1 ? PoseTiming::Slot : word == 2 ? PoseTiming::Arrival : PoseTiming::Next; }
+
+// The instant for one call under one timing. `addPeriod(display, period, out)` and `crosses(from, to)` as answerTime's; `next` ignores the arrival
+// class and the lead and judges freshness on the cached frame (answerTimeWhy). `periodsOut` receives how many periods past D the instant is
+// (slot and arrival only).
+template <class AddPeriod, class Crosses>
+inline PoseAnswer timingAnswerTime(PoseTiming mode, PoseArrival arrival, int64_t latestDisplayTime, int64_t periodNs, int64_t leadNs, int64_t now,
+                                   AddPeriod&& addPeriod, Crosses&& crosses, int64_t* out, int64_t* periodsOut = nullptr) {
+  if (mode == PoseTiming::Slot) return slotAnswerTime(latestDisplayTime, periodNs, leadNs, now, crosses, out, periodsOut, 0);
+  if (mode == PoseTiming::Arrival)
+    return slotAnswerTime(latestDisplayTime, periodNs, leadNs, now, crosses, out, periodsOut, arrival == PoseArrival::Between ? 1 : 0);
+  return answerTimeWhy(latestDisplayTime, periodNs, now, addPeriod, crosses, out);
 }
 
 // The log lines that say the fix is acting, and for whom. The first caller to qualify writes one line; each further DISTINCT return RVA that

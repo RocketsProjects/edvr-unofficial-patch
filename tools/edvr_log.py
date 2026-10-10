@@ -63,9 +63,11 @@ rather than printing an empty table.
 --tally pose tables the pose-gap diagnostic: every `pose gap:` line in the RUNTIME log (it reads --tag openxr unless you name a tag or a file) by
 caller (thread, return address): how far a head pose is located from the drawn frame's display time, how far it is turned from the drawn pose, and the
 correlation of that angle with head speed across the windows (docs\terrain-culling.md). Exit 1 when the log has no such line. It then tables the `pose slot:` lines
-(TEMPORARY, advanced.cull_pose_slot): per mode (next, slot) and thread, how often the pose an Elite "now" call was handed was a slot short or long of the frame that
+(TEMPORARY, advanced.cull_pose_timing): per mode (next, slot, arrival) and thread, how often the pose an Elite "now" call was handed was a slot short or long of the frame that
 came next, the fallbacks by reason, how many of each were turned more than 1 and 2 degrees from the pose that frame was drawn with, per minute, and the reading of
-the three signatures (H-late, H-stale, H-overshoot).
+the three signatures (H-late, H-stale, H-overshoot). It also tables the `pose arrival:` lines: per mode (next, slot, arrival) and thread, how many calls arrived between
+frames and were served before the next publish (Between), after it (Straddled), or while the frame rendered (Render, Other), their queue times, and where each class was
+located against the first frame published after it arrived (0p, +1p, +2p+, -1p-), with the calls above 1 and 2 degrees.
 
 --tally periodic answers one question about one flight: which periodic work
 coincides with long frames. It reads the graphics log and the runtime log
@@ -711,12 +713,16 @@ def print_pose_tally(text):
     """The --tally pose report. Returns the process exit code."""
     windows, notes = parse_pose_gap(text)
     slot_windows, slot_notes = parse_pose_slot(text)
+    arrival_windows, arrival_notes = parse_pose_arrival(text)
     for note in notes:
         print("[edvr] pose gap: %s" % note)
     if not windows:
-        if slot_windows:
-            print("[edvr] no `pose gap:` lines in this log, but it has `pose slot:` lines.")
-            print_pose_slot_tally(slot_windows, slot_notes)
+        if slot_windows or arrival_windows:
+            print("[edvr] no `pose gap:` lines in this log, but it has `pose slot:` or `pose arrival:` lines.")
+            if slot_windows:
+                print_pose_slot_tally(slot_windows, slot_notes)
+            if arrival_windows:
+                print_pose_arrival_tally(arrival_windows, arrival_notes)
             return 0
         print("[edvr] no `pose gap:` lines in this log. The diagnostic is always on and writes one per caller every 60 s from the runtime's "
               "WaitGetPoses; they are in the runtime log (--tag openxr), not the graphics log, and need a build with the pose-gap diagnostic.")
@@ -753,13 +759,17 @@ def print_pose_tally(text):
     else:
         print("[edvr] no `pose slot:` lines in this log: a build without the pose-slot instrument, or no Elite \"now\" call was handled in a window (the instrument writes a "
               "line for every window that has a call, zeros included).")
+    if arrival_windows:
+        print_pose_arrival_tally(arrival_windows, arrival_notes)
+    else:
+        print("[edvr] no `pose arrival:` lines in this log: a build without the pose-arrival instrument, or no Elite \"now\" call was handled in a window.")
     return 0
 
 # --tally pose also reads the pose-slot diagnostic (src/openxr/pose_slot.h writes every line; tools\openxr_pose_test holds tools\pose_slot_fixture.log, which
-# this script's --self-test reads, to exactly what it writes). TEMPORARY with advanced.cull_pose_slot (docs\terrain-culling.md, 2026-10-10). One line per
+# this script's --self-test reads, to exactly what it writes). TEMPORARY with advanced.cull_pose_timing (docs\terrain-culling.md, 2026-10-10). One line per
 # calling thread per window of one mode, in the RUNTIME log next to the `pose gap:` lines:
 #
-#   pose slot: tid T mode next|slot calls N match M short S (1p a, 2p+ b) long L (1p c, 2p+ d) fallback F (none e, stale f, period g, cross h, cap i,
+#   pose slot: tid T mode next|slot|arrival calls N match M short S (1p a, 2p+ b) long L (1p c, 2p+ d) fallback F (none e, stale f, period g, cross h, cap i,
 #       refused j; delta match k, short l, long m) unresolved U; >1deg match .. short .. (1p .., 2p+ ..) long .. (1p .., 2p+ ..) fallback .. (none .., stale ..,
 #       period .., cross .., cap .., refused ..); >2deg <the same>; max X deg (class)|max n/a; late frames n; window S s
 #   pose slot: more than 8 callers in a window; N calls not counted
@@ -779,7 +789,7 @@ _POSE_SLOT_OVER = (r"match (?P<{p}match>\d+) short (?P<{p}short>\d+) \(1p (?P<{p
                    r"fallback (?P<{p}fb>\d+) \(none (?P<{p}r0>\d+), stale (?P<{p}r1>\d+), period (?P<{p}r2>\d+), cross (?P<{p}r3>\d+), "
                    r"cap (?P<{p}r4>\d+), refused (?P<{p}r5>\d+)\)")
 POSE_SLOT_RE = re.compile(
-    r"pose slot: tid (?P<tid>\d+) mode (?P<mode>next|slot) calls (?P<calls>\d+) "
+    r"pose slot: tid (?P<tid>\d+) mode (?P<mode>next|slot|arrival) calls (?P<calls>\d+) "
     r"match (?P<match>\d+) short (?P<short>\d+) \(1p (?P<short1>\d+), 2p\+ (?P<short2>\d+)\) "
     r"long (?P<long>\d+) \(1p (?P<long1>\d+), 2p\+ (?P<long2>\d+)\) "
     r"fallback (?P<fb>\d+) \(none (?P<r0>\d+), stale (?P<r1>\d+), period (?P<r2>\d+), cross (?P<r3>\d+), cap (?P<r4>\d+), refused (?P<r5>\d+); "
@@ -830,7 +840,8 @@ def tally_pose_slot(windows):
     for w in windows:
         groups.setdefault((w["mode"], w["tid"]), []).append(w)
     rows = []
-    for key in sorted(groups, key=lambda k: (k[0] != "next", k[0], k[1])):
+    order = {"next": 0, "slot": 1, "arrival": 2}
+    for key in sorted(groups, key=lambda k: (order[k[0]], k[1])):
         ws = groups[key]
         row = {"mode": key[0], "tid": key[1], "n": len(ws), "minutes": sum(w["secs"] for w in ws) / 60.0, "late": sum(w["late"] for w in ws),
                "reasons": {n: sum(w["reasons"][n] for w in ws) for n in POSE_SLOT_REASONS},
@@ -886,7 +897,7 @@ def print_pose_slot_tally(windows, notes):
             print("[edvr] %s, tid %d: %d window line(s) whose classes do not add up to their calls (a cut-off or edited log?)." % (r["mode"], r["tid"], r["badsum"]))
         if r["unresolved"]:
             print("[edvr] %s, tid %d: %d call(s) never met a next frame (the session ended, the cache was dropped, or the store was full)." % (r["mode"], r["tid"], r["unresolved"]))
-    for mode in ("next", "slot"):
+    for mode in ("next", "slot", "arrival"):
         sel = [r for r in rows if r["mode"] == mode]
         if not sel:
             continue
@@ -896,19 +907,168 @@ def print_pose_slot_tally(windows, notes):
               "late frames %d."
               % (mode, mins, sum(r["over1"]["short1"] for r in sel), sum(r["over2"]["short1"] for r in sel),
                  sum(r["over1"]["reasons"]["stale"] + r["over1"]["reasons"]["cap"] for r in sel), sum(r["over1"]["long"] for r in sel), late))
-    if {r["mode"] for r in rows} == {"next", "slot"}:
+    if len({r["mode"] for r in rows}) >= 2:
         def rate(mode):
             sel = [r for r in rows if r["mode"] == mode]
             mins = max(r["minutes"] for r in sel)
             n = sum(r["over1"]["short"] + r["over1"]["long"] + r["over1"]["fb"] for r in sel)
             return (n / mins) if mins > 0 else None
-        a, b = rate("next"), rate("slot")
-        if a is not None and b is not None:
-            print("[edvr] calls above 1 degree from the next drawn pose, per minute, all classes and threads: next %.2f, slot %.2f." % (a, b))
+        rates = [(m, rate(m)) for m in ("next", "slot", "arrival") if any(r["mode"] == m for r in rows)]
+        if all(v is not None for _, v in rates):
+            print("[edvr] calls above 1 degree from the next drawn pose, per minute, all classes and threads: %s." % ", ".join("%s %.2f" % (m, v) for m, v in rates))
     print("[edvr] How to read it: under `next`, short 1p calls above 1 degree that rise with the late frames are H-late (the next frame came a period later than `next` "
           "guessed); fallback stale above 1 degree is H-stale (the cached frame went a period stale and the call fell to now); long above 1 degree is H-overshoot "
           "(the cache had already advanced). Under `slot` those should fall to about zero. If every class is near zero while the flashes persist, the pose timing "
           "is not the cause.")
+
+# --tally pose also reads the pose-arrival diagnostic (src/openxr/pose_arrival.h writes every line; tools\openxr_pose_test holds tools\pose_arrival_fixture.log,
+# which this script's --self-test reads, to exactly what it writes). TEMPORARY with advanced.cull_pose_timing (docs\terrain-culling.md, 2026-10-10). One line per
+# calling thread per window of one timing, in the RUNTIME log next to the `pose slot:` lines:
+#
+#   pose arrival: tid T mode next|slot|arrival calls N between B straddled S render R other O fallback F unresolved U; queue ms between m/x, straddled m/x, render m/x;
+#       vs first frame after arrival: between (0p a, +1p b, +2p+ c, -1p- d), straddled (...), render (...), other (...); >1deg between x straddled y render z other w;
+#       >2deg between .. straddled .. render .. other ..; max X deg (class)|max n/a; late frames n; window S s
+#   pose arrival: more than 8 callers in a window; N calls not counted
+#
+# Each call is classed by what was true when it ARRIVED, read on the calling thread: Between (Elite had already begun to submit the latest frame, and the call was served
+# before the next publish), Straddled (the same, but it queued behind the frame wait and was served after the publish), Render (the frame was published and not yet
+# submitted), Other (a Render call that straddled). It is then compared with the FIRST FRAME PUBLISHED AFTER IT ARRIVED (for a straddled call the one cached when it was
+# served): 0p when it was located at that frame's display time to within half a period, +1p a period late, +2p+ more, -1p- a period or more early. Under `next` an unqueued
+# Between call reads 0p and a Straddled one +1p -- the same place in Elite's pipeline, answered a period apart; `arrival` puts every between-frames call at +1p.
+# calls = between + straddled + render + other; the buckets of all classes + fallback + unresolved = calls (fallbacks and unresolved calls are not bucketed).
+
+POSE_ARRIVAL_CLASSES = ("between", "straddled", "render", "other")
+POSE_ARRIVAL_BUCKETS = ("0p", "+1p", "+2p+", "-1p-")
+_ARRIVAL_VS = r"\(0p (?P<{p}0>\d+), \+1p (?P<{p}1>\d+), \+2p\+ (?P<{p}2>\d+), -1p- (?P<{p}3>\d+)\)"
+_ARRIVAL_OVER = r"between (?P<{p}0>\d+) straddled (?P<{p}1>\d+) render (?P<{p}2>\d+) other (?P<{p}3>\d+)"
+_ARRIVAL_QUEUE = r"(?P<{p}>[0-9.]+/[0-9.]+|n/a)"
+POSE_ARRIVAL_RE = re.compile(
+    r"pose arrival: tid (?P<tid>\d+) mode (?P<mode>next|slot|arrival) calls (?P<calls>\d+) "
+    r"between (?P<c0>\d+) straddled (?P<c1>\d+) render (?P<c2>\d+) other (?P<c3>\d+) fallback (?P<fb>\d+) unresolved (?P<unres>\d+); "
+    r"queue ms between " + _ARRIVAL_QUEUE.format(p="q0") + r", straddled " + _ARRIVAL_QUEUE.format(p="q1") + r", render " + _ARRIVAL_QUEUE.format(p="q2") + r"; "
+    r"vs first frame after arrival: between " + _ARRIVAL_VS.format(p="v0_") + r", straddled " + _ARRIVAL_VS.format(p="v1_") + r", render " + _ARRIVAL_VS.format(p="v2_")
+    + r", other " + _ARRIVAL_VS.format(p="v3_") + r"; "
+    r">1deg " + _ARRIVAL_OVER.format(p="a") + r"; >2deg " + _ARRIVAL_OVER.format(p="b") + r"; "
+    r"(?:max (?P<max>[0-9.]+) deg \((?P<maxc>between|straddled|render|other)\)|max n/a); late frames (?P<late>\d+); window (?P<secs>[0-9.]+) s")
+POSE_ARRIVAL_MORE_RE = re.compile(r"pose arrival: more than (?P<limit>\d+) callers in a window; (?P<dropped>\d+) calls not counted")
+
+
+def parse_pose_arrival(text):
+    """Every `pose arrival:` line, in order. Returns (windows, notes). A window is a dict: tid, mode ("next"/"slot"/"arrival"), calls, cls (the four class counts, between
+    straddled render other), fb, unresolved, queue (per between/straddled/render a (mean, max) in ms or None), bucket (per class a list of the four bucket counts 0p +1p +2p+
+    -1p-), over1 and over2 (the answered calls above 1 and above 2 degrees per class), max (degrees, None when n/a) and maxc (its class), late (frames), secs (the
+    window's length) and sums (the classes add up to the calls, and the buckets + fallbacks + unresolved to the calls). A note is the text of an over-the-limit line."""
+    windows = []
+    notes = []
+    for line in text.splitlines():
+        m = POSE_ARRIVAL_RE.search(line)
+        if m:
+            def queue(name):
+                v = m.group(name)
+                if v == "n/a":
+                    return None
+                mean, mx = v.split("/")
+                return (float(mean), float(mx))
+            cls = [int(m.group("c%d" % i)) for i in range(4)]
+            bucket = [[int(m.group("v%d_%d" % (c, b))) for b in range(4)] for c in range(4)]
+            w = {"tid": int(m.group("tid")), "mode": m.group("mode"), "calls": int(m.group("calls")), "cls": cls, "fb": int(m.group("fb")),
+                 "unresolved": int(m.group("unres")), "queue": [queue("q0"), queue("q1"), queue("q2")], "bucket": bucket,
+                 "over1": [int(m.group("a%d" % i)) for i in range(4)], "over2": [int(m.group("b%d" % i)) for i in range(4)],
+                 "max": float(m.group("max")) if m.group("max") is not None else None, "maxc": m.group("maxc"),
+                 "late": int(m.group("late")), "secs": float(m.group("secs"))}
+            w["sums"] = (w["calls"] == sum(cls) and sum(sum(b) for b in bucket) + w["fb"] + w["unresolved"] == w["calls"])
+            windows.append(w)
+            continue
+        if POSE_ARRIVAL_MORE_RE.search(line):
+            notes.append(line.split("pose arrival:", 1)[1].strip())
+    return windows, notes
+
+
+def tally_pose_arrival(windows):
+    """The --tally pose arrival numbers: one row per (mode, thread), over that caller's windows of that mode: n windows, minutes, calls and the four classes summed, fallbacks and
+    unresolved, the buckets and the calls above 1 and 2 degrees per class, the queue time per class (mean weighted by the class's calls, and the largest), late frames, the
+    largest angle and its class. Rows come out with `next` before `slot` before `arrival`."""
+    order = {"next": 0, "slot": 1, "arrival": 2}
+    groups = {}
+    for w in windows:
+        groups.setdefault((w["mode"], w["tid"]), []).append(w)
+    rows = []
+    for key in sorted(groups, key=lambda k: (order[k[0]], k[1])):
+        ws = groups[key]
+        row = {"mode": key[0], "tid": key[1], "n": len(ws), "minutes": sum(w["secs"] for w in ws) / 60.0, "late": sum(w["late"] for w in ws),
+               "calls": sum(w["calls"] for w in ws), "fb": sum(w["fb"] for w in ws), "unresolved": sum(w["unresolved"] for w in ws),
+               "cls": [sum(w["cls"][i] for w in ws) for i in range(4)],
+               "bucket": [[sum(w["bucket"][c][b] for w in ws) for b in range(4)] for c in range(4)],
+               "over1": [sum(w["over1"][i] for w in ws) for i in range(4)], "over2": [sum(w["over2"][i] for w in ws) for i in range(4)],
+               "badsum": sum(1 for w in ws if not w["sums"])}
+        queue = []
+        for c in range(3):
+            have = [(w["queue"][c], w["cls"][c]) for w in ws if w["queue"][c] is not None and w["cls"][c] > 0]
+            total = sum(n for _, n in have)
+            queue.append((sum(q[0] * n for q, n in have) / total, max(q[1] for q, _ in have)) if total else None)
+        row["queue"] = queue
+        known = [w for w in ws if w["max"] is not None]
+        top = max(known, key=lambda w: w["max"]) if known else None
+        row["max"] = top["max"] if top else None
+        row["maxc"] = top["maxc"] if top else None
+        rows.append(row)
+    return rows
+
+
+def print_pose_arrival_tally(windows, notes):
+    """The `pose arrival:` half of the --tally pose report: per (mode, thread) the share of calls in each arrival class, their queue times, where each class was located
+    against the first frame published after it arrived, the calls above 1 and 2 degrees per minute, then the reading of the mix."""
+    for note in notes:
+        print("[edvr] pose arrival: %s" % note)
+    rows = tally_pose_arrival(windows)
+    print("[edvr] tally pose arrival: %d window line(s) over %d (mode, thread) row(s); each call is classed by what was true when it ARRIVED and compared with the first frame published after it" % (len(windows), len(rows)))
+    print("%-8s %7s %6s %7s  %-14s %-16s %-14s %-12s %-8s %-6s" % ("mode", "tid", "min", "calls", "between", "straddled", "render", "other", "fallbk", "unres"))
+    for r in rows:
+        def share(i):
+            return "%d (%.0f%%)" % (r["cls"][i], 100.0 * r["cls"][i] / r["calls"]) if r["calls"] else "0"
+        print("%-8s %7d %6.1f %7d  %-14s %-16s %-14s %-12s %-8d %-6d" % (r["mode"], r["tid"], r["minutes"], r["calls"], share(0), share(1), share(2), share(3), r["fb"], r["unresolved"]))
+    print("queue ms (mean/max) and where the calls were located against the first frame after arrival (0p / +1p / +2p+ / -1p-):")
+    print("%-8s %7s  %-12s %-12s %-12s  %-22s %-22s %-22s" % ("mode", "tid", "q between", "q straddled", "q render", "between", "straddled", "render"))
+    for r in rows:
+        def q(i):
+            return ("%.2f/%.2f" % r["queue"][i]) if r["queue"][i] is not None else "n/a"
+        def vs(c):
+            return "/".join(str(v) for v in r["bucket"][c])
+        print("%-8s %7d  %-12s %-12s %-12s  %-22s %-22s %-22s" % (r["mode"], r["tid"], q(0), q(1), q(2), vs(0), vs(1), vs(2)))
+    print("calls above 1 degree / above 2 degrees, per minute (between, straddled, render, other):")
+    for r in rows:
+        mins = r["minutes"] if r["minutes"] > 0 else None
+        print("%-8s %7d  >1: %s   >2: %s" % (r["mode"], r["tid"], " ".join(("%.2f" % (v / mins)) if mins else "n/a" for v in r["over1"]),
+                                           " ".join(("%.2f" % (v / mins)) if mins else "n/a" for v in r["over2"])))
+    for r in rows:
+        if r["max"] is not None:
+            print("[edvr] %s, tid %d: the largest angle between a call's pose and the first frame after it arrived was %.3f deg (%s)." % (r["mode"], r["tid"], r["max"], r["maxc"]))
+        if r["badsum"]:
+            print("[edvr] %s, tid %d: %d window line(s) whose classes or buckets do not add up to their calls (a cut-off or edited log?)." % (r["mode"], r["tid"], r["badsum"]))
+        if r["unresolved"]:
+            print("[edvr] %s, tid %d: %d call(s) never met a first frame after arrival (the session ended, the cache was dropped, or the store was full)." % (r["mode"], r["tid"], r["unresolved"]))
+    for mode in ("next", "slot", "arrival"):
+        sel = [r for r in rows if r["mode"] == mode]
+        if not sel:
+            continue
+        mins = max(r["minutes"] for r in sel)
+        bf = sum(r["cls"][0] + r["cls"][1] for r in sel)
+        if not bf:
+            print("[edvr] mode %s over %.1f min: no call arrived between frames." % (mode, mins))
+            continue
+        not_straddled = sum(r["cls"][0] for r in sel)
+        at0 = sum(r["bucket"][0][0] + r["bucket"][1][0] for r in sel)
+        at1 = sum(r["bucket"][0][1] + r["bucket"][1][1] for r in sel)
+        answered = sum(sum(r["bucket"][0]) + sum(r["bucket"][1]) for r in sel)
+        other = answered - at0 - at1
+        den = answered if answered else 1
+        print("[edvr] mode %s over %.1f min: of %d call(s) that arrived between frames, %.0f%% were served before the next publish (Between) and %.0f%% queued behind the wait (Straddled); "
+              "answered at 0p %.0f%%, at +1p %.0f%%, elsewhere %.0f%% of the %d bucketed. Calls above 1 degree: between %d, straddled %d, render %d, other %d."
+              % (mode, mins, bf, 100.0 * not_straddled / bf, 100.0 * (bf - not_straddled) / bf, 100.0 * at0 / den, 100.0 * at1 / den, 100.0 * other / den, answered,
+                 sum(r["over1"][0] for r in sel), sum(r["over1"][1] for r in sel), sum(r["over1"][2] for r in sel), sum(r["over1"][3] for r in sel)))
+    print("[edvr] How to read it: under `next`, between-frames calls answered at 0p AND at +1p are the mix -- the same place in Elite's pipeline, a period apart, so the cull pose jumps a "
+          "period back and forth (a flash at either edge on a head turn). If Between calls are a real share of the between-frames calls on this runtime with calls above 1 degree, the mix "
+          "explains the flashes and `arrival` (every between-frames call at +1p) should clear them; if nearly every between-frames call is Straddled here too, the mix is not it.")
 
 # --camera-census: the VR camera census (advanced.vr_camera_census), one flight
 # in the VR profile with the key on. The question it answers (design doc section
@@ -10494,6 +10654,8 @@ def self_test():
         ok = False
     if not self_test_pose_slot():
         ok = False
+    if not self_test_pose_arrival():
+        ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1
@@ -10809,7 +10971,7 @@ def self_test_pose_slot():
         with open(name, "wb") as f:
             f.write((head + text).encode("utf-8"))
         rc, out = run(["--dir", logs, "--tally", "pose"])
-        if rc != 0 or "no `pose gap:` lines in this log, but it has `pose slot:` lines." not in out or "tally pose slot: 14 window line(s)" not in out:
+        if rc != 0 or "no `pose gap:` lines in this log, but it has `pose slot:` or `pose arrival:` lines." not in out or "tally pose slot: 14 window line(s)" not in out:
             fail("a log with pose slot lines and no pose gap line -> rc %d:\n%s" % (rc, out))
         # Neither: the old message and exit 1, unchanged.
         with open(name, "wb") as f:
@@ -10827,6 +10989,182 @@ def self_test_pose_slot():
             f.write((head + unres).encode("utf-8"))
         rc, out = run(["--dir", logs, "--tally", "pose"])
         if rc != 0 or "3 call(s) never met a next frame" not in out:
+            fail("unresolved calls are not said -> rc %d:\n%s" % (rc, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
+POSE_ARRIVAL_FIXTURE = "pose_arrival_fixture.log"
+
+
+def self_test_pose_arrival():
+    """--tally pose on the pose-arrival lines: tools\\pose_arrival_fixture.log (which tools\\openxr_pose_test holds to exactly what src/openxr/pose_arrival.h writes for the
+    scripted flight: 14 lines -- seven windows of two threads, `next` for 600 frames, `arrival` for 400 (the second window cut short by the flip back), `next` again for 700
+    (the last window cut short by the end of the run); thread 24212 makes a Straddled call every fourth frame, a Between call on the next two and a Render call on the fourth,
+    thread 7001 a Between call every frame, one in five a fallback; every tenth frame is late), then on lines altered to break each thing the report depends on. Returns ok."""
+    ok = True
+
+    def fail(message):
+        nonlocal ok
+        print("self_test_pose_arrival: %s" % message)
+        ok = False
+
+    import contextlib
+    import io
+    import shutil
+    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), POSE_ARRIVAL_FIXTURE)
+    if not os.path.isfile(fixture):
+        fail("the fixture %s is missing beside this script" % POSE_ARRIVAL_FIXTURE)
+        return False
+    text = read_text(fixture)
+    windows, notes = parse_pose_arrival(text)
+    if len(windows) != 14 or notes:
+        fail("the fixture parsed to %d windows and %d notes, want 14 and none" % (len(windows), len(notes)))
+        return False
+    if parse_pose_arrival("[00:00:00.000] pose slot: tid 1 mode next calls 0\n") != ([], []):
+        fail("a `pose slot:` line parsed as a pose arrival window")
+    if not all(w["sums"] for w in windows):
+        fail("a fixture window whose classes or buckets do not add up to its calls")
+    w0 = windows[0]
+    if (w0["tid"], w0["mode"], w0["calls"], w0["cls"], w0["fb"], w0["unresolved"], w0["bucket"][0], w0["over1"], w0["over2"], w0["max"], w0["maxc"], w0["late"], w0["secs"]) \
+            != (7001, "next", 300, [300, 0, 0, 0], 60, 0, [210, 0, 0, 30], [30, 0, 0, 0], [0, 0, 0, 0], 1.389, "between", 30, 60.0) \
+            or w0["queue"] != [(0.4, 0.4), None, None]:
+        fail("window 1 (the second thread under `next`: 300 Between calls, 60 fallbacks, 30 of them before a late frame) parsed to %r" % (w0,))
+    w1 = windows[1]
+    if (w1["tid"], w1["mode"], w1["cls"], w1["bucket"], w1["over1"], w1["maxc"]) != (24212, "next", [150, 75, 75, 0], [[135, 0, 0, 15], [0, 75, 0, 0], [60, 0, 0, 15], [0, 0, 0, 0]], [15, 75, 15, 0], "straddled") \
+            or w1["queue"] != [(0.3, 0.3), (7.0, 8.0), (0.1, 0.1)]:
+        fail("window 2 (Elite's thread under `next`: Between at 0p except before a late frame, Straddled at +1p, Render at 0p) parsed to %r" % (w1,))
+    if [w["secs"] for w in windows] != [60.0] * 6 + [20.0, 20.0] + [60.0] * 4 + [20.0, 20.0] or [w["mode"] for w in windows] != ["next"] * 4 + ["arrival"] * 4 + ["next"] * 6:
+        fail("the window lengths or modes -> %r" % ([(w["mode"], w["secs"]) for w in windows],))
+
+    def close(a, b, eps=0.005):
+        return a is not None and abs(a - b) <= eps
+
+    all_rows = tally_pose_arrival(windows)
+    if [(r["mode"], r["tid"]) for r in all_rows] != [("next", 7001), ("next", 24212), ("arrival", 7001), ("arrival", 24212)]:
+        fail("the rows, `next` before `arrival` -> %r" % ([(r["mode"], r["tid"]) for r in all_rows],))
+        return False
+    rows = {(r["mode"], r["tid"]): r for r in all_rows}
+    a = rows[("next", 24212)]
+    if (a["n"], a["calls"], a["cls"], a["fb"], a["unresolved"], a["late"]) != (5, 1300, [650, 325, 325, 0], 0, 0, 130) or not close(a["minutes"], 260.0 / 60.0, 1e-9) \
+            or a["bucket"] != [[585, 0, 0, 65], [0, 325, 0, 0], [260, 0, 0, 65], [0, 0, 0, 0]] or a["over1"] != [65, 325, 65, 0] or a["over2"] != [0, 0, 0, 0] \
+            or a["max"] != 1.389 or a["queue"][0] != (0.3, 0.3) or not close(a["queue"][1][0], 7.0, 0.05) or a["queue"][1][1] != 8.0 or a["queue"][2] != (0.1, 0.1):
+        fail("Elite's thread under `next` (Between 0p, Straddled +1p: the mix) -> %r" % (a,))
+    b = rows[("arrival", 24212)]
+    if (b["n"], b["calls"], b["cls"], b["late"]) != (2, 400, [200, 100, 100, 0], 40) or not close(b["minutes"], 80.0 / 60.0, 1e-9) \
+            or b["bucket"] != [[20, 180, 0, 0], [0, 100, 0, 0], [80, 0, 0, 20], [0, 0, 0, 0]] or b["over1"] != [180, 100, 20, 0]:
+        fail("Elite's thread under `arrival` (Between and Straddled both +1p, Render 0p) -> %r" % (b,))
+    c = rows[("next", 7001)]
+    if (c["n"], c["calls"], c["fb"], c["cls"], c["bucket"][0], c["over1"]) != (5, 1300, 260, [1300, 0, 0, 0], [910, 0, 0, 130], [130, 0, 0, 0]):
+        fail("the second thread under `next` -> %r" % (c,))
+    d = rows[("arrival", 7001)]
+    if (d["n"], d["calls"], d["fb"], d["bucket"][0], d["over1"]) != (2, 400, 80, [40, 280, 0, 0], [280, 0, 0, 0]):
+        fail("the second thread under `arrival` -> %r" % (d,))
+    # A line altered: n/a reads None; an n/a queue stays out of the row's mean; classes or buckets that do not add up are flagged; unresolved calls are said.
+    na = text.replace("max 1.389 deg (between)", "max n/a", 1)
+    nw, _ = parse_pose_arrival(na)
+    if nw[0]["max"] is not None or nw[0]["maxc"] is not None or nw[1]["max"] != 1.389:
+        fail("max n/a parsed as a number: %r" % (nw[0],))
+    nq = text.replace("queue ms between 0.30/0.30, straddled 7.00/8.00, render 0.10/0.10", "queue ms between n/a, straddled n/a, render n/a", 1)
+    qw, _ = parse_pose_arrival(nq)
+    if qw[1]["queue"] != [None, None, None] or tally_pose_arrival(qw)[1]["queue"][0] != (0.3, 0.3):
+        fail("an n/a queue changed the row: %r" % (qw[1]["queue"],))
+    broken = text.replace("calls 300 between 300 straddled 0", "calls 301 between 300 straddled 0", 1)
+    bw, _ = parse_pose_arrival(broken)
+    if bw[0]["sums"] or not all(w["sums"] for w in bw[1:]):
+        fail("a window whose classes add up to 300 of 301 calls was not flagged (only it)")
+    moved = text.replace("between (0p 210, +1p 0, +2p+ 0, -1p- 30)", "between (0p 210, +1p 0, +2p+ 0, -1p- 29)", 1)
+    mw, _ = parse_pose_arrival(moved)
+    if mw[0]["sums"]:
+        fail("a window whose buckets add up to 299 of 300 answered calls was not flagged")
+    unres = text.replace("fallback 60 unresolved 0; queue", "fallback 60 unresolved 1; queue", 1).replace("between (0p 210, +1p 0, +2p+ 0, -1p- 30)", "between (0p 209, +1p 0, +2p+ 0, -1p- 30)", 1)
+    uw, _ = parse_pose_arrival(unres)
+    if uw[0]["unresolved"] != 1 or not uw[0]["sums"]:
+        fail("a window with one unresolved call -> %r" % (uw[0],))
+    more = text + "[00:00:00.000] pose arrival: more than 8 callers in a window; 2 calls not counted\n"
+    ow, on = parse_pose_arrival(more)
+    if len(ow) != 14 or on != ["more than 8 callers in a window; 2 calls not counted"]:
+        fail("the over-the-limit line -> %d windows, notes %r" % (len(ow), on))
+    # The slot line under `arrival` parses, and sorts after `slot`.
+    slot_fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), POSE_SLOT_FIXTURE)
+    slot_text = read_text(slot_fixture) if os.path.isfile(slot_fixture) else ""
+    swapped = slot_text.replace(" mode slot ", " mode arrival ")
+    sw, _ = parse_pose_slot(swapped)
+    srows = tally_pose_slot(sw + [dict(w, mode="slot") for w in sw[:1]])
+    if len(sw) != 14 or sw[4]["mode"] != "arrival" or [r["mode"] for r in srows] != ["next", "next", "slot", "arrival", "arrival"]:
+        fail("a `pose slot:` line under mode arrival -> %d windows, rows %r" % (len(sw), [r["mode"] for r in srows]))
+    # Through main(), on a directory the tool discovers on its own.
+    gap_fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), POSE_FIXTURE)
+    gap_text = read_text(gap_fixture) if os.path.isfile(gap_fixture) else ""
+    head = "[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-09 12:00:00 UTC\n"
+    tmp = tempfile.mkdtemp(prefix="edvr_posearrival_selftest_")
+    try:
+        logs = os.path.join(tmp, "edvr_logs")
+        os.makedirs(logs)
+
+        def run(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        name = os.path.join(logs, "edvr_openxr_20261010_120000_123_77.log")
+        with open(name, "wb") as f:
+            f.write((head + gap_text + slot_text + more).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        for want in ("tally pose: 24 window line(s) over 2 caller row(s)",
+                     "tally pose slot: 14 window line(s) over 4 (mode, thread) row(s)",
+                     "tally pose arrival: 14 window line(s) over 4 (mode, thread) row(s); each call is classed by what was true when it ARRIVED and compared with the first frame published after it",
+                     "[edvr] pose arrival: more than 8 callers in a window; 2 calls not counted",
+                     "mode         tid    min   calls  between        straddled        render         other        fallbk   unres",
+                     "next       24212    4.3    1300  650 (50%)      325 (25%)        325 (25%)      0 (0%)       0        0",
+                     "arrival    24212    1.3     400  200 (50%)      100 (25%)        100 (25%)      0 (0%)       0        0",
+                     "next        7001  0.40/0.40    n/a          n/a           910/0/0/130",
+                     "next       24212  0.30/0.30    7.00/8.00    0.10/0.10     585/0/0/65             0/325/0/0              260/0/0/65",
+                     "arrival    24212  0.30/0.30    6.99/8.00    0.10/0.10     20/180/0/0             0/100/0/0              80/0/0/20",
+                     "next       24212  >1: 15.00 75.00 15.00 0.00   >2: 0.00 0.00 0.00 0.00",
+                     "arrival     7001  >1: 210.00 0.00 0.00 0.00",
+                     "[edvr] next, tid 24212: the largest angle between a call's pose and the first frame after it arrived was 1.389 deg (",
+                     "[edvr] mode next over 4.3 min: of 2275 call(s) that arrived between frames, 86% were served before the next publish (Between) and 14% queued behind the wait (Straddled); "
+                     "answered at 0p 74%, at +1p 16%, elsewhere 10% of the 2015 bucketed. Calls above 1 degree: between 195, straddled 325, render 65, other 0.",
+                     "[edvr] mode arrival over 1.3 min: of 700 call(s) that arrived between frames, 86% were served before the next publish (Between) and 14% queued behind the wait (Straddled); "
+                     "answered at 0p 10%, at +1p 90%, elsewhere 0% of the 620 bucketed. Calls above 1 degree: between 460, straddled 100, render 20, other 0.",
+                     "the same place in Elite's pipeline, a period apart, so the cull pose jumps a period back and forth",
+                     "if nearly every between-frames call is Straddled here too, the mix is not it."):
+            if want not in out:
+                fail("--tally pose output lacks %r:\n%s" % (want, out))
+        if rc != 0:
+            fail("--tally pose exited %d" % rc)
+        # The same log with the arrival lines taken out: the slot report, then the note that says the arrival instrument never wrote a line.
+        with open(name, "wb") as f:
+            f.write((head + gap_text + slot_text).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        if rc != 0 or "tally pose slot: 14 window line(s)" not in out or "no `pose arrival:` lines in this log" not in out or "tally pose arrival" in out:
+            fail("a log with pose slot lines and no pose arrival line -> rc %d:\n%s" % (rc, out))
+        # Arrival lines and nothing else.
+        with open(name, "wb") as f:
+            f.write((head + text).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        if rc != 0 or "no `pose gap:` lines in this log, but it has `pose slot:` or `pose arrival:` lines." not in out or "tally pose arrival: 14 window line(s)" not in out \
+                or "tally pose slot" in out:
+            fail("a log with pose arrival lines only -> rc %d:\n%s" % (rc, out))
+        # The pose gap fixture alone: both notes.
+        with open(name, "wb") as f:
+            f.write((head + gap_text).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        if rc != 0 or "no `pose slot:` lines in this log" not in out or "no `pose arrival:` lines in this log" not in out:
+            fail("a log with pose gap lines only -> rc %d:\n%s" % (rc, out))
+        # The flags the report raises on altered lines.
+        with open(name, "wb") as f:
+            f.write((head + broken).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        if rc != 0 or "window line(s) whose classes or buckets do not add up to their calls" not in out:
+            fail("a window that does not add up is not flagged -> rc %d:\n%s" % (rc, out))
+        with open(name, "wb") as f:
+            f.write((head + unres).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        if rc != 0 or "1 call(s) never met a first frame after arrival" not in out:
             fail("unresolved calls are not said -> rc %d:\n%s" % (rc, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

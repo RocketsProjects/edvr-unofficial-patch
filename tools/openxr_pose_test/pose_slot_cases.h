@@ -37,20 +37,20 @@ inline std::string fixtureLog() {
   uint64_t ms = 1000, late = 0;
   int64_t D = 1000000000;
   const auto yawAt = [&](int64_t t, float q[4]) { yaw(std::fmod(omega * double(t) / 1e9, 360.0), q); };
-  stats.setMode(false, late, ms, lines);
+  stats.setMode(PoseTiming::Next, late, ms, lines);
   stats.flushIfDue(ms, late, lines);   // the first call only opens a window
   const int frames = 1700;
   for (int f = 0; f < frames; ++f) {
     const bool slotNow = f >= 599 && f < 999;   // the mode the NEXT frame's calls are made under
     const bool nextLate = (f % 10) == 9;
-    const int64_t T1 = D + (stats.on() && nextLate ? 2 : 1) * P;
+    const int64_t T1 = D + (stats.mode() != PoseTiming::Next && nextLate ? 2 : 1) * P;
     float q[4];
     yawAt(T1, q);
     stats.noteCall(24212, T1, PoseAnswer::Answered, q);
     if (f % 7 == 3) {
       const int64_t now = D - P;   // the wall clock: older than any slot
       yawAt(now, q);
-      stats.noteCall(7001, now, stats.on() ? PoseAnswer::Cap : PoseAnswer::Stale, q);
+      stats.noteCall(7001, now, stats.mode() != PoseTiming::Next ? PoseAnswer::Cap : PoseAnswer::Stale, q);
     } else if (f == 100) {
       yawAt(D, q);
       stats.noteCall(7001, D, PoseAnswer::Cross, q);
@@ -65,7 +65,7 @@ inline std::string fixtureLog() {
     yawAt(next, drawn);
     stats.resolve(next, P, drawn);
     D = next;
-    stats.setMode(slotNow, late, ms, lines);
+    stats.setMode(slotNow ? PoseTiming::Slot : PoseTiming::Next, late, ms, lines);
     stats.flushIfDue(ms, late, lines);
   }
   stats.flushNow(ms, late, lines);
@@ -114,7 +114,7 @@ void runPoseSlotCases(Check&& check) {
       yaw(angle, q);
       s.noteCall(tid, next + delta, why, q);
     };
-    s.setMode(false, 0, 1000, lines);
+    s.setMode(PoseTiming::Next, 0, 1000, lines);
     s.flushIfDue(1000, 0, lines);
     call(1, 0, PoseAnswer::Answered, 0.5);                                         // match, below 1 degree
     call(1, 2777777, PoseAnswer::Answered, 1.5);                                   // match, above 1
@@ -219,8 +219,8 @@ void runPoseSlotCases(Check&& check) {
     Lines lines;
     float q[4];
     yaw(0.0, q);
-    check(!s.on(), "the instrument starts in the shipped mode");
-    s.setMode(false, 5, 1000, lines);
+    check(s.mode() == PoseTiming::Next, "the instrument starts in the shipped mode");
+    s.setMode(PoseTiming::Next, 5, 1000, lines);
     s.flushIfDue(1000, 5, lines);
     s.noteCall(1, D, PoseAnswer::Answered, q);
     s.resolve(D, P, q);
@@ -238,8 +238,8 @@ void runPoseSlotCases(Check&& check) {
     s.noteCall(1, D, PoseAnswer::Answered, q);
     s.noteCall(2, D, PoseAnswer::Answered, q);
     s.resolve(D, P, q);
-    s.setMode(true, 25, 130000, lines);
-    check(s.on() && lines.v.size() == 3 && lines.v[1].find("tid 1 mode next calls 1 ") != std::string::npos && lines.v[2].find("tid 2 mode next calls 1 ") != std::string::npos &&
+    s.setMode(PoseTiming::Slot, 25, 130000, lines);
+    check(s.mode() == PoseTiming::Slot && lines.v.size() == 3 && lines.v[1].find("tid 1 mode next calls 1 ") != std::string::npos && lines.v[2].find("tid 2 mode next calls 1 ") != std::string::npos &&
               lines.v[1].find("late frames 5") != std::string::npos,
           "a mode change closes the window at the change: its lines are written under the OLD mode, with the late frames up to the change (25 - 20)");
     s.noteCall(1, D, PoseAnswer::Answered, q);
@@ -249,7 +249,7 @@ void runPoseSlotCases(Check&& check) {
     s.flushIfDue(190000, 31, lines);
     check(lines.v.size() == 4 && lines.v[3].find("tid 1 mode slot calls 1 ") != std::string::npos && lines.v[3].find("late frames 6") != std::string::npos,
           "...and is written under the new mode 60 s later (31 - 25)");
-    s.setMode(true, 40, 200000, lines);
+    s.setMode(PoseTiming::Slot, 40, 200000, lines);
     check(lines.v.size() == 4, "setting the mode it is in changes nothing");
   }
   // ---- the lines of the scripted flight ------------------------------------------------------------------------------------------------------

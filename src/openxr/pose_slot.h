@@ -1,6 +1,6 @@
 #pragma once
 
-// The pose-slot diagnostic (docs\terrain-culling.md, 2026-10-10; TEMPORARY with advanced.cull_pose_slot). Always on, in both modes, cheap: no
+// The pose-slot diagnostic (docs\terrain-culling.md, 2026-10-10; TEMPORARY with advanced.cull_pose_timing). Always on, in both modes, cheap: no
 // allocation, no lock, owner thread only (the same rule as the cached frame it measures against).
 //
 // WHAT IT MEASURES. Elite's game thread asks for "now" between frames and culls planet terrain with the pose it gets; the fix (head_pose_time.h)
@@ -20,7 +20,7 @@
 // cache was dropped by a session or origin change, the pending store was full, the next frame has no usable period) is unresolved.
 //
 // One line per calling thread per 60 s window, next to the `pose gap:` line (which is unchanged), written from the WaitGetPoses publish point:
-//   pose slot: tid T mode next|slot calls N match M short S (1p a, 2p+ b) long L (1p c, 2p+ d) fallback F (none e, stale f, period g, cross h,
+//   pose slot: tid T mode next|slot|arrival calls N match M short S (1p a, 2p+ b) long L (1p c, 2p+ d) fallback F (none e, stale f, period g, cross h,
 //   cap i, refused j; delta match k, short l, long m) unresolved U; >1deg match .. short .. (1p .., 2p+ ..) long .. (1p .., 2p+ ..) fallback ..
 //   (none .., stale .., period .., cross .., cap .., refused ..); >2deg ...; max X deg (class); late frames n; window S s
 // `mode` is the one in force when the calls were made; a mode change closes the window at the change, so a line has one mode. `late frames` is the
@@ -89,8 +89,8 @@ struct NoPoseSlotSink {
 
 class PoseSlotStats {
  public:
-  // Whether the slot answer is in force: what the next calls are made under. Set from the publish point (setMode).
-  bool on() const { return on_; }
+  // The timing in force: what the next calls are made under (next, slot, arrival). Set from the publish point (setMode).
+  PoseTiming mode() const { return mode_; }
 
   // One call the fix handled, located at `at` (the instant it asked the runtime for) and returned orientation `q` (x, y, z, w; null when the pose
   // it returned was not valid). `why` is Answered, or the reason it fell back to now + prediction.
@@ -145,11 +145,11 @@ class PoseSlotStats {
   // From the publish point, once per frame, after resolve(): the mode for the calls to come. The first call sets it; a change closes the window
   // (writing its lines under the old mode) and opens the next at `nowMs`.
   template <class Sink>
-  void setMode(bool slot, uint64_t lateTotal, uint64_t nowMs, Sink&& sink) {
-    if (!modeKnown_) { modeKnown_ = true; on_ = slot; return; }
-    if (slot == on_) return;
+  void setMode(PoseTiming mode, uint64_t lateTotal, uint64_t nowMs, Sink&& sink) {
+    if (!modeKnown_) { modeKnown_ = true; mode_ = mode; return; }
+    if (mode == mode_) return;
     write(lateTotal, nowMs, sink);
-    on_ = slot; startMs_ = nowMs; lateStart_ = lateTotal; started_ = true;
+    mode_ = mode; startMs_ = nowMs; lateStart_ = lateTotal; started_ = true;
   }
 
   // From the publish point: write the window's lines once it is 60 s old. The first call only opens a window.
@@ -180,7 +180,7 @@ class PoseSlotStats {
 
   // The line for one caller. `late` is the runtime's late-frame count over the window, `seconds` the window's length (60 s, or less for a window
   // cut short by a mode change or the end of the run: the tally's per-minute rates divide by it).
-  static const char* line(char (&buffer)[768], uint32_t thread, bool slot, const PoseSlotCounts& c, uint64_t late, double seconds) {
+  static const char* line(char (&buffer)[768], uint32_t thread, PoseTiming mode, const PoseSlotCounts& c, uint64_t late, double seconds) {
     const auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
     uint64_t fallback = 0, fallbackOver1 = 0, fallbackOver2 = 0;
     for (unsigned i = kSlotFallbackFirst; i <= kSlotFallbackLast; ++i) { fallback += c.cls[i]; fallbackOver1 += c.over1[i]; fallbackOver2 += c.over2[i]; }
@@ -202,7 +202,7 @@ class PoseSlotStats {
       "pose slot: tid %lu mode %s calls %llu match %llu short %llu (1p %llu, 2p+ %llu) long %llu (1p %llu, 2p+ %llu) fallback %llu "
       "(none %llu, stale %llu, period %llu, cross %llu, cap %llu, refused %llu; delta match %llu, short %llu, long %llu) unresolved %llu; "
       ">1deg %s; >2deg %s; %s; late frames %llu; window %.1f s",
-      static_cast<unsigned long>(thread), slot ? "slot" : "next", u(c.calls), u(c.cls[kSlotMatch]), u(c.cls[kSlotShort1] + c.cls[kSlotShort2]),
+      static_cast<unsigned long>(thread), poseTimingName(mode), u(c.calls), u(c.cls[kSlotMatch]), u(c.cls[kSlotShort1] + c.cls[kSlotShort2]),
       u(c.cls[kSlotShort1]), u(c.cls[kSlotShort2]), u(c.cls[kSlotLong1] + c.cls[kSlotLong2]), u(c.cls[kSlotLong1]), u(c.cls[kSlotLong2]), u(fallback),
       u(c.cls[kSlotFallbackFirst]), u(c.cls[kSlotFallbackFirst + 1]), u(c.cls[kSlotFallbackFirst + 2]), u(c.cls[kSlotFallbackFirst + 3]),
       u(c.cls[kSlotFallbackFirst + 4]), u(c.cls[kSlotFallbackFirst + 5]), u(c.fallbackDelta[0]), u(c.fallbackDelta[1]), u(c.fallbackDelta[2]),
@@ -234,7 +234,7 @@ class PoseSlotStats {
     const uint64_t late = lateTotal >= lateStart_ ? lateTotal - lateStart_ : 0;
     const double seconds = started_ && nowMs >= startMs_ ? double(nowMs - startMs_) / 1000.0 : 0.0;
     char buffer[768];
-    for (unsigned i = 0; i < used_; ++i) sink(static_cast<const char*>(line(buffer, keys_[i].thread, on_, keys_[i].counts, late, seconds)));
+    for (unsigned i = 0; i < used_; ++i) sink(static_cast<const char*>(line(buffer, keys_[i].thread, mode_, keys_[i].counts, late, seconds)));
     if (droppedCalls_) {
       char more[128];
       std::snprintf(more, sizeof(more), "pose slot: more than %u callers in a window; %llu calls not counted", kPoseSlotThreads,
@@ -249,6 +249,7 @@ class PoseSlotStats {
   Pending pending_[kPoseSlotPending]{};
   unsigned count_ = 0;
   uint64_t overflowed_ = 0, droppedCalls_ = 0, startMs_ = 0, lateStart_ = 0;
-  bool started_ = false, modeKnown_ = false, on_ = false;
+  bool started_ = false, modeKnown_ = false;
+  PoseTiming mode_ = PoseTiming::Next;
 };
 }  // namespace edvr::openxr

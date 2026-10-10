@@ -40,10 +40,29 @@ struct State {
     bool pacingNoted = false;
     bool weaponStabilityNoted = false;
     bool lastWeaponStability = true;
-    bool cullPoseSlotNoted = false;
-    bool lastCullPoseSlot = false;
+    bool cullPoseTimingNoted = false;
+    uint32_t lastCullPoseTiming = 0;
     EdvrNativeFrameDecision cachedDecision{};
 };
+
+// advanced.cull_pose_timing's value as the word the runtime is told (EdvrNativeFrameOutput::cullPoseTiming): next 0, slot 1, arrival 2, any case; anything
+// else is `next`.
+std::string lowered(std::string text) {
+    for (char& c : text) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return text;
+}
+bool cullPoseTimingIsNext(const std::string& text) { return lowered(text) == "next"; }
+uint32_t cullPoseTimingCode(const std::string& text) {
+    const std::string t = lowered(text);
+    return t == "slot" ? 1u : t == "arrival" ? 2u : 0u;
+}
+const char* cullPoseTimingName(uint32_t code) { return code == 1u ? "slot" : code == 2u ? "arrival" : "next"; }
+const char* cullPoseTimingDescription(uint32_t code) {
+    return code == 1u ? "Elite's \"now\" head pose is located at the display slot the next frame will really be shown at, a later one after a late frame"
+         : code == 2u ? "Elite's \"now\" head pose is located as slot, and a period later for a call that arrived between frames, so every between-frames "
+                        "call is answered a period past the first frame published after it arrived"
+                      : "Elite's \"now\" head pose is located one display period after the drawn frame, as shipped";
+}
 
 State g_pool[kPoolSize];
 unsigned g_used = 0;
@@ -319,20 +338,20 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         state->weaponStabilityNoted = true;
         state->lastWeaponStability = weaponStability;
     }
-    // advanced.cull_pose_slot (TEMPORARY, the terrain-culling arc; docs\terrain-culling.md): whether the runtime locates Elite's "now" head
-    // pose at the display slot the next frame will really be shown at. Only a shape that carries version 4's word (a version 4 or 5 caller) can
-    // be told; every older one reads the shipped answer and nothing is said for it. Read every frame, so the key is live.
+    // advanced.cull_pose_timing = next | slot | arrival (TEMPORARY, the terrain-culling arc; docs\terrain-culling.md): which instant the runtime
+    // locates Elite's "now" head pose at. Only a shape that carries version 4's word (a version 4 or 5 caller) can be told; every older one reads
+    // the shipped answer (`next`) and nothing is said for it. Read every frame, so the key is live; a value that is none of the three reads `next`.
     if (wantsFade || wantsChannel) {
-        const bool slot = edvr::Config::get().getBool("advanced.cull_pose_slot", false);
-        result.cullPoseSlot = slot ? 1u : 0u;
-        if (!state->cullPoseSlotNoted || state->lastCullPoseSlot != slot) {
-            edvr::Log::get().note(
-                "cull pose slot: %s (%s).", slot ? "on" : "off",
-                slot ? "Elite's \"now\" head pose is located at the display slot the next frame will really be shown at, "
-                       "a later one after a late frame"
-                     : "Elite's \"now\" head pose is located one display period after the drawn frame, as shipped");
-            state->cullPoseSlotNoted = true;
-            state->lastCullPoseSlot = slot;
+        const std::string raw = edvr::Config::get().getString("advanced.cull_pose_timing", "next");
+        const uint32_t timing = cullPoseTimingCode(raw);
+        result.cullPoseTiming = timing;
+        if (!state->cullPoseTimingNoted || state->lastCullPoseTiming != timing) {
+            const bool known = timing != 0 || raw.empty() || cullPoseTimingIsNext(raw);
+            std::string what = cullPoseTimingDescription(timing);
+            if (!known) what += "; \"" + raw + "\" is not next, slot or arrival";
+            edvr::Log::get().note("cull pose timing: %s (%s).", cullPoseTimingName(timing), what.c_str());
+            state->cullPoseTimingNoted = true;
+            state->lastCullPoseTiming = timing;
         }
     }
 

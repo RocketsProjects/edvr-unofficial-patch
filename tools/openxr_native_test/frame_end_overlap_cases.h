@@ -268,11 +268,17 @@ template<class Check> void runFrameEndOverlapCases(Check check) {
   check(f.owner.invoke([&]{firstWaitOk=openFrame();}),"frame_end_overlap first wait invoked on owner");
   check(firstWaitOk,"frame_end_overlap first wait admits a frame");
   h.frameWithheld=true;
+  // The pose-arrival stamp (pose_arrival.h): Elite's Submit of the latest frame sets submitSeq to the frames published so far, at the entry of the call on
+  // Elite's thread. waitPoses's publish point is not reached by this fixture, so publishSeq is set by hand to a value the Submit must copy.
+  h.publishSeq.store(41);h.submitSeq.store(0);
   check(h.submitEye(h.compositorGeneration,vr::Eye_Left,&leftTexture,nullptr,vr::Submit_Default)==vr::VRCompositorError_None,
     "frame_end_overlap first eye submits");
+  check(h.submitSeq.load()==41,"pose arrival: the first eye's Submit sets submitSeq to the frames published so far (a pose call that arrives now is between frames)");
   timing_fixture::state.log.clear(); // isolate the deferring eye's own calls
+  h.publishSeq.store(42);
   const auto secondResult=h.submitEye(h.compositorGeneration,vr::Eye_Right,&rightTexture,nullptr,vr::Submit_Default);
   check(secondResult==vr::VRCompositorError_None,"frame_end_overlap deferred second eye returns immediately");
+  check(h.submitSeq.load()==42,"pose arrival: the second eye's Submit sets it too, taken at the entry on Elite's thread before the hop to the owner");
   // Not h.pendingFrameEndFinish: the FIFO worker can pick up and finish the
   // queued job before this test thread gets back around to checking it here
   // -- the overlap's whole point -- so that flag is racy from this side. The

@@ -1,6 +1,7 @@
 #include "../../src/openxr/space_pose.h"
 #include "pose_gap_cases.h"
 #include "pose_slot_cases.h"
+#include "pose_arrival_cases.h"
 #include "head_pose_time_cases.h"
 #include <cmath>
 #include <cstdio>
@@ -184,10 +185,17 @@ int main(int argc, char** argv) {
     std::fwrite(text.data(), 1, text.size(), stdout);
     return 0;
   }
+  if (argc == 2 && std::string(argv[1]) == "--print-arrival-fixture") {
+    const std::string text = pose_arrival_cases::fixtureLog();
+    _setmode(_fileno(stdout), _O_BINARY);   // LF only: tools/pose_arrival_fixture.log is this, byte for byte
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    return 0;
+  }
   if (argc != 2 || std::string(argv[1]) != "--self-test") return 2;
   conversionTests(); locateTests(); timeTests();
   pose_gap_cases::runPoseGapCases(check);
   pose_slot_cases::runPoseSlotCases(check);
+  pose_arrival_cases::runPoseArrivalCases(check);
   head_pose_time_cases::runHeadPoseTimeCases(check);
   std::cout << "openxr_pose_test: " << checks << " checks, " << failures << " failures\n";
   return failures ? 1 : 0;

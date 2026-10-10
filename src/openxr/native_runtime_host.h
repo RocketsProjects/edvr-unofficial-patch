@@ -58,6 +58,7 @@
 #include "head_locator.h"
 #include "pose_gap.h"
 #include "pose_slot.h"
+#include "pose_arrival.h"
 #include "runtime_gate.h"
 #include "frame_pacer.h"
 #include "frame_boundary.h"
@@ -393,17 +394,32 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     bool valid=false,orientationKnown=false,speedKnown=false;
     XrTime displayTime=0;XrDuration period=0;
     // The frame's lead: its display time less the runtime time its frame wait returned at (waitReturnedAt), 0 when that was not read. Only
-    // the pose-slot answer (advanced.cull_pose_slot) reads it.
+    // the pose-slot answer (advanced.cull_pose_timing) reads it.
     XrDuration lead=0;
     float orientation[4]{0,0,0,1};
     double speedDegPerSec=0;
   } latestPoseFrame;
   // The calls Elite's "now" requests made since the cached frame was published, kept for the pose-slot diagnostic to compare with the frame that
   // came next (pose_slot.h): dropping the cached frame (a session, origin or geometry change) gives them no frame to be compared with.
-  void dropPoseFrame() {latestPoseFrame=PoseFrame{};poseSlot.dropPending();}
+  void dropPoseFrame() {latestPoseFrame=PoseFrame{};poseSlot.dropPending();poseArrival.dropPending();}
   // The runtime time at which the frame wait of the frame now being published returned (set right after boundary.waitAndBegin; 0: not read).
   XrTime waitReturnedAt=0;
   PoseSlotStats poseSlot;
+  PoseArrivalStats poseArrival;
+  // Arrival bookkeeping for Elite's "now" calls (pose_arrival.h, head_pose_time.h PoseArrival). `publishSeq` counts the frames published to the pose
+  // cache (incremented in publishPoseGap, owner thread); `submitSeq` is the publishSeq of the last frame Elite began to submit (set at the entry of
+  // submitEyeAdmitted, on Elite's calling thread, before the hop to the owner). Both are read on the CALLING thread when a pose call arrives
+  // (stampArrival), since the owner may be blocked in the frame wait while the call queues behind it. `headClockHz` turns the head clock's ticks into
+  // seconds for the queue times (the performance counter's frequency; a rig that substitutes its own clock sets its own).
+  std::atomic<uint64_t> publishSeq{0},submitSeq{0};
+  double headClockHz=[]{LARGE_INTEGER f{};return QueryPerformanceFrequency(&f)&&f.QuadPart>0?double(f.QuadPart):1e9;}();
+  void stampArrival(HeadCall& call) const {
+    call.arrived=true;
+    call.publishSeq=publishSeq.load(std::memory_order_acquire);
+    call.submitSeq=submitSeq.load(std::memory_order_acquire);
+    LARGE_INTEGER ticks{};
+    call.arrivalTicks=(headClock&&headClock(&ticks))?int64_t(ticks.QuadPart):0;
+  }
   // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the explicit-time locates the runtime
   // refused with XR_ERROR_TIME_INVALID and that were located at now + prediction instead.
   CounterNow headClock=counterNow;
@@ -874,13 +890,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // window: counted here, written here, so the lines come from the one thread that already logs per frame.
   // The pose-slot instrument (pose_slot.h) is fed here too, and writes its own lines through `slotSink`: first the calls made since the previous
   // frame are compared with THIS frame (its display time, period and drawn orientation), before the cache is replaced; then the mode the next
-  // calls are made under is taken from the frame the graphics half just described (featureFrame.cullPoseSlot, advanced.cull_pose_slot, live), and
-  // the window is judged.
-  template<class Sink,class SlotSink=NoPoseSlotSink>
+  // calls are made under is taken from the frame the graphics half just described (featureFrame.cullPoseTiming, advanced.cull_pose_timing, live), and
+  // the window is judged. The pose-arrival instrument (pose_arrival.h) is fed the same way and writes through `arrivalSink`: its Between and Render
+  // calls are compared with this frame here; the frame count (publishSeq) advances once the cache holds it.
+  template<class Sink,class SlotSink=NoPoseSlotSink,class ArrivalSink=NoPoseSlotSink>
   void publishPoseGap(XrTime displayTime,XrDuration period,const XrPosef& headPose,bool poseValid,XrSpaceVelocityFlags velocityFlags,
-                      const XrVector3f& angularVelocity,uint64_t nowMs,Sink&& sink,SlotSink&& slotSink=SlotSink{}) {
+                      const XrVector3f& angularVelocity,uint64_t nowMs,Sink&& sink,SlotSink&& slotSink=SlotSink{},ArrivalSink&& arrivalSink=ArrivalSink{}) {
     const float drawn[4]={headPose.orientation.x,headPose.orientation.y,headPose.orientation.z,headPose.orientation.w};
     poseSlot.resolve(displayTime,period,poseValid?drawn:nullptr);
+    poseArrival.resolve(displayTime,period,poseValid?drawn:nullptr);
     latestPoseFrame.valid=true;latestPoseFrame.displayTime=displayTime;latestPoseFrame.period=period;
     latestPoseFrame.lead=(waitReturnedAt>0&&displayTime>waitReturnedAt)?displayTime-waitReturnedAt:0;
     latestPoseFrame.orientationKnown=poseValid;
@@ -888,11 +906,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     latestPoseFrame.orientation[2]=drawn[2];latestPoseFrame.orientation[3]=drawn[3];
     latestPoseFrame.speedKnown=(velocityFlags&XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)!=0;
     latestPoseFrame.speedDegPerSec=latestPoseFrame.speedKnown?angularSpeedDegrees(angularVelocity.x,angularVelocity.y,angularVelocity.z):0.0;
+    publishSeq.fetch_add(1,std::memory_order_release);
     poseGap.noteWait();
     poseGap.flushIfDue(nowMs,sink);
     const uint64_t late=boundary.lateFrames();
-    poseSlot.setMode(featureFrameKnown&&featureFrame.cullPoseSlot==1,late,nowMs,slotSink);
+    const PoseTiming wanted=featureFrameKnown?poseTimingFromWord(featureFrame.cullPoseTiming):PoseTiming::Next;
+    poseSlot.setMode(wanted,late,nowMs,slotSink);
     poseSlot.flushIfDue(nowMs,late,slotSink);
+    poseArrival.setMode(wanted,late,nowMs,arrivalSink);
+    poseArrival.flushIfDue(nowMs,late,arrivalSink);
   }
   // The runtime time at which the frame wait that produced the frame being published returned, taken the moment boundary.waitAndBegin comes back
   // (the frame's lead is its display time less this). The same clock a pose call's "now" reads, so lead and now are comparable.
@@ -1279,7 +1301,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     out=snapshot;lastCompositorResult=XR_SUCCESS;
     publishPoseGap(frame.predictedDisplayTime,frame.predictedDisplayPeriod,located.headPose,render.pose.bPoseIsValid,
       velocity.velocityFlags,velocity.angularVelocity,GetTickCount64(),[](const char* gapLine){nativeTracePuts(gapLine);},
-      [](const char* slotLine){nativeTracePuts(slotLine);});
+      [](const char* slotLine){nativeTracePuts(slotLine);},[](const char* arrivalLine){nativeTracePuts(arrivalLine);});
     if(timingFrameActive && FAILED(timing.waitEnd(timingSequence,true,static_cast<int64_t>(frame.predictedDisplayPeriod))))
       timingInvalidate();
     if(timingFrameActive) {
@@ -1311,6 +1333,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   vr::EVRCompositorError submitEyeAdmitted(uint64_t generation,vr::EVREye eye,const vr::Texture_t* texture,
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags,uint64_t admission) {
     if(!service.isOwner()) {
+      // Elite has begun to submit the latest frame: from here on a pose call that arrives is "between frames" (pose_arrival.h) until the next
+      // publish. Taken at the very entry, on Elite's calling thread before the hop to the owner (the owner may still be finishing the previous
+      // frame's end), and not again when the owner re-enters below, so a publish in between cannot mark a frame submitted that was not. Either eye.
+      submitSeq.store(publishSeq.load(std::memory_order_acquire),std::memory_order_release);
       auto result=vr::VRCompositorError_InvalidTexture;
       const auto sequence=timingApplicationSequence.load(std::memory_order_acquire);
       const auto cycleSequence=frameCycleSequence.load(std::memory_order_acquire);
@@ -2272,6 +2298,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.note(sample);
   }
   bool locateHeadFor(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out) override {
+    // The call is stamped when it ARRIVES, here on the calling thread before the hop to the owner (which may be blocked in the frame wait): the
+    // frames published so far, the frame Elite had begun to submit, and the clock. A call already stamped (the owner's own re-entry) is left alone.
+    if(!call.arrived) {HeadCall stamped=call;stampArrival(stamped);return locateHeadFor(generation,origin,prediction,stamped,out);}
     if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=locateHeadFor(generation,origin,prediction,call,out);})&&result;}
     PoseGapStats::Sample sample{};sample.thread=call.thread;sample.rva=call.rva;sample.predictionSec=prediction;
     const bool located=locateHeadOwned(generation,origin,prediction,call,out,sample);
@@ -2284,15 +2313,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // or geometry was last invalidated, a display time that is not positive, the cached frame more than one display period behind `now`
   // (displayTimeFresh, judged on the cached frame, not on the target), a frame that reports no period, or a reference-space change between the
   // display time and the target -- and the call is located at now + prediction as it always was.
-  // With advanced.cull_pose_slot on (poseSlot.on(), set at each publish) the instant is instead the next display slot at or after now + the cached
-  // frame's lead (head_pose_time.h slotAnswerTime): the same as `next` while frames are on time, a later slot after a late one, and no freshness
-  // guard. `why` is Answered, or the reason there is no instant of its own (PoseAnswer), which the pose-slot diagnostic counts.
-  PoseAnswer poseTargetWhy(XrTime now,XrTime& target) {
+  // With advanced.cull_pose_timing = slot (poseSlot.mode(), set at each publish) the instant is instead the next display slot at or after now + the
+  // cached frame's lead (head_pose_time.h slotAnswerTime): the same as `next` while frames are on time, a later slot after a late one, and no
+  // freshness guard; = arrival is slot plus one period for a call that arrived between frames and was not served after a publish (`arrival` is the
+  // class the call had, PoseArrival). `why` is Answered, or the reason there is no instant of its own (PoseAnswer), which the pose-slot
+  // diagnostic counts.
+  PoseAnswer poseTargetWhy(XrTime now,XrTime& target,PoseArrival arrival=PoseArrival::Render) {
     if(!latestPoseFrame.valid)return PoseAnswer::NoFrame;
-    const auto crosses=[&](int64_t from,int64_t to){return changes.crosses(from,to);};
-    if(poseSlot.on())return slotAnswerTime(latestPoseFrame.displayTime,latestPoseFrame.period,latestPoseFrame.lead,now,crosses,&target);
-    return answerTimeWhy(latestPoseFrame.displayTime,latestPoseFrame.period,now,
-      [](int64_t shown,int64_t period,int64_t& out){return nextPredictionTime(shown,period,out);},crosses,&target);
+    return timingAnswerTime(poseSlot.mode(),arrival,latestPoseFrame.displayTime,latestPoseFrame.period,latestPoseFrame.lead,now,
+      [](int64_t shown,int64_t period,int64_t& out){return nextPredictionTime(shown,period,out);},
+      [&](int64_t from,int64_t to){return changes.crosses(from,to);},&target);
   }
   bool poseTargetFor(bool display,XrTime now,XrTime& target) {
     return display&&poseTargetWhy(now,target)==PoseAnswer::Answered;
@@ -2317,7 +2347,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       HeadLocator{}.currentTime(dispatch,instance,headClock,&headLocateStage,boundary.estimateNow(),now)==XR_SUCCESS;
     // Why this call has no instant of its own, for the pose-slot diagnostic (no frame, or a clock that cannot be read, reads as NoFrame).
     PoseAnswer why=call.display?PoseAnswer::NoFrame:PoseAnswer::Answered;
-    if(call.display&&nowKnown)why=poseTargetWhy(now,explicitTarget);
+    // What was true when the call ARRIVED (stampArrival, on the calling thread), against what is true now that it is served: Between, Straddled,
+    // Render or Other (head_pose_time.h PoseArrival), and how long it queued. A call with no stamp reads as Render, which every timing answers as `next`.
+    PoseArrival arrival=PoseArrival::Render;
+    double queueMs=-1.0;
+    if(call.display&&call.arrived) {
+      arrival=classifyPoseArrival(call.submitSeq,call.publishSeq,publishSeq.load(std::memory_order_acquire));
+      LARGE_INTEGER served{};
+      if(call.arrivalTicks>0&&headClock&&headClock(&served)&&headClockHz>0) {
+        const double ms=double(int64_t(served.QuadPart)-call.arrivalTicks)/headClockHz*1000.0;
+        queueMs=ms>0.0?ms:0.0;
+      }
+    }
+    if(call.display&&nowKnown)why=poseTargetWhy(now,explicitTarget,arrival);
     bool explicitTime=call.display&&nowKnown&&why==PoseAnswer::Answered;
     const auto locatePlain=[&]{
       return nowKnown
@@ -2376,6 +2418,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(call.display) {
       const float given[4]={head.pose.orientation.x,head.pose.orientation.y,head.pose.orientation.z,head.pose.orientation.w};
       poseSlot.noteCall(call.thread,lastHeadTime,why,pose.bPoseIsValid?given:nullptr);
+      // The pose-arrival instrument: the same call by its arrival class. A call that straddled a publish is compared at once with the frame cached
+      // when it was served (the first frame published after it arrived); the others wait for the next publish.
+      PoseArrivalFrame servedFrame;
+      if(latestPoseFrame.valid) {
+        servedFrame.display=latestPoseFrame.displayTime;servedFrame.period=latestPoseFrame.period;
+        servedFrame.q=latestPoseFrame.orientationKnown?latestPoseFrame.orientation:nullptr;
+      }
+      poseArrival.noteCall(call.thread,arrival,queueMs,lastHeadTime,why==PoseAnswer::Answered,pose.bPoseIsValid?given:nullptr,
+        latestPoseFrame.valid?&servedFrame:nullptr);
     }
     out=pose;return true;
   }
@@ -2584,6 +2635,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       (unsigned long long)fssDeferredEyes,(unsigned long long)withheldPairs,(unsigned long long)replayedPairs,(unsigned long long)emptyWithholds,unsigned(fovTrim.stage()));
     // The pose-slot window as it stands (calls still waiting for a next frame are unresolved), so a run's last minute is not lost.
     if(tracing)poseSlot.flushNow(GetTickCount64(),boundary.lateFrames(),[](const char* slotLine){nativeTracePuts(slotLine);});
+    if(tracing)poseArrival.flushNow(GetTickCount64(),boundary.lateFrames(),[](const char* arrivalLine){nativeTracePuts(arrivalLine);});
     if(tracing)nativeTracePrintf("native_pacing_summary,changes=%llu,deferred=%llu,synthesized=%llu,ready_at_wait=%llu,kicks=%llu,drained_frames=%llu,drained_waits=%llu,late_frames=%llu,perf_settings_events=%llu\n",
       (unsigned long long)pacingChanges,(unsigned long long)boundary.deferredFrames(),(unsigned long long)boundary.synthesized(),
       (unsigned long long)boundary.readyAtWait(),(unsigned long long)boundary.kicks(),(unsigned long long)boundary.drainedFrames(),

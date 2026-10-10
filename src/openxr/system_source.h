@@ -48,6 +48,13 @@ struct SystemRead {
 struct HeadCall {
   uint32_t thread=0,rva=0;
   bool display=false;
+  // When the call ARRIVED, stamped by the source on the calling thread before the hop to the owner (native_runtime_host.h locateHeadFor), since the
+  // owner may be blocked in the frame wait while the call queues behind it: the frames published so far (publishSeq), the publishSeq of the last
+  // frame Elite had begun to submit (submitSeq), and the head clock's counter (arrivalTicks; 0 when it could not be read). `arrived` says it was
+  // stamped. The pose-arrival instrument and the `arrival` timing read them (head_pose_time.h PoseArrival; docs\terrain-culling.md).
+  bool arrived=false;
+  uint64_t publishSeq=0,submitSeq=0;
+  int64_t arrivalTicks=0;
 };
 
 // The source outlives the concrete IVRSystem object and protects its resources

@@ -10,8 +10,10 @@
 // freshness rule and the line formats are held in tools\openxr_pose_test.
 #include "launch_centre_cases.h"
 #include "frame_end_overlap_cases.h"
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 namespace edvr::openxr::test {
 namespace head_pose_fixture {
@@ -357,7 +359,7 @@ template<class Check> void runHeadPoseCases(Check&& check) {
     check(waited != vr::VRCompositorError_None && stillRunning && dropped, "a WaitGetPoses that fails invalidates the geometry publication and drops the cached frame with it (the host is still up)");
   }
   // ====================================================================================================================================
-  // The pose-slot answer (advanced.cull_pose_slot, TEMPORARY) and its instrument (pose_slot.h), through the host: the mode is taken at each publish
+  // The pose-slot answer (advanced.cull_pose_timing, TEMPORARY) and its instrument (pose_slot.h), through the host: the mode is taken at each publish
   // from the frame the graphics half described, the frame's lead from the clock at its wait, the instant from slotAnswerTime, and every call the fix
   // handles -- answered or fallen back -- is compared with the frame that comes next. The pure arithmetic and the line writer are held in
   // tools\openxr_pose_test; this is the wiring.
@@ -371,7 +373,7 @@ template<class Check> void runHeadPoseCases(Check&& check) {
     const auto publishFrame = [&](XrTime displayTime, XrDuration framePeriod, uint64_t atMs, bool slotOn) {
       f.owner.invoke([&] {
         h.featureFrameKnown = true;
-        h.featureFrame.cullPoseSlot = slotOn ? 1u : 0u;
+        h.featureFrame.cullPoseTiming = slotOn ? 1u : 0u;
         h.waitReturnedAt = displayTime - lead;
         h.publishPoseGap(displayTime, framePeriod, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, 0, XrVector3f{0, 0, 0}, atMs, collect, slotSink);
       });
@@ -381,7 +383,7 @@ template<class Check> void runHeadPoseCases(Check&& check) {
       f.owner.invoke([&] { if (const PoseSlotCounts* p = h.poseSlot.countsFor(me)) c = *p; });
       return c;
     };
-    const auto slotOn = [&]() { bool on = false; f.owner.invoke([&] { on = h.poseSlot.on(); }); return on; };
+    const auto slotOn = [&]() { bool on = false; f.owner.invoke([&] { on = h.poseSlot.mode() != PoseTiming::Next; }); return on; };
     f.owner.invoke([&] { h.poseSlot.flushNow(0, h.boundary.lateFrames(), slotSink); });
     slotLines.clear();
     // The clock at the wait: the same clock a pose call reads.
@@ -474,8 +476,192 @@ template<class Check> void runHeadPoseCases(Check&& check) {
     // ---- off again, and the host as the later cells expect it -------------------------------------------------------------------------------------------
     publishFrame(t7 + 4 * period, period, 92000, false);
     check(!slotOn(), "the key turned off again: the shipped mode");
-    f.owner.invoke([&] { h.featureFrameKnown = false; h.featureFrame.cullPoseSlot = 0; h.waitReturnedAt = 0; });
-    f.owner.invoke([&] { h.poseSlot.flushNow(0, h.boundary.lateFrames(), slotSink); });
+    f.owner.invoke([&] { h.featureFrameKnown = false; h.featureFrame.cullPoseTiming = 0; h.waitReturnedAt = 0; });
+    f.owner.invoke([&] { h.poseSlot.flushNow(0, h.boundary.lateFrames(), slotSink); h.poseArrival.flushNow(0, h.boundary.lateFrames(), slotSink); });
+  }
+  // ====================================================================================================================================
+  // Arrival (advanced.cull_pose_timing = arrival, and the pose-arrival instrument, pose_arrival.h), through the host. A call is stamped when it ARRIVES, on
+  // the calling thread, with the frames published so far and the last frame Elite began to submit; whether it is Between, Straddled, Render or Other is
+  // told at service. A straddle is made as production makes one: the owner is held in a job (the frame wait) while the call is made from another thread
+  // and queues behind it, the job publishes the next frame, and the call is served after it. `submitSeq` is set here directly (the real Submit entry is
+  // held in frame_end_overlap_cases.h, where the fixture can submit); the clock is the cells' own, in nanoseconds.
+  // ====================================================================================================================================
+  {
+    const XrTime base = 17000000000LL;
+    const double savedHz = h.headClockHz;
+    h.headClockHz = 1e9;
+    std::vector<std::string> slotLines, arrivalLines;
+    const auto slotSink = [&](const char* l) { slotLines.emplace_back(l); };
+    const auto arrivalSink = [&](const char* l) { arrivalLines.emplace_back(l); };
+    uint64_t atMs = 1000;
+    // The publish point as WaitGetPoses reaches it, on the owner thread (also called from inside a held owner job).
+    const auto publishNow = [&](XrTime displayTime, uint32_t word) {
+      h.featureFrameKnown = true;
+      h.featureFrame.cullPoseTiming = word;
+      h.waitReturnedAt = displayTime - lead;
+      atMs += 200;
+      h.publishPoseGap(displayTime, period, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, 0, XrVector3f{0, 0, 0}, atMs, collect, slotSink, arrivalSink);
+    };
+    const auto publishFrame = [&](XrTime displayTime, uint32_t word) { f.owner.invoke([&] { publishNow(displayTime, word); }); };
+    const auto counts = [&]() -> PoseArrivalCounts {
+      PoseArrivalCounts c{};
+      f.owner.invoke([&] { if (const PoseArrivalCounts* p = h.poseArrival.countsFor(me)) c = *p; });
+      return c;
+    };
+    const auto markSubmitted = [&](bool submitted) {
+      f.owner.invoke([&] {
+        const uint64_t published = h.publishSeq.load();
+        h.submitSeq.store(submitted ? published : published - 1);
+      });
+    };
+    // A call that arrives at `arrivalAt`, queues behind a held owner job that publishes `newDisplay` and is served at `serviceAt`.
+    const auto straddle = [&](XrTime arrivalAt, XrTime serviceAt, XrTime newDisplay, uint32_t word) {
+      std::atomic<bool> started{false}, go{false};
+      bool located = false;
+      std::thread frameWait([&] {
+        f.owner.invoke([&] {
+          started.store(true);
+          while (!go.load()) Sleep(1);
+          publishNow(newDisplay, word);
+        });
+      });
+      while (!started.load()) Sleep(1);
+      setNow(arrivalAt);
+      std::thread caller([&] { located = locateAs(true, 0.0f); });
+      Sleep(150);                       // the call has been stamped and is queued behind the held job
+      setNow(serviceAt);
+      go.store(true);
+      frameWait.join();
+      caller.join();
+      return located;
+    };
+    const auto isArrival = [&]() { bool on = false; f.owner.invoke([&] { on = h.poseArrival.mode() == PoseTiming::Arrival && h.poseSlot.mode() == PoseTiming::Arrival; }); return on; };
+    const auto flushBoth = [&] {
+      f.owner.invoke([&] { h.poseSlot.flushNow(0, h.boundary.lateFrames(), slotSink); h.poseArrival.flushNow(0, h.boundary.lateFrames(), arrivalSink); });
+      arrivalLines.clear();
+    };
+    // ---- what a stamp holds ----------------------------------------------------------------------------------------------------------------------
+    {
+      h.publishSeq.store(41);h.submitSeq.store(40);setNow(123456789);
+      HeadCall stamped;
+      h.stampArrival(stamped);
+      check(stamped.arrived && stamped.publishSeq == 41 && stamped.submitSeq == 40 && stamped.arrivalTicks == 123456789,
+            "a stamp holds the frames published so far, the last frame Elite began to submit, and the head clock's counter, and says it was stamped");
+      HeadCall bare;
+      check(!bare.arrived && bare.publishSeq == 0 && bare.submitSeq == 0 && bare.arrivalTicks == 0, "(a call nobody stamped says so)");
+      h.publishSeq.store(0);h.submitSeq.store(0);
+    }
+    flushBoth();
+    // ---- next: a call that arrived between frames and was served before the publish ---------------------------------------------------------------
+    yawed(0.0);
+    publishFrame(base, 0);
+    markSubmitted(true);
+    setNow(base - lead + 5000000);
+    check(locateAs(true, 0.0f) && f.fake.lastTime == base + period, "next, Between: a call after Elite's Submit, served before the next publish, is located at D + P");
+    {
+      const PoseArrivalCounts c = counts();
+      check(c.cls[0] == 1 && c.queueN[0] == 1 && c.queueMax[0] == 0.0, "...and is counted Between with a queue of 0 ms");
+    }
+    // ---- a call that arrived while the frame renders (published, not yet submitted) ---------------------------------------------------------------
+    const XrTime d1 = base + period;
+    publishFrame(d1, 0);   // resolves the Between call: T = D + P = D' is 0p
+    {
+      const PoseArrivalCounts c = counts();
+      check(c.bucket[0][kBucket0p] == 1, "(the next publish finds the Between call at 0p: it was located at exactly the frame that came)");
+    }
+    setNow(d1 - lead + 5000000);   // submitSeq is one behind publishSeq now: the frame has not been submitted
+    check(locateAs(true, 0.0f) && f.fake.lastTime == d1 + period, "next, Render: a call after the publish and before Elite's Submit is located at D + P");
+    {
+      const PoseArrivalCounts c = counts();
+      check(c.cls[2] == 1 && c.queueN[2] == 1, "...and is counted Render");
+    }
+    // ---- a straddle: Between at arrival, served after a publish ------------------------------------------------------------------------------------
+    markSubmitted(true);
+    const XrTime d2 = d1 + period;
+    check(straddle(d1 - lead + 5000000, d1 - lead + 13000000, d2, 0) && f.fake.lastTime == d2 + period,
+          "next, Straddled: a call that arrived after the Submit and queued across the publish of the next frame is located at D(next) + P, a period past the Between call");
+    {
+      const PoseArrivalCounts c = counts();
+      check(c.cls[1] == 1 && c.queueN[1] == 1 && std::fabs(c.queueSum[1] - 8.0) < 1e-6 && c.bucket[1][kBucketPlus1p] == 1,
+            "...counted Straddled with its 8 ms of queue, and read +1p against the first frame published after it arrived (the one cached when it was served)");
+      check(c.bucket[2][kBucket0p] == 1, "(and the Render call read 0p against the publish that followed it)");
+    }
+    // ---- Other: Render at arrival, served after a publish -------------------------------------------------------------------------------------------
+    const XrTime d3 = d2 + period;
+    markSubmitted(false);
+    check(straddle(d2 - lead + 5000000, d2 - lead + 9000000, d3, 0) && f.fake.lastTime == d3 + period, "next, Other: a call that arrived while the frame rendered and queued across a publish is located at D(next) + P");
+    {
+      const PoseArrivalCounts c = counts();
+      check(c.cls[3] == 1 && c.bucket[3][kBucketPlus1p] == 1 && c.queueN[0] == 1 && c.queueN[2] == 1, "...counted Other and read +1p (Other is not timed)");
+    }
+    // ---- the owner-thread path: stamped where it is made, no queue -------------------------------------------------------------------------------------
+    markSubmitted(true);
+    bool ownerLocated = false;
+    setNow(d3 - lead + 5000000);
+    f.owner.invoke([&] { ownerLocated = locateAs(true, 0.0f); });
+    check(ownerLocated && f.fake.lastTime == d3 + period, "a call made on the owner thread itself is stamped there and located the same way");
+    {
+      const PoseArrivalCounts c = counts();
+      check(c.cls[0] == 2 && c.queueN[0] == 2 && c.queueMax[0] == 0.0, "...counted Between with no queue");
+    }
+    // ---- arrival: the same calls ---------------------------------------------------------------------------------------------------------------------
+    const XrTime d4 = d3 + period;
+    publishFrame(d4, 2);   // the key turned on to arrival: the `next` window is written under next; the owner-thread Between call is resolved first
+    {
+      const std::string wantHead = "pose arrival: tid " + std::to_string(me) + " mode next calls 5 between 2 straddled 1 render 1 other 1 fallback 0 unresolved 0; ";
+      check(arrivalLines.size() == 1 && arrivalLines[0].rfind(wantHead, 0) == 0 && arrivalLines[0].find("straddled 8.00/8.00") != std::string::npos &&
+                arrivalLines[0].find("between 0.00/0.00") != std::string::npos,
+            "the key turned to arrival closes the window under next: five calls, two Between, one of each other class, the 8 ms straddle");
+    }
+    check(isArrival(), "...and the mode is arrival from the next call (both instruments)");
+    markSubmitted(true);
+    setNow(d4 - lead + 5000000);
+    check(locateAs(true, 0.0f) && f.fake.lastTime == d4 + 2 * period, "ARRIVAL, Between: a call after the Submit, served before the next publish, is located at D + 2P: the first frame after it arrived, plus a period");
+    const XrTime d5 = d4 + period;
+    publishFrame(d5, 2);
+    {
+      const PoseArrivalCounts c = counts();
+      check(c.cls[0] == 1 && c.bucket[0][kBucketPlus1p] == 1, "...and reads +1p against that frame: every between-frames call is answered a period past the first frame published after it arrived");
+    }
+    setNow(d5 - lead + 5000000);   // the frame is published and not submitted
+    check(locateAs(true, 0.0f) && f.fake.lastTime == d5 + period, "ARRIVAL, Render: a call while the frame renders is located as next, at D + P");
+    markSubmitted(true);
+    const XrTime d6 = d5 + period;
+    check(straddle(d5 - lead + 5000000, d5 - lead + 12000000, d6, 2) && f.fake.lastTime == d6 + period,
+          "ARRIVAL, Straddled: a call that queued across the publish is located at D(next) + P, with no extra period (it already is a period past the first frame after it arrived)");
+    {
+      const PoseArrivalCounts c = counts();
+      check(c.cls[1] == 1 && c.bucket[1][kBucketPlus1p] == 1 && c.bucket[2][kBucket0p] == 1, "...so Between and Straddled both read +1p under arrival and Render reads 0p");
+    }
+    const XrTime d7 = d6 + period;
+    markSubmitted(false);
+    check(straddle(d6 - lead + 5000000, d6 - lead + 7000000, d7, 2) && f.fake.lastTime == d7 + period, "ARRIVAL, Other: located at D(next) + P as well");
+    // ---- a late frame under arrival: the slot arithmetic adds its period to the extra one ---------------------------------------------------------------
+    markSubmitted(true);
+    setNow(d7 - lead + period * 12 / 10);
+    check(locateAs(true, 0.0f) && f.fake.lastTime == d7 + 3 * period, "ARRIVAL, Between, 1.2 periods after the wait (k = 2): located at D + 3P");
+    // ---- back to next ---------------------------------------------------------------------------------------------------------------------------------
+    arrivalLines.clear();
+    publishFrame(d7 + 3 * period, 0);
+    {
+      const std::string wantHead = "pose arrival: tid " + std::to_string(me) + " mode arrival calls 5 between 2 straddled 1 render 1 other 1 fallback 0 unresolved 0; ";
+      check(arrivalLines.size() == 1 && arrivalLines[0].rfind(wantHead, 0) == 0, "the key turned back to next closes the window under arrival: five calls");
+    }
+    check(!isArrival(), "...and the mode is next again");
+    // ---- the cache dropped under a waiting call: unresolved ----------------------------------------------------------------------------------------
+    markSubmitted(true);
+    setNow(d7 + 3 * period - lead + 5000000);
+    check(locateAs(true, 0.0f), "(a Between call waiting for the next publish)");
+    f.owner.invoke([&] { h.dropPoseFrame(); });
+    {
+      unsigned waiting = 9;
+      f.owner.invoke([&] { waiting = h.poseArrival.pending(); });
+      const PoseArrivalCounts c = counts();
+      check(waiting == 0 && c.unresolved == 1 && c.cls[0] == 1, "dropping the cached frame (a session or origin change) leaves the waiting call unresolved, in the arrival instrument as in the slot one");
+    }
+    f.owner.invoke([&] { h.featureFrameKnown = false; h.featureFrame.cullPoseTiming = 0; h.waitReturnedAt = 0; });
+    flushBoth();
+    h.headClockHz = savedHz;
   }
   // ---- the last two cells end the host's usefulness (a reset that cannot make its space, a fatal failure), so they come last ----------------------
   {

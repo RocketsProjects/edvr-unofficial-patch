@@ -148,7 +148,7 @@ void runHeadPoseTimeCases(Check&& check) {
               std::string(poseAnswerName(PoseAnswer::Refused)) == "refused" && kPoseAnswers == 7,
           "the reasons are named as the log line prints them");
   }
-  // ---- the slot instant (advanced.cull_pose_slot) --------------------------------------------------------------------------------------------
+  // ---- the slot instant (advanced.cull_pose_timing) --------------------------------------------------------------------------------------------
   {
     constexpr int64_t period = 11111111, display = 5000000000, lead = 42000000;
     const int64_t waitReturned = display - lead;   // the wait that produced the frame returned this long before its display time
@@ -230,6 +230,125 @@ void runHeadPoseTimeCases(Check&& check) {
     check(slotAnswerTime(display, period, lead, waitReturned, never, &at) == PoseAnswer::Answered && at == display + period, "(the count is optional)");
     // The freshness guard is not applied in this mode, and a display time behind now alone is no reason to fall back.
     check(slotAnswerTime(display, period, lead, display + 10 * period, never, &at, &k) == PoseAnswer::Answered && k > 1, "a display time ten periods behind now is answered at a later slot");
+  }
+  // ---- when the call arrived: the four classes ------------------------------------------------------------------------------------------------
+  {
+    check(classifyPoseArrival(5, 5, 5) == PoseArrival::Between && classifyPoseArrival(0, 0, 0) == PoseArrival::Between && classifyPoseArrival(9, 5, 5) == PoseArrival::Between,
+          "the latest frame was already submitted when the call arrived (submitSeq >= publishSeq) and nothing was published while it queued: Between");
+    check(classifyPoseArrival(5, 5, 6) == PoseArrival::Straddled && classifyPoseArrival(5, 5, 9) == PoseArrival::Straddled,
+          "...and a publish happened while it queued: Straddled (it is served against the frame published during its wait)");
+    check(classifyPoseArrival(4, 5, 5) == PoseArrival::Render && classifyPoseArrival(0, 1, 1) == PoseArrival::Render,
+          "published but not yet submitted when it arrived (submitSeq < publishSeq), nothing published while it queued: Render");
+    check(classifyPoseArrival(4, 5, 6) == PoseArrival::Other && classifyPoseArrival(0, 1, 3) == PoseArrival::Other,
+          "...and a straddled Render call is Other");
+    check(std::string(poseArrivalName(PoseArrival::Between)) == "between" && std::string(poseArrivalName(PoseArrival::Straddled)) == "straddled" &&
+              std::string(poseArrivalName(PoseArrival::Render)) == "render" && std::string(poseArrivalName(PoseArrival::Other)) == "other" && kPoseArrivals == 4,
+          "the classes are named as the log line prints them");
+    check(poseTimingFromWord(0) == PoseTiming::Next && poseTimingFromWord(1) == PoseTiming::Slot && poseTimingFromWord(2) == PoseTiming::Arrival &&
+              poseTimingFromWord(3) == PoseTiming::Next && poseTimingFromWord(0xFFFFFFFFu) == PoseTiming::Next,
+          "the word the graphics half hands over: 0 next, 1 slot, 2 arrival; anything else reads next");
+    check(std::string(poseTimingName(PoseTiming::Next)) == "next" && std::string(poseTimingName(PoseTiming::Slot)) == "slot" && std::string(poseTimingName(PoseTiming::Arrival)) == "arrival",
+          "the timings are named as the log lines print them");
+  }
+  // ---- the three timings, each class --------------------------------------------------------------------------------------------------------
+  {
+    constexpr int64_t period = 11111111, display = 5000000000, lead = 42000000;
+    const int64_t waitReturned = display - lead;
+    const auto add = [](int64_t shown, int64_t p, int64_t& out) { return nextPredictionTime(shown, p, out); };
+    const auto never = [](int64_t, int64_t) { return false; };
+    const PoseArrival classes[] = {PoseArrival::Between, PoseArrival::Straddled, PoseArrival::Render, PoseArrival::Other};
+    const PoseTiming timings[] = {PoseTiming::Next, PoseTiming::Slot, PoseTiming::Arrival};
+    // answer(): the reason, the instant and the periods past the display time for one how and class.
+    struct Got { PoseAnswer why; int64_t at, n; };
+    const auto answerWith = [&](PoseTiming how, PoseArrival arrival, int64_t now, int64_t d, int64_t p, int64_t l) {
+      Got g{PoseAnswer::Refused, -7, -7};
+      g.why = timingAnswerTime(how, arrival, d, p, l, now, add, never, &g.at, &g.n);
+      return g;
+    };
+    const auto answer = [&](PoseTiming how, PoseArrival arrival, int64_t now) { return answerWith(how, arrival, now, display, period, lead); };
+    // On time (a call just after the wait returned): next and slot answer D + P for every class; arrival adds a period for Between only.
+    bool steady = true;
+    for (PoseTiming how : timings)
+      for (PoseArrival c : classes) {
+        const Got g = answer(how, c, waitReturned + 5000000);
+        const int64_t extra = (how == PoseTiming::Arrival && c == PoseArrival::Between) ? 1 : 0;
+        steady = steady && g.why == PoseAnswer::Answered && g.at == display + (1 + extra) * period && (how == PoseTiming::Next || g.n == 1 + extra);
+      }
+    check(steady, "ON TIME: next and slot answer D + P for every class (k = 1); arrival answers D + 2P for Between and D + P for Straddled, Render and Other");
+    // Late by 1.2 periods (k = 2).
+    bool late = true;
+    for (PoseTiming how : timings)
+      for (PoseArrival c : classes) {
+        const Got g = answer(how, c, waitReturned + period * 12 / 10);
+        const int64_t k = how == PoseTiming::Next ? 1 : 2;
+        const int64_t extra = (how == PoseTiming::Arrival && c == PoseArrival::Between) ? 1 : 0;
+        late = late && g.why == PoseAnswer::Answered && g.at == display + (k + extra) * period;
+      }
+    check(late, "LATE BY 1.2 PERIODS: next still D + P (its guard is not yet stale), slot D + 2P, arrival D + 3P for Between and D + 2P for the rest");
+    // Stale: next gives up (a counted fallback), slot and arrival go on.
+    bool stale = true;
+    for (PoseArrival c : classes) {
+      stale = stale && answer(PoseTiming::Next, c, display + 3 * period).why == PoseAnswer::Stale;
+      const Got s = answer(PoseTiming::Slot, c, display + 3 * period);
+      const Got a = answer(PoseTiming::Arrival, c, display + 3 * period);
+      stale = stale && s.why == PoseAnswer::Answered && s.at == display + 7 * period && a.why == PoseAnswer::Answered &&
+              a.at == display + (c == PoseArrival::Between ? 8 : 7) * period;
+    }
+    check(stale, "A STALE FRAME (3 periods behind now): next falls back for every class; slot answers the 7th slot; arrival the 8th for Between, the 7th for the rest");
+    // The cap is judged on k, before the extra period.
+    bool cap = true;
+    const int64_t nowAtMost = waitReturned + 22 * period;   // k = 22: the last slot the cap lets through
+    for (PoseArrival c : classes) {
+      const Got s = answer(PoseTiming::Slot, c, nowAtMost), s2 = answer(PoseTiming::Slot, c, nowAtMost + 1);
+      const Got a = answer(PoseTiming::Arrival, c, nowAtMost), a2 = answer(PoseTiming::Arrival, c, nowAtMost + 1);
+      cap = cap && s.why == PoseAnswer::Answered && s.at == display + 22 * period && s2.why == PoseAnswer::Cap && s2.at == -7 &&
+            a.why == PoseAnswer::Answered && a.at == display + (c == PoseArrival::Between ? 23 : 22) * period && a2.why == PoseAnswer::Cap && a2.at == -7;
+    }
+    check(cap, "THE CAP: the 22nd slot is the last for slot and arrival, the 23rd is a Cap fallback for every class; arrival's extra period may go one past it (the cap is judged on k)");
+    // Overflow on the extra period.
+    const Got fits = answerWith(PoseTiming::Slot, PoseArrival::Between, 1, INT64_MAX - period, period, lead);
+    const Got extraOverflows = answerWith(PoseTiming::Arrival, PoseArrival::Between, 1, INT64_MAX - period, period, lead);
+    const Got renderFits = answerWith(PoseTiming::Arrival, PoseArrival::Render, 1, INT64_MAX - period, period, lead);
+    check(fits.why == PoseAnswer::Answered && fits.at == INT64_MAX && extraOverflows.why == PoseAnswer::Period && extraOverflows.at == -7 &&
+              renderFits.why == PoseAnswer::Answered && renderFits.at == INT64_MAX,
+          "OVERFLOW ON THE EXTRA PERIOD: D + P just fits and is answered (slot, and arrival for a Render call); D + 2P for a Between call under arrival overflows: Period, no wrap");
+    const int64_t huge = INT64_MAX / 2 + 1;
+    const Got hugeSlot = answerWith(PoseTiming::Slot, PoseArrival::Between, 1, 1, huge, lead);
+    const Got hugeArrival = answerWith(PoseTiming::Arrival, PoseArrival::Between, 1, 1, huge, lead);
+    check(hugeSlot.why == PoseAnswer::Answered && hugeSlot.at == 1 + huge && hugeArrival.why == PoseAnswer::Period && hugeArrival.at == -7,
+          "...and a period so long that two of them cannot be multiplied: Period");
+    // The crossing check covers the final span.
+    int64_t seenFrom = 0, seenTo = 0;
+    const auto recording = [&](int64_t from, int64_t to) { seenFrom = from; seenTo = to; return false; };
+    int64_t at = -7, n = -7;
+    timingAnswerTime(PoseTiming::Arrival, PoseArrival::Between, display, period, lead, waitReturned + 5000000, add, recording, &at, &n);
+    const bool spanBetween = seenFrom == display && seenTo == display + 2 * period;
+    timingAnswerTime(PoseTiming::Arrival, PoseArrival::Render, display, period, lead, waitReturned + 5000000, add, recording, &at, &n);
+    const bool spanRender = seenFrom == display && seenTo == display + period;
+    timingAnswerTime(PoseTiming::Slot, PoseArrival::Between, display, period, lead, waitReturned + 5000000, add, recording, &at, &n);
+    const bool spanSlot = seenFrom == display && seenTo == display + period;
+    check(spanBetween && spanRender && spanSlot, "the crossing check is asked about exactly the span from D to the final instant: D + 2P for Between under arrival, D + P otherwise");
+    const int64_t change = display + period + 1;   // a reference change between D + P and D + 2P
+    const auto crossing = [&](int64_t from, int64_t to) { return from < change && change <= to; };
+    at = -7;
+    const PoseAnswer slotOk = timingAnswerTime(PoseTiming::Slot, PoseArrival::Between, display, period, lead, waitReturned + 5000000, add, crossing, &at, &n);
+    const bool slotAt = at == display + period;
+    at = -7;
+    const PoseAnswer arrivalCross = timingAnswerTime(PoseTiming::Arrival, PoseArrival::Between, display, period, lead, waitReturned + 5000000, add, crossing, &at, &n);
+    const bool arrivalAt = at == -7;
+    const PoseAnswer renderOk = timingAnswerTime(PoseTiming::Arrival, PoseArrival::Render, display, period, lead, waitReturned + 5000000, add, crossing, &at, &n);
+    check(slotOk == PoseAnswer::Answered && slotAt && arrivalCross == PoseAnswer::Cross && arrivalAt && renderOk == PoseAnswer::Answered,
+          "a reference-space change between D + P and D + 2P: slot and a Render call are answered, a Between call under arrival (which reaches past it) is a Cross fallback");
+    // No frame, no period, no lead.
+    bool bare = true;
+    for (PoseArrival c : classes) {
+      bare = bare && answerWith(PoseTiming::Next, c, 1, 0, period, lead).why == PoseAnswer::NoFrame && answerWith(PoseTiming::Slot, c, 1, 0, period, lead).why == PoseAnswer::NoFrame &&
+             answerWith(PoseTiming::Arrival, c, 1, 0, period, lead).why == PoseAnswer::NoFrame;
+      bare = bare && answerWith(PoseTiming::Slot, c, display, display, 0, lead).why == PoseAnswer::Period && answerWith(PoseTiming::Arrival, c, display, display, 0, lead).why == PoseAnswer::Period;
+      bare = bare && answerWith(PoseTiming::Slot, c, display, display, period, 0).why == PoseAnswer::Period && answerWith(PoseTiming::Arrival, c, display, display, period, 0).why == PoseAnswer::Period;
+      bare = bare && answerWith(PoseTiming::Next, c, display - 1000, display, period, 0).why == PoseAnswer::Answered;   // next never needed the lead
+    }
+    check(bare, "no display time: NoFrame in every timing; no period, or no lead: Period for slot and arrival (the call is located at now + prediction); next never needed a lead");
   }
   // ---- the lines -----------------------------------------------------------------------------------------------------------------------------
   {
