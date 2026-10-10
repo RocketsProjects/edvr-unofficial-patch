@@ -356,6 +356,127 @@ template<class Check> void runHeadPoseCases(Check&& check) {
     });
     check(waited != vr::VRCompositorError_None && stillRunning && dropped, "a WaitGetPoses that fails invalidates the geometry publication and drops the cached frame with it (the host is still up)");
   }
+  // ====================================================================================================================================
+  // The pose-slot answer (advanced.cull_pose_slot, TEMPORARY) and its instrument (pose_slot.h), through the host: the mode is taken at each publish
+  // from the frame the graphics half described, the frame's lead from the clock at its wait, the instant from slotAnswerTime, and every call the fix
+  // handles -- answered or fallen back -- is compared with the frame that comes next. The pure arithmetic and the line writer are held in
+  // tools\openxr_pose_test; this is the wiring.
+  // ====================================================================================================================================
+  {
+    const XrTime base = 13000000000LL;
+    std::vector<std::string> slotLines;
+    const auto slotSink = [&](const char* l) { slotLines.emplace_back(l); };
+    // The publish point as WaitGetPoses reaches it: the frame's lead is its display time less the time its wait returned at, and the graphics half's frame
+    // says whether the slot answer is on.
+    const auto publishFrame = [&](XrTime displayTime, XrDuration framePeriod, uint64_t atMs, bool slotOn) {
+      f.owner.invoke([&] {
+        h.featureFrameKnown = true;
+        h.featureFrame.cullPoseSlot = slotOn ? 1u : 0u;
+        h.waitReturnedAt = displayTime - lead;
+        h.publishPoseGap(displayTime, framePeriod, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, 0, XrVector3f{0, 0, 0}, atMs, collect, slotSink);
+      });
+    };
+    const auto counts = [&]() -> PoseSlotCounts {
+      PoseSlotCounts c{};
+      f.owner.invoke([&] { if (const PoseSlotCounts* p = h.poseSlot.countsFor(me)) c = *p; });
+      return c;
+    };
+    const auto slotOn = [&]() { bool on = false; f.owner.invoke([&] { on = h.poseSlot.on(); }); return on; };
+    f.owner.invoke([&] { h.poseSlot.flushNow(0, h.boundary.lateFrames(), slotSink); });
+    slotLines.clear();
+    // The clock at the wait: the same clock a pose call reads.
+    setNow(777000000);
+    XrTime waitReturned = 0;
+    f.owner.invoke([&] { h.noteWaitReturned(); waitReturned = h.waitReturnedAt; });
+    check(waitReturned == 777000000, "the time the frame wait returned at is read from the head clock (the one a pose call's \"now\" reads)");
+    // ---- off (what ships): the instrument measures, the answer is `next` -----------------------------------------------------------------------------
+    yawed(0.0);
+    setNow(base - lead);
+    publishFrame(base, period, 1000, false);
+    XrDuration keptLead = 0;
+    f.owner.invoke([&] { keptLead = h.latestPoseFrame.lead; });
+    check(keptLead == lead && !slotOn(), "the publish point keeps the frame's lead (its display time less the time its wait returned: 42 ms) and, with the key off, the shipped mode");
+    setNow(base - lead + 5000000);
+    check(locateAs(true, 0.0f) && f.fake.lastTime == base + period, "off: a call just after the wait is located one period past the display time (`next`)");
+    publishFrame(base + period, period, 1200, false);
+    check(counts().calls == 1 && counts().cls[kSlotMatch] == 1 && counts().unresolved == 0, "...and when the next frame comes on time it is a match");
+    const XrTime t1 = base + period;
+    setNow(t1 - lead + 5000000);
+    yawed(3.0);
+    check(locateAs(true, 0.0f) && f.fake.lastTime == t1 + period, "off: a call just after the next wait is located one period past that frame");
+    yawed(0.0);
+    publishFrame(t1 + 2 * period, period, 1400, false);   // the display skipped a slot
+    {
+      const PoseSlotCounts c = counts();
+      check(c.calls == 2 && c.cls[kSlotShort1] == 1 && c.over1[kSlotShort1] == 1 && c.over2[kSlotShort1] == 1 && c.maxKnown && close(c.maxAngle, 3.0, 1e-3) && c.maxClass == kSlotShort1,
+            "...a frame the display skipped a slot for makes it a slot short (1p), and the 3 degrees the head turned are above 1 and above 2");
+    }
+    const XrTime t2 = t1 + 2 * period;
+    setNow(t2 + 3 * period);
+    check(locateAs(true, 0.0f) && f.fake.lastTime == t2 + 3 * period, "off: a cached frame three periods behind now is stale, and the call is located at now + prediction");
+    const uint64_t pendingBefore = [&] { unsigned n = 0; f.owner.invoke([&] { n = h.poseSlot.pending(); }); return uint64_t(n); }();
+    check(locateAs(false, 0.0f), "(a call the fix does not handle: outside the image or with a real prediction)");
+    const uint64_t pendingAfter = [&] { unsigned n = 0; f.owner.invoke([&] { n = h.poseSlot.pending(); }); return uint64_t(n); }();
+    check(pendingBefore == 1 && pendingAfter == 1, "...is not remembered: only the calls the fix handles are compared");
+    // The graphics half turns the key on: the publish point resolves the stale call, closes the window under the old mode, then switches.
+    publishFrame(t2 + 4 * period, period, 31000, true);
+    {
+      const std::string wantLine = "pose slot: tid " + std::to_string(me) + " mode next calls 3 match 1 short 1 (1p 1, 2p+ 0) long 0 (1p 0, 2p+ 0) fallback 1 (none 0, stale 1, period 0, cross 0, cap 0, refused 0; "
+                               "delta match 0, short 1, long 0) unresolved 0; ";
+      check(slotLines.size() == 1 && slotLines[0].rfind(wantLine, 0) == 0 && slotLines[0].find(">2deg match 0 short 1 (1p 1, 2p+ 0)") != std::string::npos &&
+                slotLines[0].find("max 3.000 deg (short-1p); late frames 0; window 31.0 s") != std::string::npos,
+            "the key turned on closes the window under the OLD mode: the three calls (a match, a slot short, a stale fallback that was also short by its delta), the 3 degrees, 31 s (the window opened at 0)");
+    }
+    check(slotOn(), "...and the mode is slot from the next call");
+    // ---- on: the slot answer ----------------------------------------------------------------------------------------------------------------------
+    const XrTime t3 = t2 + 4 * period;
+    setNow(t3 - lead + 5000000);
+    check(locateAs(true, 0.0f) && f.fake.lastTime == t3 + period, "on: steady flight is exactly `next` (k = 1)");
+    publishFrame(t3 + period, period, 32000, true);
+    const XrTime t4 = t3 + period;
+    setNow(t4 - lead + period * 12 / 10);
+    check(locateAs(true, 0.0f) && f.fake.lastTime == t4 + 2 * period, "on: a call 1.2 periods after the wait returned is located at the second slot (k = 2)");
+    publishFrame(t4 + 2 * period, period, 33000, true);   // the display skipped a slot: the call was right
+    const XrTime t5 = t4 + 2 * period;
+    setNow(t5 + 3 * period);
+    check(locateAs(true, 0.0f) && f.fake.lastTime == t5 + 7 * period, "on: a cached frame three periods behind now is answered at the 7th slot (3 periods and the 42 ms lead), not dropped to the wall clock");
+    publishFrame(t5 + 7 * period, period, 34000, true);
+    check(counts().calls == 3 && counts().cls[kSlotMatch] == 3 && counts().fallbackDelta[0] + counts().fallbackDelta[1] + counts().fallbackDelta[2] == 0,
+          "...and all three matched the frame that came next, which under `next` would have been a slot short, a slot short and a fallback");
+    const XrTime t6 = t5 + 7 * period;
+    setNow(t6 + 400000000);
+    check(locateAs(true, 0.0f) && f.fake.lastTime == t6 + 400000000, "on: 400 ms behind is past the cap: the call is located at now + prediction");
+    publishFrame(t6 + 450000000, period, 35000, true);
+    check(counts().cls[kSlotFallbackFirst + 4] == 1 && counts().fallbackDelta[1] == 1, "...a fallback for the cap, short by its delta");
+    const XrTime t7 = t6 + 450000000;
+    setNow(t7 - lead + 5000000);
+    f.fake.rejectTime = t7 + period;
+    check(locateAs(true, 0.0f) && f.fake.lastTime == t7 - lead + 5000000, "on: the runtime refuses the slot with XR_ERROR_TIME_INVALID: one retry at now + prediction");
+    f.fake.rejectTime = -1;
+    publishFrame(t7 + period, period, 36000, true);
+    check(counts().cls[kSlotFallbackFirst + 5] == 1 && counts().calls == 5, "...counted as a refused fallback");
+    // A frame the display never published after: the cache is dropped, the calls waiting for it are unresolved.
+    setNow(t7 + period - lead + 5000000);
+    check(locateAs(true, 0.0f), "(a call waiting for a next frame)");
+    f.owner.invoke([&] { h.dropPoseFrame(); });
+    {
+      bool gone = false;
+      f.owner.invoke([&] { gone = !h.latestPoseFrame.valid; });
+      check(gone && counts().unresolved == 1 && counts().calls == 6, "dropping the cached frame (a session or origin change) leaves the waiting call unresolved");
+    }
+    // The window is written 60 s after the mode changed (31 s), by the publish point, with the late frames from the boundary.
+    slotLines.clear();
+    publishFrame(t7 + 3 * period, period, 91000, true);
+    check(slotLines.size() == 1 && slotLines[0].find("mode slot calls 6 match 3 short 0 (1p 0, 2p+ 0) long 0 (1p 0, 2p+ 0) fallback 2 (none 0, stale 0, period 0, cross 0, cap 1, refused 1; "
+                                                    "delta match 0, short 2, long 0) unresolved 1; ") != std::string::npos &&
+                  slotLines[0].find("late frames 0; window 60.0 s") != std::string::npos,
+          "at 60 s the window's line is written under `slot`, with the cap and the refused fallback, the call dropped with the cache unresolved, the window length");
+    // ---- off again, and the host as the later cells expect it -------------------------------------------------------------------------------------------
+    publishFrame(t7 + 4 * period, period, 92000, false);
+    check(!slotOn(), "the key turned off again: the shipped mode");
+    f.owner.invoke([&] { h.featureFrameKnown = false; h.featureFrame.cullPoseSlot = 0; h.waitReturnedAt = 0; });
+    f.owner.invoke([&] { h.poseSlot.flushNow(0, h.boundary.lateFrames(), slotSink); });
+  }
   // ---- the last two cells end the host's usefulness (a reset that cannot make its space, a fatal failure), so they come last ----------------------
   {
     setNow(display - lead);

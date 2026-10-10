@@ -36,6 +36,27 @@ inline bool isNowRequest(float predictionSeconds) {
   return std::fabs(predictionSeconds) < kNowPredictionLimitSeconds;   // (a NaN is false: the caller refuses it before this)
 }
 
+// Why a call handled by the fix was or was not answered at an instant of its own. Answered is the success; the rest are the counted fallbacks
+// (the call is located at now + prediction instead), and the names are what the `pose slot:` line prints: NoFrame "none" (no frame cached yet,
+// or a clock that cannot be read), Stale (the cached frame is more than one period behind now: `next` only), Period (no usable period or lead,
+// or the sum would overflow), Cross (a reference-space change between the display time and the instant), Cap (more than kSlotCapNs ahead:
+// `slot` only), Refused (the runtime refused the instant with XR_ERROR_TIME_INVALID and the call was retried at now + prediction).
+enum class PoseAnswer : uint8_t { Answered = 0, NoFrame, Stale, Period, Cross, Cap, Refused };
+constexpr unsigned kPoseAnswers = 7;
+
+inline const char* poseAnswerName(PoseAnswer a) {
+  switch (a) {
+    case PoseAnswer::Answered: return "answered";
+    case PoseAnswer::NoFrame: return "none";
+    case PoseAnswer::Stale: return "stale";
+    case PoseAnswer::Period: return "period";
+    case PoseAnswer::Cross: return "cross";
+    case PoseAnswer::Cap: return "cap";
+    case PoseAnswer::Refused: return "refused";
+  }
+  return "?";
+}
+
 // Is this call one the display time answers? `returnRva` is the caller's return address as an RVA in the game executable (frameRva):
 // a value below kFrameUnknown is inside the image.
 inline bool answeredAtDisplayTime(uint32_t returnRva, float predictionSeconds) {
@@ -78,15 +99,62 @@ inline bool displayTimeFresh(int64_t displayTime, int64_t periodNs, int64_t now)
 // period, or the sum would overflow), or when a reference-space change falls between the display time and the target
 // (`crosses(from, to)`, reference_changes.h): a pose across it would be in another origin.
 template <class AddPeriod, class Crosses>
-inline bool answerTime(int64_t latestDisplayTime, int64_t periodNs, int64_t now, AddPeriod&& addPeriod, Crosses&& crosses, int64_t* out) {
+inline PoseAnswer answerTimeWhy(int64_t latestDisplayTime, int64_t periodNs, int64_t now, AddPeriod&& addPeriod, Crosses&& crosses, int64_t* out) {
   int64_t display = 0;
-  if (!displayTimeTarget(latestDisplayTime, &display)) return false;
-  if (!displayTimeFresh(display, periodNs, now)) return false;
+  if (!displayTimeTarget(latestDisplayTime, &display)) return PoseAnswer::NoFrame;
+  if (!displayTimeFresh(display, periodNs, now)) return PoseAnswer::Stale;
   int64_t target = 0;
-  if (!addPeriod(display, periodNs, target)) return false;
-  if (crosses(display, target)) return false;
+  if (!addPeriod(display, periodNs, target)) return PoseAnswer::Period;
+  if (crosses(display, target)) return PoseAnswer::Cross;
   *out = target;
-  return true;
+  return PoseAnswer::Answered;
+}
+
+// The same, as the yes/no the host has always asked (the reason is what the pose-slot diagnostic counts: pose_slot.h).
+template <class AddPeriod, class Crosses>
+inline bool answerTime(int64_t latestDisplayTime, int64_t periodNs, int64_t now, AddPeriod&& addPeriod, Crosses&& crosses, int64_t* out) {
+  return answerTimeWhy(latestDisplayTime, periodNs, now, addPeriod, crosses, out) == PoseAnswer::Answered;
+}
+
+// THE SLOT INSTANT (TEMPORARY: advanced.cull_pose_slot = on; docs\terrain-culling.md, 2026-10-10). `next` answers one period past the cached frame's
+// display time, which is the next frame's display time only while that frame is on time. When the game misses a display slot the next frame is
+// shown at D + 2P or later, so `next` is a period short for it, and once D is a period behind now the freshness guard drops the call to now +
+// prediction, 40 ms short. This answers at the display slot the NEXT frame will really be shown at, as far as it can be told from the cached frame:
+//   L  the frame's lead: its display time minus the runtime time at which the xrWaitFrame that produced it returned (how far ahead of the wait
+//      the compositor schedules a frame; the next frame's lead is taken to be the same);
+//   e  = now + L, when a frame whose wait returns now would be shown;
+//   k  = the smallest whole number of periods past D that reaches e, and never fewer than one: the next slot at or after e.
+// In steady flight now is within a period of the wait that returned D, so e is at most D + P and k = 1: exactly `next`. A late or stale frame
+// puts now a period or more past that wait and k grows with it. The freshness guard is not applied (k replaces it); a gap longer than
+// kSlotCapNs (a stall, a loading screen) is a counted fallback (Cap), the same as the stale fallback it replaces. No display time, no usable
+// period or lead, an overflow, or a reference-space change between D and the instant (`crosses(from, to)`, reference_changes.h) fall back
+// to now + prediction as well. `periodsOut`, when given, receives k on success.
+constexpr int64_t kSlotCapNs = 250000000;
+
+template <class Crosses>
+inline PoseAnswer slotAnswerTime(int64_t latestDisplayTime, int64_t periodNs, int64_t leadNs, int64_t now, Crosses&& crosses, int64_t* out,
+                                 int64_t* periodsOut = nullptr) {
+  int64_t display = 0;
+  if (!displayTimeTarget(latestDisplayTime, &display)) return PoseAnswer::NoFrame;
+  if (periodNs <= 0 || leadNs <= 0) return PoseAnswer::Period;
+  if (now > 0 && leadNs > INT64_MAX - now) return PoseAnswer::Period;
+  const int64_t expected = now + leadNs;
+  int64_t k = 1;
+  if (expected > display) {
+    const int64_t ahead = expected - display;                       // display > 0 and expected > display: no overflow
+    k = ahead / periodNs + (ahead % periodNs != 0 ? 1 : 0);
+    if (k < 1) k = 1;
+  }
+  int64_t most = kSlotCapNs / periodNs;                             // (a period past the cap still gets its one slot: k = 1 is `next`)
+  if (most < 1) most = 1;
+  if (k > most) return PoseAnswer::Cap;
+  const int64_t step = k * periodNs;                                // (k > 1 only when k * period <= kSlotCapNs: no overflow)
+  if (step > INT64_MAX - display) return PoseAnswer::Period;
+  const int64_t target = display + step;
+  if (crosses(display, target)) return PoseAnswer::Cross;
+  *out = target;
+  if (periodsOut) *periodsOut = k;
+  return PoseAnswer::Answered;
 }
 
 // The log lines that say the fix is acting, and for whom. The first caller to qualify writes one line; each further DISTINCT return RVA that

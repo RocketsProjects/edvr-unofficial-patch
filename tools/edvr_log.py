@@ -62,7 +62,10 @@ rather than printing an empty table.
 
 --tally pose tables the pose-gap diagnostic: every `pose gap:` line in the RUNTIME log (it reads --tag openxr unless you name a tag or a file) by
 caller (thread, return address): how far a head pose is located from the drawn frame's display time, how far it is turned from the drawn pose, and the
-correlation of that angle with head speed across the windows (docs\terrain-culling.md). Exit 1 when the log has no such line.
+correlation of that angle with head speed across the windows (docs\terrain-culling.md). Exit 1 when the log has no such line. It then tables the `pose slot:` lines
+(TEMPORARY, advanced.cull_pose_slot): per mode (next, slot) and thread, how often the pose an Elite "now" call was handed was a slot short or long of the frame that
+came next, the fallbacks by reason, how many of each were turned more than 1 and 2 degrees from the pose that frame was drawn with, per minute, and the reading of
+the three signatures (H-late, H-stale, H-overshoot).
 
 --tally periodic answers one question about one flight: which periodic work
 coincides with long frames. It reads the graphics log and the runtime log
@@ -707,9 +710,14 @@ def tally_pose(windows):
 def print_pose_tally(text):
     """The --tally pose report. Returns the process exit code."""
     windows, notes = parse_pose_gap(text)
+    slot_windows, slot_notes = parse_pose_slot(text)
     for note in notes:
         print("[edvr] pose gap: %s" % note)
     if not windows:
+        if slot_windows:
+            print("[edvr] no `pose gap:` lines in this log, but it has `pose slot:` lines.")
+            print_pose_slot_tally(slot_windows, slot_notes)
+            return 0
         print("[edvr] no `pose gap:` lines in this log. The diagnostic is always on and writes one per caller every 60 s from the runtime's "
               "WaitGetPoses; they are in the runtime log (--tag openxr), not the graphics log, and need a build with the pose-gap diagnostic.")
         return 1
@@ -740,7 +748,167 @@ def print_pose_tally(text):
           "drawn pose of about head speed times that period (r near +1: it is one period ahead by design). A gap near 0 means the answer is not "
           "acting (or is the earlier display-time answer); +40 ms or more is the lag it replaced. A caller with a real prediction, or outside the "
           "game's image, shows the true lag (before the fix Elite's was 41-44 ms and up to 4.1 degrees, r = +0.98).")
+    if slot_windows:
+        print_pose_slot_tally(slot_windows, slot_notes)
+    else:
+        print("[edvr] no `pose slot:` lines in this log: a build without the pose-slot instrument, or no Elite \"now\" call was handled in a window (the instrument writes a "
+              "line for every window that has a call, zeros included).")
     return 0
+
+# --tally pose also reads the pose-slot diagnostic (src/openxr/pose_slot.h writes every line; tools\openxr_pose_test holds tools\pose_slot_fixture.log, which
+# this script's --self-test reads, to exactly what it writes). TEMPORARY with advanced.cull_pose_slot (docs\terrain-culling.md, 2026-10-10). One line per
+# calling thread per window of one mode, in the RUNTIME log next to the `pose gap:` lines:
+#
+#   pose slot: tid T mode next|slot calls N match M short S (1p a, 2p+ b) long L (1p c, 2p+ d) fallback F (none e, stale f, period g, cross h, cap i,
+#       refused j; delta match k, short l, long m) unresolved U; >1deg match .. short .. (1p .., 2p+ ..) long .. (1p .., 2p+ ..) fallback .. (none .., stale ..,
+#       period .., cross .., cap .., refused ..); >2deg <the same>; max X deg (class)|max n/a; late frames n; window S s
+#   pose slot: more than 8 callers in a window; N calls not counted
+#
+# Each call Elite's "now" request made is compared with the frame that came NEXT (delta = the instant it was located at less that frame's display time; angle =
+# the orientation it returned against the one that frame was drawn with). Classes: match (|delta| under a quarter period), short (the pose is older than the
+# frame it was drawn in: 1p within 1.5 periods, 2p+ beyond), long (newer), fallback (not located at an instant of its own, by reason; also split by delta),
+# unresolved. calls = match + short + long + fallback + unresolved. The signatures it reads for (docs\terrain-culling.md):
+#   H-late      short 1p calls above 1 degree under `next`, rising with the window's late frames; gone under `slot`.
+#   H-stale     fallback stale (under `slot`: cap) calls above 1 degree.
+#   H-overshoot long calls above 1 degree.
+#   none of them while the flashes persist: the pose timing is not the cause.
+
+POSE_SLOT_REASONS = ("none", "stale", "period", "cross", "cap", "refused")
+_POSE_SLOT_OVER = (r"match (?P<{p}match>\d+) short (?P<{p}short>\d+) \(1p (?P<{p}short1>\d+), 2p\+ (?P<{p}short2>\d+)\) "
+                   r"long (?P<{p}long>\d+) \(1p (?P<{p}long1>\d+), 2p\+ (?P<{p}long2>\d+)\) "
+                   r"fallback (?P<{p}fb>\d+) \(none (?P<{p}r0>\d+), stale (?P<{p}r1>\d+), period (?P<{p}r2>\d+), cross (?P<{p}r3>\d+), "
+                   r"cap (?P<{p}r4>\d+), refused (?P<{p}r5>\d+)\)")
+POSE_SLOT_RE = re.compile(
+    r"pose slot: tid (?P<tid>\d+) mode (?P<mode>next|slot) calls (?P<calls>\d+) "
+    r"match (?P<match>\d+) short (?P<short>\d+) \(1p (?P<short1>\d+), 2p\+ (?P<short2>\d+)\) "
+    r"long (?P<long>\d+) \(1p (?P<long1>\d+), 2p\+ (?P<long2>\d+)\) "
+    r"fallback (?P<fb>\d+) \(none (?P<r0>\d+), stale (?P<r1>\d+), period (?P<r2>\d+), cross (?P<r3>\d+), cap (?P<r4>\d+), refused (?P<r5>\d+); "
+    r"delta match (?P<dm>\d+), short (?P<ds>\d+), long (?P<dl>\d+)\) unresolved (?P<unres>\d+); "
+    r">1deg " + _POSE_SLOT_OVER.format(p="a_") + r"; >2deg " + _POSE_SLOT_OVER.format(p="b_") + r"; "
+    r"(?:max (?P<max>[0-9.]+) deg \((?P<maxc>[a-z0-9+-]+)\)|max n/a); late frames (?P<late>\d+); window (?P<secs>[0-9.]+) s")
+POSE_SLOT_MORE_RE = re.compile(r"pose slot: more than (?P<limit>\d+) callers in a window; (?P<dropped>\d+) calls not counted")
+
+
+def parse_pose_slot(text):
+    """Every `pose slot:` line, in order. Returns (windows, notes). A window is a dict: tid, mode ("next"/"slot"), calls, match, short/short1/short2, long/long1/long2,
+    fb and reasons (a dict by none/stale/period/cross/cap/refused), fbd (the fallbacks by delta: match/short/long), unresolved, over1 and over2 (the calls above 1 and
+    above 2 degrees: the same keys as the classes, reasons included), max (degrees, None when n/a) and maxc (its class), late (frames), secs (the window's length)
+    and sums (the classes add up to the calls). A note is the text of an over-the-limit line."""
+    windows = []
+    notes = []
+    for line in text.splitlines():
+        m = POSE_SLOT_RE.search(line)
+        if m:
+            def over(p):
+                d = {k: int(m.group(p + k)) for k in ("match", "short", "short1", "short2", "long", "long1", "long2", "fb")}
+                d["reasons"] = {name: int(m.group("%sr%d" % (p, i))) for i, name in enumerate(POSE_SLOT_REASONS)}
+                return d
+            w = {"tid": int(m.group("tid")), "mode": m.group("mode"), "calls": int(m.group("calls")),
+                 "match": int(m.group("match")), "short": int(m.group("short")), "short1": int(m.group("short1")), "short2": int(m.group("short2")),
+                 "long": int(m.group("long")), "long1": int(m.group("long1")), "long2": int(m.group("long2")), "fb": int(m.group("fb")),
+                 "reasons": {name: int(m.group("r%d" % i)) for i, name in enumerate(POSE_SLOT_REASONS)},
+                 "fbd": {"match": int(m.group("dm")), "short": int(m.group("ds")), "long": int(m.group("dl"))},
+                 "unresolved": int(m.group("unres")), "over1": over("a_"), "over2": over("b_"),
+                 "max": float(m.group("max")) if m.group("max") is not None else None, "maxc": m.group("maxc"),
+                 "late": int(m.group("late")), "secs": float(m.group("secs"))}
+            w["sums"] = (w["calls"] == w["match"] + w["short"] + w["long"] + w["fb"] + w["unresolved"]
+                         and w["short"] == w["short1"] + w["short2"] and w["long"] == w["long1"] + w["long2"]
+                         and w["fb"] == sum(w["reasons"].values()) and w["fb"] == sum(w["fbd"].values()))
+            windows.append(w)
+            continue
+        if POSE_SLOT_MORE_RE.search(line):
+            notes.append(line.split("pose slot:", 1)[1].strip())
+    return windows, notes
+
+
+def tally_pose_slot(windows):
+    """The --tally pose slot numbers: one row per (mode, thread), over that caller's windows of that mode: n windows, minutes (the windows' lengths), calls and every
+    class summed (short/long with their 1p and 2p+, fallbacks by reason and by delta, unresolved), the calls above 1 and above 2 degrees by the same classes, the late
+    frames, the largest angle and its class, and r, the correlation across the windows of a window's late frames per minute with its short-1p-above-1-degree calls
+    per minute (None when it cannot be told). Rows come out with `next` before `slot`."""
+    groups = {}
+    for w in windows:
+        groups.setdefault((w["mode"], w["tid"]), []).append(w)
+    rows = []
+    for key in sorted(groups, key=lambda k: (k[0] != "next", k[0], k[1])):
+        ws = groups[key]
+        row = {"mode": key[0], "tid": key[1], "n": len(ws), "minutes": sum(w["secs"] for w in ws) / 60.0, "late": sum(w["late"] for w in ws),
+               "reasons": {n: sum(w["reasons"][n] for w in ws) for n in POSE_SLOT_REASONS},
+               "fbd": {n: sum(w["fbd"][n] for w in ws) for n in ("match", "short", "long")}, "badsum": sum(1 for w in ws if not w["sums"])}
+        for k in ("calls", "match", "short", "short1", "short2", "long", "long1", "long2", "fb", "unresolved"):
+            row[k] = sum(w[k] for w in ws)
+        for tag in ("over1", "over2"):
+            o = {k: sum(w[tag][k] for w in ws) for k in ("match", "short", "short1", "short2", "long", "long1", "long2", "fb")}
+            o["reasons"] = {n: sum(w[tag]["reasons"][n] for w in ws) for n in POSE_SLOT_REASONS}
+            row[tag] = o
+        known = [w for w in ws if w["max"] is not None]
+        top = max(known, key=lambda w: w["max"]) if known else None
+        row["max"] = top["max"] if top else None
+        row["maxc"] = top["maxc"] if top else None
+        row["r"] = _pearson([(w["late"] / (w["secs"] / 60.0), w["over1"]["short1"] / (w["secs"] / 60.0)) for w in ws if w["secs"] > 0])
+        rows.append(row)
+    return rows
+
+
+def print_pose_slot_tally(windows, notes):
+    """The `pose slot:` half of the --tally pose report: per (mode, thread), totals and per-minute rates, then the reading of each signature."""
+    for note in notes:
+        print("[edvr] pose slot: %s" % note)
+    rows = tally_pose_slot(windows)
+    print("[edvr] tally pose slot: %d window line(s) over %d (mode, thread) row(s); each call is compared with the frame that came next" % (len(windows), len(rows)))
+    print("%-5s %7s %6s %7s %7s  %-16s %-14s %-9s %-6s %5s" % ("mode", "tid", "min", "calls", "match", "short (1p/2p+)", "long (1p/2p+)", "fallback", "unres", "late"))
+    for r in rows:
+        print("%-5s %7d %6.1f %7d %7d  %-16s %-14s %-9d %-6d %5d"
+              % (r["mode"], r["tid"], r["minutes"], r["calls"], r["match"], "%d (%d/%d)" % (r["short"], r["short1"], r["short2"]),
+                 "%d (%d/%d)" % (r["long"], r["long1"], r["long2"]), r["fb"], r["unresolved"], r["late"]))
+    print("per minute (short / long / fallback, then the calls above 1 degree and above 2 degrees in those classes, late frames):")
+    print("%-5s %7s  %7s %7s %9s  %8s %7s %9s  %8s %7s %9s  %7s"
+          % ("mode", "tid", "short", "long", "fallback", ">1 short", ">1 long", ">1 fallbk", ">2 short", ">2 long", ">2 fallbk", "late"))
+    for r in rows:
+        mins = r["minutes"] if r["minutes"] > 0 else None
+
+        def per(v):
+            return ("%.2f" % (v / mins)) if mins else "n/a"
+        print("%-5s %7d  %7s %7s %9s  %8s %7s %9s  %8s %7s %9s  %7s"
+              % (r["mode"], r["tid"], per(r["short"]), per(r["long"]), per(r["fb"]), per(r["over1"]["short"]), per(r["over1"]["long"]), per(r["over1"]["fb"]),
+                 per(r["over2"]["short"]), per(r["over2"]["long"]), per(r["over2"]["fb"]), per(r["late"])))
+    for r in rows:
+        reasons = ", ".join("%s %d" % (n, r["reasons"][n]) for n in POSE_SLOT_REASONS if r["reasons"][n])
+        over = ", ".join("%s %d" % (n, r["over1"]["reasons"][n]) for n in POSE_SLOT_REASONS if r["over1"]["reasons"][n])
+        if r["fb"]:
+            print("[edvr] %s, tid %d: %d fallback call(s) (%s); by delta match %d, short %d, long %d; above 1 degree: %s."
+                  % (r["mode"], r["tid"], r["fb"], reasons, r["fbd"]["match"], r["fbd"]["short"], r["fbd"]["long"], over or "none"))
+        if r["max"] is not None:
+            print("[edvr] %s, tid %d: the largest angle between a call's pose and the next drawn pose was %.3f deg (%s)." % (r["mode"], r["tid"], r["max"], r["maxc"]))
+        if r["r"] is not None:
+            print("[edvr] %s, tid %d: a window's late frames against its short-1p calls above 1 degree: r = %+.2f over %d window(s)." % (r["mode"], r["tid"], r["r"], r["n"]))
+        if r["badsum"]:
+            print("[edvr] %s, tid %d: %d window line(s) whose classes do not add up to their calls (a cut-off or edited log?)." % (r["mode"], r["tid"], r["badsum"]))
+        if r["unresolved"]:
+            print("[edvr] %s, tid %d: %d call(s) never met a next frame (the session ended, the cache was dropped, or the store was full)." % (r["mode"], r["tid"], r["unresolved"]))
+    for mode in ("next", "slot"):
+        sel = [r for r in rows if r["mode"] == mode]
+        if not sel:
+            continue
+        mins = max(r["minutes"] for r in sel)
+        late = max(r["late"] for r in sel)
+        print("[edvr] mode %s over %.1f min: H-late (short 1p above 1 deg) %d, above 2 deg %d; H-stale (fallback stale+cap above 1 deg) %d; H-overshoot (long above 1 deg) %d; "
+              "late frames %d."
+              % (mode, mins, sum(r["over1"]["short1"] for r in sel), sum(r["over2"]["short1"] for r in sel),
+                 sum(r["over1"]["reasons"]["stale"] + r["over1"]["reasons"]["cap"] for r in sel), sum(r["over1"]["long"] for r in sel), late))
+    if {r["mode"] for r in rows} == {"next", "slot"}:
+        def rate(mode):
+            sel = [r for r in rows if r["mode"] == mode]
+            mins = max(r["minutes"] for r in sel)
+            n = sum(r["over1"]["short"] + r["over1"]["long"] + r["over1"]["fb"] for r in sel)
+            return (n / mins) if mins > 0 else None
+        a, b = rate("next"), rate("slot")
+        if a is not None and b is not None:
+            print("[edvr] calls above 1 degree from the next drawn pose, per minute, all classes and threads: next %.2f, slot %.2f." % (a, b))
+    print("[edvr] How to read it: under `next`, short 1p calls above 1 degree that rise with the late frames are H-late (the next frame came a period later than `next` "
+          "guessed); fallback stale above 1 degree is H-stale (the cached frame went a period stale and the call fell to now); long above 1 degree is H-overshoot "
+          "(the cache had already advanced). Under `slot` those should fall to about zero. If every class is near zero while the flashes persist, the pose timing "
+          "is not the cause.")
 
 # --camera-census: the VR camera census (advanced.vr_camera_census), one flight
 # in the VR profile with the key on. The question it answers (design doc section
@@ -10239,6 +10407,8 @@ def self_test():
         ok = False
     if not self_test_pose():
         ok = False
+    if not self_test_pose_slot():
+        ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1
@@ -10414,6 +10584,169 @@ def self_test_pose():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return ok
+
+POSE_SLOT_FIXTURE = "pose_slot_fixture.log"
+
+
+def self_test_pose_slot():
+    """--tally pose on the pose-slot lines: tools\\pose_slot_fixture.log (which tools\\openxr_pose_test holds to exactly what src/openxr/pose_slot.h writes for the
+    scripted flight: 14 lines -- seven windows of two threads, `next` for 600 frames, `slot` for 400 (the second window cut short by the flip back), `next` again for 700
+    (the last window cut short by the end of the run); thread 24212 is Elite's own and reads a slot short before every late frame under `next` and none under `slot`, thread
+    7001 adds a stale fallback every seventh frame (the cap under `slot`) and one cross), then on lines altered to break each thing the report depends on. Returns ok."""
+    ok = True
+
+    def fail(message):
+        nonlocal ok
+        print("self_test_pose_slot: %s" % message)
+        ok = False
+
+    import contextlib
+    import io
+    import shutil
+    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), POSE_SLOT_FIXTURE)
+    if not os.path.isfile(fixture):
+        fail("the fixture %s is missing beside this script" % POSE_SLOT_FIXTURE)
+        return False
+    text = read_text(fixture)
+    windows, notes = parse_pose_slot(text)
+    if len(windows) != 14 or notes:
+        fail("the fixture parsed to %d windows and %d notes, want 14 and none" % (len(windows), len(notes)))
+        return False
+    if parse_pose_slot("[00:00:00.000] pose gap: tid 1 calls 3 from exe+0x4E3881 prediction 0.0 ms target-minus-display n/a angle-to-drawn n/a head n/a waitgetposes 1 failed 0\n") != ([], []):
+        fail("a `pose gap:` line parsed as a pose slot window")
+    if not all(w["sums"] for w in windows):
+        fail("a fixture window whose classes do not add up to its calls")
+    w0, w1 = windows[0], windows[1]
+    if (w0["tid"], w0["mode"], w0["calls"], w0["match"], w0["short"], w0["short1"], w0["short2"], w0["long"], w0["fb"], w0["unresolved"], w0["late"], w0["secs"]) \
+            != (24212, "next", 300, 270, 30, 30, 0, 0, 0, 0, 30, 60.0) \
+            or w0["over1"]["short1"] != 30 or w0["over2"]["short1"] != 0 or w0["max"] != 1.389 or w0["maxc"] != "short-1p":
+        fail("window 1 (Elite's thread under `next`: a slot short before every late frame, 1.389 degrees) parsed to %r" % (w0,))
+    if (w1["tid"], w1["mode"], w1["calls"], w1["match"], w1["short"], w1["fb"], w1["reasons"]["stale"], w1["reasons"]["cross"], w1["fbd"]["short"]) \
+            != (7001, "next", 300, 230, 26, 44, 43, 1, 44) \
+            or w1["over1"]["reasons"]["stale"] != 43 or w1["over2"]["reasons"]["stale"] != 43 or w1["over2"]["reasons"]["cross"] != 0 or w1["maxc"] != "fallback-stale":
+        fail("window 2 (the second thread under `next`: 43 stale fallbacks and a cross) parsed to %r" % (w1,))
+    if [w["secs"] for w in windows] != [60.0] * 6 + [20.0, 20.0] + [60.0] * 4 + [20.0, 20.0] or [w["mode"] for w in windows] != ["next"] * 4 + ["slot"] * 4 + ["next"] * 6:
+        fail("the window lengths or modes -> %r" % ([(w["mode"], w["secs"]) for w in windows],))
+
+    def close(a, b, eps=0.005):
+        return a is not None and abs(a - b) <= eps
+
+    rows = {(r["mode"], r["tid"]): r for r in tally_pose_slot(windows)}
+    if [(r["mode"], r["tid"]) for r in tally_pose_slot(windows)] != [("next", 7001), ("next", 24212), ("slot", 7001), ("slot", 24212)]:
+        fail("the rows, `next` before `slot` -> %r" % (sorted(rows),))
+        return False
+    a = rows[("next", 24212)]
+    if (a["n"], a["calls"], a["match"], a["short"], a["short1"], a["short2"], a["fb"], a["unresolved"], a["late"]) != (5, 1300, 1170, 130, 130, 0, 0, 0, 130) \
+            or not close(a["minutes"], 260.0 / 60.0, 1e-9) or a["over1"]["short1"] != 130 or a["over2"]["short1"] != 0 or a["max"] != 1.389 or a["maxc"] != "short-1p" or a["r"] is not None:
+        fail("Elite's thread under `next` -> %r" % (a,))
+    b = rows[("slot", 24212)]
+    if (b["n"], b["calls"], b["match"], b["short"], b["fb"], b["late"]) != (2, 400, 400, 0, 0, 40) or not close(b["minutes"], 80.0 / 60.0, 1e-9) or b["max"] != 0.0 or b["maxc"] != "match":
+        fail("Elite's thread under `slot` -> %r" % (b,))
+    c = rows[("next", 7001)]
+    if (c["n"], c["calls"], c["match"], c["short"], c["fb"], c["reasons"]["stale"], c["reasons"]["cross"], c["fbd"]["short"]) != (5, 1300, 1001, 112, 187, 186, 1, 187) \
+            or c["over1"]["reasons"]["stale"] != 186 or c["over1"]["reasons"]["cross"] != 1 or c["over2"]["reasons"]["stale"] != 186 or c["over2"]["reasons"]["cross"] != 0 or c["maxc"] != "fallback-stale":
+        fail("the second thread under `next` -> %r" % (c,))
+    d = rows[("slot", 7001)]
+    if (d["n"], d["calls"], d["match"], d["short"], d["fb"], d["reasons"]["cap"], d["reasons"]["stale"]) != (2, 400, 343, 0, 57, 57, 0) or d["over2"]["reasons"]["cap"] != 57:
+        fail("the second thread under `slot` (the cap, never stale) -> %r" % (d,))
+    # The correlation of a window's late frames with its short-1p-above-1-degree calls needs three windows and a spread on both sides.
+    varied = [dict(w, late=n, over1=dict(w["over1"], short1=2 * n)) for w, n in zip([w for w in windows if w["tid"] == 24212 and w["mode"] == "next"], (10, 20, 30, 40, 50))]
+    rv = tally_pose_slot(varied)[0]["r"]
+    if rv is None or not close(rv, 1.0, 1e-9):
+        fail("late frames against short-1p-above-1-degree calls with a spread -> %r, want +1" % (rv,))
+    # A line altered: n/a reads None; classes that do not add up are flagged; a window of unresolved calls is counted and said.
+    na = text.replace("max 1.389 deg (short-1p)", "max n/a", 1)
+    nw, _ = parse_pose_slot(na)
+    if nw[0]["max"] is not None or nw[0]["maxc"] is not None or nw[1]["max"] != 4.167:
+        fail("max n/a parsed as a number: %r" % (nw[0],))
+    if tally_pose_slot(nw)[1]["max"] != 1.389:
+        fail("an n/a window changed the largest angle of the row")
+    broken = text.replace("calls 300 match 270", "calls 301 match 270", 1)
+    bw, _ = parse_pose_slot(broken)
+    if bw[0]["sums"] or not all(w["sums"] for w in bw[1:]):
+        fail("a window whose classes add up to 300 of 301 calls was not flagged (only it)")
+    unres = text.replace("calls 300 match 270", "calls 303 match 270", 1).replace("(none 0, stale 0, period 0, cross 0, cap 0, refused 0; delta match 0, short 0, long 0) unresolved 0;",
+                                                                                  "(none 0, stale 0, period 0, cross 0, cap 0, refused 0; delta match 0, short 0, long 0) unresolved 3;", 1)
+    uw, _ = parse_pose_slot(unres)
+    if uw[0]["unresolved"] != 3 or not uw[0]["sums"]:
+        fail("a window with 3 unresolved calls -> %r" % (uw[0],))
+    more = text + "[00:00:00.000] pose slot: more than 8 callers in a window; 2 calls not counted\n"
+    mw, mn = parse_pose_slot(more)
+    if len(mw) != 14 or mn != ["more than 8 callers in a window; 2 calls not counted"]:
+        fail("the over-the-limit line -> %d windows, notes %r" % (len(mw), mn))
+    # Through main(), on a directory the tool discovers on its own: the pose-gap table is as it was, and the slot tally follows it.
+    gap_fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), POSE_FIXTURE)
+    gap_text = read_text(gap_fixture) if os.path.isfile(gap_fixture) else ""
+    head = "[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-09 12:00:00 UTC\n"
+    tmp = tempfile.mkdtemp(prefix="edvr_poseslot_selftest_")
+    try:
+        logs = os.path.join(tmp, "edvr_logs")
+        os.makedirs(logs)
+
+        def run(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        name = os.path.join(logs, "edvr_openxr_20261010_120000_123_77.log")
+        with open(name, "wb") as f:
+            f.write((head + gap_text + more).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        for want in ("tally pose: 24 window line(s) over 2 caller row(s)",
+                     "tally pose slot: 14 window line(s) over 4 (mode, thread) row(s); each call is compared with the frame that came next",
+                     "[edvr] pose slot: more than 8 callers in a window; 2 calls not counted",
+                     "mode      tid    min   calls   match  short (1p/2p+)   long (1p/2p+)  fallback  unres   late",
+                     "next    24212    4.3    1300    1170  130 (130/0)      0 (0/0)        0         0        130",
+                     "next     7001    4.3    1300    1001  112 (112/0)      0 (0/0)        187       0        130",
+                     "slot    24212    1.3     400     400  0 (0/0)          0 (0/0)        0         0         40",
+                     "slot     7001    1.3     400     343  0 (0/0)          0 (0/0)        57        0         40",
+                     "next    24212    30.00    0.00      0.00     30.00    0.00      0.00      0.00    0.00      0.00    30.00",
+                     "[edvr] next, tid 7001: 187 fallback call(s) (stale 186, cross 1); by delta match 0, short 187, long 0; above 1 degree: stale 186, cross 1.",
+                     "[edvr] slot, tid 7001: 57 fallback call(s) (cap 57); by delta match 0, short 57, long 0; above 1 degree: cap 57.",
+                     "[edvr] next, tid 24212: the largest angle between a call's pose and the next drawn pose was 1.389 deg (short-1p).",
+                     "[edvr] next, tid 7001: the largest angle between a call's pose and the next drawn pose was 4.167 deg (fallback-stale).",
+                     "[edvr] mode next over 4.3 min: H-late (short 1p above 1 deg) 242, above 2 deg 0; H-stale (fallback stale+cap above 1 deg) 186; H-overshoot (long above 1 deg) 0; late frames 130.",
+                     "[edvr] mode slot over 1.3 min: H-late (short 1p above 1 deg) 0, above 2 deg 0; H-stale (fallback stale+cap above 1 deg) 57; H-overshoot (long above 1 deg) 0; late frames 40.",
+                     "[edvr] calls above 1 degree from the next drawn pose, per minute, all classes and threads: next 99.00, slot 42.75.",
+                     "If every class is near zero while the flashes persist, the pose timing is not the cause."):
+            if want not in out:
+                fail("--tally pose output lacks %r:\n%s" % (want, out))
+        if rc != 0:
+            fail("--tally pose exited %d" % rc)
+        # The same log with the slot lines taken out: the old report, then the note that says the instrument never wrote a line.
+        with open(name, "wb") as f:
+            f.write((head + gap_text).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        if rc != 0 or "tally pose: 24 window line(s) over 2 caller row(s)" not in out or "no `pose slot:` lines in this log" not in out or "tally pose slot" in out:
+            fail("a log with pose gap lines and no pose slot line -> rc %d:\n%s" % (rc, out))
+        # Slot lines and no gap lines: the slot tally alone, exit 0.
+        with open(name, "wb") as f:
+            f.write((head + text).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        if rc != 0 or "no `pose gap:` lines in this log, but it has `pose slot:` lines." not in out or "tally pose slot: 14 window line(s)" not in out:
+            fail("a log with pose slot lines and no pose gap line -> rc %d:\n%s" % (rc, out))
+        # Neither: the old message and exit 1, unchanged.
+        with open(name, "wb") as f:
+            f.write((head + "[00:00:01.000] nothing here\n").encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        if rc != 1 or "no `pose gap:` lines" not in out or "tally pose slot" in out:
+            fail("a log with neither -> rc %d:\n%s" % (rc, out))
+        # The flags the report raises on altered lines.
+        with open(name, "wb") as f:
+            f.write((head + broken).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        if rc != 0 or "window line(s) whose classes do not add up to their calls" not in out:
+            fail("a window that does not add up is not flagged -> rc %d:\n%s" % (rc, out))
+        with open(name, "wb") as f:
+            f.write((head + unres).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        if rc != 0 or "3 call(s) never met a next frame" not in out:
+            fail("unresolved calls are not said -> rc %d:\n%s" % (rc, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
 
 def self_test_flat_upscale():
     """--flat-upscale on the checked-in synthetic flight (tools\\flat_upscale_fixture.log, which tools\\flat_temporal_test holds to exactly what the DLL's

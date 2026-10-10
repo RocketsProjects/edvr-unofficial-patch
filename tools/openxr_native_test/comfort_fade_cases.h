@@ -9,9 +9,10 @@
 namespace edvr::openxr::test {
 namespace comfort_fixture {
 // A provider of a given age: it knows the shapes up to maxVersion, refuses any other with E_INVALIDARG and consumes nothing when it does, and writes the fade
-// level only into a struct that has the slot. `scribble` makes it write the slot anyway (a provider that claims less than it writes).
+// level (version 5) and the cull-pose-slot switch (version 4's word) only into a struct that has the slot. `scribble` makes it write the slots anyway (a provider that
+// claims less than it writes).
 struct Provider {
-  uint32_t maxVersion=5;float fade=1.0f;unsigned calls=0;bool scribble=false;HRESULT fail=S_OK;
+  uint32_t maxVersion=5;float fade=1.0f;uint32_t slot=1;unsigned calls=0;bool scribble=false;HRESULT fail=S_OK;
   HRESULT answer(EdvrNativeFrameOutput& o) {
     ++calls;
     if(fail!=S_OK)return fail;
@@ -21,6 +22,7 @@ struct Provider {
     if(o.size!=want)return E_INVALIDARG;
     o.sceneReady=1;
     if(o.version>=5||scribble)o.fadeAlpha=fade;
+    if(o.version>=4||scribble)o.cullPoseSlot=slot;
     return S_OK;
   }
 };
@@ -65,5 +67,33 @@ template<class Check> void runComfortFadeCases(Check&& check) {
   check(Client::ask(5).size==sizeof(EdvrNativeFrameOutput)&&Client::ask(5).version==5&&Client::ask(4).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_4&&Client::ask(4).version==4&&
         Client::ask(9).version==5&&Client::ask(0).version==1,"the shapes the client asks for: 5 is the whole struct, 4 stops before the fade slot, anything above is 5, 0 is 1");
   check(Client::ask(5).fadeAlpha==0.0f,"a fresh ask carries fade 0 (no fade) until a provider says otherwise");
+  // advanced.cull_pose_slot (TEMPORARY): version 4's word. 1 is on; everything the ladder cannot vouch for reads 0, off, the shipped head-pose answer.
+  {
+    Provider p;uint32_t v=5;EdvrNativeFrameOutput out{};
+    check(ladder(p,v,out)==S_OK&&out.version==5&&out.cullPoseSlot==1u&&out.fadeAlpha==1.0f&&p.calls==1,"a current d3d11.dll: one call, and the cull-pose-slot switch arrives with the fade level");
+  }
+  for(uint32_t code:{0u,1u}) {
+    Provider p;p.slot=code;uint32_t v=5;EdvrNativeFrameOutput out{};
+    check(ladder(p,v,out)==S_OK&&out.cullPoseSlot==code,"the switch arrives as sent: 0 is off, 1 is on");
+  }
+  for(uint32_t code:{2u,7u,0x80000000u,0xFFFFFFFFu}) {
+    Provider p;p.slot=code;uint32_t v=5;EdvrNativeFrameOutput out{};
+    check(ladder(p,v,out)==S_OK&&out.version==5&&out.cullPoseSlot==0u&&out.fadeAlpha==1.0f,"any other value reads off, and the rest of the answer is kept");
+  }
+  {
+    Provider p;p.maxVersion=4;uint32_t v=5;EdvrNativeFrameOutput out{};
+    check(ladder(p,v,out)==S_OK&&out.version==4&&out.cullPoseSlot==1u&&out.fadeAlpha==0.0f,"a version 4 d3d11.dll (from before the fade) still carries the switch: it is version 4's word");
+  }
+  for(uint32_t version:{3u,2u,1u}) {
+    Provider p;p.maxVersion=version;uint32_t v=5;EdvrNativeFrameOutput out{};
+    check(ladder(p,v,out)==S_OK&&out.version==version&&out.cullPoseSlot==0u,"a d3d11.dll older than the word (3, 2, 1) reads off");
+    Provider q;q.maxVersion=version;q.scribble=true;uint32_t w=5;EdvrNativeFrameOutput out2{};
+    check(ladder(q,w,out2)==S_OK&&out2.version==version&&out2.cullPoseSlot==0u,"...and one that writes the word into a shape that has none is not believed");
+  }
+  {
+    Provider p;p.fail=E_FAIL;uint32_t v=5;EdvrNativeFrameOutput out{};out.cullPoseSlot=1u;
+    check(ladder(p,v,out)==E_FAIL&&out.cullPoseSlot==0u,"a provider that fails the frame leaves no switch behind");
+  }
+  check(Client::ask(5).cullPoseSlot==0u&&Client::ask(4).cullPoseSlot==0u,"a fresh ask carries off until a provider says otherwise");
 }
 } // namespace edvr::openxr::test

@@ -18,7 +18,7 @@
 #define EDVR_NATIVE_FRAME_VERSION_3 3u
 // Version 4 added one word to the END and nothing else, under the same
 // hand-copied-DLLs rule (the projection channel of the terrain guard, retired
-// 2026-10-09: the slot stays, see reservedProjectionChannel below).
+// 2026-10-09: the slot stays, see cullPoseSlot below).
 #define EDVR_NATIVE_FRAME_VERSION_4 4u
 // Version 5 adds fadeAlpha to the END and nothing else (Explorer Cam's comfort
 // fade, comfort_fade.h), under the same hand-copied-DLLs rule: a version 1 to
@@ -73,10 +73,14 @@ struct EdvrNativeFrameOutput {
     // (fix.weapon_stability while on foot); 0: the wait stays in
     // WaitGetPoses.
     uint32_t deferredPacing;
-    // RETIRED 2026-10-09 (version 4's one word: which projection query channel
-    // the terrain guard's widened frustum was told through). Always zero, never
-    // read; the slot stays for the same reason as the 21 above.
-    uint32_t reservedProjectionChannel;
+    // Version 4 and later. TEMPORARY (the terrain-culling arc, docs\terrain-culling.md, 2026-10-10): advanced.cull_pose_slot, 1 when the
+    // runtime is to locate Elite's "now" head pose at the display slot the next frame will really be shown at (head_pose_time.h
+    // slotAnswerTime), 0 (the default) for one display period past the latest frame, the shipped behaviour. Anything else reads as 0.
+    // This is version 4's one word, RETIRED 2026-10-09 with the terrain guard (which projection query channel its widened frustum was
+    // told through; it was always zero afterwards and nothing read it), put to use again instead of a new version: no new shape, no
+    // new ladder step, and a half from before this key reads 0 (off) in either direction -- an older provider writes zero there, an
+    // older runtime never looked. When the arc closes the key goes and this word goes back to a zero nothing reads.
+    uint32_t cullPoseSlot;
     // Version 5 and later. How black the projection layer is, 0 (clear, the
     // default and the only value an older provider can mean) to 1: the runtime
     // blends black over each eye image by this much when it composes. Already
@@ -97,10 +101,10 @@ struct EdvrNativeFrameOutput {
     ((uint32_t)offsetof(EdvrNativeFrameOutput, deferredPacing))
 // The size the fields through deferredPacing occupy, which is what a
 // version 3 caller's struct is, with no tail padding before
-// reservedProjectionChannel.
+// cullPoseSlot.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 \
-    ((uint32_t)offsetof(EdvrNativeFrameOutput, reservedProjectionChannel))
-// The size the fields through reservedProjectionChannel occupy, which is what a version 4
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, cullPoseSlot))
+// The size the fields through cullPoseSlot occupy, which is what a version 4
 // caller's struct is, with no tail padding before fadeAlpha.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, fadeAlpha))

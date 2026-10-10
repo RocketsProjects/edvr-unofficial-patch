@@ -33,7 +33,7 @@ class NativeFrameClient final {
   // The version ladder, on its own so a rig can drive it with a provider of any age. A d3d11.dll that does not yet know a newer shape refuses it and
   // consumes nothing when it does, so the same frame can be asked again the only way that one knows: one step down at a time, until version 1 (which every
   // provider answers) or an acceptance settles what shape to ask for first next time. It then carries no trim/pacing/fade field, ever; whatever
-  // the answer did not carry reads as its off value (fadeAlpha 0: no fade, never black).
+  // the answer did not carry reads as its off value (fadeAlpha 0: no fade, never black; cullPoseSlot 0: the shipped head-pose answer).
   template<class Begin>
   static HRESULT beginLadder(Begin&& call,uint32_t& providerVersion,EdvrNativeFrameOutput& out) {
     out=ask(providerVersion);
@@ -49,6 +49,9 @@ class NativeFrameClient final {
       out.deferredPacing=0;
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_5||!(out.fadeAlpha==out.fadeAlpha))
       out.fadeAlpha=0;
+    // advanced.cull_pose_slot (TEMPORARY): version 4's word. 1 is on; a shape without the word, a failed frame and anything but 0 or 1 read as off.
+    if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_4||out.cullPoseSlot>1)
+      out.cullPoseSlot=0;
     return r;
   }
   HRESULT latch(uint64_t sequence,EdvrNativeFrameDecision& out) {

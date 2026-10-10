@@ -2,6 +2,7 @@
 #include "../../src/common/comfort_fade.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/config.h"
+#include "../../src/common/log.h"
 #include "../../src/common/native_render_settings.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/journal_watch.h"
@@ -12,6 +13,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <thread>
@@ -72,6 +75,14 @@ int wmain(int argc, wchar_t** argv) {
           "WARP device");
     if (!device) return 1;
     std::puts("native_frame_test: device ready");
+
+    // The graphics log, in a folder of its own for the whole run: the lines advanced.cull_pose_slot writes (at the session's first frame and on each
+    // change) are read back where its cells end.
+    wchar_t tempFolder[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tempFolder);
+    const std::wstring logDir = std::wstring(tempFolder) + L"edvr_native_frame_test_" + std::to_wstring(GetCurrentProcessId());
+    CreateDirectoryW(logDir.c_str(), nullptr);
+    check(edvr::Log::get().open(logDir, L"nativeframe"), "the graphics log opens in a folder of its own");
 
     // Reset the process channel so every assertion below observes this
     // provider's session rather than an earlier native-frame run.
@@ -151,10 +162,11 @@ int wmain(int argc, wchar_t** argv) {
               firstOutput.reservedOffset[2] == 0.0f && firstOutput.reservedYaw == 0.0f &&
               firstOutput.reservedOffsetEnabled == 0 && firstOutput.reservedOffsetGamePoses == 0,
           "the retired offset slots are zero");
-    // The terrain guard's slots are retired (2026-10-09): always zero, whatever an old ini says.
+    // The terrain guard's slots are retired (2026-10-09): always zero, whatever an old ini says. (Version 4's word is no longer one of them: it carries
+    // advanced.cull_pose_slot, 0 by default, which these cells leave unset.)
     const auto retiredGuardSlotsZero = [](const EdvrNativeFrameOutput& o) {
         for (uint32_t word : o.reservedTerrainGuard) if (word != 0) return false;
-        return o.reservedProjectionChannel == 0;
+        return o.cullPoseSlot == 0;
     };
     check(retiredGuardSlotsZero(firstOutput),
           "the terrain guard's retired slots are zero although the ini still carries all six of its old keys");
@@ -302,13 +314,13 @@ int wmain(int argc, wchar_t** argv) {
     // caller: answered in exactly its own shape, pacing and all, with the
     // channel field never written into its (absent) tail.
     EdvrNativeFrameOutput defaultOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_3, EDVR_NATIVE_FRAME_VERSION_3};
-    defaultOutput.reservedProjectionChannel = 0xA5A5A5A5u;
+    defaultOutput.cullPoseSlot = 0xA5A5A5A5u;
     EdvrNativeFrameInput defaultFrame = input(41, 7, 11);
     check(table.beginFrame(table.context, &defaultFrame, &defaultOutput) == S_OK &&
               defaultOutput.version == EDVR_NATIVE_FRAME_VERSION_3 &&
               defaultOutput.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 &&
               defaultOutput.deferredPacing == 0 &&
-              defaultOutput.reservedProjectionChannel == 0xA5A5A5A5u,
+              defaultOutput.cullPoseSlot == 0xA5A5A5A5u,
           "a version 3 caller is answered in kind, its absent tail untouched");
 
     g_journalActive = g_onFootKnown = g_onFoot = true;
@@ -417,10 +429,10 @@ int wmain(int argc, wchar_t** argv) {
         check(table.beginFrame(table.context, &v4Frame, &v4) == S_OK && v4.version == EDVR_NATIVE_FRAME_VERSION_4 && v4.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 && v4.fadeAlpha == -123.0f,
               "A VERSION 4 CALLER is answered in its own shape and the fade slot past it is untouched (a runtime from before the fade cannot be blacked out)");
         EdvrNativeFrameOutput v3{EDVR_NATIVE_FRAME_OUTPUT_SIZE_3, EDVR_NATIVE_FRAME_VERSION_3};
-        v3.reservedProjectionChannel = 0xA5A5A5A5u;
+        v3.cullPoseSlot = 0xA5A5A5A5u;
         v3.fadeAlpha = -123.0f;
         EdvrNativeFrameInput v3Frame = input(41, 7, ++seq);
-        check(table.beginFrame(table.context, &v3Frame, &v3) == S_OK && v3.reservedProjectionChannel == 0xA5A5A5A5u && v3.fadeAlpha == -123.0f, "...and a version 3 caller likewise");
+        check(table.beginFrame(table.context, &v3Frame, &v3) == S_OK && v3.cullPoseSlot == 0xA5A5A5A5u && v3.fadeAlpha == -123.0f, "...and a version 3 caller likewise");
         EdvrNativeFrameOutput fullAsV4{sizeof(fullAsV4), EDVR_NATIVE_FRAME_VERSION_4};
         EdvrNativeFrameInput fullMismatchFrame = input(41, 7, ++seq);
         check(table.beginFrame(table.context, &fullMismatchFrame, &fullAsV4) == E_INVALIDARG, "A FULL-SIZE STRUCT CLAIMING VERSION 4 is refused (the size contradicts the version)");
@@ -428,6 +440,88 @@ int wmain(int argc, wchar_t** argv) {
         EdvrNativeFrameInput mismatchFrame2 = input(41, 7, ++seq);
         check(table.beginFrame(table.context, &mismatchFrame2, &v4AsV5) == E_INVALIDARG, "...and a version 4 sized struct claiming version 5 is refused: it is never half-answered");
         edvr::comfort::clear();
+    }
+
+    // ---- advanced.cull_pose_slot (TEMPORARY; EdvrNativeFrameOutput::cullPoseSlot, version 4's word, read every frame so the key is live) --------------------------
+    {
+        uint64_t seq = 120;
+        auto ask = [&](uint32_t* slot) {
+            EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_5};
+            o.cullPoseSlot = 0xA5A5A5A5u;   // a sentinel the answer must overwrite
+            EdvrNativeFrameInput f = input(41, 7, ++seq);
+            const HRESULT r = table.beginFrame(table.context, &f, &o);
+            *slot = o.cullPoseSlot;
+            return r;
+        };
+        uint32_t slot = 7;
+        check(ask(&slot) == S_OK && slot == 0u, "advanced.cull_pose_slot absent from the config altogether reads 0 (off): an unset key changes nothing, and the sentinel is overwritten");
+        edvr::Config::get().set("advanced.cull_pose_slot", "");
+        check(ask(&slot) == S_OK && slot == 0u, "...empty reads 0");
+        struct SlotCase { const char* text; uint32_t code; };
+        const SlotCase slotCases[] = {{"on", 1}, {"off", 0}, {"ON", 1}, {"Off", 0}, {"1", 1}, {"0", 0}, {"true", 1}, {"false", 0}, {"yes", 1}, {"no", 0},
+                                      {"junk", 0}, {"2", 0}, {"on ", 0}, {"slot", 0}, {"", 0}};
+        bool parsed = true;
+        for (const SlotCase& c : slotCases) {
+            edvr::Config::get().set("advanced.cull_pose_slot", c.text);
+            parsed = parsed && ask(&slot) == S_OK && slot == c.code;
+        }
+        check(parsed, "on, 1, true and yes (any case) read 1; off, 0, false, no, a near miss, a number, a trailing space and empty read 0 (an unrecognised value is the default, off)");
+        // Live: the same table, no reacquire, follows the key from one frame to the next.
+        edvr::Config::get().set("advanced.cull_pose_slot", "on");
+        const bool onNow = ask(&slot) == S_OK && slot == 1u;
+        edvr::Config::get().set("advanced.cull_pose_slot", "off");
+        const bool offNow = ask(&slot) == S_OK && slot == 0u;
+        edvr::Config::get().set("advanced.cull_pose_slot", "on");
+        const bool onAgain = ask(&slot) == S_OK && slot == 1u;
+        check(onNow && offNow && onAgain, "THE KEY IS LIVE: on, off and on again are each told at the very next frame");
+        // The older shapes. Version 4's shape carries the word; version 3's does not, and its absent tail is never written.
+        EdvrNativeFrameOutput v4{EDVR_NATIVE_FRAME_OUTPUT_SIZE_4, EDVR_NATIVE_FRAME_VERSION_4};
+        v4.cullPoseSlot = 0xA5A5A5A5u;
+        EdvrNativeFrameInput v4Frame = input(41, 7, ++seq);
+        check(table.beginFrame(table.context, &v4Frame, &v4) == S_OK && v4.version == EDVR_NATIVE_FRAME_VERSION_4 && v4.cullPoseSlot == 1u,
+              "a version 4 caller (a runtime from before the comfort fade) is told the switch in its own shape");
+        EdvrNativeFrameOutput v3{EDVR_NATIVE_FRAME_OUTPUT_SIZE_3, EDVR_NATIVE_FRAME_VERSION_3};
+        v3.cullPoseSlot = 0xA5A5A5A5u;
+        EdvrNativeFrameInput v3Frame = input(41, 7, ++seq);
+        check(table.beginFrame(table.context, &v3Frame, &v3) == S_OK && v3.cullPoseSlot == 0xA5A5A5A5u,
+              "...a version 3 caller's absent tail is untouched: it never learns of the key (it reads the shipped answer)");
+        edvr::Config::get().set("advanced.cull_pose_slot", "off");
+        check(ask(&slot) == S_OK && slot == 0u, "(and off again)");
+        // The log: one line at the session's first frame (off, the default) and one on every change -- 14 changes in all, alternating -- and none for a frame that
+        // changes nothing (the junk values, which read off after off, and the version 3 caller, which cannot be told).
+        edvr::Log::get().close();
+        std::string logText;
+        {
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((logDir + L"\\edvr_nativeframe_*.log").c_str(), &fd);
+            std::wstring best;
+            if (h != INVALID_HANDLE_VALUE) {
+                do { const std::wstring n = logDir + L"\\" + fd.cFileName; if (n > best) best = n; } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+            std::ifstream in(best, std::ios::binary);
+            logText.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            in.close();
+            h = FindFirstFileW((logDir + L"\\*").c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE) {
+                do { if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) DeleteFileW((logDir + L"\\" + fd.cFileName).c_str()); } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+            RemoveDirectoryW(logDir.c_str());
+        }
+        std::string sequence;
+        size_t count = 0, at = 0;
+        const std::string tag = "cull pose slot: ";
+        while ((at = logText.find(tag, at)) != std::string::npos) {
+            at += tag.size();
+            sequence += logText.compare(at, 2, "on") == 0 ? "1" : logText.compare(at, 3, "off") == 0 ? "0" : "?";
+            ++count;
+        }
+        check(count == 15 && sequence == "010101010101010", "the log carries 15 `cull pose slot:` lines, alternating off (the session's first frame) and on, one per change and none for a frame that changed nothing");
+        check(logText.find("cull pose slot: off (Elite's \"now\" head pose is located one display period after the drawn frame, as shipped).") != std::string::npos &&
+                  logText.find("cull pose slot: on (Elite's \"now\" head pose is located at the display slot the next frame will really be shown at, a later one after a late frame).") != std::string::npos,
+              "...worded as the brief says: on or off, then what it does (the exact text)");
+        check(logText.find("cull pose slot: off") < logText.find("cull pose slot: on"), "...the first is the session's start, and says off");
     }
 
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),

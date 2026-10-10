@@ -121,6 +121,116 @@ void runHeadPoseTimeCases(Check&& check) {
     check(displayTimeFresh(INT64_MAX, period, INT64_MAX) && displayTimeFresh(INT64_MAX, period, INT64_MAX - 1) && !displayTimeFresh(INT64_MAX - 3 * period, period, INT64_MAX),
           "the comparison does not overflow at the ends of the range");
   }
+  // ---- why a call was or was not answered ---------------------------------------------------------------------------------------------------
+  {
+    constexpr int64_t period = 11111111, display = 5000000000;
+    const auto add = [](int64_t shown, int64_t p, int64_t& out) { return nextPredictionTime(shown, p, out); };
+    const auto never = [](int64_t, int64_t) { return false; };
+    const auto always = [](int64_t, int64_t) { return true; };
+    int64_t at = -7;
+    check(answerTimeWhy(display, period, display - 1000, add, never, &at) == PoseAnswer::Answered && at == display + period, "the reason for an answered call is Answered, and the instant is written");
+    at = -7;
+    check(answerTimeWhy(0, period, 1, add, never, &at) == PoseAnswer::NoFrame && answerTimeWhy(-5, period, 1, add, never, &at) == PoseAnswer::NoFrame && at == -7,
+          "no display time (not positive): NoFrame, the output left alone");
+    check(answerTimeWhy(display, period, display + period + 1, add, never, &at) == PoseAnswer::Stale && at == -7, "a cached frame more than one period behind now: Stale");
+    check(answerTimeWhy(display, 0, display, add, never, &at) == PoseAnswer::Period && answerTimeWhy(display, -1, display - 5, add, never, &at) == PoseAnswer::Period &&
+              answerTimeWhy(INT64_MAX - 5, period, INT64_MAX - 5, add, never, &at) == PoseAnswer::Period && at == -7,
+          "no period that is positive, or a sum that would overflow: Period");
+    check(answerTimeWhy(display, 0, display + 1, add, never, &at) == PoseAnswer::Stale,
+          "(with no period the display time must not be behind now at all, and one that is reads Stale: the freshness test comes before the period is added, as it always did)");
+    check(answerTimeWhy(display, period, display - 1000, add, always, &at) == PoseAnswer::Cross && at == -7, "a reference-space change in between: Cross");
+    check(answerTime(display, period, display - 1000, add, never, &at) && !answerTime(display, period, display - 1000, add, always, &at) &&
+              !answerTime(0, period, 1, add, never, &at) && !answerTime(display, period, display + 2 * period, add, never, &at),
+          "the yes/no answerTime is exactly 'the reason is Answered' (the shipped behaviour does not move)");
+    check(std::string(poseAnswerName(PoseAnswer::Answered)) == "answered" && std::string(poseAnswerName(PoseAnswer::NoFrame)) == "none" &&
+              std::string(poseAnswerName(PoseAnswer::Stale)) == "stale" && std::string(poseAnswerName(PoseAnswer::Period)) == "period" &&
+              std::string(poseAnswerName(PoseAnswer::Cross)) == "cross" && std::string(poseAnswerName(PoseAnswer::Cap)) == "cap" &&
+              std::string(poseAnswerName(PoseAnswer::Refused)) == "refused" && kPoseAnswers == 7,
+          "the reasons are named as the log line prints them");
+  }
+  // ---- the slot instant (advanced.cull_pose_slot) --------------------------------------------------------------------------------------------
+  {
+    constexpr int64_t period = 11111111, display = 5000000000, lead = 42000000;
+    const int64_t waitReturned = display - lead;   // the wait that produced the frame returned this long before its display time
+    const auto never = [](int64_t, int64_t) { return false; };
+    const auto add = [](int64_t shown, int64_t p, int64_t& out) { return nextPredictionTime(shown, p, out); };
+    int64_t at = -7, k = -7;
+    check(kSlotCapNs == 250000000, "the cap is 250 ms");
+    // Steady flight: the call is made within a period of the wait that returned the frame, so the next slot is one period past its display time.
+    check(slotAnswerTime(display, period, lead, waitReturned, never, &at, &k) == PoseAnswer::Answered && at == display + period && k == 1,
+          "steady flight, a call just after the wait returned: k = 1, one period past the display time");
+    int64_t next = -7;
+    check(answerTime(display, period, waitReturned, add, never, &next) && next == at, "...exactly what `next` answers");
+    check(slotAnswerTime(display, period, lead, waitReturned + 5000000, never, &at, &k) == PoseAnswer::Answered && at == display + period && k == 1,
+          "...5 ms later: still k = 1 (e = display + 5 ms)");
+    check(slotAnswerTime(display, period, lead, waitReturned + period, never, &at, &k) == PoseAnswer::Answered && at == display + period && k == 1,
+          "...a call exactly one period after the wait returned (e = display + period): k = 1, the slot e falls on");
+    check(slotAnswerTime(display, period, lead, waitReturned + period + 1, never, &at, &k) == PoseAnswer::Answered && at == display + 2 * period && k == 2,
+          "...one nanosecond later: the next slot is the second, k = 2");
+    // e <= D: a call before the wait could have returned (or a lead longer than the gap): the next slot is still the first, never the display time itself.
+    check(slotAnswerTime(display, period, lead, display - 3 * lead, never, &at, &k) == PoseAnswer::Answered && at == display + period && k == 1,
+          "e at or before the display time: k = 1, never fewer");
+    check(slotAnswerTime(display, period, lead, display - lead, never, &at, &k) == PoseAnswer::Answered && at == display + period && k == 1, "e exactly the display time: k = 1");
+    // A late frame: the call comes more than a period after the wait that produced the cached frame.
+    check(slotAnswerTime(display, period, lead, waitReturned + period * 12 / 10, never, &at, &k) == PoseAnswer::Answered && at == display + 2 * period && k == 2,
+          "LATE BY 1.2 PERIODS: k = 2, two periods past the display time (`next` would be a period short)");
+    check(slotAnswerTime(display, period, lead, waitReturned + period * 25 / 10, never, &at, &k) == PoseAnswer::Answered && at == display + 3 * period && k == 3,
+          "LATE BY 2.5 PERIODS: k = 3");
+    check(slotAnswerTime(display, period, lead, waitReturned + 2 * period, never, &at, &k) == PoseAnswer::Answered && at == display + 2 * period && k == 2 &&
+              slotAnswerTime(display, period, lead, waitReturned + 2 * period + 1, never, &at, &k) == PoseAnswer::Answered && at == display + 3 * period && k == 3,
+          "a whole number of periods late rounds to that slot, a nanosecond more to the next (ceil)");
+    // Where the freshness guard of `next` would have dropped the call to the wall clock, the slot answer has a slot of its own.
+    int64_t unused = -7;
+    check(answerTimeWhy(display, period, waitReturned + 5 * period, add, never, &unused) == PoseAnswer::Stale &&
+              slotAnswerTime(display, period, lead, display + 3 * period, never, &at, &k) == PoseAnswer::Answered && k == 7 && at == display + 7 * period,
+          "A STALE FRAME: `next` falls back (Stale), the slot answer does not -- 3 periods past the display time plus the 42 ms lead is the 7th slot");
+    // The cap: a stall or a loading screen.
+    const int64_t most = 22;   // 250 ms / 11.11 ms
+    check(slotAnswerTime(display, period, lead, display - lead + most * period, never, &at, &k) == PoseAnswer::Answered && k == most && at == display + most * period,
+          "the 22nd slot (244 ms) is the last the cap lets through");
+    at = -7;
+    check(slotAnswerTime(display, period, lead, display - lead + most * period + 1, never, &at, &k) == PoseAnswer::Cap && at == -7,
+          "...one nanosecond past it is the 23rd (256 ms): Cap, the call falls back to now + prediction, the output left alone");
+    check(slotAnswerTime(display, 13888889, lead, display - lead + 17 * 13888889LL, never, &at, &k) == PoseAnswer::Answered && k == 17 &&
+              slotAnswerTime(display, 13888889, lead, display - lead + 17 * 13888889LL + 1, never, &at, &k) == PoseAnswer::Cap,
+          "...at 72 Hz the cap is 17 slots (250 / 13.89 rounded down)");
+    check(slotAnswerTime(display, 300000000, lead, display - lead, never, &at, &k) == PoseAnswer::Answered && k == 1 && at == display + 300000000 &&
+              slotAnswerTime(display, 300000000, lead, display - lead + 300000001, never, &at, &k) == PoseAnswer::Cap,
+          "a 'period' longer than the cap still gets its first slot (k = 1 is `next`) and no second");
+    // No frame, no period, no lead.
+    at = -7;
+    check(slotAnswerTime(0, period, lead, 1, never, &at, &k) == PoseAnswer::NoFrame && slotAnswerTime(-5, period, lead, 1, never, &at, &k) == PoseAnswer::NoFrame &&
+              slotAnswerTime(INT64_MIN, period, lead, 1, never, &at, &k) == PoseAnswer::NoFrame && at == -7,
+          "no display time (not positive): NoFrame");
+    check(slotAnswerTime(display, 0, lead, display, never, &at, &k) == PoseAnswer::Period && slotAnswerTime(display, -1, lead, display, never, &at, &k) == PoseAnswer::Period &&
+              slotAnswerTime(display, INT64_MIN, lead, display, never, &at, &k) == PoseAnswer::Period && at == -7,
+          "a frame that reports no period (zero or negative): Period");
+    check(slotAnswerTime(display, period, 0, display, never, &at, &k) == PoseAnswer::Period && slotAnswerTime(display, period, -1, display, never, &at, &k) == PoseAnswer::Period &&
+              slotAnswerTime(display, period, INT64_MIN, display, never, &at, &k) == PoseAnswer::Period && at == -7,
+          "a lead that is not known or not positive (zero, negative): Period -- the call is located at now + prediction");
+    // Overflow.
+    check(slotAnswerTime(display, period, INT64_MAX, 1, never, &at, &k) == PoseAnswer::Period && slotAnswerTime(display, period, INT64_MAX - 5, 6, never, &at, &k) == PoseAnswer::Period &&
+              at == -7,
+          "now + lead that would overflow: Period, no wrap");
+    check(slotAnswerTime(INT64_MAX - 5, period, lead, INT64_MAX - 5, never, &at, &k) == PoseAnswer::Period && at == -7 &&
+              slotAnswerTime(INT64_MAX - 5, period, lead, 1, never, &at, &k) == PoseAnswer::Period && at == -7 &&
+              slotAnswerTime(INT64_MAX - period, period, lead, INT64_MAX - period - lead, never, &at, &k) == PoseAnswer::Answered && at == INT64_MAX && k == 1,
+          "a display time so late that one period more overflows: Period, no wrap (with now far from it, so only the sum overflows, and with now beside it); one that just fits is answered");
+    check(slotAnswerTime(1, period, lead, INT64_MAX - lead, never, &at, &k) == PoseAnswer::Cap,
+          "a now so far past the display time that the count would be astronomical is the cap, not an overflow");
+    // The reference-space change between the display time and the slot.
+    at = -7;
+    const auto crossing = [&](int64_t from, int64_t to) { return from < display + 5000000 && display + 5000000 <= to; };
+    check(slotAnswerTime(display, period, lead, waitReturned, crossing, &at, &k) == PoseAnswer::Cross && at == -7, "a reference change between the display time and the slot: Cross");
+    int64_t seenFrom = 0, seenTo = 0;
+    check(slotAnswerTime(display, period, lead, waitReturned + 2 * period + 1, [&](int64_t from, int64_t to) { seenFrom = from; seenTo = to; return false; }, &at, &k) == PoseAnswer::Answered &&
+              seenFrom == display && seenTo == display + 3 * period,
+          "...asked about exactly the span from the display time to the slot the call lands on");
+    // The optional count may be left out.
+    check(slotAnswerTime(display, period, lead, waitReturned, never, &at) == PoseAnswer::Answered && at == display + period, "(the count is optional)");
+    // The freshness guard is not applied in this mode, and a display time behind now alone is no reason to fall back.
+    check(slotAnswerTime(display, period, lead, display + 10 * period, never, &at, &k) == PoseAnswer::Answered && k > 1, "a display time ten periods behind now is answered at a later slot");
+  }
   // ---- the lines -----------------------------------------------------------------------------------------------------------------------------
   {
     HeadPoseSightings s;

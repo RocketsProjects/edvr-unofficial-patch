@@ -40,6 +40,8 @@ struct State {
     bool pacingNoted = false;
     bool weaponStabilityNoted = false;
     bool lastWeaponStability = true;
+    bool cullPoseSlotNoted = false;
+    bool lastCullPoseSlot = false;
     EdvrNativeFrameDecision cachedDecision{};
 };
 
@@ -317,6 +319,23 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         state->weaponStabilityNoted = true;
         state->lastWeaponStability = weaponStability;
     }
+    // advanced.cull_pose_slot (TEMPORARY, the terrain-culling arc; docs\terrain-culling.md): whether the runtime locates Elite's "now" head
+    // pose at the display slot the next frame will really be shown at. Only a shape that carries version 4's word (a version 4 or 5 caller) can
+    // be told; every older one reads the shipped answer and nothing is said for it. Read every frame, so the key is live.
+    if (wantsFade || wantsChannel) {
+        const bool slot = edvr::Config::get().getBool("advanced.cull_pose_slot", false);
+        result.cullPoseSlot = slot ? 1u : 0u;
+        if (!state->cullPoseSlotNoted || state->lastCullPoseSlot != slot) {
+            edvr::Log::get().note(
+                "cull pose slot: %s (%s).", slot ? "on" : "off",
+                slot ? "Elite's \"now\" head pose is located at the display slot the next frame will really be shown at, "
+                       "a later one after a late frame"
+                     : "Elite's \"now\" head pose is located one display period after the drawn frame, as shipped");
+            state->cullPoseSlotNoted = true;
+            state->lastCullPoseSlot = slot;
+        }
+    }
+
     if (weaponStability && !state->pacingNoted && !edvr::journalWatchActive()) {
         edvr::Log::get().note(
             "weapon stability: needs the journal watcher (d3d11.journal_watch) "
