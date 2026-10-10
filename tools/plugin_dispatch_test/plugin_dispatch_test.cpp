@@ -1453,6 +1453,95 @@ void scannerComfortLifecycleDispatch() {
         kComfort, edvr::kComfortExposureLifecycleComponent);
     edvr::g_runtimeProfile = savedProfile;
 }
+
+void pilotAndDiagnosticsLifecycleAdmission() {
+    constexpr uint32_t kCockpit = edvr::plugins::kPluginCockpitVisuals;
+    constexpr uint32_t kDiagnostics = edvr::plugins::kPluginDiagnostics;
+    edvr::pluginRegistryShutdownLifecycle(kCockpit);
+    edvr::pluginRegistryShutdownLifecycle(kDiagnostics);
+    edvr::pluginRegistryShutdown();
+    registryState = {};
+
+    LifecycleState cockpitState{};
+    cockpitState.manifestIndex = kCockpit;
+    EdvrPluginLifecycleOps cockpitLifecycle{
+        sizeof(EdvrPluginLifecycleOps), kCockpit, "cockpit-visuals",
+        &cockpitState, &lifecycleConfigure, &lifecycleFrame,
+        &lifecycleShutdown, nullptr, nullptr, nullptr,
+        &lifecycleConfigureState, 0};
+    LifecycleState diagnosticsState{};
+    diagnosticsState.manifestIndex = kDiagnostics;
+    EdvrPluginLifecycleOps diagnosticsLifecycle{
+        sizeof(EdvrPluginLifecycleOps), kDiagnostics, "diagnostics",
+        &diagnosticsState, &lifecycleConfigure, &lifecycleFrame,
+        &lifecycleShutdown, nullptr, nullptr, nullptr,
+        &lifecycleConfigureState, 0};
+
+    EdvrPluginLifecycleOps invalidDiagnosticsComponent = diagnosticsLifecycle;
+    invalidDiagnosticsComponent.componentIndex = 1;
+    check(!edvr::pluginRegistryRegisterLifecycle(&invalidDiagnosticsComponent) &&
+              !edvr::pluginRegistryHasLifecycle(kDiagnostics),
+          "nonzero lifecycle components remain restricted to Comfort");
+
+    const auto savedProfile = edvr::g_runtimeProfile;
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    check(!edvr::pluginRegistryRegisterLifecycle(&cockpitLifecycle) &&
+              !edvr::pluginRegistryHasLifecycle(kCockpit),
+          "Cockpit RemLok lifecycle registration remains absent on the unsupported flat profile");
+    edvr::g_runtimeProfile = savedProfile;
+
+    EdvrPluginOps nightVision = registryOps();
+    check(edvr::pluginRegistryRegister(&nightVision) &&
+              edvr::pluginRegistryRegisterLifecycle(&cockpitLifecycle) &&
+              edvr::pluginRegistryRegisterLifecycle(&diagnosticsLifecycle),
+          "Cockpit pilot and Diagnostics lifecycle records register independently");
+    check(edvr::pluginRegistryHasLifecycle(kCockpit) &&
+              edvr::pluginRegistryHasLifecycle(kDiagnostics),
+          "Cockpit component zero and Diagnostics component zero occupy separate lifecycle slots");
+
+    bool enabled = true;
+    edvr::pluginRegistryConfigure(&enabled);
+    edvr::bindingSetShader(edvr::BindSlot::Vs,
+                           reinterpret_cast<void*>(0x424), kVs);
+    edvr::bindingSetShader(edvr::BindSlot::Ps,
+                           reinterpret_cast<void*>(0x515), kPs);
+    const auto candidatesBeforeLifecycle = edvr::pluginRegistryShaderCandidates();
+    check(edvr::plugins::dispatch::hasCandidate(candidatesBeforeLifecycle, kCockpit),
+          "registered Night Vision draw module has a shader candidate before lifecycle dispatch");
+    const auto legacyConfigureCallsBefore = lifecycleState.configureCalls;
+    edvr::pluginRegistryConfigureLifecycle(kCockpit, &enabled);
+    edvr::pluginRegistryFrameLifecycle(kCockpit, 0x4242u);
+    const auto candidates = edvr::pluginRegistryShaderCandidates();
+    check(candidates == candidatesBeforeLifecycle &&
+              edvr::plugins::dispatch::hasCandidate(candidates, kCockpit),
+          "Cockpit lifecycle configure/frame does not disturb the Night Vision draw candidate");
+    check(cockpitState.configureStateCalls == 1 &&
+              cockpitState.lastState == &cockpitState &&
+              cockpitState.lastStateConfig == &enabled &&
+              cockpitState.frameCalls == 1 && cockpitState.lastFrame == 0x4242u &&
+              lifecycleState.configureCalls == legacyConfigureCallsBefore,
+          "Cockpit lifecycle dispatch forwards stateful configure and frame to its own record");
+    edvr::pluginRegistryShutdownLifecycle(kCockpit);
+    check(!edvr::pluginRegistryHasLifecycle(kCockpit) &&
+              edvr::pluginRegistryWantsDraws(&registryState) &&
+              edvr::pluginRegistryShaderCandidates() == candidates,
+          "retiring RemLok lifecycle leaves the independently registered Night Vision draw module active");
+
+    edvr::pluginRegistryConfigureLifecycle(kDiagnostics, &enabled);
+    edvr::pluginRegistryFrameLifecycle(kDiagnostics, 0x5151u);
+    check(diagnosticsState.configureStateCalls == 1 &&
+              diagnosticsState.lastState == &diagnosticsState &&
+              diagnosticsState.lastStateConfig == &enabled &&
+              diagnosticsState.frameCalls == 1 && diagnosticsState.lastFrame == 0x5151u &&
+              lifecycleState.configureCalls == legacyConfigureCallsBefore,
+          "Diagnostics lifecycle dispatch forwards its own configure and frame callbacks");
+    edvr::pluginRegistryShutdownLifecycle(kDiagnostics);
+    check(!edvr::pluginRegistryHasLifecycle(kDiagnostics) &&
+              diagnosticsState.shutdownCalls == 1,
+          "Diagnostics lifecycle shutdown retires only its lifecycle slot");
+    edvr::pluginRegistryShutdown();
+    edvr::g_runtimeProfile = savedProfile;
+}
 }
 
 namespace edvr {
@@ -1492,6 +1581,7 @@ int main(int argc, char** argv) {
     exposureLifecycleRegistryDispatch();
     comfortComponentRegistryDispatch();
     scannerComfortLifecycleDispatch();
+    pilotAndDiagnosticsLifecycleAdmission();
     std::printf("PASS: plugin dispatch (%u checks)\n", checks);
     return 0;
 }

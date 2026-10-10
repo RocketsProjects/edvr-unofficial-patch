@@ -7,11 +7,9 @@
 // carry this file's own CodeHooks. Targets 0/1 (the worker entries
 // 0x4321940/0x4320340) already carry the kinematic eval hook's patch --
 // CodeHook refuses to patch a function whose first instruction is a jump --
-// so they are observed through that hook's job-0/1 relays instead; the
-// attach below holds the eval gate open via kinematicEvalSchedulerAttach()
-// and the wrappers feed schedulerStackNoteJobEntry(). Observation is gated
-// on the probe's armed state; an unarmed relay is one atomic load plus the
-// trampoline call.
+// so they are observed through the core kinematic relay's separate scheduler
+// observer slot. Diagnostics registers that slot only while the probe is
+// armed; the relay skips this feed whenever the slot is absent.
 #include <cstdint>
 
 namespace edvr {
@@ -31,12 +29,5 @@ void detachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept;
 // True when both own targets still carry OUR patch (used to accept an
 // already-hooked prologue during validation).
 bool schedulerStackHooksMatch(uintptr_t base) noexcept;
-
-// The job-0/1 relay feed (targets 0/1). Called by the kinematic eval
-// hook's job wrappers before their timed bracket; `entryRsp` must be the
-// observed function's entry RSP (_AddressOfReturnAddress() in the wrapper,
-// which the relay tail-jumps into, so that address IS the target's entry
-// stack pointer and [entryRsp] is the engine caller's return address).
-void schedulerStackNoteJobEntry(uint32_t target, uintptr_t entryRsp) noexcept;
 
 } // namespace edvr

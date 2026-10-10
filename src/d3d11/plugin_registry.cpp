@@ -243,7 +243,8 @@ bool pluginRegistryRegisterLifecycle(const EdvrPluginLifecycleOps* ops) {
     if (!record.id || !record.implementationStatus ||
         record.index != ops->manifestIndex ||
         std::strcmp(record.id, ops->manifestId) != 0 ||
-        std::strcmp(record.implementationStatus, "phase1-lifecycle") != 0)
+        (std::strcmp(record.implementationStatus, "phase1-lifecycle") != 0 &&
+         std::strcmp(record.implementationStatus, "phase1-pilot") != 0))
         return false;
     if (lifecycleDeclaresConfigure(record) &&
         !ops->configure && !hasStatefulConfigure)

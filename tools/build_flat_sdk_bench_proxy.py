@@ -39,6 +39,7 @@ def plan(root: Path, env: dict[str, str]) -> tuple[list[str], Path]:
         ("explorer-cam", objdir / "plugins" / "explorer_cam" / "plugin_explorer_cam.lib"),
         ("temporal-aa", objdir / "plugins" / "temporal_aa" / "plugin_temporal_aa.lib"),
         ("diagnostics", objdir / "plugins" / "diagnostics" / "plugin_diagnostics.lib"),
+        ("performance", objdir / "plugins" / "performance" / "plugin_performance.lib"),
     )
     bench = objdir / "flat_sdk_bench_proxy"
     output = build / "flat_sdk_bench_proxy.dll"
@@ -117,6 +118,7 @@ def self_test() -> None:
             "explorer-cam": root / "build" / "obj" / "plugins" / "explorer_cam" / "plugin_explorer_cam.lib",
             "temporal-aa": root / "build" / "obj" / "plugins" / "temporal_aa" / "plugin_temporal_aa.lib",
             "diagnostics": root / "build" / "obj" / "plugins" / "diagnostics" / "plugin_diagnostics.lib",
+            "performance": root / "build" / "obj" / "plugins" / "performance" / "plugin_performance.lib",
         }
         for library in plugin_libs.values():
             library.parent.mkdir(parents=True)

@@ -13,15 +13,15 @@
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
 - **Current integration:** main `39c2e02c` is merged. The offline
-  scanner selector and on-foot ownership checkpoint passes the full
-  build; receipt `74af1613` matches. Last measured Steam build:
-  `6ab758d2`. Sean must approve any install.
-- **Module progress:** Comfort owns exposure, scanners, transition flash
-  and terrain pose policy. On-foot owns the footprint instrument; shared
-  sizing stays core. Explorer Cam owns its archive and lifecycle. All
-  eight selections remain unavailable; draw migration, installer UI and
-  runtime selection stay open.
-
+  policy/lifecycle checkpoint passes the full build; receipt `286de0b9`
+  matches. Last measured Steam build: `6ab758d2`. Sean must approve any
+  install.
+- **Module progress:** Performance owns the OpenXR resolution policy.
+  Cockpit owns RemLok; Diagnostics owns scheduler capture. Comfort owns
+  exposure, scanners, transition flash and terrain pose policy. On-foot
+  owns footprint sampling; shared sizing stays core. Explorer Cam owns
+  its archive/lifecycle. All selections remain unavailable; draw
+  migration and installer/runtime selection stay open.
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
   Capture uses consumed values; unarmed paths construct no predicate payload.
@@ -4484,3 +4484,91 @@ cross-runtime selection and uninstalled-zero-work remain open. All eight
 availability lists stay empty and budgets stay unmeasured. The Steam
 approval hold remains: no install, promotion, live INI edit or flight
 was performed. The branch stays separate from main.
+
+### 2026-10-10 — Performance policy and feature lifecycles
+
+Performance now owns the query-time `fix.openxr_resolution` parser
+invocation and explanation logs. Core retains the exported v2
+settings/v1 sizing ABI, request validation and echoes, raw/token labels,
+generation tracking and auto-width persistence. A copied immutable
+private resolver record is registered after Config/log initialization
+and before the first device-create export returns, because native
+runtime capture precedes optional vScreen setup. Absent policy answers
+1.0/matched 0/entry count 0; selected failure or invalid POD result
+fails the query. Query-only synchronization joins teardown with any
+active callback. The private manifest index is tied to the generated
+owner by a compile-time assertion. Startup selection remains fixed to
+supported profiles in this checkpoint; this is not selected/unselected
+installation proof.
+
+Cockpit Visuals owns RemLok's implementation and real
+configure/frame/shutdown callbacks. The existing matcher, state, five
+config reads, cost sites and scissor operations are preserved. VScreen
+dispatches the callbacks at the original positions with the previous
+direct behavior as registration-failure fallback; the draw facade and
+arbitration positions stay core-owned. The WARP matcher rig exercises
+the real adapter but still does not execute scissor geometry or prove
+whole-ladder parity.
+
+Diagnostics owns scheduler capture, its private class, hook installer
+and real lifecycle adapter. Core's shared kinematic relay consumes a
+fixed POD observer record through one atomic snapshot; an absent slot
+calls nothing. The module callback still loads its independent observer,
+preserving its identity and disarm gate. Registration/detach match the
+exact immutable record under the existing install mutex, and other
+consumers keep their shared gate. Static probe lifetime and the original
+capture/table/config/report algorithms are preserved. Adapter fixtures
+cover actual frame clocks, invalid state, disabled no-hook behavior,
+repeat polls, disarm/rearm, shutdown and refusal retry/log semantics
+with hook/config/log stubs. They do not patch a game.
+
+Source review caught a guaranteed native frame fixture failure before
+building: 3283/1824 is 1.79989035, below the new assertion's 1.8 lower
+bound. The higher-tier fixture audit replaced that bound with the
+expected ratio and tolerance, dimension/echo checks, and strengthened
+policy identity and failure no-write checks. No resolver algorithm
+change was needed. The audit also identified an existing scheduler
+capture/reset race: a worker can pass `active_` before reset then
+publish into `targets_` after disarm/rearm. This ownership split
+preserves the original ordering; an attempted epoch guard was removed
+from this slice. A follow-up should pause a capture after its active
+load and check old-epoch publication after reset/rearm before choosing a
+fix. The first production compile stopped on root's new RemLok wrapper
+referring to nonexistent `State::bodyFrame` (C2039). It now passes the
+existing `frameNo` field. The failure is retained in
+`full-plugin-policy-lifecycles-offline-20261010-r1.log`; validation was
+restarted from the full build after the wrapper and its source gate were
+corrected. The second full run passed production graphics compilation
+but stopped in the new RemLok adapter fixture: an `int` zero conflicted
+with the observed `uint32_t` template argument (C2672). The next-tier
+audit corrected the typed expectation and traced the adapter cases
+before another full run. Its log is retained as
+`full-plugin-policy-lifecycles-offline-20261010-r2.log`. The third full
+run passed the native settings (252), native frame (77), and RemLok
+(241) checks, then stopped at the new lifecycle coexistence fixture. Its
+legacy configure callback incremented a shared fixture counter while the
+assertion read the per-record counter. The next-tier audit traced the
+actual registry dispatch and changed only the two new test records to
+the existing stateful configure callback, retaining
+candidate-preservation checks and adding exact state/config evidence.
+Production registry behavior did not change. The log is retained as
+`full-plugin-policy-lifecycles-offline-20261010-r3.log`. An empty
+continued argument left by the scheduler source move was also removed
+from the production build source list; the third run had no
+corresponding D9024/D9027 compiler warnings.
+
+Validation: `full-plugin-policy-lifecycles-offline-20261010-r4.log`
+passed the full native build, production DLL/export checks, the
+source/fixture gates, and self-contained installer validation. Receipt
+`286de0b9ae2ada4d423d4f4b8c7e734b5a9fe1809567f2dc7efd6866fa724cec`
+matches the validated source. The shared build recipes retarget every
+moved source and link the real Performance archive in both production
+DLL variants and the flat SDK bench. Config ownership/defaults, public
+native ABI and the historical cost ABI remain unchanged.
+
+No installation, live INI edit, flight, promotion or feature-to-main
+merge occurred. Remote main was checked at `39c2e02c`. All eight
+installer selections remain unavailable. Remaining feature ownership,
+selection bootstrap and UI, whole-ladder parity, lifecycle cost coverage
+and final runtime CPU/GPU acceptance stay open. Performance's FOV and
+sampler policies remain to migrate.

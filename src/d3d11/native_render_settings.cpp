@@ -1,15 +1,14 @@
 #include "../common/native_render_settings.h"
 #include "native_render_labels.h"
+#include "native_render_policy.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
-#include <vector>
 
 #include "../common/config.h"
-#include "../common/log.h"
 #include "../common/openxr_resolution_entries.h"
 #include "../common/vscreen_auto_state.h"
 
@@ -20,6 +19,9 @@ EdvrNativeRenderSizing g_sizing{};
 // the settings input carries no generation of its own (the query runs before
 // the sizing publish mints one), so the labels borrow the sizing's.
 NativeRenderLabels g_labels{};
+std::mutex g_policyMutex;
+edvr::native_render_policy::OpsV1 g_policy{};
+bool g_policyInstalled = false;
 
 bool copySizingInput(const void* input, EdvrNativeRenderSizing& output) noexcept {
     __try {
@@ -64,6 +66,27 @@ bool terminated(const char* field, size_t bytes) noexcept {
     return std::memchr(field, 0, bytes) != nullptr;
 }
 
+bool validPolicyResult(const edvr::native_render_policy::ResultV1& result) noexcept {
+    return result.structSize == sizeof(result) &&
+           result.version == edvr::native_render_policy::kVersion &&
+           std::isfinite(result.requestedScale) &&
+           result.requestedScale >= EDVR_NATIVE_RENDER_SCALE_MINIMUM &&
+           result.requestedScale <= EDVR_NATIVE_RENDER_SCALE_MAXIMUM &&
+           result.matchedEntry <= 2 &&
+           result.entryCount <= edvr::native_render::kResolutionEntryMax &&
+           result.reserved == 0;
+}
+
+bool copyPolicyOps(const edvr::native_render_policy::OpsV1* input,
+                   edvr::native_render_policy::OpsV1& output) noexcept {
+    __try {
+        output = *input;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 std::string dimensions(uint32_t w, uint32_t h) {
     char text[32];
     snprintf(text, sizeof(text), "%ux%u", w, h);
@@ -75,6 +98,38 @@ std::string number(uint32_t value) {
     snprintf(text, sizeof(text), "%u", value);
     return text;
 }
+}
+
+BOOL edvr::native_render_policy::registerPolicy(const OpsV1* input) noexcept {
+    if (!input) return FALSE;
+    OpsV1 candidate{};
+    if (!copyPolicyOps(input, candidate) ||
+        candidate.structSize != sizeof(candidate) || candidate.version != kVersion ||
+        candidate.manifestIndex != kPerformanceManifestIndex || candidate.reserved != 0 ||
+        !candidate.resolve) return FALSE;
+    std::lock_guard<std::mutex> lock(g_policyMutex);
+    if (g_policyInstalled) {
+        return g_policy.structSize == candidate.structSize &&
+               g_policy.version == candidate.version &&
+               g_policy.manifestIndex == candidate.manifestIndex &&
+               g_policy.reserved == candidate.reserved &&
+               g_policy.context == candidate.context &&
+               g_policy.resolve == candidate.resolve ? TRUE : FALSE;
+    }
+    g_policy = candidate;
+    g_policyInstalled = true;
+    return TRUE;
+}
+
+BOOL edvr::native_render_policy::unregisterPolicy(uint32_t manifestIndex,
+                                                  void* context,
+                                                  Resolve resolve) noexcept {
+    std::lock_guard<std::mutex> lock(g_policyMutex);
+    if (!g_policyInstalled || g_policy.manifestIndex != manifestIndex ||
+        g_policy.context != context || g_policy.resolve != resolve) return FALSE;
+    g_policy = {};
+    g_policyInstalled = false;
+    return TRUE;
 }
 
 bool nativeRenderLabels(NativeRenderLabels* out) {
@@ -172,22 +227,29 @@ extern "C" BOOL WINAPI edvrQueryNativeRenderSettings(uint32_t version,
             !bounds.maxHeight || bounds.originalWidth > bounds.maxWidth ||
             bounds.originalHeight > bounds.maxHeight) return FALSE;
     }
+    EdvrNativeRenderSettings answer = in;
+    answer.openxrRenderScale = EDVR_NATIVE_RENDER_SCALE_DEFAULT;
+    answer.matchedEntry = 0;
+    answer.entryCount = 0;
+    answer.reserved = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_policyMutex);
+        if (g_policyInstalled) {
+            edvr::native_render_policy::ResultV1 policyResult{};
+            // The callback runs while holding the registration mutex. It may
+            // not call registerPolicy/unregisterPolicy; unregister waits here
+            // for any in-flight callback before the owner retires its module.
+            if (!g_policy.resolve(g_policy.context, &in, &policyResult) ||
+                !validPolicyResult(policyResult)) return FALSE;
+            answer.openxrRenderScale = policyResult.requestedScale;
+            answer.matchedEntry = policyResult.matchedEntry;
+            answer.entryCount = policyResult.entryCount;
+        }
+    }
+    if (!writeSettingsOutput(output, answer)) return FALSE;
     using namespace edvr::native_render;
     const std::string rt = headsetToken(in.runtimeName, sizeof(in.runtimeName));
     const std::string sys = headsetToken(in.systemName, sizeof(in.systemName));
-    const std::string value = edvr::Config::get().getString("fix.openxr_resolution", "");
-    ResolutionEntry entries[kResolutionEntryMax];
-    std::vector<std::string> skipped;
-    const size_t count = parseResolutionEntries(value.c_str(), entries, &skipped);
-    uint32_t matched = 0;
-    const uint32_t resolved = resolveResolutionWidth(entries, count, rt, sys, &matched);
-    const uint32_t width = resolved ? resolved : in.eyes[0].originalWidth;
-    EdvrNativeRenderSettings answer = in;
-    answer.openxrRenderScale = clampScale(widthToScale(width, in.eyes[0].originalWidth));
-    answer.matchedEntry = matched;
-    answer.entryCount = static_cast<uint32_t>(count);
-    answer.reserved = 0;
-    if (!writeSettingsOutput(output, answer)) return FALSE;
     {
         std::lock_guard<std::mutex> lock(g_sizingMutex);
         g_labels = {};
@@ -197,24 +259,6 @@ extern "C" BOOL WINAPI edvrQueryNativeRenderSettings(uint32_t version,
         std::memcpy(g_labels.systemToken, sys.c_str(), (std::min)(sys.size(), sizeof(g_labels.systemToken) - 1));
         g_labels.valid = 1;
     }
-    for (const std::string& token : skipped) {
-        edvr::Log::get().note("openxr resolution: ignored \"%s\" in fix.openxr_resolution "
-                              "(entries look like oculus/meta-quest-3:3283)", token.c_str());
-    }
-    OpenxrResolutionReport report;
-    report.runtimeName = in.runtimeName;
-    report.systemName = in.systemName;
-    report.runtimeToken = rt;
-    report.systemToken = sys;
-    report.value = value;
-    report.entries = entries;
-    report.entryCount = count;
-    report.matched = matched;
-    report.width = resolved;
-    report.eyes = in.eyes;
-    report.settingsFile = edvr::Config::get().iniName();
-    const std::string line = formatOpenxrResolutionReport(report);
-    edvr::Log::get().note("%s", line.c_str());
     return TRUE;
 }
 

@@ -18,6 +18,8 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../plugins/performance/openxr_resolution_policy.h"
+#include "plugin_registry.h"
 #include "../common/runtime_profile.h"
 #include "../common/d3d11_device_identity.h"
 #include "../common/frame_flag.h"
@@ -274,6 +276,22 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     edvr::Log::get().open(cfg.logDir(), L"gfx");
     edvr::Log::get().note("edvr d3d11 proxy attached; module dir %S",
                           g_moduleDir->c_str());
+    // NativeRuntimeHost queries CPU-only render settings immediately after
+    // its first device create, before vScreen's optional state is configured.
+    // First-party selection is still fixed to the supported profile here.
+    if (edvr::runtimeFeaturesAllowed() &&
+        edvr::pluginRegistryProfileSupports(edvr::plugins::kPluginPerformance)) {
+        static_assert(edvr::native_render_policy::kPerformanceManifestIndex ==
+                          edvr::plugins::kPluginPerformance,
+                      "private resolution policy must match the generated owner");
+        const edvr::native_render_policy::OpsV1 policy = {
+            sizeof(edvr::native_render_policy::OpsV1),
+            edvr::native_render_policy::kVersion,
+            edvr::plugins::kPluginPerformance, 0, nullptr,
+            &edvr::plugins::performance::resolveOpenxrResolution};
+        if (!edvr::native_render_policy::registerPolicy(&policy))
+            edvr::Log::get().note("native render policy: Performance registration failed");
+    }
     // THIS DLL IS PINNED HERE, once, before anything can start that outlives a
     // call: the journal worker starts at the first Present tick and fix.ui_quality's
     // HMD Quality refresh (a thread-pool callback) at the first frame boundary,
@@ -351,6 +369,9 @@ void ensureInitialised() {
 
 void shutdown() {
     edvr::oculusRouteReport();
+    edvr::native_render_policy::unregisterPolicy(
+        edvr::plugins::kPluginPerformance, nullptr,
+        &edvr::plugins::performance::resolveOpenxrResolution);
     // Per-site fault totals, so "logged once" does not mean "counted once".
     edvr::reportFaultSites();
     edvr::shutdownDeviceHooks();

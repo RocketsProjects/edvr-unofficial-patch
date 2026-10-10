@@ -70,7 +70,7 @@
 #include "holo_fix.h"
 #include "target_sharp.h"
 #include "wake_pulse.h"
-#include "scheduler_stack_probe.h"  // schedulerStackProbeShutdown
+#include "../plugins/diagnostics/scheduler_lifecycle.h"
 #include "ui_depth.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"
@@ -96,6 +96,7 @@
 #include "splash_dim.h"
 #include "quad_probe.h"
 #include "remlok_fix.h"
+#include "../plugins/cockpit_visuals/remlok_lifecycle.h"
 #include "fss_outer_probe.h"
 #include "scrim_fix.h"
 #include "exposure_fix.h"
@@ -1056,6 +1057,49 @@ void shutdownIntroVideoLifecycle() {
 }
 
 constexpr uint32_t kComfortPluginIndex = plugins::kPluginComfort;
+
+void configureRemlokLifecycle(Config& cfg) {
+    if (g_state && pluginRegistryRegisterLifecycle(
+            &plugins::cockpit_visuals::remlokLifecycleOps())) {
+        pluginRegistryConfigureLifecycle(plugins::kPluginCockpitVisuals, &cfg);
+        return;
+    }
+    remlokConfigure(cfg);
+}
+
+void frameRemlokLifecycle(uint32_t sceneFrame) {
+    if (pluginRegistryHasLifecycle(plugins::kPluginCockpitVisuals)) {
+        pluginRegistryFrameLifecycle(plugins::kPluginCockpitVisuals, sceneFrame);
+        return;
+    }
+    remlokFrameBoundary();
+}
+
+void shutdownRemlokLifecycle() {
+    if (pluginRegistryHasLifecycle(plugins::kPluginCockpitVisuals)) {
+        pluginRegistryShutdownLifecycle(plugins::kPluginCockpitVisuals);
+        return;
+    }
+    remlokShutdown();
+}
+
+void configureSchedulerLifecycle(Config& cfg) {
+    if (g_state && pluginRegistryRegisterLifecycle(
+            &plugins::diagnostics::schedulerLifecycleOps())) {
+        pluginRegistryConfigureLifecycle(plugins::kPluginDiagnostics, &cfg);
+        return;
+    }
+    edvrDiagnosticsSchedulerConfigure(edvrDiagnosticsSchedulerState(),
+        cfg.getBool("advanced.scheduler_probe", false) ? 1u : 0u);
+}
+
+void shutdownSchedulerLifecycle() {
+    if (pluginRegistryHasLifecycle(plugins::kPluginDiagnostics)) {
+        pluginRegistryShutdownLifecycle(plugins::kPluginDiagnostics);
+        return;
+    }
+    edvrDiagnosticsSchedulerShutdown(edvrDiagnosticsSchedulerState());
+}
 
 bool ensureScannerLifecycle() {
     if (!g_state) return false;
@@ -8614,7 +8658,7 @@ void vScreenRefreshConfig() {
     readEyeRenderSize(cfg, s);
     readCensusSkip(cfg, s);
     fssResConfigure(cfg);
-    remlokConfigure(cfg);
+    configureRemlokLifecycle(cfg);
     holoConfigure(cfg);
     targetSharpConfigure(cfg);
     wakePulseConfigure(cfg);
@@ -8632,7 +8676,7 @@ void vScreenRefreshConfig() {
     configureIntroVideoLifecycle(cfg);
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
-    schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
+    configureSchedulerLifecycle(cfg);
     screenMotionConfigure(cfg);
     pluginRegistryConfigure(&cfg);
     depthProbeConfigure(cfg);
@@ -9081,7 +9125,7 @@ void vScreenFrameBoundary() {
             lastQpc.QuadPart = 0;
         }
     });
-    tkRemlok.run([&] { remlokFrameBoundary(); });
+    tkRemlok.run([&] { frameRemlokLifecycle(s->frameNo); });
 
     // The per-frame invalidation lives in binding_shadow now, and device_hook
     // calls it once for both fixes. Doing it here as well would be harmless but
@@ -9923,7 +9967,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     g_state->distanceIndex = readDistanceIndex(cfg);
     readEyeRenderSize(cfg, g_state);
     readCensusSkip(cfg, g_state);
-    remlokConfigure(cfg);
+    configureRemlokLifecycle(cfg);
     holoConfigure(cfg);
     targetSharpConfigure(cfg);
     wakePulseConfigure(cfg);
@@ -9941,7 +9985,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     configureIntroVideoLifecycle(cfg);
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
-    schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
+    configureSchedulerLifecycle(cfg);
     screenMotionConfigure(cfg);
     pluginRegistryConfigure(&cfg);
     depthProbeConfigure(cfg);
@@ -10306,7 +10350,7 @@ void shutdownVScreenFixes() {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;
     }
-    remlokShutdown();
+    shutdownRemlokLifecycle();
     holoShutdown();
     uiDepthShutdown();
     uiLayerShutdown();
@@ -10339,7 +10383,7 @@ void shutdownVScreenFixes() {
     // reset() clears active_ -- the Present and job-entry feeds check it --
     // and detaches its scheduler-hook observer. A second call finds it
     // inactive and detached and does nothing.
-    schedulerStackProbeShutdown();
+    shutdownSchedulerLifecycle();
     depthProbeShutdown();
     sharpenPassShutdown();
     g_state->hook.uninstall();

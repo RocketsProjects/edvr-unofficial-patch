@@ -137,12 +137,8 @@ private:
 
 extern SchedulerStackProbe schedulerStackProbe;
 
-// Config-facing lifecycle, driven by the once-per-second
-// temporalPassConfigure re-poll:
-// configure(true) is idempotent while live; configure(false) stands down
-// and clears. On any hook refusal the probe logs once per distinct status
-// and stays inert -- the degrade philosophy the rest of the instruments
-// keep. Key: advanced.scheduler_probe (default off).
+// Module-private lifecycle bodies. Core integration uses the opaque bridge
+// in scheduler_lifecycle.h and never calls these C++ APIs directly.
 void schedulerStackProbeConfigure(bool on);
 void schedulerStackProbeShutdown();
 

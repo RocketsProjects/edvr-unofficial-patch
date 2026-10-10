@@ -134,7 +134,10 @@
         "fix.witchspace_stars"
       ],
       "hookPoints": [
-        "draw.classify"
+        "draw.classify",
+        "lifecycle.configure",
+        "lifecycle.frame",
+        "lifecycle.shutdown"
       ],
       "claims": [
         {
@@ -161,7 +164,9 @@
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
       "rigs": [
         "night_vision_test",
-        "plugin_dispatch_test"
+        "plugin_dispatch_test",
+        "remlok_predicate_test",
+        "cockpit_api_test"
       ],
       "implementationStatus": "phase1-pilot",
       "selectionAvailableProfiles": [],
@@ -485,7 +490,10 @@
       "hookPoints": [],
       "claims": [],
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
-      "rigs": [],
+      "rigs": [
+        "native_render_settings_test",
+        "native_frame_test"
+      ],
       "implementationStatus": "catalog-only",
       "selectionAvailableProfiles": [],
       "costBudget": {
@@ -567,13 +575,21 @@
         "hotkey.dump_draws",
         "hotkey.dump_eyes"
       ],
-      "hookPoints": [],
+      "hookPoints": [
+        "lifecycle.configure",
+        "lifecycle.frame",
+        "lifecycle.shutdown"
+      ],
       "claims": [],
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
       "rigs": [
-        "pixel_probe_test"
+        "pixel_probe_test",
+        "scheduler_stack_probe_test",
+        "scheduler_stack_json_test",
+        "kinematic_probe_test",
+        "plugin_dispatch_test"
       ],
-      "implementationStatus": "catalog-only",
+      "implementationStatus": "phase1-lifecycle",
       "selectionAvailableProfiles": [],
       "costBudget": {
         "state": "unmeasured",

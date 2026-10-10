@@ -15,24 +15,45 @@
 #include <sstream>
 #include <string>
 #define private public
-#include "../../src/d3d11/scheduler_stack_probe.h"
+#include "../../src/plugins/diagnostics/scheduler_stack_probe.h"
 #undef private
 #include "../../src/common/log.h"
 // The implementation under test is compiled INTO this TU: MSVC encodes
 // access specifiers in decorated names, so a separately linked
 // scheduler_stack_probe.obj would not resolve the private members this rig
 // seeds (the kinematic_probe_test pattern).
-#include "../../src/d3d11/scheduler_stack_probe.cpp"
+#include "../../src/plugins/diagnostics/scheduler_stack_probe.cpp"
+#include "../../src/plugins/diagnostics/scheduler_lifecycle.cpp"
+
+namespace {
+bool g_configEnabled = false;
+unsigned g_attachCalls = 0, g_detachCalls = 0, g_logNotes = 0;
+edvr::SchedulerStackProbe* g_attachedProbe = nullptr;
+const char* g_attachResult = "installed";
+}
 
 namespace edvr {
-// Linker stubs: this rig never hooks anything (arm/finish/reset unused),
-// and the Log stub stands in for src\common\log.cpp (note() must not
-// write files here).
-const char* attachSchedulerStackHooks(SchedulerStackProbe*) noexcept { return "installed"; }
-void detachSchedulerStackHooks(SchedulerStackProbe*) noexcept {}
+// The lifecycle adapter and probe are real. Only the executable CodeHooks,
+// config storage and disk logging are replaced; the fixture never patches
+// the test process or touches a game/runtime/device.
+const char* attachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept {
+    ++g_attachCalls;
+    if (std::strcmp(g_attachResult, "installed") == 0) g_attachedProbe = probe;
+    return g_attachResult;
+}
+void detachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept {
+    if (g_attachedProbe == probe) {
+        ++g_detachCalls;
+        g_attachedProbe = nullptr;
+    }
+}
+Config& Config::get() { static Config config; return config; }
+bool Config::getBool(const char* key, bool def) const {
+    return std::strcmp(key, "advanced.scheduler_probe") == 0 ? g_configEnabled : def;
+}
 Log& Log::get() { static Log instance; return instance; }
 Log::~Log() = default;
-void Log::note(const char*, ...) {}
+void Log::note(const char*, ...) { ++g_logNotes; }
 }
 
 using namespace edvr;
@@ -213,6 +234,120 @@ void caseNoteEntryOverflow() {
               "overflow: the surviving first signature still aggregates");
     }
 }
+
+// Exercise the production lifecycle record through its callback pointers.
+// This checks the adapter, C ABI state guard and probe transitions together;
+// the hook stub records attach/detach without installing executable patches.
+void caseLifecycleAdapter() {
+    auto& p = schedulerStackProbe;
+    const auto& ops = plugins::diagnostics::schedulerLifecycleOps();
+    void* const state = edvrDiagnosticsSchedulerState();
+    void* const wrong = reinterpret_cast<void*>(uintptr_t(1));
+    check(state == &p && state == ops.state,
+          "lifecycle: one stable opaque process-lifetime identity");
+    check(ops.configure && ops.frame && ops.shutdown,
+          "lifecycle: actual configure, frame and shutdown callbacks");
+    check(ops.componentIndex == 0 &&
+          ops.manifestIndex == plugins::kPluginDiagnostics,
+          "lifecycle: diagnostics component zero");
+
+    g_configEnabled = false;
+    ops.configure(nullptr);
+    ops.configure(&Config::get());
+    check(!p.active() && !g_attachedProbe && g_attachCalls == 0,
+          "lifecycle: disabled configure never arms a hook");
+    ops.frame(state, 11);
+    check(p.frame_ == 0, "lifecycle: unarmed frame has no clock stamp");
+    edvrDiagnosticsSchedulerConfigure(nullptr, 1);
+    edvrDiagnosticsSchedulerConfigure(wrong, 1);
+    check(g_attachCalls == 0, "lifecycle: invalid state cannot arm");
+
+    g_configEnabled = true;
+    ops.configure(&Config::get());
+    check(p.active() && g_attachedProbe == &p && g_attachCalls == 1,
+          "lifecycle: enabled configure attaches once");
+    check(g_logNotes == 1, "lifecycle: first arm logs once");
+    check(p.frame_ == 0 && p.armedTickMs_ == p.lastReportTickMs_,
+          "lifecycle: arm clears the frame and starts the report clock");
+    const unsigned liveNotes = g_logNotes;
+    ops.configure(&Config::get());
+    check(g_attachCalls == 1 && g_logNotes == liveNotes && p.frame_ == 0,
+          "lifecycle: repeated enabled poll is idempotent");
+    ops.frame(wrong, 12);
+    ops.frame(nullptr, 13);
+    check(p.frame_ == 0, "lifecycle: wrong or null frame state is inert");
+    ops.frame(state, 14);
+    check(p.frame_ == 14 && p.lastReportTickMs_ >= p.armedTickMs_,
+          "lifecycle: owned frame stamp follows arm and report clock");
+    ops.frame(state, 15);
+    check(p.frame_ == 15, "lifecycle: frame stamp follows callback order");
+    p.imageBase_ = kBase;
+    uint64_t stack[SchedulerStackProbe::kScanSlots]{};
+    stack[0] = kLo + 0x100;
+    p.noteEntry(0, reinterpret_cast<uintptr_t>(&stack[0]));
+    check(p.summary().calls[0] == 1,
+          "lifecycle: an armed observation reaches the real probe table");
+
+    edvrDiagnosticsSchedulerShutdown(wrong);
+    edvrDiagnosticsSchedulerShutdown(nullptr);
+    check(p.active() && g_detachCalls == 0,
+          "lifecycle: invalid state cannot disarm");
+    g_configEnabled = false;
+    ops.configure(&Config::get());
+    check(!p.active() && !g_attachedProbe && g_detachCalls == 1 &&
+          p.frame_ == 0 && p.summary().calls[0] == 0,
+          "lifecycle: disable detaches and clears the probe");
+    check(g_logNotes == 2, "lifecycle: first disable logs once");
+    ops.configure(&Config::get());
+    ops.frame(state, 16);
+    p.noteEntry(0, reinterpret_cast<uintptr_t>(&stack[0]));
+    check(g_detachCalls == 1 && p.frame_ == 0 &&
+          p.summary().calls[0] == 0,
+          "lifecycle: repeated disabled poll, frame and entry stay inert");
+
+    g_configEnabled = true;
+    ops.configure(&Config::get());
+    check(p.active() && g_attachCalls == 2 && g_attachedProbe == &p,
+          "lifecycle: configure after disarm reattaches same static state");
+    check(g_logNotes == 3, "lifecycle: rearm logs once");
+    ops.shutdown(state);
+    check(!p.active() && !g_attachedProbe && g_detachCalls == 2 &&
+          p.frame_ == 0, "lifecycle: shutdown detaches and clears");
+    check(g_logNotes == 4 && edvrDiagnosticsSchedulerState() == state,
+          "lifecycle: shutdown logs once and preserves opaque storage");
+    ops.shutdown(state);
+    ops.frame(state, 17);
+    check(g_detachCalls == 2 && p.frame_ == 0,
+          "lifecycle: repeated shutdown and later frame stay inert");
+}
+
+void caseLifecycleHookRefusal() {
+    auto& p = schedulerStackProbe;
+    const auto& ops = plugins::diagnostics::schedulerLifecycleOps();
+    const unsigned attaches = g_attachCalls, notes = g_logNotes;
+    g_configEnabled = true;
+    g_attachResult = "identity_mismatch";
+    ops.configure(&Config::get());
+    check(!p.active() && !g_attachedProbe &&
+          p.hookStatus() == SchedulerStackProbe::HookStatus::IdentityMismatch &&
+          g_attachCalls == attaches + 1 && g_logNotes == notes + 1,
+          "lifecycle: identity refusal stands down and logs once");
+    ops.configure(&Config::get());
+    check(g_attachCalls == attaches + 2 && g_logNotes == notes + 1,
+          "lifecycle: failed attach retries quietly on the next poll");
+    g_attachResult = "opcode_mismatch";
+    ops.configure(&Config::get());
+    check(p.hookStatus() == SchedulerStackProbe::HookStatus::OpcodeMismatch &&
+          g_logNotes == notes + 2,
+          "lifecycle: a different refusal reason logs once");
+    g_attachResult = "installed";
+    ops.configure(&Config::get());
+    check(p.active() && g_attachedProbe == &p && g_logNotes == notes + 3,
+          "lifecycle: successful later poll arms and logs");
+    ops.shutdown(ops.state);
+    check(!p.active() && !g_attachedProbe && g_logNotes == notes + 4,
+          "lifecycle: shutdown after retry disarms and logs");
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -229,6 +364,8 @@ int wmain(int argc, wchar_t** argv) {
     caseFnvGolden();
     caseNoteEntryAggregates();
     caseNoteEntryOverflow();
+    caseLifecycleAdapter();
+    caseLifecycleHookRefusal();
     std::fprintf(stderr, "scheduler_stack_probe_test: %u checks, %u failures\n",
                  checks, failures);
     return failures ? 1 : 0;

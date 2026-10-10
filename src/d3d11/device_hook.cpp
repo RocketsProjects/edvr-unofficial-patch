@@ -67,7 +67,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "menu.h"
 #include "kinematic_eval_probe.h"
 #include "engine_velocity.h"
-#include "scheduler_stack_probe.h"
+#include "../plugins/diagnostics/scheduler_lifecycle.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
 #include "flat_runtime.h"
 #include "flat_hdr_crumbs.h"   // the flat HDR route's crash-safe breadcrumbs: the real Present's pair
@@ -1523,7 +1523,12 @@ void presentFrameBoundary() {
     // The scheduler stack probe's report tick, same call site and the
     // same one-atomic-load-when-off cost.
     tkSchedulerProbe.run([] {
-        schedulerStackProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
+        const uint32_t frameNo = static_cast<uint32_t>(g_state->frameCounter);
+        if (pluginRegistryHasLifecycle(plugins::kPluginDiagnostics)) {
+            pluginRegistryFrameLifecycle(plugins::kPluginDiagnostics, frameNo);
+        } else {
+            edvrDiagnosticsSchedulerFrame(edvrDiagnosticsSchedulerState(), frameNo);
+        }
     });
     // The write watch's per-frame work, here rather than inside
     // vScreenReclaimTick where the re-arm used to sit behind

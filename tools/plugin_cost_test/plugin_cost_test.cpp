@@ -397,12 +397,12 @@ bool targetSharpRemlokAnnotationChecks() {
     ok &= leafApiSourceChecks("src/d3d11/target_sharp.cpp", target,
                               sizeof(target) / sizeof(target[0]),
                               "TargetSharp source is available for direct API coverage verification");
-    ok &= leafApiSourceChecks("src/d3d11/remlok_fix.cpp", remlok,
+    ok &= leafApiSourceChecks("src/plugins/cockpit_visuals/remlok_fix.cpp", remlok,
                               sizeof(remlok) / sizeof(remlok[0]),
                               "RemLok source is available for direct API coverage verification");
 
     const std::string sharp = readSource("src/d3d11/target_sharp.cpp");
-    const std::string rem = readSource("src/d3d11/remlok_fix.cpp");
+    const std::string rem = readSource("src/plugins/cockpit_visuals/remlok_fix.cpp");
     const std::string probe = functionBody(sharp, "bool targetSharpOnEyeDrawImpl(");
     const std::string sharpDefault = functionBody(sharp, "bool targetSharpOnEyeDraw(");
     const std::string sharpObserved = functionBody(sharp, "bool targetSharpOnEyeDrawObserved(");

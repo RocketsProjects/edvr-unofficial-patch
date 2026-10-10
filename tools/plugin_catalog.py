@@ -67,20 +67,28 @@ EXPECTED_IMPLEMENTATION = {
     'comfort': 'phase1-lifecycle',
     'explorer-cam': 'phase1-lifecycle',
     'performance': 'catalog-only',
-    'diagnostics': 'catalog-only',
+    'diagnostics': 'phase1-lifecycle',
 }
 EXPECTED_HOOK_POINTS = {
+    'cockpit-visuals': ('draw.classify', 'lifecycle.configure', 'lifecycle.frame',
+                        'lifecycle.shutdown'),
     'intro': ('lifecycle.configure', 'lifecycle.frame', 'lifecycle.shutdown'),
     'comfort': ('lifecycle.configure', 'lifecycle.frame', 'lifecycle.shutdown'),
     'explorer-cam': ('lifecycle.frame', 'lifecycle.shutdown'),
+    'diagnostics': ('lifecycle.configure', 'lifecycle.frame', 'lifecycle.shutdown'),
 }
 EXPECTED_RIGS = {
     'temporal-aa': ('flat_sharpen_pass_test',),
+    'cockpit-visuals': ('night_vision_test', 'plugin_dispatch_test',
+                        'remlok_predicate_test', 'cockpit_api_test'),
     'comfort': ('exposure_dispatch_test', 'exposure_cost_test', 'native_fss_gpu_test',
                 'fss_predicate_test', 'fss_reveal_api_test', 'native_temporal_test',
                 'transition_flash_prevent_test', 'plugin_dispatch_test'),
     'explorer-cam': ('explorer_cam_test', 'explorer_cam_fade_test', 'plugin_dispatch_test'),
-    'diagnostics': ('pixel_probe_test',),
+    'performance': ('native_render_settings_test', 'native_frame_test'),
+    'diagnostics': ('pixel_probe_test', 'scheduler_stack_probe_test',
+                    'scheduler_stack_json_test', 'kinematic_probe_test',
+                    'plugin_dispatch_test'),
     'intro': ('plugin_dispatch_test', 'intro_lifecycle_test'),
 }
 DEFAULT_INSTALL = {
@@ -795,6 +803,15 @@ def self_test():
               intro['claims'] == [] and
               all(rig in intro['rigs'] for rig in
                   ('plugin_dispatch_test', 'intro_lifecycle_test')))
+        cockpit_index = EXPECTED_IDS.index('cockpit-visuals')
+        cockpit = original['plugins'][cockpit_index]
+        check('Cockpit Visuals keeps its night-vision pilot claim and declares the real RemLok lifecycle',
+              cockpit['implementationStatus'] == 'phase1-pilot' and
+              cockpit['selectionAvailableProfiles'] == [] and
+              tuple(cockpit['hookPoints']) == EXPECTED_HOOK_POINTS['cockpit-visuals'] and
+              [claim['id'] for claim in cockpit['claims']] == ['night-vision'] and
+              all(rig in cockpit['rigs'] for rig in
+                  ('plugin_dispatch_test', 'remlok_predicate_test', 'cockpit_api_test')))
         comfort_index = EXPECTED_IDS.index('comfort')
         comfort = original['plugins'][comfort_index]
         check('comfort lifecycle owns Exposure, Scanners, and Transition Flash while remaining non-selectable',
@@ -823,7 +840,22 @@ def self_test():
               not any(retired in performance['description'].lower()
                       for retired in ('guard', 'settlement', 'static props')) and
               not {'exposure', 'scanners'} & set(EXPECTED_IDS))
-        for pid, index in (('comfort', comfort_index), ('explorer-cam', explorer_index)):
+        check('Performance remains catalog-only with both native render policy rigs',
+              performance['implementationStatus'] == 'catalog-only' and
+              performance['selectionAvailableProfiles'] == [] and
+              performance['hookPoints'] == [] and
+              all(rig in performance['rigs'] for rig in
+                  ('native_render_settings_test', 'native_frame_test')))
+        diagnostics_index = EXPECTED_IDS.index('diagnostics')
+        diagnostics = original['plugins'][diagnostics_index]
+        check('Diagnostics lifecycle owns scheduler probes while remaining non-selectable',
+              diagnostics['implementationStatus'] == 'phase1-lifecycle' and
+              diagnostics['selectionAvailableProfiles'] == [] and
+              tuple(diagnostics['hookPoints']) == EXPECTED_HOOK_POINTS['diagnostics'] and
+              diagnostics['claims'] == [] and
+              all(rig in diagnostics['rigs'] for rig in EXPECTED_RIGS['diagnostics']))
+        for pid, index in (('comfort', comfort_index), ('explorer-cam', explorer_index),
+                           ('diagnostics', diagnostics_index)):
             plugin = original['plugins'][index]
             bad = copy.deepcopy(original)
             bad['plugins'][index]['selectionAvailableProfiles'] = ['vr']
@@ -1046,6 +1078,13 @@ def self_test():
               'k_intro_hook_points[] = {\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
               'k_intro_claims, 0' in content and 'k_intro_rigs, 2' in content and
               'k_intro_rigs[] = {\n    "plugin_dispatch_test",\n    "intro_lifecycle_test",' in content)
+        cockpit_record = next((line for line in content.splitlines()
+                               if '"cockpit-visuals"' in line and '"phase1-pilot"' in line), '')
+        check('generated Cockpit metadata keeps its draw claim and adds lifecycle hooks',
+              '"phase1-pilot"' in cockpit_record and
+              'k_cockpit_visuals_hook_points[] = {\n    "draw.classify",\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
+              'k_cockpit_visuals_claims, 1' in content and
+              'k_cockpit_visuals_rigs[] = {\n    "night_vision_test",\n    "plugin_dispatch_test",\n    "remlok_predicate_test",\n    "cockpit_api_test",' in content)
         comfort_record = next((line for line in content.splitlines()
                                if '"comfort"' in line and '"phase1-lifecycle"' in line), '')
         check('generated Comfort metadata carries merged lifecycle rigs',
@@ -1060,6 +1099,13 @@ def self_test():
               'k_explorer_cam_hook_points[] = {\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
               'k_explorer_cam_claims, 0' in content and
               'k_explorer_cam_rigs[] = {\n    "explorer_cam_test",\n    "explorer_cam_fade_test",' in content)
+        diagnostics_record = next((line for line in content.splitlines()
+                                   if '"diagnostics"' in line and '"phase1-lifecycle"' in line), '')
+        check('generated Diagnostics metadata declares its lifecycle and real rigs',
+              '"phase1-lifecycle"' in diagnostics_record and '0x0u' in diagnostics_record and
+              'k_diagnostics_hook_points[] = {\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
+              'k_diagnostics_claims, 0' in content and
+              'k_diagnostics_rigs[] = {\n    "pixel_probe_test",\n    "scheduler_stack_probe_test",' in content)
     except Exception as exc:
         failures.append('unexpected exception: %s' % exc)
 

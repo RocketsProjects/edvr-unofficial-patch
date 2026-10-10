@@ -1,6 +1,6 @@
 #include "scheduler_stack_probe.h"
 #include "scheduler_stack_hook.h"
-#include "../common/log.h"
+#include "../../common/log.h"
 #include <windows.h>
 #include <cstring>
 #include <string>
@@ -303,8 +303,7 @@ void SchedulerStackProbe::selfTestPopulateForJson() noexcept {
     }
 }
 
-// --- config-facing lifecycle (driven by the once-per-second
-// temporalPassConfigure re-poll) ---------------------------------------
+// --- config-facing lifecycle body ------------------------------------
 
 void schedulerStackProbeConfigure(bool on) {
     if(on==schedulerStackProbe.active())return; // 1 Hz re-poll idempotency

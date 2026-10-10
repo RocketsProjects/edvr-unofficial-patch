@@ -293,6 +293,7 @@ REM build if either DLL imports the compiler again.
 python "tools\check_plugin_boundaries.py" --self-test || exit /b 1
 python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visuals ^
     --require-source src\plugins\cockpit_visuals\night_vision.cpp ^
+    --require-source src\plugins\cockpit_visuals\remlok_fix.cpp ^
     --require-plugin intro --require-source src\plugins\intro\intro_skip.cpp ^
     --require-source src\plugins\intro\intro_upscale.cpp ^
     --require-source src\plugins\intro\intro_lifecycle.cpp ^
@@ -319,6 +320,10 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
     --require-source src\plugins\explorer_cam\explorer_cam_lifecycle.cpp ^
     --require-plugin temporal_aa --require-source src\plugins\temporal_aa\sharpen_pass.cpp ^
     --require-plugin diagnostics --require-source src\plugins\diagnostics\pixel_probe.cpp ^
+    --require-source src\plugins\diagnostics\scheduler_stack_probe.cpp ^
+    --require-source src\plugins\diagnostics\scheduler_stack_hook.cpp ^
+    --require-source src\plugins\diagnostics\scheduler_lifecycle.cpp ^
+    --require-plugin performance --require-source src\plugins\performance\openxr_resolution_policy.cpp ^
     --include-dir "%GEN%" || exit /b 1
 python "tools\plugin_lifecycle_wiring_test.py" --dry-run || exit /b 1
 python "tools\plugin_lifecycle_wiring_test.py" --self-test || exit /b 1
@@ -326,10 +331,12 @@ python "tools\plugin_lifecycle_wiring_test.py" --self-test || exit /b 1
 if not exist "%OBJ%\plugins\cockpit_visuals" mkdir "%OBJ%\plugins\cockpit_visuals"
 del /q "%OBJ%\plugins\cockpit_visuals\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\cockpit_visuals\\" ^
-    "src\plugins\cockpit_visuals\night_vision.cpp"
+    "src\plugins\cockpit_visuals\night_vision.cpp" ^
+    "src\plugins\cockpit_visuals\remlok_fix.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
-    "%OBJ%\plugins\cockpit_visuals\night_vision.obj"
+    "%OBJ%\plugins\cockpit_visuals\night_vision.obj" ^
+    "%OBJ%\plugins\cockpit_visuals\remlok_fix.obj"
 if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\on_foot_panel" mkdir "%OBJ%\plugins\on_foot_panel"
@@ -397,11 +404,26 @@ if errorlevel 1 ( echo [edvr] ERROR: temporal-aa plugin library failed & exit /b
 if not exist "%OBJ%\plugins\diagnostics" mkdir "%OBJ%\plugins\diagnostics"
 del /q "%OBJ%\plugins\diagnostics\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\diagnostics\\" ^
-    "src\plugins\diagnostics\pixel_probe.cpp"
+    "src\plugins\diagnostics\pixel_probe.cpp" ^
+    "src\plugins\diagnostics\scheduler_stack_probe.cpp" ^
+    "src\plugins\diagnostics\scheduler_stack_hook.cpp" ^
+    "src\plugins\diagnostics\scheduler_lifecycle.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: diagnostics plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\diagnostics\plugin_diagnostics.lib" ^
-    "%OBJ%\plugins\diagnostics\pixel_probe.obj"
+    "%OBJ%\plugins\diagnostics\pixel_probe.obj" ^
+    "%OBJ%\plugins\diagnostics\scheduler_stack_probe.obj" ^
+    "%OBJ%\plugins\diagnostics\scheduler_stack_hook.obj" ^
+    "%OBJ%\plugins\diagnostics\scheduler_lifecycle.obj"
 if errorlevel 1 ( echo [edvr] ERROR: diagnostics plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\performance" mkdir "%OBJ%\plugins\performance"
+del /q "%OBJ%\plugins\performance\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\performance\\" ^
+    "src\plugins\performance\openxr_resolution_policy.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: performance plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\performance\plugin_performance.lib" ^
+    "%OBJ%\plugins\performance\openxr_resolution_policy.obj"
+if errorlevel 1 ( echo [edvr] ERROR: performance plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\intro" mkdir "%OBJ%\plugins\intro"
 del /q "%OBJ%\plugins\intro\*.obj" 2>nul
@@ -674,7 +696,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\object_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
-    "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
     "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\skin_entity_hook.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
@@ -682,7 +703,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" ^
-    "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
+    "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" ^
     "src\d3d11\wake_pulse.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
@@ -731,6 +752,7 @@ link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%
     "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
     "%OBJ%\plugins\explorer_cam\plugin_explorer_cam.lib" ^
     "%OBJ%\plugins\temporal_aa\plugin_temporal_aa.lib" "%OBJ%\plugins\diagnostics\plugin_diagnostics.lib" ^
+    "%OBJ%\plugins\performance\plugin_performance.lib" ^
     "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
@@ -1020,7 +1042,8 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_frame\\" /Fe"%BUILD%\native_frame_test.exe" ^
     "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
-    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\plugins\performance\openxr_resolution_policy.cpp" ^
+    "src\common\vscreen_auto_state.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native frame provider test build failed & exit /b 1 )
@@ -1975,7 +1998,7 @@ if not exist "%OBJ%\cockpitapi" mkdir "%OBJ%\cockpitapi"
 cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DEDVR_BINDING_SHADOW_EXTERNAL /Fo"%OBJ%\cockpitapi\\" ^
     /Fe"%OBJ%\cockpitapi\cockpit_api_test.exe" "tools\cockpit_api_test\cockpit_api_test.cpp" ^
-    "src\d3d11\target_sharp.cpp" "src\d3d11\remlok_fix.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\d3d11\target_sharp.cpp" "src\plugins\cockpit_visuals\remlok_fix.cpp" "src\d3d11\plugin_cost.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: cockpit API WARP rig build failed & exit /b 1 )
 "%OBJ%\cockpitapi\cockpit_api_test.exe" --self-test || (
@@ -2985,6 +3008,7 @@ link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
     "%OBJ%\plugins\explorer_cam\plugin_explorer_cam.lib" ^
     "%OBJ%\plugins\temporal_aa\plugin_temporal_aa.lib" "%OBJ%\plugins\diagnostics\plugin_diagnostics.lib" ^
+    "%OBJ%\plugins\performance\plugin_performance.lib" ^
     kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test build failed & exit /b 1 )
 "%BUILD%\vscreen_predicate_test.exe" --dry-run || exit /b 1
@@ -3046,7 +3070,7 @@ cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_REMLOK_PREDICATE_TEST ^
     /Fo"%OBJ%\remlokpredicate\\" /Fe"%BUILD%\remlok_predicate_test.exe" ^
     "tools\remlok_predicate_test\remlok_predicate_test.cpp" ^
-    "src\d3d11\remlok_fix.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\plugins\cockpit_visuals\remlok_fix.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO /OPT:REF user32.lib version.lib
@@ -3062,12 +3086,12 @@ ml64.exe /nologo /c /Fo"%OBJ%\classification\unwind_stubs.obj" ^
     "tools\object_classification_test\unwind_stubs.asm"
 if errorlevel 1 ( echo [edvr] ERROR: unwind fixture build failed & exit /b 1 )
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_RECORD_WRITER_TEST ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_RECORD_WRITER_TEST /I"%GEN%" ^
     /Fo"%OBJ%\classification\\" /Fe"%OBJ%\classification\object_classification_test.exe" ^
     "tools\object_classification_test\object_classification_test.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
-    "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
+    "src\plugins\diagnostics\scheduler_stack_probe.cpp" "src\plugins\diagnostics\scheduler_stack_hook.cpp" ^
     "src\common\code_hook.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\proxy.cpp" "src\common\guard.cpp" ^
     "%OBJ%\classification\unwind_stubs.obj" ^
@@ -3706,7 +3730,8 @@ REM dimensions and the tightest runtime/D3D maximum is shared by both eyes.
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     /Fo"%OBJ%\native_render_settings\\" /Fe"%BUILD%\native_render_settings_test.exe" ^
     "tools\native_render_settings_test\native_render_settings_test.cpp" ^
-    "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\plugins\performance\openxr_resolution_policy.cpp" ^
+    "src\common\vscreen_auto_state.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native render settings test build failed & exit /b 1 )
@@ -4160,7 +4185,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
     /Fo"%OBJ%\schedjson\\" /Fe"%BUILD%\scheduler_stack_json_test.exe" ^
     "tools\scheduler_stack_json_test\scheduler_stack_json_test.cpp" ^
-    "src\d3d11\scheduler_stack_probe.cpp" ^
+    "src\plugins\diagnostics\scheduler_stack_probe.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: scheduler stack JSON writer test build failed & exit /b 1 )
 "%BUILD%\scheduler_stack_json_test.exe" --dry-run || exit /b 1
@@ -4179,7 +4204,7 @@ REM find. Drives the production noteEntry/captureStack on synthetic
 REM stacks, including a VirtualProtect guard-page fault fixture.
 if not exist "%OBJ%\schedprobe" mkdir "%OBJ%\schedprobe"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 /I"%GEN%" ^
     /Fo"%OBJ%\schedprobe\\" /Fe"%BUILD%\scheduler_stack_probe_test.exe" ^
     "tools\scheduler_stack_probe_test\scheduler_stack_probe_test.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib

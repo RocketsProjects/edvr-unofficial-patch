@@ -13,6 +13,7 @@
 #include "../../src/common/vtable_hook.h"
 #include "../../src/d3d11/binding_shadow.h"
 #include "../../src/d3d11/remlok_fix.h"
+#include "../../src/plugins/cockpit_visuals/remlok_lifecycle.h"
 
 using Microsoft::WRL::ComPtr;
 namespace pc = edvr::plugin_cost;
@@ -67,6 +68,49 @@ void checkMutation(const ro::Observation& o,
     checkRead(o.mutation.hiddenAfter, true, true, hiddenAfter, label);
     checkRead(o.mutation.pendingRightBefore, true, true, pendingBefore, label);
     checkRead(o.mutation.pendingRightAfter, true, true, pendingAfter, label);
+}
+
+void checkLifecycleAdapter() {
+    const auto& ops = edvr::plugins::cockpit_visuals::remlokLifecycleOps();
+    check(ops.structSize == sizeof(EdvrPluginLifecycleOps),
+          "RemLok lifecycle adapter uses the current private ABI extent");
+    check(ops.manifestIndex == edvr::plugins::kPluginCockpitVisuals &&
+              ops.manifestId &&
+              std::strcmp(ops.manifestId, "cockpit-visuals") == 0 &&
+              ops.componentIndex == 0,
+          "RemLok lifecycle adapter belongs to Cockpit Visuals component zero");
+    if (!check(ops.state == nullptr && ops.configure && ops.frame && ops.shutdown,
+               "RemLok lifecycle adapter is stateless and provides all three callbacks"))
+        return;
+
+    // Null configuration is the module's existing configure no-op. The frame
+    // adapter must reach the same parity reset used by the direct facade.
+    edvr::remlokPredicateTestSeed(ro::kModeOuter, false, 9, 7, true);
+    ops.configure(nullptr);
+    const auto beforeFrame = edvr::remlokPredicateTestSnapshot();
+    checkRead(beforeFrame.matchesAfter, true, true, uint32_t{9},
+              "null lifecycle configure preserves seeded RemLok eye parity");
+    checkRead(beforeFrame.hiddenAfter, true, true, uint64_t{7},
+              "null lifecycle configure preserves seeded hidden count");
+    checkRead(beforeFrame.pendingRightAfter, true, true, true,
+              "null lifecycle configure preserves seeded pending right eye");
+    ops.frame(ops.state, 42);
+    const auto afterFrame = edvr::remlokPredicateTestSnapshot();
+    checkRead(afterFrame.matchesAfter, true, true, uint32_t{0},
+              "lifecycle frame callback resets RemLok eye parity");
+    checkRead(afterFrame.hiddenAfter, true, true, uint64_t{7},
+              "lifecycle frame callback preserves hidden count");
+    checkRead(afterFrame.pendingRightAfter, true, true, true,
+              "lifecycle frame callback preserves pending right-eye state");
+    ops.shutdown(ops.state);
+    const auto afterShutdown = edvr::remlokPredicateTestSnapshot();
+    checkRead(afterShutdown.matchesAfter, true, true, uint32_t{0},
+              "lifecycle shutdown callback preserves frame reset");
+    checkRead(afterShutdown.hiddenAfter, true, true, uint64_t{7},
+              "lifecycle shutdown callback preserves hidden count");
+    checkRead(afterShutdown.pendingRightAfter, true, true, true,
+              "lifecycle shutdown callback preserves pending right-eye state");
+    edvr::remlokPredicateTestSetMode(ro::kModeStock);
 }
 
 edvr::RemlokAction observe(char kind, uint32_t count, uint32_t instances,
@@ -221,6 +265,8 @@ int main(int argc, char** argv) {
     if (!check(SUCCEEDED(created), "create WARP device")) return 1;
     if (!check(edvr::reportSystemD3D11Only("remlok_predicate_test"),
                "WARP uses only System32 d3d11")) return 1;
+
+    checkLifecycleAdapter();
 
     ComPtr<ID3D11Texture2D> goodTexture, narrowTexture, shortTexture, depthTexture;
     ComPtr<ID3D11ShaderResourceView> goodView, narrowView, shortView;

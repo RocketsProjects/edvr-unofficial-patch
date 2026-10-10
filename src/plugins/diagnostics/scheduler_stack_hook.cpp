@@ -1,7 +1,7 @@
 #include "scheduler_stack_hook.h"
 #include "scheduler_stack_probe.h"
-#include "kinematic_eval_hook.h"
-#include "../common/code_hook.h"
+#include "../../d3d11/scheduler_relay.h"
+#include "../../common/code_hook.h"
 #include <windows.h>
 #include <intrin.h>
 #include <atomic>
@@ -21,6 +21,17 @@ using ObservedFn = uintptr_t (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr
 alignas(8) std::atomic<SchedulerStackProbe*> observer{nullptr};
 static_assert(decltype(observer)::is_always_lock_free,
               "The x64 relay reads the aligned atomic pointer directly.");
+
+void schedulerRelayFeed(void* context,uint32_t target,uint64_t entryRsp) noexcept {
+    auto* slot=static_cast<std::atomic<SchedulerStackProbe*>*>(context);
+    SchedulerStackProbe* probe=slot?slot->load(std::memory_order_acquire):nullptr;
+    if(probe)probe->noteEntry(target,static_cast<uintptr_t>(entryRsp));
+}
+
+const EdvrSchedulerRelayObserverOps kSchedulerRelayObserverOps = {
+    sizeof(EdvrSchedulerRelayObserverOps), 1u,
+    &observer, &schedulerRelayFeed
+};
 
 // The prologues, from the hash-verified exe (SHA-256 e6be8bbe...4e988;
 // verified 2026-09-21 against analysis/EliteDangerous64.exe and against
@@ -227,10 +238,11 @@ const char* attachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept {
         if(!targetValid(base))return "identity_mismatch";
         if(!ensureInstalled(base))return "install_failed";
         if(!schedulerStackHooksMatch(base))return "opcode_mismatch";
-        // Targets 0/1 are observed through the kinematic eval hook's job
-        // relays; hold that gate open (it may already be open for the probe
-        // or the emit -- the gate is recomputed from every consumer's cell).
-        const char* feed=kinematicEvalSchedulerAttach();
+        // Targets 0/1 are observed through a distinct scheduler observer
+        // slot in the core kinematic relay. Kinematic Evaluation retains
+        // independent ownership of its own observer and its shared patch.
+        const char* feed=edvrKinematicEvalSchedulerObserverAttach(
+            &kSchedulerRelayObserverOps);
         if(std::strcmp(feed,"installed")!=0)return feed;
         observer.store(probe,std::memory_order_release);
         return "installed";
@@ -242,13 +254,8 @@ void detachSchedulerStackHooks(SchedulerStackProbe* probe) noexcept {
         std::lock_guard<std::mutex> lock(g_installMutex);
         if(observer.load(std::memory_order_acquire)!=probe)return;
         observer.store(nullptr,std::memory_order_release);
-        kinematicEvalSchedulerDetach();
+        edvrKinematicEvalSchedulerObserverDetach(&kSchedulerRelayObserverOps);
     } catch(...) {}
-}
-
-void schedulerStackNoteJobEntry(uint32_t target,uintptr_t entryRsp) noexcept {
-    SchedulerStackProbe* probe=observer.load(std::memory_order_acquire);
-    if(probe)probe->noteEntry(target,entryRsp);
 }
 
 } // namespace edvr

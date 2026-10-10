@@ -78,18 +78,12 @@ bool kinematicEvalEmitHookLive(const char** why) noexcept;
 // Targets 0/1 of SchedulerStackProbe are the job bodies' own RVAs, which
 // already carry this hook's patch -- CodeHook refuses a second patch and
 // there is nothing to gain by double-hooking. Instead the job-0/1 relay
-// wrappers call schedulerStackNoteJobEntry() (scheduler_stack_hook.h) before
+// wrappers call the registered opaque scheduler observer before
 // their timed bracket, at exactly the pre-forward point a dedicated hook
 // would sit. For that to happen the eval relays must be live even when the
 // eval probe is dark, so the scheduler probe is a gate consumer of its own:
-void schedulerStackNoteJobEntry(uint32_t target, uintptr_t entryRsp) noexcept;
-// Installs the shared kinematic hook set (validating the executable) and
-// holds the eval gate open for the scheduler probe. Same return vocabulary
-// as attachKinematicEvalHooks; idempotent across re-arms.
-const char* kinematicEvalSchedulerAttach() noexcept;
-// Closes the scheduler probe's want; the gate stays open while any other
-// consumer holds it.
-void kinematicEvalSchedulerDetach() noexcept;
+// The fixed POD observer registration in scheduler_relay.h installs the
+// shared hook set and holds the gate open independently of other consumers.
 
 // --- The cull gate probe's feed (advanced.cull_gate_capture) ----------------
 // FUN_14430EFE0, this file's evaluator target, IS the traversal's per-(record,

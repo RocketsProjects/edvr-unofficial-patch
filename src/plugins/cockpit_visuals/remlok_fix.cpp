@@ -1,4 +1,5 @@
-#include "remlok_fix.h"
+#include "../../d3d11/remlok_fix.h"
+#include "remlok_lifecycle.h"
 
 #include <windows.h>
 
@@ -6,12 +7,12 @@
 
 #include <cmath>
 
-#include "../common/config.h"
-#include "../common/frame_flag.h"
-#include "../common/log.h"
-#include "../common/plugin_cost.h"
-#include "binding_shadow.h"
-#include "cockpit_cost_sites.h"
+#include "../../common/config.h"
+#include "../../common/frame_flag.h"
+#include "../../common/log.h"
+#include "../../common/plugin_cost.h"
+#include "../../d3d11/binding_shadow.h"
+#include "../../d3d11/cockpit_cost_sites.h"
 
 namespace edvr {
 
@@ -526,3 +527,42 @@ void remlokShutdown() {
 }
 
 }  // namespace edvr
+
+namespace edvr::plugins::cockpit_visuals {
+namespace {
+
+void configure(void* opaqueConfig) {
+    if (!opaqueConfig) return;
+    edvr::remlokConfigure(*static_cast<edvr::Config*>(opaqueConfig));
+}
+
+void frame(void*, uint32_t) {
+    edvr::remlokFrameBoundary();
+}
+
+void shutdown(void*) {
+    edvr::remlokShutdown();
+}
+
+const EdvrPluginLifecycleOps kRemlokLifecycleOps = {
+    sizeof(EdvrPluginLifecycleOps),
+    plugins::kPluginCockpitVisuals,
+    "cockpit-visuals",
+    nullptr,
+    &configure,
+    &frame,
+    &shutdown,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    0,
+};
+
+}  // namespace
+
+const EdvrPluginLifecycleOps& remlokLifecycleOps() {
+    return kRemlokLifecycleOps;
+}
+
+}  // namespace edvr::plugins::cockpit_visuals

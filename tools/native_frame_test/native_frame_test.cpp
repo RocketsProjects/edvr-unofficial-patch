@@ -3,6 +3,8 @@
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/config.h"
 #include "../../src/common/native_render_settings.h"
+#include "../../src/d3d11/native_render_policy.h"
+#include "../../src/plugins/performance/openxr_resolution_policy.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/journal_watch.h"
 
@@ -100,9 +102,38 @@ int wmain(int argc, wchar_t** argv) {
     renderBounds[1] = {1824, 1968, 16384, 16384};
     EdvrNativeRenderSettings renderSettings =
         edvr::native_render::buildRenderSettingsRequest(renderBounds, "Oculus", "Meta Quest 3");
+    const EdvrNativeRenderSettings sentRenderSettings = renderSettings;
+    edvr::Config::get().set("fix.openxr_resolution", "oculus/meta-quest-3:3283");
     check(edvrQueryNativeRenderSettings(EDVR_NATIVE_RENDER_SETTINGS_VERSION_2,
                                         sizeof(renderSettings), &renderSettings) == TRUE,
-          "the render settings query publishes this headset's labels");
+          "the absent policy keeps the mandatory settings query available");
+    check(renderSettings.openxrRenderScale == 1.f && renderSettings.matchedEntry == 0 &&
+              renderSettings.entryCount == 0 &&
+              edvr::native_render::validateRenderSettingsAnswer(sentRenderSettings, renderSettings),
+          "the host receives the core-only 100% default before Performance selection");
+    edvr::native_render_policy::OpsV1 renderPolicy{
+        sizeof(edvr::native_render_policy::OpsV1), edvr::native_render_policy::kVersion,
+        edvr::native_render_policy::kPerformanceManifestIndex, 0, nullptr,
+        edvr::plugins::performance::resolveOpenxrResolution};
+    check(edvr::native_render_policy::registerPolicy(&renderPolicy) == TRUE,
+          "register the selected Performance resolution resolver");
+    renderSettings = edvr::native_render::buildRenderSettingsRequest(
+        renderBounds, "Oculus", "Meta Quest 3");
+    const EdvrNativeRenderSettings selectedRequest = renderSettings;
+    const float selectedScale = static_cast<float>(3283.0 / 1824.0);
+    check(edvrQueryNativeRenderSettings(EDVR_NATIVE_RENDER_SETTINGS_VERSION_2,
+                                        sizeof(renderSettings), &renderSettings) == TRUE &&
+              edvr::native_render::validateRenderSettingsAnswer(selectedRequest, renderSettings) &&
+              std::fabs(renderSettings.openxrRenderScale - selectedScale) < 0.000001f &&
+              renderSettings.matchedEntry == 1 && renderSettings.entryCount == 1,
+          "the selected resolver applies the saved per-headset setting");
+    const float selectedEffective = edvr::native_render::effectiveScale(
+        renderSettings.openxrRenderScale, renderBounds, 2);
+    check(edvr::native_render::scaledDimension(renderBounds[0].originalWidth,
+                                              renderBounds[0].maxWidth, selectedEffective) == 3283 &&
+              edvr::native_render::scaledDimension(renderBounds[0].originalHeight,
+                                                   renderBounds[0].maxHeight, selectedEffective) == 3542,
+          "the selected ratio resolves the expected per-eye dimensions");
     // The keys live in [experimental] since 2026-09-29 (edvr.ini's
     // `# moved-from: fix.fov_trim_*`; tools/config_test proves an old line is
     // read as the new name and tools/installer_test that the merge carries it).

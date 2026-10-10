@@ -6,7 +6,7 @@
 // it and asserts every fixture value round-trips. The C++ side runs a
 // quote/brace structural scan first so a broken stream is diagnosed here
 // even before the python parse.
-#include "../../src/d3d11/scheduler_stack_probe.h"
+#include "../../src/plugins/diagnostics/scheduler_stack_probe.h"
 #include "../../src/common/log.h"
 #include <cstdio>
 #include <cwchar>

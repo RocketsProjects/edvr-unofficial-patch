@@ -1,4 +1,5 @@
 #include "kinematic_eval_hook.h"
+#include "scheduler_relay.h"
 #include "kinematic_eval_probe.h"
 #include "engine_velocity_emit.h"
 #include "engine_motion_cpu.h"   // the CPU instrument: EDVR's own work in every relay below is clocked per call
@@ -70,7 +71,9 @@ std::atomic<const char*> g_clearStatus{"not requested"};
 // The scheduler stack probe's want: its targets 0/1 are the job bodies
 // themselves, already patched by this file, so it observes through the
 // job-0/1 relays and holds this gate open while armed.
-std::atomic<bool> schedulerWanted{false};
+alignas(8) std::atomic<const EdvrSchedulerRelayObserverOps*> schedulerObserver{nullptr};
+static_assert(decltype(schedulerObserver)::is_always_lock_free,
+              "scheduler worker feed requires a lock-free immutable snapshot");
 // The cull gate probe's want (advanced.cull_gate_capture): observes the
 // evaluator (the traversal's per-view gate) after its forward and the
 // bucket bracket (the draw-item builder) before its forward, for the few
@@ -403,8 +406,11 @@ uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
     // entry RSP, so this wrapper's own return address (EDVR code, outside
     // the probe's image range) scans as a filtered miss and the engine's
     // return address lands at index 0 of the collected stack.
-    if(job<2)schedulerStackNoteJobEntry(job,
-        reinterpret_cast<uintptr_t>(_AddressOfReturnAddress()));
+    if(job<2) {
+        const auto* scheduler=schedulerObserver.load(std::memory_order_acquire);
+        if(scheduler)scheduler->feed(scheduler->context,job,
+            reinterpret_cast<uintptr_t>(_AddressOfReturnAddress()));
+    }
     // Job attribution: every eval observation made while this job runs on
     // this thread carries its bit. Save/restore so nested jobs keep both
     // bits and early returns always unwind the mask.
@@ -1091,7 +1097,7 @@ const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {
 void recomputeGateLocked() noexcept {
     const bool open=observer.load(std::memory_order_acquire)!=nullptr ||
                     emitWanted.load(std::memory_order_acquire) ||
-                    schedulerWanted.load(std::memory_order_acquire) ||
+                    schedulerObserver.load(std::memory_order_acquire)!=nullptr ||
                     gateProbeWanted.load(std::memory_order_acquire);
     evalGate.store(open?uintptr_t(1):uintptr_t(0),std::memory_order_release);
     primaryGate.store(emitWanted.load(std::memory_order_acquire) &&
@@ -1177,25 +1183,32 @@ void kinematicEvalEmitDetach() noexcept {
     } catch(...) {}
 }
 
-const char* kinematicEvalSchedulerAttach() noexcept {
+extern "C" const char* edvrKinematicEvalSchedulerObserverAttach(
+    const EdvrSchedulerRelayObserverOps* ops) noexcept {
+    if(!ops || ops->structSize!=sizeof(EdvrSchedulerRelayObserverOps) ||
+       ops->version!=1 || !ops->context || !ops->feed)return "invalid_observer";
     try {
         std::lock_guard<std::mutex> lock(g_installMutex);
+        const auto* active=schedulerObserver.load(std::memory_order_acquire);
+        if(active)return active==ops?"installed":"observer_busy";
         const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
         if(!base)return "identity_mismatch";
         if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
             return "identity_mismatch";
         if(!ensureInstalled(base))return "install_failed";
         if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
-        schedulerWanted.store(true,std::memory_order_release);
+        schedulerObserver.store(ops,std::memory_order_release);
         recomputeGateLocked();
         return "installed";
     } catch(...) {return "install_failed";}
 }
 
-void kinematicEvalSchedulerDetach() noexcept {
+extern "C" void edvrKinematicEvalSchedulerObserverDetach(
+    const EdvrSchedulerRelayObserverOps* exactOps) noexcept {
     try {
         std::lock_guard<std::mutex> lock(g_installMutex);
-        schedulerWanted.store(false,std::memory_order_release);
+        if(!exactOps || schedulerObserver.load(std::memory_order_acquire)!=exactOps)return;
+        schedulerObserver.store(nullptr,std::memory_order_release);
         recomputeGateLocked();
     } catch(...) {}
 }

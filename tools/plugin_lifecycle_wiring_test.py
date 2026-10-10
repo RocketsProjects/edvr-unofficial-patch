@@ -11,6 +11,23 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SLICE_PATHS = {
+    "remlok_header": ROOT / "src/plugins/cockpit_visuals/remlok_lifecycle.h",
+    "remlok": ROOT / "src/plugins/cockpit_visuals/remlok_fix.cpp",
+    "scheduler_header": ROOT / "src/plugins/diagnostics/scheduler_lifecycle.h",
+    "scheduler": ROOT / "src/plugins/diagnostics/scheduler_lifecycle.cpp",
+    "probe": ROOT / "src/plugins/diagnostics/scheduler_stack_probe.cpp",
+    "scheduler_hook": ROOT / "src/plugins/diagnostics/scheduler_stack_hook.cpp",
+    "proxy": ROOT / "src/d3d11/d3d11_proxy.cpp",
+    "native_settings": ROOT / "src/d3d11/native_render_settings.cpp",
+    "native_policy_header": ROOT / "src/d3d11/native_render_policy.h",
+    "native_policy": ROOT / "src/plugins/performance/openxr_resolution_policy.cpp",
+    "relay_header": ROOT / "src/d3d11/scheduler_relay.h",
+    "relay_host": ROOT / "src/d3d11/kinematic_eval_hook.cpp",
+    "vscreen": ROOT / "src/d3d11/vscreen.cpp",
+    "device": ROOT / "src/d3d11/device_hook.cpp",
+    "registry": ROOT / "src/d3d11/plugin_registry.cpp",
+}
 PATHS = (
     ROOT / "src/plugins/comfort/scanners/scanner_lifecycle.h",
     ROOT / "src/plugins/comfort/scanners/scanner_lifecycle.cpp",
@@ -242,6 +259,254 @@ def check(scanner_h: str, scanner: str, exposure: str, comfort_h: str,
         raise AssertionError("plugin cost logger lost its stable row label lookup")
 
 
+def check_module_slices(sources: dict[str, str]) -> None:
+    rem_h = sources["remlok_header"]
+    rem = sources["remlok"]
+    scheduler_h = sources["scheduler_header"]
+    scheduler = sources["scheduler"]
+    probe = sources["probe"]
+    scheduler_hook = sources["scheduler_hook"]
+    proxy = sources["proxy"]
+    native_settings = sources["native_settings"]
+    native_policy_h = sources["native_policy_header"]
+    native_policy = sources["native_policy"]
+    relay_h = sources["relay_header"]
+    relay = sources["relay_host"]
+    vscreen = sources["vscreen"]
+    device = sources["device"]
+    registry = sources["registry"]
+    build = (ROOT / "build.bat").read_text(encoding="utf-8")
+    flat_proxy = (ROOT / "tools/build_flat_sdk_bench_proxy.py").read_text(encoding="utf-8")
+
+    if "const EdvrPluginLifecycleOps& remlokLifecycleOps();" not in rem_h:
+        raise AssertionError("Cockpit Visuals private header must expose its RemLok lifecycle record")
+    rem_config = body(rem, "void configure(void* opaqueConfig)")
+    if "if (!opaqueConfig) return;" not in rem_config or \
+            "edvr::remlokConfigure(*static_cast<edvr::Config*>(opaqueConfig))" not in rem_config:
+        raise AssertionError("RemLok lifecycle configure must delegate the host Config to the module facade")
+    for signature, target in (("void frame(void*, uint32_t)", "edvr::remlokFrameBoundary()"),
+                              ("void shutdown(void*)", "edvr::remlokShutdown()")):
+        if body(rem, signature).count(target) != 1:
+            raise AssertionError(f"RemLok lifecycle callback lost {target}")
+    rem_record = body(rem, "const EdvrPluginLifecycleOps kRemlokLifecycleOps =")
+    for token in ("plugins::kPluginCockpitVisuals", '"cockpit-visuals"',
+                  "&configure,", "&frame,", "&shutdown,", "nullptr,\n    0,"):
+        if token not in rem_record:
+            raise AssertionError(f"RemLok lifecycle record missing {token}")
+
+    for sig in ("void vScreenRefreshConfig()", "void installVScreenFixes("):
+        site = body(vscreen, sig)
+        if site.count("configureRemlokLifecycle(cfg)") != 1:
+            raise AssertionError(f"{sig} must configure RemLok once at its former host position")
+    rem_configure_host = body(vscreen, "void configureRemlokLifecycle(Config& cfg)")
+    ordered(rem_configure_host, "pluginRegistryRegisterLifecycle(",
+            "pluginRegistryConfigureLifecycle(", "return;", "remlokConfigure(cfg);")
+    rem_frame_host = body(vscreen, "void frameRemlokLifecycle(uint32_t sceneFrame)")
+    ordered(rem_frame_host, "pluginRegistryHasLifecycle(",
+            "pluginRegistryFrameLifecycle(", "return;", "remlokFrameBoundary();")
+    rem_shutdown_host = body(vscreen, "void shutdownRemlokLifecycle()")
+    ordered(rem_shutdown_host, "pluginRegistryHasLifecycle(",
+            "pluginRegistryShutdownLifecycle(", "return;", "remlokShutdown();")
+    if body(body(vscreen, "void vScreenFrameBoundary()"), "tkRemlok.run(").count(
+            "frameRemlokLifecycle(s->frameNo)") != 1:
+        raise AssertionError("RemLok lifecycle frame callback moved off its existing body-frame tick")
+    if body(vscreen, "void shutdownVScreenFixes()").count(
+            "shutdownRemlokLifecycle()") != 1:
+        raise AssertionError("VScreen shutdown must retire RemLok through its lifecycle wrapper")
+
+    if "const EdvrPluginLifecycleOps& schedulerLifecycleOps();" not in scheduler_h:
+        raise AssertionError("Diagnostics private header must expose the scheduler lifecycle record")
+    sched_config = body(scheduler, "void configure(void* rawConfig)")
+    ordered(sched_config, "if (!rawConfig) return;", "edvrDiagnosticsSchedulerConfigure(",
+            "getBool(\"advanced.scheduler_probe\", false)")
+    if "&edvr::schedulerStackProbe" not in body(
+            scheduler, "const EdvrPluginLifecycleOps kSchedulerLifecycleOps ="):
+        raise AssertionError("Diagnostics lifecycle record must own the scheduler probe state")
+    for signature, target in (("void frame(void* state, uint32_t sceneFrame)",
+                               "edvrDiagnosticsSchedulerFrame(state, sceneFrame)"),
+                              ("void shutdown(void* state)",
+                               "edvrDiagnosticsSchedulerShutdown(state)")):
+        if body(scheduler, signature).count(target) != 1:
+            raise AssertionError(f"Diagnostics lifecycle callback lost {target}")
+    for sig in ("void vScreenRefreshConfig()", "void installVScreenFixes("):
+        site = body(vscreen, sig)
+        if site.count("configureSchedulerLifecycle(cfg)") != 1:
+            raise AssertionError(f"{sig} must configure Diagnostics at the former scheduler probe position")
+    sched_config_host = body(vscreen, "void configureSchedulerLifecycle(Config& cfg)")
+    ordered(sched_config_host, "pluginRegistryRegisterLifecycle(",
+            "pluginRegistryConfigureLifecycle(", "return;",
+            "edvrDiagnosticsSchedulerConfigure(edvrDiagnosticsSchedulerState(),")
+    sched_shutdown_host = body(vscreen, "void shutdownSchedulerLifecycle()")
+    ordered(sched_shutdown_host, "pluginRegistryHasLifecycle(",
+            "pluginRegistryShutdownLifecycle(", "return;",
+            "edvrDiagnosticsSchedulerShutdown(edvrDiagnosticsSchedulerState())")
+    device_tick = body(device, "tkSchedulerProbe.run([] {")
+    ordered(device_tick, "g_state->frameCounter", "pluginRegistryHasLifecycle(",
+            "pluginRegistryFrameLifecycle(", "} else {", "edvrDiagnosticsSchedulerFrame(")
+    if "schedulerStackProbe" in device_tick or "SchedulerStackProbe" in device_tick:
+        raise AssertionError("core Present host must dispatch Diagnostics through scalar lifecycle callbacks")
+    relay_feed = body(scheduler_hook, "void schedulerRelayFeed(")
+    ordered(relay_feed, "slot->load(std::memory_order_acquire)",
+            "if(probe)probe->noteEntry(target,static_cast<uintptr_t>(entryRsp))")
+    hook_ops = body(scheduler_hook, "const EdvrSchedulerRelayObserverOps kSchedulerRelayObserverOps =")
+    for token in ("sizeof(EdvrSchedulerRelayObserverOps)", "&observer", "&schedulerRelayFeed"):
+        if token not in hook_ops:
+            raise AssertionError(f"Diagnostics relay record missing {token}")
+    hook_install = body(scheduler_hook, "const char* attachSchedulerStackHooks(")
+    ordered(hook_install, "edvrKinematicEvalSchedulerObserverAttach(",
+            "&kSchedulerRelayObserverOps)", "observer.store(probe")
+    hook_remove = body(scheduler_hook, "void detachSchedulerStackHooks(")
+    ordered(hook_remove, "observer.store(nullptr", "edvrKinematicEvalSchedulerObserverDetach(",
+            "&kSchedulerRelayObserverOps)")
+    if "SchedulerStackProbe schedulerStackProbe;" not in probe:
+        raise AssertionError("moved probe must retain module-owned process-lifetime state")
+
+    if "sizeof(EdvrSchedulerRelayObserverOps) == 24" not in relay_h or \
+            "offsetof(EdvrSchedulerRelayObserverOps, feed) == 16" not in relay_h:
+        raise AssertionError("scheduler relay record must keep its fixed 24-byte POD layout")
+    bracket = body(relay, "uintptr_t __fastcall bracket(")
+    if bracket.count("schedulerObserver.load(std::memory_order_acquire)") != 1:
+        raise AssertionError("job bracket must take exactly one scheduler observer snapshot")
+    ordered(bracket, "schedulerObserver.load(std::memory_order_acquire)",
+            "scheduler->feed(scheduler->context,job,",
+            "struct JobBit", "KinematicEvalProbe* probe=")
+    if "schedulerStackProbe" in relay or "edvrDiagnosticsSchedulerRelayJob" in relay:
+        raise AssertionError("core kinematic relay must not know the Diagnostics module feed symbol or class")
+    gate = body(relay, "void recomputeGateLocked() noexcept")
+    if "schedulerObserver.load(std::memory_order_acquire)!=nullptr" not in gate or \
+            "observer.load(std::memory_order_acquire)!=nullptr" not in gate or \
+            "emitWanted.load(std::memory_order_acquire)" not in gate:
+        raise AssertionError("scheduler ownership must share the recomputed gate with existing consumers")
+    attach = body(relay, "extern \"C\" const char* edvrKinematicEvalSchedulerObserverAttach(")
+    ordered(attach, "ops->structSize!=sizeof(EdvrSchedulerRelayObserverOps)",
+            "std::lock_guard<std::mutex> lock(g_installMutex)",
+            "if(active)return active==ops?\"installed\":\"observer_busy\"",
+            "ensureInstalled(base)", "schedulerObserver.store(ops", "recomputeGateLocked()")
+    detach = body(relay, "extern \"C\" void edvrKinematicEvalSchedulerObserverDetach(")
+    ordered(detach, "std::lock_guard<std::mutex> lock(g_installMutex)",
+            "schedulerObserver.load(std::memory_order_acquire)!=exactOps",
+            "schedulerObserver.store(nullptr", "recomputeGateLocked()")
+
+    if 'Config::get().getString("fix.openxr_resolution"' in native_settings:
+        raise AssertionError("core render settings broker must not own resolution policy reads")
+    query = body(native_settings, "extern \"C\" BOOL WINAPI edvrQueryNativeRenderSettings(")
+    ordered(query, "answer.openxrRenderScale = EDVR_NATIVE_RENDER_SCALE_DEFAULT",
+            "answer.matchedEntry = 0", "answer.entryCount = 0",
+            "if (g_policyInstalled)", "g_policy.resolve(", "writeSettingsOutput(output, answer)")
+    for token in ("edvrPublishNativeRenderSizing", "edvrQueryNativeRenderSizing",
+                  "nativeRenderLabels"):
+        if token not in native_settings:
+            raise AssertionError(f"core sizing broker lost shared service {token}")
+    if "fix.openxr_resolution" not in native_policy or "Log::get().note" not in native_policy:
+        raise AssertionError("Performance implementation must own resolution config reads and reports")
+    if "static_assert(sizeof(OpsV1) == 32" not in native_policy_h:
+        raise AssertionError("native render policy bridge must keep its fixed POD record")
+    if "static_assert(edvr::native_render_policy::kPerformanceManifestIndex ==" not in proxy or \
+            "edvr::plugins::kPluginPerformance," not in proxy:
+        raise AssertionError("proxy policy bootstrap must stay tied to the generated Performance manifest index")
+    init = body(proxy, "BOOL CALLBACK initOnceCallback(")
+    ordered(init, "cfg.init(", "Log::get().open(",
+            "pluginRegistryProfileSupports(edvr::plugins::kPluginPerformance)",
+            "registerPolicy(&policy)", "return TRUE;")
+    shutdown = body(proxy, "void shutdown()")
+    ordered(shutdown, "unregisterPolicy(", "shutdownDeviceHooks()")
+
+    required_build_sources = (
+        "src\\plugins\\cockpit_visuals\\remlok_fix.cpp",
+        "src\\plugins\\diagnostics\\scheduler_stack_probe.cpp",
+        "src\\plugins\\diagnostics\\scheduler_stack_hook.cpp",
+        "src\\plugins\\diagnostics\\scheduler_lifecycle.cpp",
+        "src\\plugins\\performance\\openxr_resolution_policy.cpp",
+    )
+    for path in required_build_sources:
+        if build.count(path) < 2:
+            raise AssertionError(f"build must compile/archive and preserve direct rig source coverage for {path}")
+    if "plugin_performance.lib" not in build or "plugin_performance.lib" not in flat_proxy:
+        raise AssertionError("Performance archive must feed production and flat SDK bench links")
+    probe_start = build.find(":rig_scheduler_stack_probe_test")
+    probe_end = build.find("\n:rig_", probe_start + 1)
+    probe_rig = build[probe_start:probe_end if probe_end >= 0 else None]
+    if probe_start < 0 or '/I"%GEN%"' not in probe_rig or \
+            '"tools\\scheduler_stack_probe_test\\scheduler_stack_probe_test.cpp"' not in probe_rig:
+        raise AssertionError("scheduler lifecycle adapter rig must include generated manifest headers")
+    if '"src\\plugins\\diagnostics\\scheduler_lifecycle.cpp"' in probe_rig:
+        raise AssertionError("scheduler probe rig owns its direct adapter include; do not compile it twice")
+    classification_start = build.find(":rig_object_classification")
+    classification_end = build.find("\n:rig_", classification_start + 1)
+    classification_rig = build[classification_start:classification_end if classification_end >= 0 else None]
+    if classification_start < 0 or '/I"%GEN%"' not in classification_rig:
+        raise AssertionError("object classification fixture must resolve the generated manifest dependency")
+
+    register = body(registry, "bool pluginRegistryRegisterLifecycle(")
+    if 'std::strcmp(record.implementationStatus, "phase1-lifecycle") != 0' not in register or \
+            'std::strcmp(record.implementationStatus, "phase1-pilot") != 0' not in register:
+        raise AssertionError("lifecycle registry must accept both lifecycle modules and the Cockpit pilot")
+    if "componentIndex != 0 && ops->manifestIndex != plugins::kPluginComfort" not in register:
+        raise AssertionError("nonzero lifecycle components must remain restricted to Comfort")
+
+
+def expect_slice(label: str, sources: dict[str, str]) -> None:
+    try:
+        check_module_slices(sources)
+    except (AssertionError, ValueError):
+        return
+    raise AssertionError(f"mutation not detected: {label}")
+
+
+def self_test_slices(sources: dict[str, str]) -> None:
+    changed = dict(sources)
+    changed["registry"] = replace_body(changed["registry"],
+        "bool pluginRegistryRegisterLifecycle(",
+        'std::strcmp(record.implementationStatus, "phase1-pilot") != 0',
+        'std::strcmp(record.implementationStatus, "disabled") != 0')
+    expect_slice("Cockpit pilot lifecycle admission", changed)
+
+    changed = dict(sources)
+    changed["native_settings"] = replace_body(changed["native_settings"],
+        "extern \"C\" BOOL WINAPI edvrQueryNativeRenderSettings(",
+        "if (g_policyInstalled)", "if (false)")
+    expect_slice("native policy callback installation gate", changed)
+
+    changed = dict(sources)
+    changed["native_settings"] = once(changed["native_settings"],
+        "answer.openxrRenderScale = EDVR_NATIVE_RENDER_SCALE_DEFAULT;", "/* absent policy default removed */")
+    expect_slice("native policy absent defaults", changed)
+
+    changed = dict(sources)
+    changed["proxy"] = replace_body(changed["proxy"], "void shutdown()",
+        "unregisterPolicy(", "/* unregister omitted */")
+    expect_slice("policy unregistration before device shutdown", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = replace_body(changed["vscreen"], "void frameRemlokLifecycle(uint32_t sceneFrame)",
+        "pluginRegistryFrameLifecycle(", "/* registry frame omitted */")
+    expect_slice("RemLok frame dispatch and fallback", changed)
+
+    changed = dict(sources)
+    changed["device"] = replace_body(changed["device"], "tkSchedulerProbe.run([] {",
+        "pluginRegistryFrameLifecycle(", "/* registry frame omitted */")
+    expect_slice("Diagnostics Present frame dispatch", changed)
+
+    changed = dict(sources)
+    changed["relay_host"] = replace_body(changed["relay_host"],
+        "uintptr_t __fastcall bracket(",
+        "schedulerObserver.load(std::memory_order_acquire)",
+        "schedulerObserver.load(std::memory_order_relaxed)")
+    expect_slice("single acquire observer snapshot", changed)
+
+    changed = dict(sources)
+    changed["relay_host"] = once(changed["relay_host"],
+        "schedulerObserver.load(std::memory_order_acquire)!=nullptr", "false")
+    expect_slice("relay gate ownership recomputation", changed)
+
+    changed = dict(sources)
+    changed["relay_host"] = replace_body(changed["relay_host"],
+        'extern "C" const char* edvrKinematicEvalSchedulerObserverAttach(',
+        'if(active)return active==ops?"installed":"observer_busy";',
+        'if(active)return "observer_busy";')
+    expect_slice("relay exact-record idempotence and busy replacement", changed)
+
+
 def expect(label: str, sources: tuple[str, ...], changed: tuple[str, ...]) -> None:
     try:
         check(*changed)
@@ -303,12 +568,16 @@ def main() -> int:
     args = parser.parse_args()
     sources = (*tuple(path.read_text(encoding="utf-8") for path in PATHS),
                (ROOT / "src/d3d11/plugin_registry.h").read_text(encoding="utf-8"))
+    slice_sources = {name: path.read_text(encoding="utf-8")
+                     for name, path in SLICE_PATHS.items()}
     check(*sources)
+    check_module_slices(slice_sources)
     if args.self_test:
         self_test(sources)
-        print("PASS: grouped Comfort/Explorer lifecycle wiring (24 mutations)")
+        self_test_slices(slice_sources)
+        print("PASS: grouped lifecycle wiring and module boundaries (32 mutations)")
     else:
-        print("DRY RUN: grouped Comfort/Explorer lifecycle pins passed; no files written")
+        print("DRY RUN: grouped lifecycle and module-boundary pins passed; no files written")
     return 0
 
 

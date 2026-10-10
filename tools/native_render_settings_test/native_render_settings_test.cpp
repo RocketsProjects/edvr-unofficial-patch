@@ -1,6 +1,8 @@
 #include "../../src/common/native_render_settings.h"
 #include "../../src/common/openxr_resolution_entries.h"
 #include "../../src/d3d11/native_render_labels.h"
+#include "../../src/d3d11/native_render_policy.h"
+#include "../../src/plugins/performance/openxr_resolution_policy.h"
 #include "../../src/common/config.h"
 
 #include <cstdio>
@@ -86,9 +88,12 @@ void setValue(const char* value) { edvr::Config::get().set("fix.openxr_resolutio
 bool queryGives(const Fixture& f,const char* value,uint32_t w,uint32_t h,uint32_t matched,uint32_t entries) {
     setValue(value);
     BOOL ok=FALSE;
-    const auto answer=query(f,&ok);
+    const auto sent=request(f);
+    auto answer=sent;
+    ok=edvrQueryNativeRenderSettings(EDVR_NATIVE_RENDER_SETTINGS_VERSION_2,sizeof(answer),&answer);
     const Active a=active(f,answer);
-    if(ok!=TRUE || a.w!=w || a.h!=h || answer.matchedEntry!=matched || answer.entryCount!=entries) {
+    if(ok!=TRUE || !validateRenderSettingsAnswer(sent,answer) || a.w!=w || a.h!=h ||
+       answer.matchedEntry!=matched || answer.entryCount!=entries) {
         std::printf("  %s value=\"%s\": got %ux%u matched=%u entries=%u, wanted %ux%u matched=%u entries=%u\n",
             f.name,value,a.w,a.h,answer.matchedEntry,answer.entryCount,w,h,matched,entries);
         return false;
@@ -111,6 +116,30 @@ bool token(const char* raw,const char* expected,const char* message) {
     if(!ok) std::printf("  headsetToken(\"%s\") = \"%s\", wanted \"%s\"\n",raw,got.c_str(),expected);
     check(ok,message);
     return ok;
+}
+
+BOOL WINAPI failedPolicy(void*,const EdvrNativeRenderSettings*,
+                         edvr::native_render_policy::ResultV1*) { return FALSE; }
+
+BOOL WINAPI malformedPolicy(void* context,const EdvrNativeRenderSettings*,
+                            edvr::native_render_policy::ResultV1* result) {
+    result->structSize=sizeof(*result);
+    result->version=edvr::native_render_policy::kVersion;
+    result->requestedScale=1.f;
+    result->matchedEntry=0;
+    result->entryCount=0;
+    result->reserved=0;
+    switch (reinterpret_cast<uintptr_t>(context)) {
+    case 1: --result->structSize; break;
+    case 2: ++result->version; break;
+    case 3: result->requestedScale=std::numeric_limits<float>::quiet_NaN(); break;
+    case 4: result->requestedScale=2.01f; break;
+    case 5: result->matchedEntry=3; break;
+    case 6: result->entryCount=9; break;
+    case 7: result->reserved=1; break;
+    default: break;
+    }
+    return TRUE;
 }
 }
 
@@ -175,6 +204,77 @@ int wmain(int argc,wchar_t** argv) {
     // ---- the graphics DLL's v2 export, in pixels --------------------------
     NativeRenderLabels labels{};
     check(!nativeRenderLabels(&labels) && labels.valid==0,"labels read invalid before any query");
+    setValue("oculus/meta-quest-3:3283");
+    auto absent=request(kQ3Oculus);
+    const auto absentSent=absent;
+    check(edvrQueryNativeRenderSettings(EDVR_NATIVE_RENDER_SETTINGS_VERSION_2,
+          sizeof(absent),&absent)==TRUE && absent.openxrRenderScale==1.f &&
+          absent.matchedEntry==0 && absent.entryCount==0 &&
+          validateRenderSettingsAnswer(absentSent,absent) &&
+          active(kQ3Oculus,absent).w==kQ3Oculus.w &&
+          active(kQ3Oculus,absent).h==kQ3Oculus.h,
+          "an absent policy answers the mandatory query at 100% without selecting config");
+    check(nativeRenderLabels(&labels) && !std::strcmp(labels.runtimeToken,"oculus") &&
+          !std::strcmp(labels.systemToken,"meta-quest-3"),
+          "labels remain available when Performance policy is absent");
+
+    using namespace edvr::native_render_policy;
+    OpsV1 policyOps{sizeof(OpsV1),kVersion,kPerformanceManifestIndex,0,nullptr,
+                    edvr::plugins::performance::resolveOpenxrResolution};
+    OpsV1 badOps=policyOps;
+    badOps.structSize--;
+    check(registerPolicy(&badOps)==FALSE,"registration rejects a short ops record");
+    badOps=policyOps; badOps.version++;
+    check(registerPolicy(&badOps)==FALSE,"registration rejects an unknown ops version");
+    badOps=policyOps; badOps.manifestIndex++;
+    check(registerPolicy(&badOps)==FALSE,"registration rejects a non-Performance owner");
+    badOps=policyOps; badOps.reserved=1;
+    check(registerPolicy(&badOps)==FALSE,"registration rejects nonzero ops reserved");
+    badOps=policyOps; badOps.resolve=nullptr;
+    check(registerPolicy(&badOps)==FALSE,"registration rejects a null callback");
+    OpsV1 registeredOps=policyOps;
+    check(registerPolicy(&registeredOps)==TRUE,"the real policy registers");
+    registeredOps.resolve=failedPolicy;
+    check(registerPolicy(&policyOps)==TRUE,
+          "registration copied the ops and accepts an exact repeat");
+    OpsV1 conflictingOps{sizeof(OpsV1),kVersion,kPerformanceManifestIndex,0,
+                         reinterpret_cast<void*>(1),
+                         edvr::plugins::performance::resolveOpenxrResolution};
+    check(registerPolicy(&conflictingOps)==FALSE,
+          "a selected resolver cannot be replaced by a different identity");
+    check(unregisterPolicy(kPerformanceManifestIndex,reinterpret_cast<void*>(1),
+          edvr::plugins::performance::resolveOpenxrResolution)==FALSE,
+          "teardown with a different context cannot remove the registered policy");
+    check(queryGives(kQ3Oculus,"oculus/meta-quest-3:3283",3283,3542,1,1),
+          "a rejected teardown leaves the copied real resolver active");
+    check(unregisterPolicy(kPerformanceManifestIndex,nullptr,
+          edvr::plugins::performance::resolveOpenxrResolution)==TRUE,
+          "the registered resolver can be removed by its exact identity");
+    OpsV1 failingOps{sizeof(OpsV1),kVersion,kPerformanceManifestIndex,0,nullptr,failedPolicy};
+    check(registerPolicy(&failingOps)==TRUE,"test failure callback registers");
+    auto failedRequest=request(kQ3Oculus);
+    const auto failedSent=failedRequest;
+    check(edvrQueryNativeRenderSettings(EDVR_NATIVE_RENDER_SETTINGS_VERSION_2,
+          sizeof(failedRequest),&failedRequest)==FALSE &&
+          !std::memcmp(&failedRequest,&failedSent,sizeof(failedRequest)),
+          "a selected policy failure is visible and leaves the request untouched");
+    check(unregisterPolicy(kPerformanceManifestIndex,nullptr,failedPolicy)==TRUE,
+          "failed test callback teardown uses its identity");
+    for(uintptr_t mode=1;mode<=7;++mode) {
+        OpsV1 malformedOps{sizeof(OpsV1),kVersion,kPerformanceManifestIndex,0,
+                           reinterpret_cast<void*>(mode),malformedPolicy};
+        check(registerPolicy(&malformedOps)==TRUE,"malformed result fixture registers");
+        auto malformedRequest=request(kQ3Oculus);
+        const auto malformedSent=malformedRequest;
+        check(edvrQueryNativeRenderSettings(EDVR_NATIVE_RENDER_SETTINGS_VERSION_2,
+              sizeof(malformedRequest),&malformedRequest)==FALSE &&
+              !std::memcmp(&malformedRequest,&malformedSent,sizeof(malformedRequest)),
+              "broker rejects each malformed v1 result without writing an answer");
+        check(unregisterPolicy(kPerformanceManifestIndex,reinterpret_cast<void*>(mode),
+              malformedPolicy)==TRUE,"malformed callback teardown uses its identity");
+    }
+    check(registerPolicy(&policyOps)==TRUE,
+          "real Performance resolver is restored for selected-entry cases");
     for(const Fixture* f:kFixtures)
         check(queryGives(*f,"",f->w,f->h,0,0),"an empty value is 100% of the recommendation everywhere");
     {
@@ -553,12 +653,17 @@ int wmain(int argc,wchar_t** argv) {
 
     // ---- sizing v1, unchanged ---------------------------------------------
     auto first=snapshot(1,.5f);
+    check(unregisterPolicy(kPerformanceManifestIndex,nullptr,
+          edvr::plugins::performance::resolveOpenxrResolution)==TRUE,
+          "remove Performance before exercising core-only sizing");
     check(edvrPublishNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1,
         sizeof(first),&first)==TRUE,"publish coherent sizing");
     EdvrNativeRenderSizing observed{};
     check(edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1,
         sizeof(observed),&observed)==TRUE && same(first,observed),
-        "query returns the coherent published sizing");
+        "sizing publication and query persist while Performance is absent");
+    check(registerPolicy(&policyOps)==TRUE,
+          "restore Performance after core-only sizing exercise");
     setValue("oculus/meta-quest-3:2500");
     check(query(kQ3Oculus).openxrRenderScale>1.37f && query(kQ3Oculus).openxrRenderScale<1.371f &&
         edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1,
