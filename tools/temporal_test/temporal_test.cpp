@@ -17,6 +17,7 @@
 #include <cstring>
 
 #include "../../src/common/temporal_math.h"
+#include "../../src/common/temporal_census.h"
 #include "../../src/common/temporal_mode.h"
 #include "../../src/d3d11/temporal_history.h"
 
@@ -665,6 +666,104 @@ int main() {
         const auto dropped = gateEye(j, far1, p, still, W, tv);
         check(dropped.carried && !dropped.carriedJump && memcmp(tv, d1tv, sizeof(tv)) == 0,
               "a drop after a jump carries the translation before it (a jump carried: zero)");
+    }
+    // THE PER-DRAW CENSUS (diag.temporal_draws, temporal_census.h): N recognised draws give N records with the rows and
+    // the projection floats of each; the per-eye-frame cap holds; a frame slot is reused by its frame number; and with the
+    // key off a draw does no work at all.
+    {
+        static edvr::census::Ring ring, offRing;
+        float rows[12], blk[16];
+        rows34(90.0f, 1.0f, 2.0f, 3.0f, rows);
+        for (int j = 0; j < 16; ++j) blk[j] = static_cast<float>(j) + 0.5f;
+        // A. Key off: nothing is stored or counted.
+        {
+            edvr::census::Draw d;
+            edvr::census::fillDraw(d, 0x1234u, 6u, rows, true, 9u, blk);
+            uint64_t calls = 0;
+            const bool stored = edvr::census::noteDraw(offRing, false, 7u, 0, d, &calls);
+            check(!stored && calls == 0 && offRing.frames[7].frame == ~0u && offRing.frames[7].drawsSeen[0] == 0,
+                  "census key off: a recognised draw stores nothing and counts nothing");
+        }
+        // B. Five draws on eye 0 and three on eye 1 in frame 7: N records, each with its own vs and index count, and the
+        // rows and projection floats of the object's write at the draw.
+        {
+            uint64_t calls = 0;
+            for (uint32_t k = 0; k < 5; ++k) {
+                edvr::census::Draw d;
+                edvr::census::fillDraw(d, 1000u + k, 100u + k, rows, true, 42u, blk);
+                edvr::census::noteDraw(ring, true, 7u, 0, d, &calls);
+            }
+            for (uint32_t k = 0; k < 3; ++k) {
+                edvr::census::Draw d;
+                edvr::census::fillDraw(d, 2000u + k, 200u + k, rows, true, 42u, blk);
+                edvr::census::noteDraw(ring, true, 7u, 1, d, &calls);
+            }
+            const edvr::census::Frame& f = ring.frames[7];
+            check(f.frame == 7u && f.drawsSeen[0] == 5u && f.drawsSeen[1] == 3u && calls == 8u,
+                  "census: 5 draws on eye 0 and 3 on eye 1 are counted per eye in their frame, 8 in all");
+            bool idsOk = true;
+            for (uint32_t k = 0; k < 5; ++k) idsOk = idsOk && f.draws[0][k].vs == 1000u + k && f.draws[0][k].indexCount == 100u + k;
+            for (uint32_t k = 0; k < 3; ++k) idsOk = idsOk && f.draws[1][k].vs == 2000u + k && f.draws[1][k].indexCount == 200u + k;
+            check(idsOk, "census: each record keeps its own VS hash and index count, in draw order, per eye");
+            const edvr::census::Draw& d0 = f.draws[0][0];
+            checkNear(d0.T[0], 1.0f, 1e-6f, "census: the record's translation x is the rows' (1)");
+            checkNear(d0.T[1], 2.0f, 1e-6f, "census: the record's translation y is the rows' (2)");
+            checkNear(d0.T[2], 3.0f, 1e-6f, "census: the record's translation z is the rows' (3)");
+            // Yaw 90 deg about +Y: the quaternion (w, x, y, z) is (sqrt(1/2), 0, sqrt(1/2), 0).
+            checkNear(d0.R[0], 0.70710678f, 1e-5f, "census: the rotation quaternion w of a 90 deg yaw");
+            checkNear(d0.R[2], 0.70710678f, 1e-5f, "census: the rotation quaternion y of a 90 deg yaw");
+            checkNear(d0.R[1] + d0.R[3], 0.0f, 1e-5f, "census: the quaternion x and z vanish for a yaw");
+            bool pOk = true;
+            for (int j = 0; j < 16; ++j) pOk = pOk && d0.P[j] == static_cast<float>(j) + 0.5f;
+            check(pOk && d0.hasRows && d0.seq == 42u, "census: the record keeps the projection floats 784-799 and the write clock");
+            // A draw with no write this frame: no rows, no translation.
+            edvr::census::Draw none;
+            edvr::census::fillDraw(none, 9u, 1u, nullptr, false, 0u, nullptr);
+            check(!none.hasRows && none.T[0] == 0.0f && none.seq == 0u && none.P[0] == 0.0f,
+                  "census: a draw whose object had no write this frame keeps no rows");
+            // The line: one TDRW record in the dump's format.
+            char line[640];
+            const int len = edvr::census::formatDraw(line, sizeof(line), 7u, 1, 2u, f.draws[1][2]);
+            int commas = 0;
+            const char* pp = std::strstr(line, "P=(");
+            if (pp) for (const char* c = pp; *c; ++c) if (*c == ',') ++commas;
+            check(len > 0 && std::strncmp(line, "TDRW f7 eye=1 i=2 vs=00000000000007D2 n=202 seq=42 rows=1 ", 58) == 0 &&
+                  pp && commas == 15 && line[len - 1] == ')',
+                  "census: a TDRW line carries frame, eye, index, vs, n, seq, rows, T, R and 16 P floats");
+            check(edvr::census::formatDraw(line, 40, 7u, 1, 2u, f.draws[1][2]) == 0,
+                  "census: a record that does not fit its buffer is refused, not truncated");
+        }
+        // C. The cap: 40 draws on eye 0 in frame 9 keep the first 32 and count all 40.
+        {
+            uint64_t calls = 0;
+            for (uint32_t k = 0; k < 40; ++k) {
+                edvr::census::Draw d;
+                edvr::census::fillDraw(d, 3000u + k, 1u, rows, true, 1u, blk);
+                edvr::census::noteDraw(ring, true, 9u, 0, d, &calls);
+            }
+            const edvr::census::Frame& f = ring.frames[9];
+            check(f.drawsSeen[0] == 40u && calls == 40u && f.draws[0][31].vs == 3031u &&
+                  f.draws[0][0].vs == 3000u,
+                  "census cap: 40 draws are counted, the first 32 kept in order, the rest counted only");
+        }
+        // D. The slot is reused by its frame number: frame 7 + 256 lands in frame 7's slot and resets its counts.
+        {
+            edvr::census::Draw d;
+            edvr::census::fillDraw(d, 77u, 1u, rows, true, 1u, blk);
+            edvr::census::noteDraw(ring, true, 7u + static_cast<uint32_t>(edvr::census::kFrames), 0, d);
+            const edvr::census::Frame& f = ring.frames[7];
+            check(f.frame == 7u + static_cast<uint32_t>(edvr::census::kFrames) && f.drawsSeen[0] == 1u &&
+                  f.drawsSeen[1] == 0u && f.draws[0][0].vs == 77u,
+                  "census: a frame's slot is reset when the ring comes round to it, not added to");
+        }
+        // E. The rows of a write that was not a rotation: no rotation, no translation, but the P floats still come.
+        {
+            float bad[12] = {2, 0, 0, 5, 0, 2, 0, 6, 0, 0, 2, 7};
+            edvr::census::Draw d;
+            edvr::census::fillDraw(d, 5u, 1u, bad, false, 3u, blk);
+            check(!d.hasRows && d.T[0] == 0.0f && d.P[15] == 15.5f && d.seq == 3u,
+                  "census: a non-rotation write keeps its P floats and clock, and no translation or rotation");
+        }
     }
     if (g_fails) {
         printf("\nTEMPORAL TEST FAILED (%d)\n", g_fails);

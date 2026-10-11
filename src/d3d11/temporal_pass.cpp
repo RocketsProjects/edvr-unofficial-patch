@@ -30,6 +30,7 @@
 #include "../common/native_render_settings.h"   // the published per-eye render size, for the NGX warm-up
 #include "../common/supersample_math.h"   // supersampleRegionFromBounds: one region rule at the door
 #include "../common/temporal_math.h"
+#include "../common/temporal_census.h"   // the per-draw census's ring and TDRW format (diag.temporal_draws)
 #include "depth_probe.h"
 #include "luma_probe.h"
 #include "dlaa.h"
@@ -2187,6 +2188,7 @@ struct ObservedRowsWrite {
     float proj[2] = {};
     uint32_t frame = 0, seq = 0;
     bool rowsValid = false;
+    float blk[16] = {};   // the block's floats 784-799, for the per-draw census (diagnostic)
 };
 // 256: in space the game writes the block over a hundred times a frame
 // (114 measured 2026-09-04), and a ring of 48 had lost the frame's early
@@ -4408,6 +4410,44 @@ void temporalPassCaptureFinalEye(uint64_t sequence,uint32_t eye,ID3D11Texture2D*
     if(device)guarded("eye capture/final device release",[&]{device->Release();});
 }
 
+// THE PER-DRAW CENSUS (diag.temporal_draws, 2026-10-11). The ring, the record and the TDRW format are
+// temporal_census.h (pure, rigged in tools\temporal_test); this keeps the ring's mutex, the draw hook's timer and the
+// key. The rigid draw above keeps only the FIRST recognised eye-target scene draw of each frame. This keeps EVERY
+// recognised draw into an identified eye: the rows current at the draw (the VS b1 object's latest write this frame),
+// its VS hash, index count, and the projection block's floats 784-799. It reads state and changes no output. Off by
+// default: the draw hook checks temporalPassDrawsWanted() before doing any work.
+census::Ring g_tdrwRing;
+std::mutex   g_tdrwMutex;
+bool         g_tdrwOn = false;        // diag.temporal_draws (temporary, default off)
+uint64_t     g_tdrwTicks = 0;         // the census's own cost this interval, in QPC ticks
+uint64_t     g_tdrwCalls = 0;         // recognised eye-target draws recorded this interval
+
+bool temporalPassDrawsWanted() {
+    return g_tdrwOn && detail::g_temporalPassWantedFssChrome;
+}
+
+void temporalPassNoteEyeDraw(ID3D11DeviceContext* ctx, const void* dsv, uint64_t vertexShaderHash, uint32_t indexCount) {
+    if (!temporalPassDrawsWanted() || !ctx) return;
+    LARGE_INTEGER t0{}, t1{};
+    QueryPerformanceCounter(&t0);
+    int eye = -1, targetIndex = -1;
+    depthProbeCurrentSceneEyeOf(static_cast<ID3D11DepthStencilView*>(const_cast<void*>(dsv)), &eye, &targetIndex);
+    if (eye >= 0 && eye <= 1) {
+        ID3D11Buffer* cb = nullptr;
+        ctx->VSGetConstantBuffers(1, 1, &cb);
+        const ObservedRowsWrite* observed = cb ? observedRowsCurrent(cb) : nullptr;
+        census::Draw d;
+        census::fillDraw(d, vertexShaderHash, indexCount, observed ? observed->rows : nullptr,
+                         observed && observed->rowsValid, observed ? observed->seq : 0u,
+                         observed ? observed->blk : nullptr);
+        if (cb) cb->Release();
+        std::lock_guard<std::mutex> lock(g_tdrwMutex);
+        census::noteDraw(g_tdrwRing, true, g_rowsFrame, eye, d, &g_tdrwCalls);
+    }
+    QueryPerformanceCounter(&t1);
+    g_tdrwTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
+}
+
 void temporalPassDumpHistory(const char* trigger) {
     std::vector<TemporalHistoryEntry> entries;
     {
@@ -4471,6 +4511,52 @@ void temporalPassDumpHistory(const char* trigger) {
             double(e.drawRows[4]),double(e.drawRows[5]),double(e.drawRows[6]),double(e.drawRows[7]),
             double(e.drawRows[8]),double(e.drawRows[9]),double(e.drawRows[10]),double(e.drawRows[11]));
     }
+    // The per-draw census (diag.temporal_draws): every recognised eye-target draw of the newest frames, oldest first,
+    // at most kTdrwDumpLines lines. One TDRWF line per eye-frame, then its TDRW lines (temporal_census.h formats them).
+    {
+        std::vector<census::Frame> frames;
+        {
+            std::lock_guard<std::mutex> lock(g_tdrwMutex);
+            frames.assign(g_tdrwRing.frames, g_tdrwRing.frames + census::kFrames);
+        }
+        frames.erase(std::remove_if(frames.begin(), frames.end(),
+                                    [](const census::Frame& f) { return f.frame == ~0u; }), frames.end());
+        std::sort(frames.begin(), frames.end(),
+                  [](const census::Frame& a, const census::Frame& b) { return a.frame < b.frame; });
+        Log::get().note(
+            "TDRW legend (diag.temporal_draws): one line per recognised eye-target scene draw of the newest frames. "
+            "i = the draw's index in its eye's frame, vs = its vertex shader hash, n = its index count, seq = the write clock "
+            "of the CB object's latest write before the draw (0 = none this frame), rows 1 when that write was a rotation, "
+            "T = the rows' translation (the camera's place), R = the rows' rotation quaternion w x y z, P = the projection "
+            "block's floats 784-799 (the x and y rows' terms, then the z row at 792-793). TDRWF gives each eye-frame's draws "
+            "seen and kept; at most %u draws are kept per eye-frame.", static_cast<unsigned>(census::kDraws));
+        constexpr size_t kTdrwDumpLines = 4000;
+        const uint32_t keptMax = static_cast<uint32_t>(census::kDraws);
+        size_t lines = 0;
+        size_t firstFrame = 0;
+        for (size_t i = frames.size(); i-- > 0;) {
+            size_t need = 2;
+            for (int e = 0; e < 2; ++e) need += std::min<uint32_t>(frames[i].drawsSeen[e], keptMax);
+            if (lines + need > kTdrwDumpLines) break;
+            lines += need;
+            firstFrame = i;
+        }
+        for (size_t i = firstFrame; i < frames.size(); ++i) {
+            const census::Frame& f = frames[i];
+            for (int e = 0; e < 2; ++e) {
+                const uint32_t kept = std::min<uint32_t>(f.drawsSeen[e], keptMax);
+                Log::get().note("TDRWF f%u eye=%d drawn=%u kept=%u", f.frame, e, f.drawsSeen[e], kept);
+                for (uint32_t k = 0; k < kept; ++k) {
+                    char buf[640];
+                    if (census::formatDraw(buf, sizeof(buf), f.frame, e, k, f.draws[e][k])) Log::get().note("%s", buf);
+                }
+            }
+        }
+        if (firstFrame > 0) {
+            Log::get().note("TDRW older frames omitted: the dump keeps %u of %zu frames' draws (%zu lines).",
+                            static_cast<unsigned>(frames.size() - firstFrame), frames.size(), lines);
+        }
+    }
     Log::get().note("--- end temporal submission history ---");
 }
 
@@ -4490,6 +4576,8 @@ void temporalPassConfigure(Config& cfg) {
     // window regardless of whether the values read back the same.
     ++g_configGeneration;
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
+    // diag.temporal_draws (the per-draw census, TDRW lines): diagnostic, reads state only. Off by default; temporary.
+    g_tdrwOn = cfg.getString("diag.temporal_draws", "off") == "on";
     const bool wasWanted = detail::g_temporalPassWantedFssChrome;
     detail::g_temporalPassWantedFssChrome = temporalModeEnabled(mode);
     if (detail::g_temporalPassWantedFssChrome != wasWanted) {
@@ -4832,6 +4920,7 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
         observed->frame = g_rowsFrame;
         observed->seq = observedSeq;
         observed->rowsValid = rowsValid;
+        memcpy(observed->blk, static_cast<const float*>(data) + 784, sizeof(observed->blk));
         if (rowsValid) {
             memcpy(observed->rows, f, sizeof(observed->rows));
             observed->proj[0] = pz[2];
@@ -5245,6 +5334,19 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                   g_chooseMulti, g_chooseMulti ? g_chooseSpreadSum / g_chooseMulti : 0.0,
                   g_chooseSpreadMax, g_twinFrames);
     }
+    // The per-draw census's own line (diag.temporal_draws): how many recognised eye-target draws the interval saw, and
+    // what the census itself cost on the render thread (QPC around its work). Silent while the key is off.
+    if (g_tdrwOn) {
+        static LARGE_INTEGER freq{};
+        if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+        const double frames = g_rowsFramesSum ? static_cast<double>(g_rowsFramesSum) : 1.0;
+        const double totalUs = freq.QuadPart ? static_cast<double>(g_tdrwTicks) * 1.0e6 / static_cast<double>(freq.QuadPart) : 0.0;
+        Log::get().note(
+            "temporal draw census: %llu recognised eye-target draws over %.0f frames (%.1f a frame); the census "
+            "cost %.1f us a frame (%.2f us a draw) on the render thread",
+            static_cast<unsigned long long>(g_tdrwCalls), frames, static_cast<double>(g_tdrwCalls) / frames,
+            totalUs / frames, g_tdrwCalls ? totalUs / static_cast<double>(g_tdrwCalls) : 0.0);
+    }
     // The interval starts afresh: the next line judges the next stretch.
     memset(g_candPix, 0, sizeof(g_candPix));
     memset(g_candRej, 0, sizeof(g_candRej));
@@ -5277,6 +5379,8 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_chooseNone = 0;
     g_camCarried = 0;
     g_camCarriedJump = 0;
+    g_tdrwTicks = 0;
+    g_tdrwCalls = 0;
     g_probeWorldDx = g_probeWorldDy = 0;
     g_probeWorldN = 0;
     g_probeShipDx = g_probeShipDy = 0;
