@@ -177,6 +177,8 @@ REM The guard tools\run_jobs.py holds every rig to (no window, no console, no
 REM move of the keyboard focus); its own self-test, run below with the rigs,
 REM starts it on real processes, so this one fails first and fast.
 python tools\focus_watch.py --self-test || exit /b 1
+REM tools\elite_hotspots.py: the CPU-sample reader, the .pdata function map (chained fragments folded into their primary), the sample report, and the build refusal, held to a synthetic PE; needs no game files and no capstone.
+python tools\elite_hotspots.py --self-test || exit /b 1
 
 REM The version baked into both DLLs, printed in the second line of every log.
 REM
