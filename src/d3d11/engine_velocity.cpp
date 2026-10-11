@@ -2165,7 +2165,8 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
     Log::get().note("engine motion: primary copy observer work cumulative: clear calls %llu, no-claim skips %llu, "
                     "nodes walked %llu; merge calls %llu, started without claims %llu, nodes walked %llu; "
                     "active source claims %llu, detached plans %llu. Skips do not inspect native dictionaries; "
-                    "clear failures describe attempted observer work, not skipped calls. Merge walks are retained for clear/unwind safety.",
+                    "clear failures describe attempted observer work, not skipped calls. A merge or clear with no live claim is counted "
+                    "without a lock or a walk of the native lists, so nodes walked count only calls that had claims to protect.",
                     u(copyStats.clearCalls),u(copyStats.clearNoClaims),u(copyStats.clearNodes),
                     u(copyStats.mergeCalls),u(copyStats.mergeWithoutClaims),u(copyStats.mergeNodes),
                     u(copyStats.activeClaims),u(copyStats.activePlans));

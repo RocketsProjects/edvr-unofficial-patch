@@ -8,11 +8,14 @@
 #include "temporal_shader_bytecode.h"
 #include <wrl/client.h>
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 #include <mutex>
 #include <memory>
 #include <unordered_set>
+#include <utility>
 
 namespace edvr { namespace engine_velocity_primary_copy {
 namespace emit=engine_velocity_emit;
@@ -36,31 +39,85 @@ inline const char* scatterFailureName(ScatterFailure f) {
 struct Stats { ScatterFailure lastScatterFailure=ScatterFailure::None; uint64_t emissions=0,copies=0,joined=0,declined=0,invalidated=0,overflows=0,scatterBatches=0,scatterRows=0,scatterFailed=0,scatterEmpty=0,sourceResets=0,copierNoLease=0,copierAmbiguous=0,copierInvalidRange=0,mergePlans=0,mergeFailed=0,clearCalls=0,clearedClaims=0,clearFailed=0;
     uint64_t mergeCalls=0,mergeWithoutClaims=0,clearNoClaims=0,mergeNodes=0,clearNodes=0,activeClaims=0,activePlans=0;
 };
+struct MergePlan;
 inline std::mutex g_mutex,g_gpuMutex;
 inline std::unordered_map<uintptr_t,Emission> g_emissions;
+inline std::unordered_set<MergePlan*> g_mergePlans;
 inline std::unordered_map<ID3D11Buffer*,Pool> g_pools;
 inline Stats g_stats;
 inline uint32_t g_overflowFrame=~0u;
 inline uint32_t g_emissionFrame=~0u;
 inline uint64_t g_emissionEpoch=1;
+// !g_emissions.empty() || !g_mergePlans.empty(), as of the last release of g_mutex by anyone who locks it. The two
+// job-thread observers below (a typed-dictionary clear and a list merge) read it without the mutex: when it is false
+// there is nothing for them to revoke or stage, so they count the call and leave. It sits on its own cache line so
+// readers are not invalidated by the mutex's traffic, and it is written only when its value changes.
+alignas(64) inline std::atomic<bool> g_claimsLive{false};
+// Calls that took that exit, counted without the mutex and folded into stats() as clearCalls/clearNoClaims and
+// mergeCalls/mergeWithoutClaims, so every counter the log prints keeps its meaning.
+alignas(64) inline std::atomic<uint64_t> g_clearSkipped{0};
+alignas(64) inline std::atomic<uint64_t> g_mergeSkipped{0};
+// The only way this header locks g_mutex. The destructor publishes g_claimsLive BEFORE it unlocks, with release order,
+// so a lock-free reader that sees "false" is reading a state no later than the last completed critical section: it is
+// ordered before any mutation that is still in flight, which is a legal interleaving of the call it replaces. A caller
+// whose emission was recorded and returned before this call started sees "true": the unlock publishes it.
+struct ClaimLock {
+    ClaimLock(){g_mutex.lock();}
+    ~ClaimLock() {
+        const bool live=!g_emissions.empty() || !g_mergePlans.empty();
+        if(g_claimsLive.load(std::memory_order_relaxed)!=live)g_claimsLive.store(live,std::memory_order_release);
+        g_mutex.unlock();
+    }
+    ClaimLock(const ClaimLock&)=delete;
+    ClaimLock& operator=(const ClaimLock&)=delete;
+};
+// Address set for the observers' bounded walks of Elite's lists: up to kInline entries live in an inline array searched
+// linearly (a walk of eight nodes is 64 item addresses, so it never touches the heap), and the first insert past that
+// moves everything into a std::unordered_set for good. insert().second, size(), count() and forEach() answer as the
+// unordered_set they replace did; like it, forEach has no defined order.
+class AddressSet {
+public:
+    static constexpr size_t kInline=64;
+    std::pair<const uintptr_t*,bool> insert(uintptr_t value) {
+        if(spill_) {const auto r=spill_->insert(value);return {&*r.first,r.second};}
+        for(size_t i=0;i<count_;++i)if(inline_[i]==value)return {&inline_[i],false};
+        if(count_<kInline){inline_[count_]=value;return {&inline_[count_++],true};}
+        auto spill=std::make_unique<std::unordered_set<uintptr_t>>(inline_,inline_+count_);
+        const auto r=spill->insert(value);spill_=std::move(spill);return {&*r.first,true};
+    }
+    size_t size() const {return spill_?spill_->size():count_;}
+    size_t count(uintptr_t value) const {
+        if(spill_)return spill_->count(value);
+        for(size_t i=0;i<count_;++i)if(inline_[i]==value)return 1;
+        return 0;
+    }
+    template<class F> void forEach(F&& visit) const {
+        if(spill_){for(uintptr_t value:*spill_)visit(value);}
+        else for(size_t i=0;i<count_;++i)visit(inline_[i]);
+    }
+private:
+    uintptr_t inline_[kInline];
+    size_t count_=0;
+    std::unique_ptr<std::unordered_set<uintptr_t>> spill_;
+};
 inline emit::Pose current(const uint32_t* r) { return emit::Pose{{r[4],r[5],r[6],r[2],r[3]}}; }
 inline void overflow(uint32_t frame) {
     g_overflowFrame=frame;++g_stats.overflows;g_emissions.clear();++g_emissionEpoch;
     for(auto& entry:g_pools)entry.second.patches.clear();
 }
 inline void invalidateEmission(uintptr_t source) noexcept {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    ClaimLock lock;
     if(source)g_emissions.erase(source);else {g_emissions.clear();++g_emissionEpoch;++g_stats.invalidated;++g_stats.sourceResets;}
 }
 inline void invalidateMapped(uintptr_t base) noexcept {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    ClaimLock lock;
     for(auto& entry:g_pools)if(entry.second.active && (!base || entry.second.base==base)) {
         entry.second.patches.clear();entry.second.valid=false;++g_stats.invalidated;
     }
 }
 inline bool recordEmission(uintptr_t source,const uint32_t native[kWords],const emit::Pose& previous,
                            uint32_t marker,uint32_t frame) noexcept {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    ClaimLock lock;
     if(g_emissionFrame!=frame){g_emissions.clear();g_emissionFrame=frame;++g_emissionEpoch;++g_stats.sourceResets;}
     if(!source || !native || g_overflowFrame==frame)return false;
     const emit::Pose now=current(native);
@@ -89,7 +146,7 @@ inline bool recordEmission(uintptr_t source,const uint32_t native[kWords],const 
 }
 inline bool beginMap(ID3D11Buffer* resource,void* base,uint32_t bytes,uint32_t stride,D3D11_MAP type,
                      uint64_t sequence,uint32_t frame) noexcept {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    ClaimLock lock;
     if(!resource)return false;
     try {
         auto old=g_pools.find(resource);
@@ -105,7 +162,7 @@ inline bool beginMap(ID3D11Buffer* resource,void* base,uint32_t bytes,uint32_t s
     } catch(...) {overflow(frame);return false;}
 }
 inline void copier(uintptr_t base,uint32_t stride,uintptr_t source,uint32_t firstSlot,uint32_t count,uint32_t frame) noexcept {
-    std::lock_guard<std::mutex> lock(g_mutex);++g_stats.copies;
+    ClaimLock lock;++g_stats.copies;
     if(!count)return;
     Pool* pool=nullptr;
     uint32_t matches=0;
@@ -139,17 +196,17 @@ inline void copier(uintptr_t base,uint32_t stride,uintptr_t source,uint32_t firs
     }
 }
 inline void endMap(ID3D11Buffer* resource,uint64_t sequence) noexcept {
-    std::lock_guard<std::mutex> lock(g_mutex);auto i=g_pools.find(resource);if(i==g_pools.end())return;
+    ClaimLock lock;auto i=g_pools.find(resource);if(i==g_pools.end())return;
     Pool& p=i->second;
     if(!p.active || p.sequence!=sequence){p.patches.clear();p.valid=false;++g_stats.declined;}
     p.active=false;
 }
 inline void forget(ID3D11Buffer* resource) noexcept {
-    std::lock_guard<std::mutex> lock(g_mutex);g_pools.erase(resource);
+    ClaimLock lock;g_pools.erase(resource);
 }
 inline Stats stats();
 inline std::vector<Patch> patches(ID3D11Buffer* resource,uint32_t frame) {
-    std::lock_guard<std::mutex> lock(g_mutex);std::vector<Patch> out;
+    ClaimLock lock;std::vector<Patch> out;
     const auto i=g_pools.find(resource);
     if(i==g_pools.end() || i->second.active || !i->second.valid || i->second.frame!=frame || g_overflowFrame==frame)return out;
     out.reserve(i->second.patches.size());for(const auto& p:i->second.patches)out.push_back(p.second);return out;
@@ -173,9 +230,11 @@ inline bool privateBound(ID3D11DeviceContext* ctx,ID3D11Buffer* buffer) {
 }
 struct MergeTransfer { uintptr_t target=0; Emission emission; };
 struct MergePlan { std::vector<MergeTransfer> transfers; std::vector<uintptr_t> addresses; uint64_t epoch=0; uint32_t frame=0; bool invalid=false; };
-inline std::unordered_set<MergePlan*> g_mergePlans;
 inline Stats stats() {
-    std::lock_guard<std::mutex> lock(g_mutex);Stats result=g_stats;
+    ClaimLock lock;Stats result=g_stats;
+    const uint64_t clearSkipped=g_clearSkipped.load(std::memory_order_relaxed),mergeSkipped=g_mergeSkipped.load(std::memory_order_relaxed);
+    result.clearCalls+=clearSkipped;result.clearNoClaims+=clearSkipped;
+    result.mergeCalls+=mergeSkipped;result.mergeWithoutClaims+=mergeSkipped;
     result.activeClaims=g_emissions.size();result.activePlans=g_mergePlans.size();return result;
 }
 inline void invalidateClaims() {g_emissions.clear();++g_emissionEpoch;++g_stats.declined;++g_stats.mergeFailed;}
@@ -183,12 +242,16 @@ inline void invalidateClaims() {g_emissions.clear();++g_emissionEpoch;++g_stats.
 // clear precedes a merge of unrelated source collections, so only claims in
 // nodes actually being freed may be revoked on a successful bounded walk.
 template<bool SkipNoClaims> inline void invalidateDictionaryImpl(uintptr_t dictionary) noexcept {
-    std::lock_guard<std::mutex> lock(g_mutex);++g_stats.clearCalls;
-    // Only source claims and detached merge plans consume this walk. Copied
-    // GPU-pool certificates are independent and must stay intact. Future
-    // emissions register fresh ownership after this lock is released.
+    // Only source claims and detached merge plans consume this walk. With none published there is nothing to revoke
+    // and nothing to mark invalid, so the call is counted and returns without the mutex.
     if constexpr(SkipNoClaims) {
-        if(g_emissions.empty() && g_mergePlans.empty()){++g_stats.clearNoClaims;return;}
+        if(!g_claimsLive.load(std::memory_order_acquire)){g_clearSkipped.fetch_add(1,std::memory_order_relaxed);return;}
+    }
+    ClaimLock lock;++g_stats.clearCalls;
+    // Copied GPU-pool certificates are independent and must stay intact.
+    // Future emissions register fresh ownership after this lock is released.
+    if constexpr(SkipNoClaims) {
+        if(g_emissions.empty() && g_mergePlans.empty()){++g_stats.clearNoClaims;return;}   // the flag was stale-true
     }
     auto fail=[](){g_emissions.clear();++g_emissionEpoch;++g_stats.sourceResets;++g_stats.clearFailed;};
     try {
@@ -196,7 +259,7 @@ template<bool SkipNoClaims> inline void invalidateDictionaryImpl(uintptr_t dicti
         if(!dictionary || dictionary>UINTPTR_MAX-0x20 ||
            !emit::read(dictionary+0x10,&buckets,8) || !emit::read(dictionary+0x18,&count,8) ||
            count>kMaxEmissions || (count && (!buckets || buckets>UINTPTR_MAX-count*8))) {fail();return;}
-        std::unordered_set<uintptr_t> entries,nodes,addresses;
+        AddressSet entries,nodes,addresses;
         for(uint64_t b=0;b<count;++b){
             const uintptr_t sentinel=buckets+uintptr_t(b)*8;uintptr_t entry=0;
             if(!emit::read(sentinel,&entry,8)){fail();return;}
@@ -217,7 +280,7 @@ template<bool SkipNoClaims> inline void invalidateDictionaryImpl(uintptr_t dicti
                 entry=nextEntry;
             }
         }
-        for(auto address:addresses){const auto n=g_emissions.erase(address);g_stats.invalidated+=n;g_stats.clearedClaims+=n;}
+        addresses.forEach([](uintptr_t address){const auto n=g_emissions.erase(address);g_stats.invalidated+=n;g_stats.clearedClaims+=n;});
         // A plan owns detached claims between the two native merge callbacks.
         // Drop only plans touching this clear, never unrelated live owners.
         for(auto* plan:g_mergePlans)for(auto address:plan->addresses)if(addresses.count(address)){plan->invalid=true;break;}
@@ -228,11 +291,22 @@ inline void invalidateDictionary(uintptr_t dictionary) noexcept {invalidateDicti
 // destination tail; partial nodes fill the
 // destination tail, then shift any remainder within their original node.
 // Claims are staged before ALL source slots/overwritten destinations clear.
+//
+// With no source claim and no detached plan published there is nothing to stage, so the call is counted and gets the
+// fixed token below: no lock, no walk of the native list, no allocation, no entry in g_mergePlans. A producer may still
+// register a claim between this callback and its end, and a native unwind must still drop it, so endMergeOpaque
+// invalidates the claims on an unwind of this token exactly as it does for a full plan. What the token does not keep is
+// an empty plan's other behaviours, all of which act on an empty transfer list: its membership in g_mergePlans (so a
+// concurrent clear no longer walks on its account, and cannot mark it invalid), the node validation walk (so a
+// malformed list no longer bumps the epoch or counts a merge failure when there is no claim to lose) and the epoch
+// compare (an unwind after a clear or a frame change now drops claims the old empty plan, found stale, would have
+// spared: the safe direction, and only on a native unwind).
+inline void* mergeNoClaimsToken() noexcept {return reinterpret_cast<void*>(uintptr_t(1));}
 inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t frame) noexcept {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    if(!g_claimsLive.load(std::memory_order_acquire)){g_mergeSkipped.fetch_add(1,std::memory_order_relaxed);return mergeNoClaimsToken();}
+    ClaimLock lock;
     ++g_stats.mergeCalls;
-    // Even an empty plan must retain its original clear/unwind semantics:
-    // a producer may register a claim between this callback and its end.
+    // The flag may be stale-true: the claims were consumed since it was published.
     if(g_emissions.empty() && g_mergePlans.empty())++g_stats.mergeWithoutClaims;
     try {
         uintptr_t dstLinks[2]{},srcLinks[2]{};
@@ -241,7 +315,7 @@ inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t fr
         auto plan=std::make_unique<MergePlan>();plan->epoch=g_emissionEpoch;plan->frame=frame;
         if(g_mergePlans.size()>=kMaxPools){invalidateClaims();return nullptr;}
         std::vector<uintptr_t> clear;
-        std::unordered_set<uintptr_t> visited;
+        AddressSet visited;
         uintptr_t tail=dstLinks[1],node=srcLinks[0],previous=source;
         uint64_t tailCount=0;
         if(dstLinks[0]==destination) {
@@ -286,8 +360,12 @@ inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t fr
     } catch(...) {invalidateClaims();return nullptr;}
 }
 inline void endMergeOpaque(void* opaque,bool completed) noexcept {
+    if(opaque==mergeNoClaimsToken()) {
+        if(!completed){ClaimLock lock;invalidateClaims();}
+        return;
+    }
     std::unique_ptr<MergePlan> plan(static_cast<MergePlan*>(opaque));if(!plan)return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    ClaimLock lock;
     g_mergePlans.erase(plan.get());
     if(plan->invalid || plan->epoch!=g_emissionEpoch){++g_stats.mergeFailed;return;}
     if(!completed){invalidateClaims();return;}
@@ -321,10 +399,10 @@ struct GpuCache {
 };
 inline GpuCache g_gpu;
 inline bool apply(ID3D11DeviceContext* ctx,ID3D11Buffer* privatePool,ID3D11Buffer* sourcePool,uint32_t frame,OutputCache& output) noexcept {
-    auto fail=[](ScatterFailure why){std::lock_guard<std::mutex> lock(g_mutex);++g_stats.scatterFailed;g_stats.lastScatterFailure=why;return false;};
+    auto fail=[](ScatterFailure why){ClaimLock lock;++g_stats.scatterFailed;g_stats.lastScatterFailure=why;return false;};
     if(!ctx || !privatePool || !sourcePool || privatePool==sourcePool)return fail(ScatterFailure::Arguments);
     try {
-        const auto work=patches(sourcePool,frame);if(work.empty()){std::lock_guard<std::mutex> lock(g_mutex);++g_stats.scatterEmpty;return true;}
+        const auto work=patches(sourcePool,frame);if(work.empty()){ClaimLock lock;++g_stats.scatterEmpty;return true;}
         std::lock_guard<std::mutex> gpu(g_gpuMutex);
         D3D11_BUFFER_DESC d{},native{};privatePool->GetDesc(&d);sourcePool->GetDesc(&native);
         if(d.ByteWidth!=native.ByteWidth || d.StructureByteStride!=kBytes ||
@@ -368,11 +446,12 @@ inline bool apply(ID3D11DeviceContext* ctx,ID3D11Buffer* privatePool,ID3D11Buffe
         ctx->CSSetShaderResources(0,1,savedInput.GetAddressOf());ctx->CSSetUnorderedAccessViews(0,1,savedOutput.GetAddressOf(),nullptr);
         ctx->CSSetConstantBuffers(0,1,savedCount.GetAddressOf());ctx->CSSetShader(savedShader.Get(),classes,numClasses);
         for(UINT i=0;i<numClasses;++i)if(classes[i])classes[i]->Release();
-        std::lock_guard<std::mutex> lock(g_mutex);++g_stats.scatterBatches;g_stats.scatterRows+=work.size();return true;
+        ClaimLock lock;++g_stats.scatterBatches;g_stats.scatterRows+=work.size();return true;
     } catch(...) {return fail(ScatterFailure::Unexpected);}
 }
 inline void reset() noexcept {
     std::lock_guard<std::mutex> gpu(g_gpuMutex);g_gpu={};
-    std::lock_guard<std::mutex> lock(g_mutex);g_emissions.clear();g_pools.clear();g_mergePlans.clear();g_stats={};g_overflowFrame=g_emissionFrame=~0u;++g_emissionEpoch;
+    ClaimLock lock;g_emissions.clear();g_pools.clear();g_mergePlans.clear();g_stats={};g_overflowFrame=g_emissionFrame=~0u;++g_emissionEpoch;
+    g_clearSkipped.store(0,std::memory_order_relaxed);g_mergeSkipped.store(0,std::memory_order_relaxed);
 }
 } }
