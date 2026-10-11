@@ -4,15 +4,16 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (PE stamp 1788384820, Si
 
 ## Status
 
-- **State:** analysis only. Branch `claude/station-interior-design` from `origin/claude/hangar-test-3` (998921da). Nothing fixed, nothing flown.
+- **State:** D0 probe built on `claude/shadow-gate-probe` (from `76c08530`): full build and rig green; NOT installed, NOT flown. Nothing fixed.
 - **Interior system:** exists, as components, state names and a location enum. No renderer input from it was found. RenderDirLights (0x5AC9C0) reads no interior global, and no path from the interior state to the sun constants, the shadow views or the record masks was found.
 - **Shadow admission:** proven end to end (P7). A record reaches a sun cascade only through per-view bits: the collection mask, a distance window, a planes test and an optional callback.
 - **Why the hull is missing from the sun map:** not established. Four gates could drop it (G1 to G4, I1). The hull is drawn in the main view, so the failing gate is specific to the sun views. Ranking is inferred.
 - **Culling:** the engine's occluder job (RenderOcclusionRasteriseJob, 0x27F8C60) has one caller chain, the spot-shadow setup (0x28295A0) inside the deferred frame. No main-view culling and no containment test were found. EDVR's own occluder design is refuted (`docs/design-occlusion-culling-2026-09-22.md`).
 - **Ruled out:** a per-model cast-shadow flag (no string); a size clamp in the planes test (0x4F4E10 has no size term); a cascade-range cut for the hull (the cascades reach 4.5 to 6.5 km); VisibilityAnalysis as scene visibility (it is the sun and lens-flare test); InteriorLightsCSM as a sun suppressor (I4); the byte group 0x5E889C0-C3 as an interior writer (P10).
 - **Open:** the writer of collection+0x48 (G1); the view constants of the sun views (G2); the storage of `player_location` (0x6031438 is only a registration object); the name-to-profile link for GameplayCSM and InteriorLightsCSM.
-- **Next flight (no engine change):** extend EDVR's cull-gate probe (`src/d3d11/cull_gate_probe.h`, which already logs rec+0x208, rec+0x210, the pose, the sphere and the planes verdict) for the hangar. Add the collection's +0x48 mask, the sun-view bits, the view+0x68D flag, and a return hook on the callback thunk 0x288AC40. Decision table in D0.
-- **Probe keys:** none added in this pass.
+- **Next flight (D0, no fix):** the probe in the 2026-10-11 D0 entry at the end. Bind `hotkey.shadow_gate_probe`; press once in a bright phase and once in a dark phase, docked in a rotating hangar; press once at 1 km outside the same station. The reading rule is in that entry.
+- **Probe keys (TEMPORARY; remove when the arc closes, quoting each):** `hotkey.shadow_gate_probe` (unbound by default) and `diag.shadow_gate_probe = off` in `[diag]`. Both are on the flat allow-list.
+- **Corrections (from the decompiles, 2026-10-11):** the builder's `mask` is the window's output for the group's base record, not the collection mask; children inherit the base's window verdict through `rec+0x2A8`; 0x288AC40 cannot be CodeHooked (SSE prologue), its callee 0x288A930 can.
 - **Build gate for any hook:** PE TimeDateStamp 1788384820 and SizeOfImage 104894464 (`src/common/cpu_sampler.h` lines 69-70, `src/d3d11/explorer_cam_core.h` lines 47-48, `src/common/hmd_camera_tag.h` lines 20-21).
 
 ## Proven
@@ -78,7 +79,7 @@ The probe in D0 selects the gate. Each fix below is then chosen by that gate. No
   - Planes return -1: G3. Fix the transformed bounds of the record, not the test.
   - Callback returns 0: G4. Read the branch in 0x288A930 for that record.
 - **Cost:** a compare and a log line per builder call, in the hangar window only.
-- **Flight:** docked, rotating hangar, hangar doors closed. Read the window line for the hull in each sun view.
+- **Flight:** docked, rotating hangar, hangar doors closed. Read the `cand=` line for the hull: its first failing gate in the sun views (the reading rule is in the 2026-10-11 D0 entry).
 
 ### D1. Admit the hull to the sun cascades (root cause; after D0)
 - **What:** change only the gate that D0 names, and only for sun views, so that a record whose box or sphere contains the camera is admitted. The walls then sit in the hull's shadow, which is the physical result.
@@ -106,3 +107,49 @@ The probe in D0 selects the gate. Each fix below is then chosen by that gate. No
 
 - Index `interior\build_index.py` (capstone over 253,443 .pdata functions) and query helper `interior\q.py`; scratch files, not committed. Validated: the RenderDirLights caller (0x284E159) and the slot 0x52E94E8 match `docs/hangar-sunlight-2026-10-11.md`.
 - Open limits: the window's sign convention (I1 G2), the storage of the per-frame directional globals, and the CSM profile mapping.
+
+## 2026-10-11, D0 probe built (not installed, not flown)
+
+Branch `claude/shadow-gate-probe` from `76c08530`. The probe is the measurement D0 asked for: `src/d3d11/shadow_gate_probe.cpp` (engine side), `src/d3d11/shadow_gate_core.h` (the pure half: layout, transforms, gate decode, line and CSV formats), and `tools/shadow_gate_probe_test` (rig, 101 checks). Full `build.bat` green. With the keys off, nothing is hooked.
+
+**Three corrections from the decompiles (they change the D1 site).**
+1. The builder's `mask` argument is the window's output for the group's base record (`out[4]`, the traversal's `local_48`), not the collection's mask. The comment in `src/d3d11/cull_gate_probe.h` that calls it the collection's active mask is wrong.
+2. The window (FUN_144331300) runs once per collection, on the group's base record. The store (FUN_144312040) writes that mask into `rec+0x208` after a LOD-limit filter, then recurses over the base's child list (`rec+0x2A8`, count `+0x2B0`). A child's G2 is its base's G2.
+3. FUN_14288AC40 cannot be CodeHooked: its first instruction is `movups` (`41 0F 10 01`), which `codeInstructionLength` refuses. It is a pure forwarder (broadcast `[r9]`, `call FUN_14288A930`, `add rsp,38h`, `ret`), so the probe hooks its callee and reads the same AL.
+
+**Hooks** (build 332841; each installs only when its pinned bytes match the exe, and its own line says why otherwise).
+
+| RVA | What | Pinned bytes | Arguments forwarded |
+|---|---|---|---|
+| 0x4331300 | window, per collection: (collection, out, base record) | `48 8B C4 53 57 48 83 EC 68` (5 bytes stolen) | rcx, rdx, r8; RAX returned |
+| 0x288A930 | callback body, the callee of FUN_14288AC40 | `40 55 56 57 41 56 41 57` (6 bytes stolen) | rcx, rdx, r8, r9; AL returned |
+| 0x5B2C80 | DirectionalShadows.Depth | `48 89 5C 24 10` (5 stolen) | rcx, rdx, r8, r9; rcx is the object the `%p` format prints |
+| 0x5B3530 | MSM pass | `48 89 5C 24 20` (5 stolen) | rcx, rdx, r8, r9 |
+
+Also read, not hooked: the planes test 0x4F4E10 (`41 0F 10 18 45 33 C9 0F`), which the probe calls on the builder's box as `cull_gate_probe.cpp` does; and the call sites 0x42B45D0 (`E8 6B 66 5D FE`) and 0x288AC56 (`E8 D5 FC FF FF`), which the install checks. The builder is observed through the gate probe's observer slot (`kinematicEvalSetGateProbeObservers`), taken only while the probe runs. The probe refuses to start while the cull probe is armed; the cull probe has no such check, so an eye run that arms it during a shadow capture would replace the probe's builder observer (the capture would then log no builder rows).
+
+**G4 attribution.** At the callee's entry, the stack holds the return into the callback, and the callback's own return (into the builder) sits 0x40 above it. The probe counts a callee call as the builder's only when that return equals 0x42B45D5. Its verdict is matched to the builder's eligible views in the builder's test order: G1 passes, planes not -1, and `view+0x68D` bit 0 with the global set.
+
+**Sun views and MAIN.** The sun views are the views whose address is the object the depth or MSM builder receives first. Not verified: that this object is a view. If none matches, the header says `sun=none` and the CSV keeps every view the bucket's mask holds, so the cascades can be identified from their origins and window constants. MAIN is view 0 by convention (not verified).
+
+**Candidates.** The 8 largest records whose sphere (`rec+0x240`, radius `rec+0x280`) holds the camera, and the 8 largest within 2 km. The camera is `ctx+0x00`, the store's window origin (not verified against the view origins). They are read at the Present after the captured frame.
+
+**Output.** `shadow gate probe:` lines in the graphics log: a header (frame, trigger, the sun list, the match counts, bucket and builder counts, `window_mismatch`, `callbacks`, `extra`); one `cand=` line per candidate (role base, child, orphan or nobucket, and the first failing gate for each sun view and for MAIN); and `done` (with `callee_calls` and `first_callee_return`, which must equal the builder site). `edvr_logs\shadow_gate_<stamp>.csv` has one row per candidate and view: G1 (bucket mask), the window bit with its replicated value and threshold, `rec+0x208` (final), whether the builder reached the record, its mask bit, the planes verdict, the visibility flag, G4, and `first_fail`. The gate order is G1, G2 (`noWindow` when no window was observed), LOD (the window passed and `rec+0x208` lost the bit), unreached, G3, G4.
+
+**Flight (Sean; not run here).**
+1. In the live `edvr.ini`, bind `hotkey.shadow_gate_probe` to a key Elite does not bind, and raise `log.max_mb` to 256. `python tools\install_edvr.py --target <target> --dry-run`, then the install, then `python tools\edvr_log.py --target <target> --expect-build HEAD --version`.
+2. Dock at a rotating hangar. Press once in a bright phase, wait for the cycle to turn, and press once in a dark phase.
+3. Launch, hold about 1 km outside the same station, and press once. Optional: an outpost pad.
+4. Before reading any gate: `callee_calls` must be above zero and `first_callee_return` must equal the builder site (base + 0x42B45D5). `window_mismatch` must be 0. If `sun=none`, the depth builder does not take the view, and the view rows are the evidence.
+
+**Reading the result.** Take the hull: the `cand=` line for the station's base (role `base`) or a child (role `child`) whose sphere contains the camera. Its first failing gate in the sun views, with MAIN admitting:
+- G1: the collection's mask lacks the sun bits. Next: the writer of `collection+0x48`.
+- G2 or noWindow: the group's window fails for the sun views. The group's base decides every child, so the fix is at the window (0x4331300) or in the view constants (`view+0x540` to `+0x560`).
+- LOD: the window passed, but the store's LOD filter cleared `rec+0x208`. Next: the record's LOD limit, `(rec+0x18)+0x68`.
+- unreached: the traversal's gates (`rec+0x234`, `+0x290`, `+0x298`) never sent the hull to the builder.
+- G3: the planes test on the hull's box returns -1. Fix the box (the transformed bounds), not the test.
+- G4: the callee vetoes. Read its branch in 0x288A930.
+
+The D1 hook is the first gate that is 0 in the sun views and 1 in MAIN for the hull record.
+
+**Risks.** The sun identity (the depth object) and MAIN (view 0) are unverified until the first flight. The camera (`ctx+0x00`) is unverified. The replicated window uses an exact `1/d`, where the engine uses `rcpps`/`rsqrtps`, so a value at the threshold can disagree; `window_mismatch` counts those. The detours go in at the first press, in VR and flat, as the existing probes' CodeHooks do. A refused detour leaves its column unknown, and its own line says why.

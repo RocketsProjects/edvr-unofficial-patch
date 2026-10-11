@@ -83,6 +83,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "sun_pass_probe.h"       // the hangar sun probe (TEMPORARY): install, per-frame, the skip key
+#include "shadow_gate_probe.h"    // the shadow gate probe (TEMPORARY, D0): install, per-frame, the key
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
 #include "hmd_camera_tag_hook.h"       // hmdCameraTagInstall at startup: the headset camera tag's coordinator hook (VR; fix.hmd_camera_tag)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
@@ -274,10 +275,13 @@ struct State {
     std::string occlusionKeyText;
     // The hangar sun probe's skip key (TEMPORARY; sun_pass_probe.h). Unbound by default.
     Hotkey sunSkipKey;
+    // The shadow gate probe's key (TEMPORARY; shadow_gate_probe.h). Unbound by default.
+    Hotkey shadowGateKey;
     // What each of those four was last bound from (the ini text), so a reload
     // that changes one re-resolves it and one that does not says nothing: the
     // settings menu's Hotkeys page writes them while the game runs.
-    std::string toggleKeyText, dumpKeyText, censusKeyText, eyesKeyText, cpuProfileKeyText, sunSkipKeyText;
+    std::string toggleKeyText, dumpKeyText, censusKeyText, eyesKeyText, cpuProfileKeyText, sunSkipKeyText,
+                shadowGateKeyText;
     bool        diagnosticKeysBound = false;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings; they give the FSS mode latch its frame-exact edges.
@@ -1227,6 +1231,8 @@ HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT c
 EDVR_BOUNDARY_TICK(tkKinematicProbe, "kinematic_probe");
 // The hangar sun probe's frame work (TEMPORARY; sun_pass_probe.cpp): under its own fault budget, like every other tick added here.
 EDVR_BOUNDARY_TICK(tkSunPassProbe, "sun_pass_probe");
+// The shadow gate probe's frame tick (TEMPORARY; shadow_gate_probe.cpp): under its own fault budget, like the sun probe's.
+EDVR_BOUNDARY_TICK(tkShadowGateProbe, "shadow_gate_probe");
 EDVR_BOUNDARY_TICK(tkEngineVelocityClock, "engine_velocity_clock");
 EDVR_BOUNDARY_TICK(tkSchedulerProbe, "scheduler_probe");
 EDVR_BOUNDARY_TICK(tkVtableWatch, "vtable_watch");
@@ -1339,6 +1345,8 @@ void tickHotkeys() {
     occlusionCensusFrameTick();
     // The hangar sun probe's skip toggle (TEMPORARY; sun_pass_probe.h): one flip per press, logged with its frame.
     if (g_state->sunSkipKey.pressed()) sunPassProbeToggle(static_cast<uint32_t>(g_state->frameCounter));
+    // The shadow gate probe (TEMPORARY; shadow_gate_probe.h): a press asks for one capture of the next frame.
+    if (g_state->shadowGateKey.pressed()) shadowGateProbeRequest("hotkey.shadow_gate_probe");
     // The two keys above are gated on focus like the others, and said nothing when a press was refused for it.
     missedDiagnosticPressNote(g_state->occlusionKey, g_state->missedOcclusionNotes, "The occlusion census key");
     missedDiagnosticPressNote(g_state->sunSkipKey, g_state->missedSunSkipNotes, "The hangar sun probe skip key");
@@ -1558,6 +1566,10 @@ void presentFrameBoundary() {
     // The hangar sun probe's frame work (TEMPORARY): the Status words, the memory watch and the 10 s window. Once per owned Present.
     tkSunPassProbe.run([] {
         sunPassProbeFrame(static_cast<uint32_t>(g_state->frameCounter));
+    });
+    // The shadow gate probe's frame tick (TEMPORARY): starts or finishes its one-frame capture. A branch when idle.
+    tkShadowGateProbe.run([] {
+        shadowGateProbeFrame(static_cast<uint32_t>(g_state->frameCounter));
     });
     // Engine-record velocity's clock (the emit table's frame stamps and
     // the per-eye snapshots), the same exactly-once-per-owned-present tick.
@@ -2055,6 +2067,11 @@ void configureDiagnosticHotkeys() {
          "hotkey.sun_pass_skip", "hangar sun probe skip toggle",
          "hotkey: sun_pass_skip is set but bound nothing, so the sun pass skip cannot be toggled this session.",
          " Flips the sun pass skip (temporary probe) and logs each flip."},
+        // TEMPORARY, the shadow gate probe (shadow_gate_probe.h): a press arms one capture of the next frame. Empty is off.
+        {&s.shadowGateKey, &s.shadowGateKeyText, Config::get().getString("hotkey.shadow_gate_probe", ""),
+         "hotkey.shadow_gate_probe", "shadow gate probe",
+         "hotkey: shadow_gate_probe is set but bound nothing, so the shadow gate probe cannot be armed by key this session.",
+         " Arms one capture of the four admission gates for one frame (temporary probe); the lines follow in the graphics log."},
     };
     for (Item& it : items) {
         if (!first && *it.applied == it.value) continue;
@@ -2914,6 +2931,8 @@ void hookDevice(ID3D11Device* device) {
             vertexResyncInstall();
             // The hangar sun probe (TEMPORARY, sun_pass_probe.cpp): the draw skip keys on the sun pair, both profiles, with no engine hook. The memory watch is build 332841 only.
             sunPassProbeInstall(runtimeFlatProfile());
+            // The shadow gate probe (TEMPORARY, shadow_gate_probe.cpp): reads diag.shadow_gate_probe; nothing is hooked until a key or the diag timer arms it.
+            shadowGateProbeInstall(runtimeFlatProfile());
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on, VR only (a flat session says
             // it is inert). A build that is not 332841 is scanned for the call site; anything short of one match is one log line and nothing patched.
             terrainCullCoverInstall(runtimeFlatProfile());

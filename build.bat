@@ -553,6 +553,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_heal.cpp" ^
     "src\d3d11\vertex_resync_hook.cpp" ^
     "src\d3d11\sun_pass_probe.cpp" ^
+    "src\d3d11\shadow_gate_probe.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -1576,6 +1577,21 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: sun pass probe test build failed & exit /b 1 )
 "%BUILD%\sun_pass_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_shadow_gate_probe_test
+echo [edvr] === shadow_gate_probe_test.exe ===
+REM The shadow gate probe's pure half (src\d3d11\shadow_gate_core.h, TEMPORARY, docs\station-interior-2026-10-11.md): the pinned
+REM bytes (a one-byte change refused), the builder's centre and the window's centre and value against hand-worked cases, the
+REM depth object's view match, the candidate choice, the first failing gate in engine order, and the CSV and line formats.
+REM No DLL and no game.
+if not exist "%OBJ%\shadowgate" mkdir "%OBJ%\shadowgate"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\shadowgate\\" ^
+    /Fe"%BUILD%\shadow_gate_probe_test.exe" "tools\shadow_gate_probe_test\shadow_gate_probe_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: shadow gate probe test build failed & exit /b 1 )
+"%BUILD%\shadow_gate_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_vr_camera_census_test
