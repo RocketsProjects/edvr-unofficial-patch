@@ -88,6 +88,7 @@ void startRecording() {
         return;
     }
     g.rec->reset();
+    g.rec->beginFrame();
     stampNow();
     g.frame = 1;
     g.framesLeft = occlusion::kCaptureFrames;
@@ -99,7 +100,7 @@ void startRecording() {
 }
 
 void finish() {
-    const std::vector<std::string> lines = occlusion::formatReport(*g.rec, occlusion::kCaptureFrames);
+    const std::vector<std::string> lines = occlusion::formatReport(*g.rec);
     for (const std::string& line : lines) Log::get().note("%s", line.c_str());
 
     std::wstring path = Config::get().logDir() + L"\\occlusion_census_";
@@ -169,20 +170,28 @@ void occlusionCensusFrameTick() {
         case Phase::kArmed:
             startRecording();
             return;
-        case Phase::kRecording:
-            // The frame this tick ends was the last one recorded when no frames are left.
-            if (g.framesLeft > 1) {
+        case Phase::kRecording: {
+            // The frame this tick ends is kept whole, or dropped whole when its draws overflowed the query pool. A dropped
+            // frame ends the capture: the frames kept before it are the window.
+            const bool kept = g.rec->endFrame();
+            if (!kept) {
+                Log::get().note("occlusion census: frame %u overflowed the query pool of %u and is dropped whole (%u draws); "
+                                "%u whole frame(s) kept.", g.frame, g.rec->poolLimit(), g.rec->droppedDraws(),
+                                g.rec->wholeFrames());
+            } else if (g.framesLeft > 1) {
                 --g.framesLeft;
                 ++g.frame;
+                g.rec->beginFrame();
                 return;
             }
             g.recording = false;
             occlusionCensusInstallWrappers(false);
             g.phase = Phase::kWaiting;
             g.waitTicks = 0;
-            Log::get().note("occlusion census: %u frames recorded; reading the queries back over the following frames.",
-                            occlusion::kCaptureFrames);
+            Log::get().note("occlusion census: %u whole frame(s) recorded; reading the queries back over the following frames.",
+                            g.rec->wholeFrames());
             return;
+        }
         case Phase::kWaiting: {
             ++g.waitTicks;
             const uint32_t left = g.rec ? g.rec->poll(g.ctx) : 0;
@@ -219,7 +228,10 @@ void occlusionCensusBegin(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
     if (scene) {
         if (bindingGet(BindSlot::Vs)) in.vs = bindingShaderHash(BindSlot::Vs);
         if (bindingGet(BindSlot::Ps)) in.ps = bindingShaderHash(BindSlot::Ps);
-        if (void* rtv = bindingGet(BindSlot::Rtv0)) in.rt = static_cast<uint32_t>(drawCensusIntern(rtv));
+        if (void* rtv = bindingGet(BindSlot::Rtv0)) {
+            in.hasRtv = true;
+            in.rt = static_cast<uint32_t>(drawCensusIntern(rtv));
+        }
         if (void* dsv = bindingGet(BindSlot::Dsv0)) {
             in.hasDsv = true;
             in.dsv = static_cast<uint32_t>(drawCensusIntern(dsv));

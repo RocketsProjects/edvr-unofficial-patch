@@ -1,15 +1,20 @@
 // The occlusion census's rig (src\d3d11\occlusion_census_core.cpp, the pure half of the instrument; the glue in
 // occlusion_census.cpp is not linked, because it needs the whole DLL). A real D3D11 WARP device, the production recorder
-// linked in as a source, and three quads that must come out as one zero-sample draw:
+// linked in as a source, and quads whose outcome is known in advance.
 //
-//   occluder   left half,  z 0.2, depth test on, writes  -> visible, samples > 0
-//   hidden     left half,  z 0.8, depth test on          -> behind the occluder, samples == 0   (the one zero)
-//   visible    right half, z 0.8, depth test on          -> the cleared depth is 1.0, samples > 0
-//   nodepth    right half, depth test OFF                -> counted as skipped_no_depth, never queried
-//   other      a draw that does not land on the scene    -> counted as other_target, never queried
+// Main capture (one whole frame, depth LESS with writes, colour target bound):
+//   occluder   left half,  z 0.2  -> visible, samples > 0
+//   hidden     left half,  z 0.8  -> behind the occluder, samples == 0   (the one zero)
+//   visible    right half, z 0.8  -> the cleared depth is 1.0, samples > 0
+//   nodepth    right half, depth test OFF -> skipped_no_depth, never queried
+//   other      a draw off the scene target -> other_target, never queried
 //
-// The rig also checks the three trace states the DLL writes: a capture with no scene draw, a capture whose queries were
-// lost, and the line and CSV formats the edvr_log.py parser reads. Run:  occlusion_census_test.exe --self-test | --dry-run
+// Depth pre-pass capture (colour write mask zero): the occluder's quad again, depth LESS with writes -> depthonly, zero.
+//
+// Overflow: a frame whose draws exceed a tiny pool is dropped whole; the frames before it are kept. A first frame that
+// overflows alone reports that nothing fit.
+//
+// Run:  occlusion_census_test.exe --self-test | --dry-run
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -23,6 +28,10 @@
 #include "../../src/d3d11/occlusion_census_core.h"
 
 namespace {
+
+using edvr::occlusion::Recorder;
+using edvr::occlusion::DrawInput;
+using edvr::occlusion::Ticket;
 
 int g_failures = 0;
 
@@ -76,6 +85,37 @@ struct Hold {
     T* get() const { return p; }
 };
 
+// The rig's draw: one quad of the vertex buffer, through the recorder, with the depth state given.
+struct Rig {
+    ID3D11DeviceContext* ctx = nullptr;
+    ID3D11DepthStencilState* dssOn = nullptr;
+    ID3D11DepthStencilState* dssOff = nullptr;
+
+    void draw(Recorder& rec, uint32_t start, bool depthOn, uint64_t vsHash, bool scene, bool hasRtv = true) {
+        DrawInput in;
+        in.kind = 'D';
+        in.count = 6;
+        in.vs = vsHash;
+        in.ps = 2;
+        in.rt = 1;
+        in.dsv = 2;
+        in.hasRtv = hasRtv;
+        in.hasDsv = true;
+        in.frame = 1;
+        ctx->OMSetDepthStencilState(depthOn ? dssOn : dssOff, 0);
+        Ticket t;
+        rec.begin(ctx, in, scene, &t);
+        ctx->Draw(6, start);
+        rec.end(ctx, t);
+    }
+};
+
+bool drainQueries(Recorder& rec, ID3D11DeviceContext* ctx) {
+    ctx->Flush();
+    for (int i = 0; i < 2000 && rec.poll(ctx) != 0; ++i) Sleep(1);
+    return rec.outstanding() == 0;
+}
+
 int runSelfTest() {
     // The arithmetic first: no device needed.
     check(edvr::occlusion::trianglesOf('D', 6, 1, 4) == 2, "trianglelist of 6 is 2 triangles");
@@ -83,12 +123,16 @@ int runSelfTest() {
     check(edvr::occlusion::trianglesOf('X', 6, 10, 4) == 20, "instanced trianglelist: 2 per instance x 10");
     check(edvr::occlusion::trianglesOf('Y', 6, 1, 4) == 0, "indirect draws name no count, so no triangles");
     check(edvr::occlusion::trianglesOf('D', 6, 1, 1) == 0, "points name no triangles");
+    check(std::strcmp(edvr::occlusion::depthFuncName(3), "EQUAL") == 0, "depth func 3 is EQUAL");
+    check(std::strcmp(edvr::occlusion::depthFuncName(7), "GREATER_EQUAL") == 0, "depth func 7 is GREATER_EQUAL");
+    std::printf("occlusion census: record bytes=%zu, pool and record limits %u / %u\n",
+                sizeof(edvr::occlusion::DrawRecord), edvr::occlusion::kPoolSize, edvr::occlusion::kMaxRecords);
 
     // A capture that never saw a scene draw says so, and names the scene target test as the suspect.
     {
-        edvr::occlusion::Recorder empty;
-        const auto lines = edvr::occlusion::formatReport(empty, 4);
-        check(hasLine(lines, "frames=4 draws=0 zero_sample_draws=0"), "an empty capture reports zero draws");
+        Recorder empty;
+        const auto lines = edvr::occlusion::formatReport(empty);
+        check(hasLine(lines, "frames=0 draws=0 zero_sample_draws=0"), "an empty capture reports zero whole frames");
         check(hasLine(lines, "no draw reached the scene target"), "an empty capture says armed-but-no-draws");
         check(edvr::occlusion::formatCsv(empty).find("frame,eye,vs,ps") == 0, "an empty capture still writes a CSV header");
     }
@@ -103,8 +147,7 @@ int runSelfTest() {
     check(SUCCEEDED(dhr) && device.get() && ctx.get(), "create a WARP device");
     if (!device.get() || !ctx.get()) return 1;
 
-    const char* vsSrc =
-        "float4 VS(float3 p : POSITION) : SV_Position { return float4(p, 1.0f); }\n";
+    const char* vsSrc = "float4 VS(float3 p : POSITION) : SV_Position { return float4(p, 1.0f); }\n";
     const char* psSrc = "float4 PS() : SV_Target { return float4(1.0f, 0.0f, 0.0f, 1.0f); }\n";
     Hold<ID3DBlob> vsBlob, psBlob;
     vsBlob.p = compile(vsSrc, "VS", "vs_4_0");
@@ -163,6 +206,11 @@ int runSelfTest() {
     device.get()->CreateDepthStencilState(&dsd, dssOn.put());
     dsd.DepthEnable = FALSE;
     device.get()->CreateDepthStencilState(&dsd, dssOff.put());
+    // A colour write mask of zero: the depth pre-pass shape.
+    D3D11_BLEND_DESC bd{};
+    bd.RenderTarget[0].RenderTargetWriteMask = 0;
+    Hold<ID3D11BlendState> bsOff;
+    device.get()->CreateBlendState(&bd, bsOff.put());
     D3D11_RASTERIZER_DESC rd{};
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;
@@ -187,40 +235,29 @@ int runSelfTest() {
     ctx.get()->ClearDepthStencilView(dsv.get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
     ctx.get()->OMSetDepthStencilState(dssOn.get(), 0);
 
-    // The capture: one measured draw per quad, the no-depth quad with its state off, and one draw off the scene.
-    edvr::occlusion::Recorder rec;
-    auto scene = [&](uint32_t start, bool depthOn, uint64_t vsHash) {
-        edvr::occlusion::DrawInput in;
-        in.kind = 'D';
-        in.count = 6;
-        in.vs = vsHash;
-        in.ps = 2;
-        in.rt = 1;
-        in.dsv = 2;
-        in.hasDsv = true;
-        in.frame = 1;
-        ctx.get()->OMSetDepthStencilState(depthOn ? dssOn.get() : dssOff.get(), 0);
-        edvr::occlusion::Ticket t;
-        rec.begin(ctx.get(), in, true, &t);
-        ctx.get()->Draw(6, start);
-        rec.end(ctx.get(), t);
-    };
-    scene(0, true, 1);    // occluder
-    scene(6, true, 3);    // hidden
-    scene(12, true, 4);   // visible
-    scene(18, false, 5);  // no depth
-    ctx.get()->OMSetDepthStencilState(dssOn.get(), 0);
+    Rig rig;
+    rig.ctx = ctx.get();
+    rig.dssOn = dssOn.get();
+    rig.dssOff = dssOff.get();
+
+    // ---- The main capture: one whole frame of four scene draws and one off the scene.
+    Recorder rec;
+    rec.beginFrame();
+    rig.draw(rec, 0, true, 1, true);     // occluder
+    rig.draw(rec, 6, true, 3, true);     // hidden
+    rig.draw(rec, 12, true, 4, true);    // visible
+    rig.draw(rec, 18, false, 5, true);   // no depth
     {
-        edvr::occlusion::DrawInput in;
+        DrawInput in;
         in.kind = 'D';
         in.count = 6;
-        edvr::occlusion::Ticket t;
+        Ticket t;
         rec.begin(ctx.get(), in, false, &t);   // not the scene target: counted, not queried
         ctx.get()->Draw(6, 0);
         rec.end(ctx.get(), t);
     }
-    ctx.get()->Flush();
-    for (int i = 0; i < 2000 && rec.poll(ctx.get()) != 0; ++i) Sleep(1);
+    check(rec.endFrame(), "a frame that fits the pool is kept whole");
+    drainQueries(rec, ctx.get());
 
     const auto& c = rec.counts();
     check(c.sceneDraws == 4, "four scene draws were seen");
@@ -229,6 +266,7 @@ int runSelfTest() {
     check(c.otherTarget == 1, "one draw off the scene was counted as other-target");
     check(c.lost == 0, "no query was lost");
     check(rec.outstanding() == 0, "every query answered");
+    check(rec.wholeFrames() == 1 && !rec.droppedFrame(), "one whole frame, nothing dropped");
 
     const auto& recs = rec.records();
     check(recs.size() == 4, "one record per scene draw");
@@ -238,36 +276,94 @@ int runSelfTest() {
         check(recs[2].ready && recs[2].samples > 0, "the visible quad has samples");
         check(recs[3].status == edvr::occlusion::Status::kNoDepth, "the depth-off draw was not queried");
         check(recs[1].tris == 2, "a six-vertex list is two triangles");
+        check(recs[1].depthFunc == 2 && recs[1].depthWrite && !recs[1].depthOnly, "the main draws are LESS, writing, colour");
     }
 
-    const auto lines = edvr::occlusion::formatReport(rec, 1);
+    const auto lines = edvr::occlusion::formatReport(rec);
     check(hasLine(lines, "frames=1 draws=3 zero_sample_draws=1 (33.3%) "), "the summary says one zero of three");
     check(hasLine(lines, "skipped_no_depth=1"), "the summary counts the depth-off draw");
-    check(hasLine(lines, "top zero draw rank=1 frame=1 eye=eye vs=0000000000000003 ps=0000000000000002 kind=D count=6"),
-          "the single zero draw is the hidden quad, by its shader pair");
+    check(hasLine(lines, "whole_frames=1 dropped_partial_frame=0 dropped_draws=0"), "the accounting names the whole frames");
+    check(hasLine(lines, "occlusion census: by depth state: LESS/write: draws=3 zero=1 tris=6 zero_tris=2"),
+          "the depth-state line groups the main pass as LESS with writes");
+    check(hasLine(lines, "top zero draw rank=1 frame=1 eye=eye vs=0000000000000003 ps=0000000000000002 kind=D count=6 "
+                         "instances=1 tris=2 rt=1 dsv=2 depth=test-write func=LESS pass=colour"),
+          "the single zero draw is the hidden quad, with its depth func and pass");
     check(hasLine(lines, "vs=0000000000000003 ps=0000000000000002 draws=1 zero=1 tris=2 zero_tris=2"),
           "the shader pair line carries the zero triangles");
     check(!hasLine(lines, "results lost"), "a clean capture does not say results were lost");
+    check(!hasLine(lines, "exceeded the query pool"), "a capture that fits does not say it overflowed");
 
     const std::string csv = edvr::occlusion::formatCsv(rec);
-    check(csv.find("frame,eye,vs,ps,kind,count,instances,samples,tris,status\n") == 0, "the CSV header is the spec's");
-    check(csv.find("1,eye,0000000000000003,0000000000000002,D,6,1,0,2,measured\n") != std::string::npos,
-          "the CSV has the hidden draw with samples 0");
+    check(csv.find("frame,eye,vs,ps,kind,count,instances,samples,tris,status,func,write,pass\n") == 0,
+          "the CSV header is the spec's, with depth func and pass");
+    check(csv.find("1,eye,0000000000000003,0000000000000002,D,6,1,0,2,measured,LESS,write,colour\n") != std::string::npos,
+          "the CSV has the hidden draw with samples 0, its func and pass");
 
-    // A capture whose queries never answered says so, and leaves them out of the figures.
+    // ---- The depth pre-pass: colour write mask zero, the occluder's quad again. Depth-only, and zero behind the occluder.
     {
-        edvr::occlusion::Recorder lost;
-        edvr::occlusion::DrawInput in;
-        in.kind = 'D';
-        in.count = 6;
-        in.hasDsv = true;
-        in.dsv = 2;
-        edvr::occlusion::Ticket t;
-        lost.begin(ctx.get(), in, true, &t);
-        ctx.get()->Draw(6, 0);
-        lost.end(ctx.get(), t);
+        Recorder pre;
+        const float blendFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        pre.beginFrame();
+        ctx.get()->OMSetBlendState(bsOff.get(), blendFactor, 0xFFFFFFFFu);
+        rig.draw(pre, 0, true, 1, true);
+        ctx.get()->OMSetBlendState(nullptr, blendFactor, 0xFFFFFFFFu);
+        pre.endFrame();
+        drainQueries(pre, ctx.get());
+        const auto pl = edvr::occlusion::formatReport(pre);
+        check(pre.records().size() == 1 && pre.records()[0].depthOnly, "a zero colour write mask is tagged depthonly");
+        check(pre.records().size() == 1 && pre.records()[0].samples == 0, "the pre-pass draw behind the occluder is zero");
+        check(hasLine(pl, "by depth state: LESS/write/depthonly: draws=1 zero=1 tris=2 zero_tris=2"),
+              "the depth-state line names the pre-pass as LESS/write/depthonly");
+        check(hasLine(pl, "pass=depthonly"), "the zero pre-pass draw is tagged depthonly in the top list");
+    }
+
+    // ---- Overflow keeps whole frames: a pool of 4, frame 1 uses 2 slots, frame 2 needs 3 and is dropped whole.
+    {
+        Recorder tiny(4, edvr::occlusion::kMaxRecords);
+        tiny.beginFrame();
+        rig.draw(tiny, 0, true, 1, true);
+        rig.draw(tiny, 6, true, 3, true);
+        check(tiny.endFrame(), "overflow test: frame 1 fits and is kept");
+        tiny.beginFrame();
+        rig.draw(tiny, 12, true, 4, true);
+        rig.draw(tiny, 0, true, 1, true);
+        rig.draw(tiny, 6, true, 3, true);   // the pool is full by now: this draw overflows and the frame goes
+        const bool kept = tiny.endFrame();
+        check(!kept && tiny.droppedFrame(), "overflow test: frame 2 overflowed and was dropped");
+        check(tiny.wholeFrames() == 1, "overflow test: one whole frame is kept");
+        check(tiny.counts().measured == 2 && tiny.records().size() == 2,
+              "overflow test: the dropped frame's draws and counts are rolled back");
+        check(tiny.droppedDraws() == 3, "overflow test: three draws were dropped with the frame");
+        drainQueries(tiny, ctx.get());
+        const auto sl = edvr::occlusion::formatReport(tiny);
+        check(hasLine(sl, "whole_frames=1 dropped_partial_frame=1 dropped_draws=3 pool=4"),
+              "the accounting says a partial frame was dropped");
+        check(hasLine(sl, "occlusion census: frame 2 exceeded the query pool of 4 and was dropped whole (3 draws)"),
+              "the report names the dropped frame");
+        check(hasLine(sl, "frames=1 draws=2 "), "the summary covers only the whole frame");
+    }
+
+    // ---- A first frame that overflows alone: nothing is measured, and the report says the pool is too tiny.
+    {
+        Recorder one(1, edvr::occlusion::kMaxRecords);
+        one.beginFrame();
+        rig.draw(one, 0, true, 1, true);
+        rig.draw(one, 6, true, 3, true);
+        check(!one.endFrame() && one.wholeFrames() == 0, "a first frame larger than the pool is dropped");
+        drainQueries(one, ctx.get());
+        const auto ol = edvr::occlusion::formatReport(one);
+        check(hasLine(ol, "no whole frame fit the query pool"), "the report says no whole frame fit");
+        check(hasLine(ol, "frames=0 draws=0"), "a capture with no whole frame measures nothing");
+    }
+
+    // ---- A capture whose queries never answered says so, and leaves them out of the figures.
+    {
+        Recorder lost;
+        lost.beginFrame();
+        rig.draw(lost, 0, true, 1, true);
+        lost.endFrame();
         const uint32_t n = lost.loseOutstanding();
-        const auto ll = edvr::occlusion::formatReport(lost, 4);
+        const auto ll = edvr::occlusion::formatReport(lost);
         check(n == 1, "one unread query is lost at the deadline");
         check(hasLine(ll, "results lost: 1 measured draws"), "the report names the lost results");
         check(hasLine(ll, "draws=0 zero_sample_draws=0"), "lost draws stay out of the figures");

@@ -4683,13 +4683,24 @@ OccReal g_occReal;
 bool occlusionSceneNow() {
     State* s = g_state;
     if (!s) return false;
+    // The scene's size: the flat runtime's render size in flat, the eye texture's in VR.
+    uint32_t w = 0, h = 0;
     if (runtimeFlatProfile()) {
-        uint32_t rw = 0, rh = 0, ow = 0, oh = 0;
-        void* rtv = bindingGet(BindSlot::Rtv0);
-        ResourceInfo info;
-        if (!rtv || !flatRuntimeSceneSizes(&rw, &rh, &ow, &oh) || !rw) return false;
-        return bindingResolve(rtv, &info) && info.isTexture2D && info.a == rw && info.b == rh;
+        uint32_t ow = 0, oh = 0;
+        if (!flatRuntimeSceneSizes(&w, &h, &ow, &oh)) return false;
+    } else {
+        w = s->eyeW;
+        h = s->eyeH;
     }
+    ResourceInfo info;
+    void* rtv = bindingGet(BindSlot::Rtv0);
+    if (!rtv) {
+        // A depth-only pass (no colour target): on the scene when its depth view is the scene's size. The census tags it
+        // depthonly, so a pre-pass is identifiable in the report.
+        void* dsv = bindingGet(BindSlot::Dsv0);
+        return dsv && w && bindingResolve(dsv, &info) && info.isTexture2D && info.a == w && info.b == h;
+    }
+    if (runtimeFlatProfile()) return w && bindingResolve(rtv, &info) && info.isTexture2D && info.a == w && info.b == h;
     return s->rtv0Eye;
 }
 

@@ -11,10 +11,13 @@
 - Keys (temporary diagnostics, remove when this arc closes, quoted per Scope control):
   `hotkey.occlusion_census` (empty = off) and `diag.occlusion_census = off|on`. Both allowed in flat.
 - Cost: zero per draw while unarmed (the game's trampolines stay in the real-draw slots). While recording, one query and two
-  context calls per depth-on scene draw, plus an immediate-context topology and depth-state read. Read-back polls once per frame
-  with DONOTFLUSH and never blocks; a query that has not answered after 600 frames is called lost.
-- Rig: `tools\occlusion_census_test` (WARP): one zero of three measured draws, the depth-off and off-scene draws counted and not
-  queried, the lost-results and no-draws trace states, the CSV and report formats.
+  context calls per depth-on scene draw, plus topology, depth-state and blend-state reads. Pool 32768 queries, record table
+  131072 records (about 96 bytes each, about 12.6 MB at the cap); query objects are made on first use, and their driver-side
+  memory is not measured here. Read-back polls once per frame with DONOTFLUSH and never blocks; a query that has not answered
+  after 600 frames is called lost.
+- Whole frames only: a frame whose draws overflow the pool is dropped whole and the capture ends there.
+- Rig: `tools\occlusion_census_test` (WARP): one zero of three measured draws, the depth func and depth-only tag, a
+  depth-only pre-pass draw, whole-frame rollback on overflow, the lost-results and no-draws trace states, the CSV and report formats.
 - Parser: `python tools\edvr_log.py --occlusion-census` (self-test in edvr_log.py's gate).
 - Open: the flight below. Nothing is concluded from a single flight.
 - Ruled out: none yet.
@@ -47,6 +50,10 @@ instances; the indirect and auto draws name no count, so they are measured but c
 - The shader pairs (`vs`, `ps`) ranked by zero triangles say which shader is drawing the hidden geometry. Compare them with
   the top single draws, which give the frame, the eye or flat target, the render-target and depth-view ids, and the depth
   state (`test-write` or `test-nowrite`).
+- `by depth state` groups the measured draws by comparison function, depth write and depth-only (a pre-pass: no colour
+  target, or colour write mask zero). A main pass with EQUAL or GREATER_EQUAL and writes off tests the final depth of the
+  pre-pass, so its zero count does not depend on draw order; the parser prints that as a VERDICT. A LESS pass with writes on
+  is order-dependent, and its zero count is only a lower bound on what the scene could hide.
 - `samples_p50` per pair separates "almost hidden" (small counts) from "fully hidden" (0).
 - `accounting` must read `lost=0` and `overflow=0` for the figures to be complete; the parser says so when they are not.
 - `no draw reached the scene target` means the scene-target test matched nothing (wrong target size or no eye target), so the
