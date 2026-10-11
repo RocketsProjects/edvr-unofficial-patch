@@ -2170,6 +2170,16 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
                     u(copyStats.clearCalls),u(copyStats.clearNoClaims),u(copyStats.clearNodes),
                     u(copyStats.mergeCalls),u(copyStats.mergeWithoutClaims),u(copyStats.mergeNodes),
                     u(copyStats.activeClaims),u(copyStats.activePlans));
+    {   // Who waited for primaryCopy's mutex and who held it, this window (engine_velocity_primary_copy.h, the lock instrument).
+        // All zeros while the counters above grow means the instrument did not run.
+        const auto lockWindow = primaryCopy::takeLockWindow();
+        char lockLine[1160];   // primaryCopy::kLockLineBytes
+        static_assert(sizeof(lockLine) == primaryCopy::kLockLineBytes, "the lock line buffer is the formatter's");
+        for (unsigned half = 0; half < 2; ++half) {
+            primaryCopy::formatLockLine(lockWindow, half, freq / 1e6, seconds, lockLine);
+            Log::get().note("%s", lockLine);
+        }
+    }
     Log::get().note("engine motion: emit (%s) over %.0f s, %.0f frames: FUN_144312E00 calls %llu (%llu appended, %llu pool "
                     "records in all); pool records joined %llu (with motion %llu), masked %llu; masked for: first seen %llu, "
                     "gap %llu, reused pointer %llu, pose changed within one frame %llu, previous frame not certified %llu, "

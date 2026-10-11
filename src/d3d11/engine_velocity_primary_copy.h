@@ -3,13 +3,16 @@
 // copier's source address, never from a pose/content match. Source relocation
 // or reuse must invalidate/transfer its claim before another copier can see it.
 #include "engine_velocity_emit.h"
+#include "engine_motion_cpu.h"   // the render thread's id (emcpu::g_gate) and the clock, for the lock instrument below
 #include <d3d11.h>
 #include "engine_velocity_primary_copy_shader.h"
 #include "temporal_shader_bytecode.h"
 #include <wrl/client.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <unordered_map>
 #include <vector>
 #include <mutex>
@@ -76,17 +79,93 @@ alignas(64) inline PoolView g_poolView;
 // Set, under g_mutex, by everything that can change a pool's lease, base, size or patches; ClaimLock then republishes
 // the view. Calls that touch only emissions leave it alone and pay a bool test.
 inline bool g_poolsDirty=false;
-// The only way this header locks g_mutex. The destructor publishes g_claimsLive (and, when pools were touched, the pool
+// ---- the lock instrument ------------------------------------------------------------------------------------------
+// Who waits for g_mutex and who holds it, per caller and per thread class (the render thread, taken from engine
+// motion's gate, or any other). One acquisition in kLockSamplePeriod per caller on each thread is timed: the QPC is read
+// before the acquire, after it and before the release, and only for those. Every other acquisition adds one thread-local
+// increment. The sums sit in relaxed atomics, are written after the unlock, and are read and zeroed once a summary.
+enum class Caller : unsigned { MergeBegin, MergeEnd, ClearSkip, ClearWalk, Copier, BeginMap, EndMap, Emit, Other, Count };
+constexpr unsigned kCallers=static_cast<unsigned>(Caller::Count);
+constexpr unsigned kLockSamplePeriod=64;
+static_assert((kLockSamplePeriod&(kLockSamplePeriod-1))==0,"the sampling test is a mask");
+inline constexpr const char* kCallerNames[kCallers]={"merge begin","merge end","clear skip","clear walk","copier","beginMap","endMap","emit","other"};
+struct LockCell { std::atomic<uint64_t> n{0},wait{0},waitMax{0},hold{0},holdMax{0}; };   // ticks
+inline LockCell g_lockCells[kCallers][2];   // [caller][0 render thread, 1 any other]
+inline thread_local uint32_t t_lockTick[kCallers]{};
+inline int64_t (*g_lockClock)() noexcept=&emcpu::qpcNow;   // the rig substitutes a counting clock
+inline bool lockSample(Caller c) noexcept {return ((++t_lockTick[static_cast<unsigned>(c)])&(kLockSamplePeriod-1))==0;}
+inline void raiseTo(std::atomic<uint64_t>& cell,uint64_t value) noexcept {
+    uint64_t seen=cell.load(std::memory_order_relaxed);
+    while(seen<value && !cell.compare_exchange_weak(seen,value,std::memory_order_relaxed)){}
+}
+inline void lockRecord(Caller c,int64_t waited,int64_t held) noexcept {
+    const bool render=static_cast<uint32_t>(emcpu::g_gate.load(std::memory_order_relaxed))==emcpu::currentThreadId();
+    LockCell& cell=g_lockCells[static_cast<unsigned>(c)][render?0:1];
+    const uint64_t w=waited>0?static_cast<uint64_t>(waited):0,h=held>0?static_cast<uint64_t>(held):0;
+    cell.n.fetch_add(1,std::memory_order_relaxed);cell.wait.fetch_add(w,std::memory_order_relaxed);cell.hold.fetch_add(h,std::memory_order_relaxed);
+    raiseTo(cell.waitMax,w);raiseTo(cell.holdMax,h);
+}
+struct LockWindow { uint64_t n[kCallers][2]{},wait[kCallers][2]{},waitMax[kCallers][2]{},hold[kCallers][2]{},holdMax[kCallers][2]{}; };
+inline LockWindow takeLockWindow() noexcept {
+    LockWindow w;
+    for(unsigned c=0;c<kCallers;++c)for(unsigned k=0;k<2;++k) {
+        LockCell& cell=g_lockCells[c][k];
+        w.n[c][k]=cell.n.exchange(0,std::memory_order_relaxed);w.wait[c][k]=cell.wait.exchange(0,std::memory_order_relaxed);
+        w.waitMax[c][k]=cell.waitMax.exchange(0,std::memory_order_relaxed);w.hold[c][k]=cell.hold.exchange(0,std::memory_order_relaxed);
+        w.holdMax[c][k]=cell.holdMax.exchange(0,std::memory_order_relaxed);
+    }
+    return w;
+}
+constexpr size_t kLockLineBytes=1160;   // the log's line buffer is 1200 and takes about 1166 characters of text
+// One of two lines (half 0: callers 0-4, half 1: callers 5-8): engine motion: primary copy lock (sampled 1 in 64, 30 s, 1 of 2):
+// merge begin: render n=0; other n=5 wait 0.2/0.5 us hold 0.4/1.0 us | merge end: ... Times are average/maximum microseconds
+// over the sampled acquisitions of the window. A caller's lock-free exits never take the mutex and are not in it.
+inline void formatLockLine(const LockWindow& w,unsigned half,double ticksPerUs,double seconds,char (&out)[kLockLineBytes]) noexcept {
+    const double perUs=ticksPerUs>0?ticksPerUs:1.0;
+    size_t used=0;
+    auto put=[&](const char* format,auto... args){
+        if(used+1>=kLockLineBytes)return;
+        const int n=std::snprintf(out+used,kLockLineBytes-used,format,args...);
+        if(n>0)used=std::min(used+static_cast<size_t>(n),kLockLineBytes-1);
+    };
+    put("engine motion: primary copy lock (sampled 1 in %u, %.0f s, %u of 2): ",kLockSamplePeriod,seconds,half+1);
+    const unsigned first=half?5u:0u,last=half?kCallers:5u;
+    for(unsigned c=first;c<last;++c) {
+        put("%s%s: ",c==first?"":" | ",kCallerNames[c]);
+        for(unsigned k=0;k<2;++k) {
+            const char* label=k?"other":"render";const uint64_t n=w.n[c][k];
+            put("%s%s n=%llu",k?"; ":"",label,static_cast<unsigned long long>(n));
+            if(n)put(" wait %.1f/%.1f us hold %.1f/%.1f us",double(w.wait[c][k])/double(n)/perUs,double(w.waitMax[c][k])/perUs,
+                     double(w.hold[c][k])/double(n)/perUs,double(w.holdMax[c][k])/perUs);
+        }
+    }
+    out[used]=0;
+}// The only way this header locks g_mutex. The destructor publishes g_claimsLive (and, when pools were touched, the pool
 // view) BEFORE it unlocks, so a lock-free reader that sees "false" is reading a state no later than the last completed
 // critical section: it is ordered before any mutation that is still in flight, which is a legal interleaving of the
 // call it replaces. A caller whose emission was recorded and returned before this call started sees "true": the
-// unlock publishes it.
+// unlock publishes it. It is also where the lock instrument lives: the caller names itself, and one acquisition in
+// kLockSamplePeriod is timed (wait from before the acquire to after it, hold from there to the release).
 struct ClaimLock {
-    ClaimLock(){g_mutex.lock();}
-    ~ClaimLock(){publish();g_mutex.unlock();}
+    explicit ClaimLock(Caller caller=Caller::Other) noexcept : caller_(caller) {
+        if(lockSample(caller)) {
+            sampled_=true;acquireStart_=g_lockClock();g_mutex.lock();acquired_=g_lockClock();
+        } else g_mutex.lock();
+    }
+    ~ClaimLock() {
+        publish();
+        if(sampled_) {
+            const int64_t released=g_lockClock();g_mutex.unlock();
+            lockRecord(caller_,acquired_-acquireStart_,released-acquired_);
+        } else g_mutex.unlock();
+    }
+    void relabel(Caller caller) noexcept {caller_=caller;}   // a clear that turns out to have nothing to walk
     ClaimLock(const ClaimLock&)=delete;
     ClaimLock& operator=(const ClaimLock&)=delete;
 private:
+    Caller caller_;
+    bool sampled_=false;
+    int64_t acquireStart_=0,acquired_=0;
     static void publish() noexcept {
         const bool claims=!g_emissions.empty() || !g_mergePlans.empty();
         const bool claimsChanged=g_claimsLive.load(std::memory_order_relaxed)!=claims;
@@ -152,18 +231,18 @@ inline void overflow(uint32_t frame) {
     for(auto& entry:g_pools)entry.second.patches.clear();
 }
 inline void invalidateEmission(uintptr_t source) noexcept {
-    ClaimLock lock;
+    ClaimLock lock(Caller::Emit);
     if(source)g_emissions.erase(source);else {g_emissions.clear();++g_emissionEpoch;++g_stats.invalidated;++g_stats.sourceResets;}
 }
 inline void invalidateMapped(uintptr_t base) noexcept {
-    ClaimLock lock;g_poolsDirty=true;
+    ClaimLock lock(Caller::Other);g_poolsDirty=true;
     for(auto& entry:g_pools)if(entry.second.active && (!base || entry.second.base==base)) {
         entry.second.patches.clear();entry.second.valid=false;++g_stats.invalidated;
     }
 }
 inline bool recordEmission(uintptr_t source,const uint32_t native[kWords],const emit::Pose& previous,
                            uint32_t marker,uint32_t frame) noexcept {
-    ClaimLock lock;
+    ClaimLock lock(Caller::Emit);
     if(g_emissionFrame!=frame){g_emissions.clear();g_emissionFrame=frame;++g_emissionEpoch;++g_stats.sourceResets;}
     if(!source || !native || g_overflowFrame==frame)return false;
     const emit::Pose now=current(native);
@@ -192,7 +271,7 @@ inline bool recordEmission(uintptr_t source,const uint32_t native[kWords],const 
 }
 inline bool beginMap(ID3D11Buffer* resource,void* base,uint32_t bytes,uint32_t stride,D3D11_MAP type,
                      uint64_t sequence,uint32_t frame) noexcept {
-    ClaimLock lock;g_poolsDirty=true;
+    ClaimLock lock(Caller::BeginMap);g_poolsDirty=true;
     if(!resource)return false;
     try {
         auto old=g_pools.find(resource);
@@ -235,7 +314,7 @@ inline bool copierLockFree(uintptr_t base,uint32_t stride,uintptr_t source,uint3
 }
 inline void copier(uintptr_t base,uint32_t stride,uintptr_t source,uint32_t firstSlot,uint32_t count,uint32_t frame) noexcept {
     if(copierLockFree(base,stride,source,firstSlot,count))return;
-    ClaimLock lock;g_poolsDirty=true;++g_stats.copies;
+    ClaimLock lock(Caller::Copier);g_poolsDirty=true;++g_stats.copies;
     if(!count)return;
     Pool* pool=nullptr;
     uint32_t matches=0;
@@ -269,7 +348,7 @@ inline void copier(uintptr_t base,uint32_t stride,uintptr_t source,uint32_t firs
     }
 }
 inline void endMap(ID3D11Buffer* resource,uint64_t sequence) noexcept {
-    ClaimLock lock;g_poolsDirty=true;auto i=g_pools.find(resource);if(i==g_pools.end())return;
+    ClaimLock lock(Caller::EndMap);g_poolsDirty=true;auto i=g_pools.find(resource);if(i==g_pools.end())return;
     Pool& p=i->second;
     if(!p.active || p.sequence!=sequence){p.patches.clear();p.valid=false;++g_stats.declined;}
     p.active=false;
@@ -279,7 +358,7 @@ inline void forget(ID3D11Buffer* resource) noexcept {
 }
 inline Stats stats();
 inline std::vector<Patch> patches(ID3D11Buffer* resource,uint32_t frame) {
-    ClaimLock lock;std::vector<Patch> out;
+    ClaimLock lock(Caller::Other);std::vector<Patch> out;
     const auto i=g_pools.find(resource);
     if(i==g_pools.end() || i->second.active || !i->second.valid || i->second.frame!=frame || g_overflowFrame==frame)return out;
     out.reserve(i->second.patches.size());for(const auto& p:i->second.patches)out.push_back(p.second);return out;
@@ -321,11 +400,11 @@ template<bool SkipNoClaims> inline void invalidateDictionaryImpl(uintptr_t dicti
     if constexpr(SkipNoClaims) {
         if(!g_claimsLive.load(std::memory_order_acquire)){g_clearSkipped.fetch_add(1,std::memory_order_relaxed);return;}
     }
-    ClaimLock lock;++g_stats.clearCalls;
+    ClaimLock lock(Caller::ClearWalk);++g_stats.clearCalls;
     // Copied GPU-pool certificates are independent and must stay intact.
     // Future emissions register fresh ownership after this lock is released.
     if constexpr(SkipNoClaims) {
-        if(g_emissions.empty() && g_mergePlans.empty()){++g_stats.clearNoClaims;return;}   // the flag was stale-true
+        if(g_emissions.empty() && g_mergePlans.empty()){lock.relabel(Caller::ClearSkip);++g_stats.clearNoClaims;return;}   // the flag was stale-true
     }
     auto fail=[](){g_emissions.clear();++g_emissionEpoch;++g_stats.sourceResets;++g_stats.clearFailed;};
     try {
@@ -378,7 +457,7 @@ inline void invalidateDictionary(uintptr_t dictionary) noexcept {invalidateDicti
 inline void* mergeNoClaimsToken() noexcept {return reinterpret_cast<void*>(uintptr_t(1));}
 inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t frame) noexcept {
     if(!g_claimsLive.load(std::memory_order_acquire)){g_mergeSkipped.fetch_add(1,std::memory_order_relaxed);return mergeNoClaimsToken();}
-    ClaimLock lock;
+    ClaimLock lock(Caller::MergeBegin);
     ++g_stats.mergeCalls;
     // The flag may be stale-true: the claims were consumed since it was published.
     if(g_emissions.empty() && g_mergePlans.empty())++g_stats.mergeWithoutClaims;
@@ -435,11 +514,11 @@ inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t fr
 }
 inline void endMergeOpaque(void* opaque,bool completed) noexcept {
     if(opaque==mergeNoClaimsToken()) {
-        if(!completed){ClaimLock lock;invalidateClaims();}
+        if(!completed){ClaimLock lock(Caller::MergeEnd);invalidateClaims();}
         return;
     }
     std::unique_ptr<MergePlan> plan(static_cast<MergePlan*>(opaque));if(!plan)return;
-    ClaimLock lock;
+    ClaimLock lock(Caller::MergeEnd);
     g_mergePlans.erase(plan.get());
     if(plan->invalid || plan->epoch!=g_emissionEpoch){++g_stats.mergeFailed;return;}
     if(!completed){invalidateClaims();return;}
