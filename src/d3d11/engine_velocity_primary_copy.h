@@ -99,7 +99,7 @@ inline void raiseTo(std::atomic<uint64_t>& cell,uint64_t value) noexcept {
     while(seen<value && !cell.compare_exchange_weak(seen,value,std::memory_order_relaxed)){}
 }
 inline void lockRecord(Caller c,int64_t waited,int64_t held) noexcept {
-    const bool render=static_cast<uint32_t>(emcpu::g_gate.load(std::memory_order_relaxed))==emcpu::currentThreadId();
+    const bool render=emcpu::g_renderThreadId.load(std::memory_order_relaxed)==emcpu::currentThreadId();   // not the gate: see there
     LockCell& cell=g_lockCells[static_cast<unsigned>(c)][render?0:1];
     const uint64_t w=waited>0?static_cast<uint64_t>(waited):0,h=held>0?static_cast<uint64_t>(held):0;
     cell.n.fetch_add(1,std::memory_order_relaxed);cell.wait.fetch_add(w,std::memory_order_relaxed);cell.hold.fetch_add(h,std::memory_order_relaxed);

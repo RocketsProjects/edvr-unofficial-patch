@@ -495,6 +495,7 @@ public:
             lastTick_ = windowStart_ = nowTicks;
             samplingOk_ = currentThreadId() == static_cast<uint32_t>(GetCurrentThreadId());
             renderTid_ = static_cast<uint32_t>(GetCurrentThreadId());
+            emcpu::g_renderThreadId.store(renderTid_, std::memory_order_relaxed);
             FrameCut prime;
             cutFrame(prime);   // baselines: nothing before the census opened is the first frame's
             emcpu::FrameCut emPrime;
@@ -557,6 +558,7 @@ public:
         primed_ = false;
         g_gate.store(0, std::memory_order_relaxed);
         emcpu::g_gate.store(0, std::memory_order_relaxed);
+        emcpu::g_renderThreadId.store(0, std::memory_order_relaxed);
         resetWindow();
     }
     bool running() const noexcept { return primed_; }
@@ -630,6 +632,7 @@ private:
         const uint64_t gate = makeGate(sampledNow_, renderNow_ || sampledNow_ ? renderTid_ : kNoThread);
         g_gate.store(gate, std::memory_order_relaxed);
         emcpu::g_gate.store(gate, std::memory_order_relaxed);
+        emcpu::g_renderThreadId.store(renderTid_, std::memory_order_relaxed);   // the gate names it on 1 frame in 16 only
     }
     void resetWindow() noexcept {
         frames_ = paused_ = sampled_ = renderClocked_ = 0;

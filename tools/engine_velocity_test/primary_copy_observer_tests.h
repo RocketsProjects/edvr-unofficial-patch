@@ -354,6 +354,7 @@ inline void runLock(ID3D11Device* device,Check check) {
     auto drain=[]{return copy::takeLockWindow();};
     Record item=record(1);const uintptr_t where=addressOf(item);
     const auto savedGate=emcpu::g_gate.load();emcpu::g_gate.store(0);   // no render thread unless a case says so
+    const auto savedRenderTid=emcpu::g_renderThreadId.load();emcpu::g_renderThreadId.store(0);
     drain();
     {   // Sampling arithmetic: any 6400 consecutive acquisitions of one caller on one thread are exactly 100 samples.
         for(unsigned i=0;i<6400;++i)copy::invalidateEmission(where);
@@ -390,14 +391,30 @@ inline void runLock(ID3D11Device* device,Check check) {
         check(lockclock::reads==6 && w.n[kEmit][1]==2 && w.wait[kEmit][1]==600 && w.hold[kEmit][1]==400 && w.waitMax[kEmit][1]==500 && w.holdMax[kEmit][1]==300,
               "lock instrument: sums and maxima over two sampled acquisitions");
     }
-    {   // Thread classes: the thread named in engine motion's gate is the render thread; any other is not.
-        emcpu::g_gate.store(emcpu::currentThreadId());
+    {   // Thread classes: the render thread is the one named in g_renderThreadId; any other is not. The gate is NOT consulted: flat
+        // names nobody (kNoThread) in the gate on 15 frames in 16, and 0 on an idle census, and the render thread is the render
+        // thread all the same.
+        const auto savedTid=emcpu::g_renderThreadId.load();
+        emcpu::g_renderThreadId.store(emcpu::currentThreadId());
+        emcpu::g_gate.store(0xFFFFFFFFull);   // flat's kNoThread frame
         for(auto& tick:copy::t_lockTick)tick=63;
         copy::invalidateEmission(where);
         std::thread other([&]{for(unsigned i=0;i<64;++i)copy::invalidateEmission(where);});other.join();
+        auto w=drain();
+        check(w.n[kEmit][0]==1 && w.n[kEmit][1]==1,"lock instrument: with the gate at nobody, a sampled acquisition on the render thread is still render, one elsewhere is other");
+        emcpu::g_gate.store(emcpu::currentThreadId());   // the gate names this thread, but the census says another is the render thread
+        emcpu::g_renderThreadId.store(emcpu::currentThreadId()+1);
+        for(auto& tick:copy::t_lockTick)tick=63;
+        copy::invalidateEmission(where);
+        w=drain();
+        check(w.n[kEmit][0]==0 && w.n[kEmit][1]==1,"lock instrument: the render column follows g_renderThreadId, not the gate");
+        emcpu::g_renderThreadId.store(0);   // an idle census: nobody is the render thread
         emcpu::g_gate.store(0);
-        const auto w=drain();
-        check(w.n[kEmit][0]==1 && w.n[kEmit][1]==1,"lock instrument: a sampled acquisition on the render thread and one elsewhere land in their own cells");
+        for(auto& tick:copy::t_lockTick)tick=63;
+        copy::invalidateEmission(where);
+        w=drain();
+        check(w.n[kEmit][0]==0 && w.n[kEmit][1]==1,"lock instrument: with no render thread published every sample is other");
+        emcpu::g_renderThreadId.store(savedTid);
     }
     {   // A clear that finds the flag stale-true is a skip, filed under its own name.
         copy::reset();drain();copy::g_claimsLive.store(true);
@@ -454,7 +471,7 @@ inline void runLock(ID3D11Device* device,Check check) {
         formatBoth(big,0.001,1e9,lines);
         check(std::strlen(lines[0])<copy::kLockLineBytes && std::strlen(lines[1])<copy::kLockLineBytes,"lock instrument: absurd values truncate inside the buffer and stay terminated");
     }
-    emcpu::g_gate.store(savedGate);drain();
+    emcpu::g_gate.store(savedGate);emcpu::g_renderThreadId.store(savedRenderTid);drain();
 }
 inline void run(ID3D11Device* device,Check check) {
     runLock(device,check);
