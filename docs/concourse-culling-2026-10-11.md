@@ -4,15 +4,15 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 
 ## Status
 
-- **State:** analysis and design; the M2 state dump (v3, after flights 5 and 6), the jump guard's TCWR marks, the look probe and the sealed-hangar trial are built on `claude/shadow-gate-probe` (which merges this doc). Full build green; not installed, not flown. Nothing fixed. M1 is blocked on draw identity (see Measurement).
+- **State:** analysis and design. Flight 7 flew the sealed-hangar trial at 80 m in the docked hangar: nothing missing (see Measurement). Built v4 on `claude/hangar-test-5` (from `claude/hangar-test-4`, which carries the camera rule): the radius steps, the 5 s windows and the ladder; full build green; the step census and the approach flight are not flown yet. Nothing fixed. M1 is blocked on draw identity (see Measurement).
 - **Primary: sealed hangar.** Docked, pad lowered, doors closed. Submit only the hangar cell and suppress the sun. Blocked on storage of pad and door state (P9).
 - **Secondary: closed panes.** Seated inside a station (doors open, or flying inside). Cull the SocialSpace (concourse) records and replace the bay windows with mirror-like opaque glass (stage 1, Sean's decision). Impostor is a later stage only.
 - **Concourse:** the SocialSpace sub-area under StationInteriorHub, created at station load (P1).
 - **Triggers now:** seated = Status Flags bits 24-26 or Flags2 bits 1-2 (EDVR `journalSeatedFromFlags`). Disembark = journal Disembark with SRV, Taxi and Multicrew false (P5). Status OnFoot lags about 6 s, so it is not a restore trigger.
 - **Ruled out:** Status.json as the sealed signal; ToggleCockpitRender as a render switch; InteriorStateChangeActivity as a switch (P7).
 - **Open:** pad and door storage (P9); cell radius; pane draw hashes and ownership; env slot numbers; player_location read path (P10).
-- **Next flight, no engine change:** the flight plan in the Built v3 section of Measurement (the look probe, the sealed-hangar trial, then the state dump with the AAB8 pin). The Built v2 plan still stands for F4 (the shadow gate probe) twice, F3 with a deliberate launch, a 1 km return and F4, and Pause presses with `diag.camera_writes` on; the open-pad outpost (M3) is there too. The M1 draw link is the open item.
-- **Probe keys (TEMPORARY):** `hotkey.state_dump`, `hotkey.look_probe` and `hotkey.sealed_trial` (all unbound by default), `diag.state_dump = off`, `diag.state_dump_frames = 3000` (60 to 6000), and `diag.sealed_trial_radius_m = 80`. **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
+- **Next flight, no engine change:** the Built v4 plan in Measurement: docked, step the trial down the ladder one rung at a time with a census (F6) at each rung, and note the smallest radius where everything still looks complete; then the approach state dump (F3, `diag.state_dump_frames = 6000`) and the look probe at the concourse bay windows. The Built v3 and v2 plans still stand for the rest (the open-pad outpost, M3, is in v2). The M1 draw link is the open item.
+- **Probe keys (TEMPORARY):** `hotkey.state_dump`, `hotkey.look_probe`, `hotkey.sealed_trial`, `hotkey.sealed_trial_smaller` and `hotkey.sealed_trial_larger` (all unbound by default), `diag.state_dump = off`, `diag.state_dump_frames = 3000` (60 to 6000; 6000 for the approach dump), and `diag.sealed_trial_radius_m = 80`. **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
 
 ## Proven
 
@@ -152,6 +152,44 @@ Limits: each tested draw costs one extra draw for that frame (a hitch). The cent
 1. Docked in the hangar, bright phase: press `hotkey.look_probe` once. The log shows `look probe: collecting frame N`, `frame N+1 collected`, the summary line and the CSV. Hypothesis L1: the hull's records are on the ray while docked, nearest first. Refuted if no large record is on the ray while the hull fills the view. Hypothesis L2: the covering draws include the hull's draws, identified by their VS and PS hashes against the shadow gate CSV's candidates. Refuted if none of the covering draws matches those hashes.
 2. Same place, dark phase: press `hotkey.sealed_trial`. The log shows `sealed trial: on at frame N (radius 80.0 m; camera (...))`, then a `sealed trial: window` line within 10 s. Hypothesis S1: the hangar stays on screen with the trial on, because the hull's records contain the camera or meet the sphere. Refuted if the hangar disappears. Hypothesis S2: the far station records and their sun-pair draws are gone, so `sun_pairs_skipped` and `culled` are non-zero. Refuted if `sun_pairs_skipped` stays 0 or `faults` is non-zero. Press again to turn it off: `sealed trial: off at frame N`.
 3. F3 (`hotkey.state_dump`) as in step 2 of the v2 plan. Read `loc_docked` on the rows around each dock and undock (it now comes from the scanner; it should follow the journal's Docked lines), and the `AAB8.key3C0=` text: it should change when the pad or the doors move. Refuted if it never changes while the pad moves.
+
+### Flight 7: the sealed trial at 80 m, docked in the hangar, 2026-10-11
+
+Log `edvr_gfx_20261011_150437.log`, build v0.19.1-57-g59f1d160 (`claude/hangar-test-4`: the v3 commit `06571406` plus the camera rule). Sean: at 80 m nothing was missing; the hangar looked good, just darker, as expected; the sun bleed was gone. The window: culled about 1.8M per 10 s, kept about 54k, the rule about 0.16 ms a frame, faults 0. Census off, then on: draws 5372 to 3940, triangles 5.34M to 4.74M, zero-sample draws 78% to 70.5%.
+
+The flight shows that the rule keeps the hangar at 80 m and that the far records, and the sun-pair draws they feed, go with it. It does not show how far the radius can come down before something visible is lost. That is the next flight.
+
+### Built v4, 2026-10-11 (branch `claude/hangar-test-5`; full build green; not installed, not flown)
+
+**The radius steps.** `hotkey.sealed_trial_smaller` and `hotkey.sealed_trial_larger` (unbound by default) step the trial's radius one rung while the trial is on, through 80, 60, 40, 30, 20, 15 and 10 m. A step closes the window of the old radius first, so each rung has its own line. Each change is logged as `sealed trial: radius -> R m at frame N`. A press at an end of the ladder changes nothing and says so (the smallest step is 10 m, the largest 80 m). With the trial off, the keys log a refusal. A starting radius that is off the ladder steps onto it: 50 m smaller gives 40 m, larger gives 60 m.
+
+**The windows.** One line every 5 s while the trial is on (was 10 s). Every window line carries `radius_m`.
+
+Nothing else changed: the rule, the sun skip, the store hook and the camera rule. The camera chooser is untouched. `tools\sealed_trial_test` checks the ladder, a step down from every rung and up from every rung, the clamps at 80 m and 10 m, the walks past both ends, the off-ladder starts, the radius parse clamp at 1 and 5000 m, and the lines (46 checks).
+
+**The flight plan (v4).**
+1. Docked in the hangar, bright phase. The start radius is the default, 80 m. Press `hotkey.sealed_trial` to turn the trial on. Look around the hangar: the ceiling, the walls, the lift, the ship, the props. Press F6 (`hotkey.occlusion_census`) for a census at this rung.
+2. Press `hotkey.sealed_trial_smaller` to step to 60 m. The 80 m window closes on that press. Wait for the rung's first window line, look around again, and press F6. Repeat at 40, 30, 20, 15 and 10 m.
+3. At each rung, record in the table below whether everything still looks complete, and what went missing if it does not. The answer is the smallest radius where everything still looks complete.
+4. Separate flight, approach: set `diag.state_dump_frames = 6000` (the cap). Press F3 (`hotkey.state_dump`) about 30 s before touchdown. Read `loc_docked` on the rows around the dock, and the `AAB8.key3C0=` text across the pad and door movement.
+5. Separate stop, concourse: stand in the concourse facing a bay window and press `hotkey.look_probe`. Read the record rows on the ray (is the window's pane among them?) and the covering draws (what paints the centre of the window).
+
+**Hypotheses and what would refute them.**
+- R1: the hangar's own geometry (the ship, the props, the lift) stays complete down to some rung, because its records contain the camera or meet the sphere. Refuted if something inside the hangar goes missing at a rung above which its record should still be kept. That record is then outside the sphere, and the look probe can name it.
+- R2: draws and triangles fall at each smaller rung without a visible loss. Refuted if the census does not fall; the rule is then not culling the far records, and the window's `culled` count says whether it runs at all.
+- S1 (approach): the `AAB8.key3C0=` text changes when the pad lowers. Refuted if it never changes while the pad moves.
+
+**Rung table (fill in on the flight).**
+
+| rung (m) | census (draws, triangles, zero-sample %) | complete? | what went missing |
+|---|---|---|---|
+| 80 (flight 7, census on) | 3940, 4.74M, 70.5% | yes | nothing |
+| 60 | | | |
+| 40 | | | |
+| 30 | | | |
+| 20 | | | |
+| 15 | | | |
+| 10 | | | |
 
 ## Open items
 

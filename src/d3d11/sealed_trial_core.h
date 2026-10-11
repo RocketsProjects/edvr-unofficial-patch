@@ -1,7 +1,8 @@
 #pragma once
 // The sealed-hangar trial's pure half (sealed_trial.cpp; TEMPORARY, the manual trial of docs/concourse-culling-2026-10-11.md).
-// No Windows, no engine memory: the sphere rule that decides which records the store keeps, the radius clamp, and the text
-// of the toggle line and the 10-second line. The rig tools\sealed_trial_test compiles it alone.
+// No Windows, no engine memory: the sphere rule that decides which records the store keeps, the radius clamp, the radius ladder
+// that hotkey.sealed_trial_smaller and hotkey.sealed_trial_larger step through, and the text of the lines. The rig
+// tools\sealed_trial_test compiles it alone.
 //
 // The rule, applied in the admission store (FUN_144312040) to each record it writes:
 //   keep when the record's sphere CONTAINS the camera (the hull, the hangar) or INTERSECTS the sphere of radius R around
@@ -18,7 +19,11 @@ namespace edvr::sealed {
 constexpr float kDefaultRadiusM = 80.0f;     // diag.sealed_trial_radius_m
 constexpr float kMinRadiusM = 1.0f;
 constexpr float kMaxRadiusM = 5000.0f;
-constexpr uint64_t kWindowMs = 10000;        // the statistics line's period
+constexpr uint64_t kWindowMs = 5000;         // the statistics line's period while the trial is on (every 5 s, so a radius step has its own line)
+
+// The radius ladder, largest first. hotkey.sealed_trial_smaller and hotkey.sealed_trial_larger walk it one rung at a time.
+constexpr uint32_t kStepCount = 7;
+constexpr float kSteps[kStepCount] = {80.0f, 60.0f, 40.0f, 30.0f, 20.0f, 15.0f, 10.0f};
 
 // Parses diag.sealed_trial_radius_m: a number of metres, clamped to [kMinRadiusM, kMaxRadiusM]. Empty or not a number
 // gives the default and returns false, so the caller can say so once.
@@ -70,7 +75,8 @@ struct Window {
     uint64_t faults = 0;          // reads or writes that failed (the record is left as it was)
 };
 
-// "sealed trial: window 10 s culled=.. kept=.. kept_unjudged=.. sun_pairs_skipped=.. eval_ms=.. faults=.. radius_m=..".
+// "sealed trial: window 5 s culled=.. kept=.. kept_unjudged=.. sun_pairs_skipped=.. eval_ms=.. faults=.. radius_m=..". The
+// radius is the one the window ran at (a step closes the window of the old radius first).
 inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM) noexcept {
     return std::snprintf(out, cap,
                          "sealed trial: window %llu s culled=%llu kept=%llu kept_unjudged=%llu sun_pairs_skipped=%llu "
@@ -94,6 +100,48 @@ inline int formatToggle(char* out, size_t cap, bool on, uint32_t frame, float ra
                          "records outside the sphere lose every view; records containing the camera are kept)",
                          frame, static_cast<double>(radiusM), static_cast<double>(camera[0]),
                          static_cast<double>(camera[1]), static_cast<double>(camera[2]));
+}
+
+// One rung from radius r, in direction dir (negative: smaller, positive: larger). Smaller takes the largest rung below r; larger
+// takes the smallest rung above r. With no rung that way (r is at the end of the ladder), r stays: that is the clamp. A radius
+// off the ladder steps onto it (50 m: smaller gives 40 m, larger gives 60 m). *moved says whether the radius changed.
+inline float stepRadius(float r, int dir, bool* moved) noexcept {
+    float out = r;
+    if (dir < 0) {
+        for (uint32_t i = 0; i < kStepCount; ++i) {          // descending: the first rung below r is the largest one
+            if (kSteps[i] < r) {
+                out = kSteps[i];
+                break;
+            }
+        }
+    } else if (dir > 0) {
+        for (uint32_t i = kStepCount; i-- > 0;) {            // ascending: the first rung above r is the smallest one
+            if (kSteps[i] > r) {
+                out = kSteps[i];
+                break;
+            }
+        }
+    }
+    if (moved) *moved = out != r;
+    return out;
+}
+
+// "sealed trial: radius -> R m at frame N" when the radius moved. When it did not, the clamp line names the end of the ladder.
+inline int formatStep(char* out, size_t cap, int dir, bool moved, float radiusM, uint32_t frame) noexcept {
+    if (moved)
+        return std::snprintf(out, cap, "sealed trial: radius -> %.1f m at frame %u", static_cast<double>(radiusM), frame);
+    if (dir < 0)
+        return std::snprintf(out, cap, "sealed trial: radius stays %.1f m at frame %u: the smallest step is %.1f m",
+                             static_cast<double>(radiusM), frame, static_cast<double>(kSteps[kStepCount - 1]));
+    return std::snprintf(out, cap, "sealed trial: radius stays %.1f m at frame %u: the largest step is %.1f m",
+                         static_cast<double>(radiusM), frame, static_cast<double>(kSteps[0]));
+}
+
+// A step key pressed while the trial is off: nothing moves, and the line says so.
+inline int formatStepRefused(char* out, size_t cap, float radiusM, uint32_t frame) noexcept {
+    return std::snprintf(out, cap,
+                         "sealed trial: the radius keys act only while the trial is on (radius %.1f m at frame %u); "
+                         "nothing changed", static_cast<double>(radiusM), frame);
 }
 
 }  // namespace edvr::sealed

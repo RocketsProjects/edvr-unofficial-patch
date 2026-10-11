@@ -291,6 +291,11 @@ struct State {
     // The sealed-hangar trial's key (TEMPORARY; sealed_trial.h). Unbound by default.
     Hotkey sealedTrialKey;
     std::string sealedTrialKeyText;
+    // The radius steps of the sealed-hangar trial (TEMPORARY; sealed_trial.h): one rung smaller or larger while the trial is on.
+    Hotkey sealedTrialSmallerKey;
+    std::string sealedTrialSmallerKeyText;
+    Hotkey sealedTrialLargerKey;
+    std::string sealedTrialLargerKeyText;
     // The look probe's key (TEMPORARY; look_probe.h). Unbound by default.
     Hotkey lookProbeKey;
     std::string lookProbeKeyText;
@@ -1370,6 +1375,11 @@ void tickHotkeys() {
     // The sealed-hangar trial (TEMPORARY; sealed_trial.h): a press turns the trial on or off, from the next frame.
     if (g_state->sealedTrialKey.pressed())
         sealedTrialToggle("hotkey.sealed_trial", static_cast<uint32_t>(g_state->frameCounter));
+    // The radius steps of the sealed-hangar trial (TEMPORARY; sealed_trial.h): one rung while the trial is on; a clamp logs and stays.
+    if (g_state->sealedTrialSmallerKey.pressed())
+        sealedTrialStep(-1, "hotkey.sealed_trial_smaller", static_cast<uint32_t>(g_state->frameCounter));
+    if (g_state->sealedTrialLargerKey.pressed())
+        sealedTrialStep(+1, "hotkey.sealed_trial_larger", static_cast<uint32_t>(g_state->frameCounter));
     // The look probe (TEMPORARY; look_probe.h): a press arms one capture of the next frame.
     if (g_state->lookProbeKey.pressed()) lookProbeRequest("hotkey.look_probe");
     // The two keys above are gated on focus like the others, and said nothing when a press was refused for it.
@@ -2118,6 +2128,15 @@ void configureDiagnosticHotkeys() {
          "hotkey.sealed_trial", "sealed trial",
          "hotkey: sealed_trial is set but bound nothing, so the sealed-hangar trial cannot be toggled by key this session.",
          " Toggles the sealed-hangar trial (temporary probe): records outside the sphere lose their views; the sun pair is skipped."},
+        // TEMPORARY, the sealed-hangar trial's radius steps (sealed_trial.h): one rung smaller or larger while the trial is on.
+        {&s.sealedTrialSmallerKey, &s.sealedTrialSmallerKeyText, Config::get().getString("hotkey.sealed_trial_smaller", ""),
+         "hotkey.sealed_trial_smaller", "sealed trial smaller",
+         "hotkey: sealed_trial_smaller is set but bound nothing, so the trial's radius cannot be stepped smaller by key this session.",
+         " Steps the sealed-hangar trial's radius one rung smaller (80, 60, 40, 30, 20, 15, 10 m) while the trial is on (temporary probe)."},
+        {&s.sealedTrialLargerKey, &s.sealedTrialLargerKeyText, Config::get().getString("hotkey.sealed_trial_larger", ""),
+         "hotkey.sealed_trial_larger", "sealed trial larger",
+         "hotkey: sealed_trial_larger is set but bound nothing, so the trial's radius cannot be stepped larger by key this session.",
+         " Steps the sealed-hangar trial's radius one rung larger (80, 60, 40, 30, 20, 15, 10 m) while the trial is on (temporary probe)."},
         // TEMPORARY, the look probe (look_probe.h): a press arms one capture. Empty is off.
         {&s.lookProbeKey, &s.lookProbeKeyText, Config::get().getString("hotkey.look_probe", ""),
          "hotkey.look_probe", "look probe",

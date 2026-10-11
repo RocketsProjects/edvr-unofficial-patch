@@ -127,6 +127,8 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         // TEMPORARY, the sealed-hangar trial (sealed_trial.h) and the look probe (look_probe.h): their keys and the radius, so the
         // flat profile reads them.
         std::strcmp(key, "hotkey.sealed_trial") == 0 ||
+        std::strcmp(key, "hotkey.sealed_trial_smaller") == 0 ||
+        std::strcmp(key, "hotkey.sealed_trial_larger") == 0 ||
         std::strcmp(key, "diag.sealed_trial_radius_m") == 0 ||
         std::strcmp(key, "hotkey.look_probe") == 0 ||
         std::strcmp(key, "fix.render_sharpness") == 0 ||
