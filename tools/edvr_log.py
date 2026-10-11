@@ -10001,6 +10001,315 @@ def print_cpu_csv(text):
     return 0
 
 
+# ---- the occlusion census (src\d3d11\occlusion_census.cpp, occlusion_census_core.cpp) ---------------------------------
+# Whole frames of the scene's draws, each with an occlusion query. A capture's report names how much of the scene's
+# triangles drew no visible pixel at issue time, the depth states (comparison function, depth write, depth-only pass),
+# the shader pairs and the largest such draws. Every line is "occlusion census: ..." after the log's timestamp.
+_OCC_CFG_RE = re.compile(r"occlusion census: (not armed|diag\.occlusion_census = \S+)")
+_OCC_START_RE = re.compile(r"occlusion census: recording frames 1-(\d+) of the scene's draws \((\w+) target, from (.+)\); "
+                           r"stamp (\w+)\.")
+_OCC_SUMMARY_RE = re.compile(r"occlusion census: frames=(\d+) draws=(\d+) zero_sample_draws=(\d+) \(([\d.]+)%\) "
+                             r"triangles=(\d+) zero_sample_triangles=(\d+) \(([\d.]+)%\) skipped_no_depth=(\d+)")
+_OCC_ACC_RE = re.compile(r"occlusion census: accounting scene_draws=(\d+) measured=(\d+) ready=(\d+) lost=(\d+) "
+                         r"overflow=(\d+) no_query=(\d+) other_target=(\d+) foreign_context=(\d+) whole_frames=(\d+) "
+                         r"dropped_partial_frame=(\d+) dropped_draws=(\d+) pool=(\d+)")
+_OCC_PAIR_RE = re.compile(r"occlusion census: vs=([0-9A-F]{16}) ps=([0-9A-F]{16}) draws=(\d+) zero=(\d+) tris=(\d+) "
+                          r"zero_tris=(\d+) max_tris_single_draw=(\d+) samples_p50=(\d+)")
+_OCC_TOP_RE = re.compile(r"occlusion census: top zero draw rank=(\d+) frame=(\d+) eye=(\S+) vs=([0-9A-F]{16}) "
+                         r"ps=([0-9A-F]{16}) kind=(\S) count=(\d+) instances=(\d+) tris=(\d+) rt=(\d+) dsv=(\d+) "
+                         r"depth=(\S+) func=(\S+) pass=(\S+)")
+_OCC_STATE_RE = re.compile(r"occlusion census: by depth state: ([A-Z_]+)/(write|nowrite)(/depthonly)?: draws=(\d+) "
+                           r"zero=(\d+) tris=(\d+) zero_tris=(\d+)")
+_OCC_LOST_RE = re.compile(r"occlusion census: results lost: (\d+) measured draws")
+_OCC_END_RE = re.compile(r"occlusion census: end rows=(\d+) csv=(\S+)")
+
+
+def _occ_new_capture(m):
+    return {"frames": int(m.group(1)), "target": m.group(2), "trigger": m.group(3), "stamp": m.group(4),
+            "summary": None, "acc": None, "pairs": [], "tops": [], "states": [], "lost": 0, "noDraws": False,
+            "noFrame": False, "dropped": False, "end": None, "done": False}
+
+
+def parse_occlusion_census(text):
+    """The occlusion captures in a graphics log, oldest first, and the configure line ("not armed" or the on mode).
+
+    A capture opens at its "recording frames" line and closes at its "end rows=" line. One still open when the log stops is
+    returned with done False: its queries were never read back, which is what a log cut short looks like.
+    """
+    caps = []
+    cur = None
+    cfg = None
+    for raw in text.splitlines():
+        at = raw.find("occlusion census:")
+        if at < 0:
+            continue
+        line = raw[at:]
+        if cfg is None and cur is None:
+            m = _OCC_CFG_RE.search(line)
+            if m:
+                cfg = m.group(1)
+                continue
+        m = _OCC_START_RE.search(line)
+        if m:
+            if cur is not None:
+                cur["done"] = False
+                caps.append(cur)
+            cur = _occ_new_capture(m)
+            continue
+        if cur is None:
+            continue
+        if "no whole frame fit the query pool" in line:
+            cur["noFrame"] = True
+            continue
+        if "dropped whole" in line:
+            cur["dropped"] = True
+            continue
+        if "armed, but no draw reached the scene target" in line:
+            cur["noDraws"] = True
+            continue
+        m = _OCC_SUMMARY_RE.search(line)
+        if m:
+            g = m.groups()
+            cur["summary"] = {"frames": int(g[0]), "draws": int(g[1]), "zero": int(g[2]), "zeroPct": float(g[3]),
+                              "tris": int(g[4]), "zeroTris": int(g[5]), "zeroTrisPct": float(g[6]),
+                              "noDepth": int(g[7])}
+            continue
+        m = _OCC_ACC_RE.search(line)
+        if m:
+            g = [int(x) for x in m.groups()]
+            cur["acc"] = {"sceneDraws": g[0], "measured": g[1], "ready": g[2], "lost": g[3], "overflow": g[4],
+                          "noQuery": g[5], "otherTarget": g[6], "foreignContext": g[7], "wholeFrames": g[8],
+                          "droppedPartial": g[9], "droppedDraws": g[10], "pool": g[11]}
+            continue
+        m = _OCC_PAIR_RE.search(line)
+        if m:
+            g = m.groups()
+            cur["pairs"].append({"vs": g[0], "ps": g[1], "draws": int(g[2]), "zero": int(g[3]), "tris": int(g[4]),
+                                 "zeroTris": int(g[5]), "maxTris": int(g[6]), "p50": int(g[7])})
+            continue
+        m = _OCC_TOP_RE.search(line)
+        if m:
+            g = m.groups()
+            cur["tops"].append({"rank": int(g[0]), "frame": int(g[1]), "eye": g[2], "vs": g[3], "ps": g[4],
+                                "kind": g[5], "count": int(g[6]), "instances": int(g[7]), "tris": int(g[8]),
+                                "rt": int(g[9]), "dsv": int(g[10]), "depth": g[11], "func": g[12], "pass": g[13]})
+            continue
+        m = _OCC_STATE_RE.search(line)
+        if m:
+            g = m.groups()
+            cur["states"].append({"func": g[0], "write": g[1] == "write", "depthOnly": bool(g[2]),
+                                  "draws": int(g[3]), "zero": int(g[4]), "tris": int(g[5]), "zeroTris": int(g[6])})
+            continue
+        m = _OCC_LOST_RE.search(line)
+        if m:
+            cur["lost"] = int(m.group(1))
+            continue
+        m = _OCC_END_RE.search(line)
+        if m:
+            cur["end"] = {"rows": int(m.group(1)), "csv": m.group(2)}
+            cur["done"] = True
+            caps.append(cur)
+            cur = None
+    if cur is not None:
+        cur["done"] = False
+        caps.append(cur)
+    return caps, cfg
+
+
+def _occ_depth_verdicts(states):
+    """What the depth-state groups say about draw order. A depth pre-pass (write on, colour off) is depthonly; a main pass
+    with EQUAL or GREATER_EQUAL and writes off tests the pre-pass's final depth, so its zeros do not depend on draw order.
+    A LESS pass with writes on is the order-dependent case: a draw is zero only against what was drawn before it."""
+    for st in states:
+        if st["depthOnly"] and st["draws"]:
+            print("  VERDICT: depth pre-pass present: %d depthonly draws (%s, writes %s); a zero here is hidden by an earlier "
+                  "draw of the pass" % (st["draws"], st["func"], "on" if st["write"] else "off"))
+    for st in states:
+        if not st["depthOnly"] and not st["write"] and st["func"] in ("EQUAL", "GREATER_EQUAL") and st["draws"]:
+            print("  VERDICT: main pass %s with writes off: %d draws, %d zero; order-independent against the final depth"
+                  % (st["func"], st["draws"], st["zero"]))
+    for st in states:
+        if not st["depthOnly"] and st["write"] and st["func"] == "LESS" and st["draws"]:
+            print("  VERDICT: %d LESS/write draws: their zeros are order-dependent (hidden only at the moment each was issued)"
+                  % st["draws"])
+
+
+def print_occlusion_census(text):
+    """The occlusion captures, with a VERDICT per capture. Exit 0 complete, 4 when the log stops during one, 3 when it has no
+    capture at all (its configure line, if any, says why)."""
+    caps, cfg = parse_occlusion_census(text)
+    if not caps:
+        if cfg:
+            print("[edvr] occlusion census: %s; no capture in this log. Press hotkey.occlusion_census (or set "
+                  "diag.occlusion_census = on) and read the log again." % cfg)
+        else:
+            print("[edvr] no occlusion census: lines at all: this log predates the instrument, or it is another build")
+        return 3
+    rc = 0
+    for n, c in enumerate(caps, 1):
+        print("occlusion census capture %d: stamp %s, %s target, from %s" % (n, c["stamp"], c["target"], c["trigger"]))
+        s = c["summary"]
+        a = c["acc"]
+        if not c["done"]:
+            print("  VERDICT: the log stops during this capture: its queries were never read back")
+            rc = 4
+        if c["noFrame"]:
+            print("  VERDICT: no whole frame fit the query pool; nothing is measured. The pool is too small for one frame.")
+        elif c["dropped"]:
+            print("  VERDICT: a frame overflowed the pool and was dropped whole; the figures cover the whole frames only")
+        if c["noDraws"] or (s is not None and s["draws"] == 0 and a and a["sceneDraws"] == 0 and not c["dropped"]):
+            print("  VERDICT: armed, but no draw reached the scene target; the scene target test matched nothing")
+        if s is not None:
+            print("  draws=%d zero_sample_draws=%d (%.1f%%) triangles=%d zero_sample_triangles=%d (%.1f%%) "
+                  "skipped_no_depth=%d" % (s["draws"], s["zero"], s["zeroPct"], s["tris"], s["zeroTris"],
+                                           s["zeroTrisPct"], s["noDepth"]))
+            if s["draws"]:
+                print("  VERDICT: %.1f%% of the measured scene triangles drew no visible pixel at their draw"
+                      % s["zeroTrisPct"])
+        if a:
+            print("  accounting: scene_draws=%d measured=%d ready=%d lost=%d overflow=%d no_query=%d other_target=%d "
+                  "foreign_context=%d" % (a["sceneDraws"], a["measured"], a["ready"], a["lost"], a["overflow"],
+                                          a["noQuery"], a["otherTarget"], a["foreignContext"]))
+            print("  whole_frames=%d dropped_partial_frame=%d dropped_draws=%d pool=%d"
+                  % (a["wholeFrames"], a["droppedPartial"], a["droppedDraws"], a["pool"]))
+        if c["lost"]:
+            print("  VERDICT: results lost: %d measured draws never answered; they are left out of the figures" % c["lost"])
+        for st in c["states"]:
+            print("  depth state %s/%s%s: draws=%d zero=%d tris=%d zero_tris=%d"
+                  % (st["func"], "write" if st["write"] else "nowrite", "/depthonly" if st["depthOnly"] else "",
+                     st["draws"], st["zero"], st["tris"], st["zeroTris"]))
+        _occ_depth_verdicts(c["states"])
+        for p in c["pairs"][:10]:
+            print("  pair vs=%s ps=%s draws=%d zero=%d tris=%d zero_tris=%d max_tris=%d samples_p50=%d"
+                  % (p["vs"], p["ps"], p["draws"], p["zero"], p["tris"], p["zeroTris"], p["maxTris"], p["p50"]))
+        for t in c["tops"][:5]:
+            print("  top rank=%d frame=%d %s vs=%s ps=%s kind=%s count=%d instances=%d tris=%d depth=%s func=%s pass=%s"
+                  % (t["rank"], t["frame"], t["eye"], t["vs"], t["ps"], t["kind"], t["count"], t["instances"],
+                     t["tris"], t["depth"], t["func"], t["pass"]))
+        if c["end"]:
+            print("  csv: edvr_logs\\%s (%d rows)" % (c["end"]["csv"], c["end"]["rows"]))
+    return rc
+
+
+def self_test_occlusion_census():
+    ok = True
+    done = (
+        "[10:00:00.001] occlusion census: not armed (diag.occlusion_census = off). Nothing is measured until "
+        "hotkey.occlusion_census is pressed.\n"
+        "[10:01:00.000] occlusion census: capture requested by hotkey.occlusion_census; it starts at the next frame tick "
+        "and records 4 frames.\n"
+        "[10:01:00.050] occlusion census: recording frames 1-4 of the scene's draws (eye target, from "
+        "hotkey.occlusion_census); stamp 20261011_100100.\n"
+        "[10:01:00.900] occlusion census: 1 whole frame(s) recorded; reading the queries back over the following frames.\n"
+        "[10:01:01.000] occlusion census: frames=1 draws=3 zero_sample_draws=1 (33.3%) triangles=6 "
+        "zero_sample_triangles=2 (33.3%) skipped_no_depth=1\n"
+        "[10:01:01.001] occlusion census: accounting scene_draws=4 measured=3 ready=3 lost=0 overflow=0 no_query=0 "
+        "other_target=1 foreign_context=0 whole_frames=1 dropped_partial_frame=0 dropped_draws=0 pool=32768\n"
+        "[10:01:01.002] occlusion census: by depth state: LESS/write: draws=3 zero=1 tris=6 zero_tris=2\n"
+        "[10:01:01.003] occlusion census: vs=0000000000000003 ps=0000000000000002 draws=1 zero=1 tris=2 zero_tris=2 "
+        "max_tris_single_draw=2 samples_p50=0\n"
+        "[10:01:01.004] occlusion census: top zero draw rank=1 frame=1 eye=eye vs=0000000000000003 "
+        "ps=0000000000000002 kind=D count=6 instances=1 tris=2 rt=1 dsv=2 depth=test-write func=LESS pass=colour\n"
+        "[10:01:01.005] occlusion census: end rows=4 csv=occlusion_census_20261011_100100.csv\n"
+    )
+    caps, cfg = parse_occlusion_census(done)
+    if cfg is None or "not armed" not in cfg or len(caps) != 1:
+        print("occlusion census: a complete capture did not parse: cfg=%r caps=%d" % (cfg, len(caps)))
+        return False
+    c = caps[0]
+    if (not c["done"] or c["summary"]["draws"] != 3 or c["summary"]["zero"] != 1 or c["summary"]["noDepth"] != 1
+            or c["acc"]["otherTarget"] != 1 or c["acc"]["wholeFrames"] != 1 or c["acc"]["pool"] != 32768
+            or len(c["pairs"]) != 1 or c["pairs"][0]["vs"] != "0000000000000003"
+            or c["tops"][0]["depth"] != "test-write" or c["tops"][0]["func"] != "LESS"
+            or c["tops"][0]["pass"] != "colour" or c["tops"][0]["tris"] != 2 or c["end"]["rows"] != 4
+            or len(c["states"]) != 1 or c["states"][0]["func"] != "LESS" or not c["states"][0]["write"]
+            or c["states"][0]["depthOnly"] or c["states"][0]["zeroTris"] != 2):
+        print("occlusion census: the summary, accounting, state, pair or top lines did not parse: %r" % (c,))
+        ok = False
+    if print_occlusion_census(done) != 0:
+        print("occlusion census: a complete capture should exit 0")
+        ok = False
+
+    # A pre-pass and an order-independent main pass: the state groups parse and print without error.
+    prepass = (
+        "[10:02:00.050] occlusion census: recording frames 1-4 of the scene's draws (eye target, from "
+        "hotkey.occlusion_census); stamp 20261011_100200.\n"
+        "[10:02:01.000] occlusion census: frames=4 draws=6 zero_sample_draws=3 (50.0%) triangles=12 "
+        "zero_sample_triangles=6 (50.0%) skipped_no_depth=0\n"
+        "[10:02:01.001] occlusion census: accounting scene_draws=6 measured=6 ready=6 lost=0 overflow=0 no_query=0 "
+        "other_target=0 foreign_context=0 whole_frames=4 dropped_partial_frame=0 dropped_draws=0 pool=32768\n"
+        "[10:02:01.002] occlusion census: by depth state: LESS/write/depthonly: draws=2 zero=2 tris=4 zero_tris=4\n"
+        "[10:02:01.003] occlusion census: by depth state: EQUAL/nowrite: draws=4 zero=1 tris=8 zero_tris=2\n"
+        "[10:02:01.004] occlusion census: end rows=6 csv=occlusion_census_20261011_100200.csv\n"
+    )
+    caps, _ = parse_occlusion_census(prepass)
+    st = caps[0]["states"] if caps else []
+    if (len(st) != 2 or not st[0]["depthOnly"] or st[0]["zero"] != 2 or st[1]["func"] != "EQUAL" or st[1]["write"]
+            or print_occlusion_census(prepass) != 0):
+        print("occlusion census: the depth-state lines did not parse: %r" % (st,))
+        ok = False
+
+    # A capture that dropped a frame: the frames kept are the window, and the drop is named.
+    dropped = (
+        "[10:07:00.050] occlusion census: recording frames 1-4 of the scene's draws (eye target, from "
+        "hotkey.occlusion_census); stamp 20261011_100700.\n"
+        "[10:07:00.900] occlusion census: frame 2 overflowed the query pool of 4 and is dropped whole (3 draws); "
+        "1 whole frame(s) kept.\n"
+        "[10:07:00.901] occlusion census: 1 whole frame(s) recorded; reading the queries back over the following frames.\n"
+        "[10:07:01.000] occlusion census: frame 2 exceeded the query pool of 4 and was dropped whole (3 draws); "
+        "1 whole frame(s) are kept above.\n"
+        "[10:07:01.001] occlusion census: frames=1 draws=2 zero_sample_draws=0 (0.0%) triangles=4 "
+        "zero_sample_triangles=0 (0.0%) skipped_no_depth=0\n"
+        "[10:07:01.002] occlusion census: accounting scene_draws=2 measured=2 ready=2 lost=0 overflow=0 no_query=0 "
+        "other_target=0 foreign_context=0 whole_frames=1 dropped_partial_frame=1 dropped_draws=3 pool=4\n"
+        "[10:07:01.003] occlusion census: end rows=2 csv=occlusion_census_20261011_100700.csv\n"
+    )
+    caps, _ = parse_occlusion_census(dropped)
+    if (len(caps) != 1 or not caps[0]["dropped"] or caps[0]["acc"]["wholeFrames"] != 1
+            or caps[0]["acc"]["droppedDraws"] != 3 or caps[0]["acc"]["pool"] != 4 or caps[0]["noFrame"]):
+        print("occlusion census: the dropped-frame accounting did not parse: %r" % (caps,))
+        ok = False
+
+    # A log cut short during a capture: the capture is open, and the exit says so.
+    cut = (
+        "[10:05:00.000] occlusion census: capture requested by hotkey.occlusion_census; it starts at the next frame tick "
+        "and records 4 frames.\n"
+        "[10:05:00.050] occlusion census: recording frames 1-4 of the scene's draws (flat target, from "
+        "hotkey.occlusion_census); stamp 20261011_100500.\n"
+    )
+    caps, _ = parse_occlusion_census(cut)
+    if len(caps) != 1 or caps[0]["done"] or caps[0]["target"] != "flat" or print_occlusion_census(cut) != 4:
+        print("occlusion census: a capture the log stops during did not read as unfinished (exit 4)")
+        ok = False
+
+    # Armed, with no scene draw: the trace names it, and the lost-results line is read.
+    empty = (
+        "[10:06:00.050] occlusion census: recording frames 1-4 of the scene's draws (eye target, from "
+        "hotkey.occlusion_census); stamp 20261011_100600.\n"
+        "[10:06:00.900] occlusion census: armed, but no draw reached the scene target in these frames (other_target=9 "
+        "foreign_context=0): the scene target test matched nothing, or nothing was drawn there.\n"
+        "[10:06:01.000] occlusion census: frames=0 draws=0 zero_sample_draws=0 (0.0%) triangles=0 "
+        "zero_sample_triangles=0 (0.0%) skipped_no_depth=0\n"
+        "[10:06:01.001] occlusion census: results lost: 2 measured draws never returned a result; they are left out of "
+        "every figure here.\n"
+        "[10:06:01.002] occlusion census: end rows=0 csv=occlusion_census_20261011_100600.csv\n"
+    )
+    caps, _ = parse_occlusion_census(empty)
+    if (len(caps) != 1 or not caps[0]["noDraws"] or caps[0]["lost"] != 2 or not caps[0]["done"]):
+        print("occlusion census: the no-draws or lost-results trace did not parse: %r" % (caps,))
+        ok = False
+
+    # Never armed: no capture, and the configure line says so.
+    caps, cfg = parse_occlusion_census("[10:00:00.001] occlusion census: not armed (diag.occlusion_census = off).\n")
+    if caps or cfg != "not armed":
+        print("occlusion census: a never-armed log did not read as never armed")
+        ok = False
+    if print_occlusion_census("[10:00:00.001] occlusion census: not armed (diag.occlusion_census = off).\n") != 3:
+        print("occlusion census: a never-armed log should exit 3")
+        ok = False
+    return ok
+
+
 def self_test_cpu_profile():
     import contextlib
     import io
@@ -10170,6 +10479,11 @@ def main(argv=None):
                          "periodic lays the `periodic work:` timing against "
                          "the flight's long frames (graphics log plus its "
                          "runtime log)")
+    ap.add_argument("--occlusion-census", action="store_true",
+                    help="the occlusion census (occlusion_census.cpp, temporary diagnostic keys): every `occlusion census:` "
+                         "capture in the log, with a VERDICT per capture: the share of the scene's triangles that drew no "
+                         "visible pixel, the shader pairs and the largest draws. Exit 0 complete, 4 when the log stops during "
+                         "one, 3 when it has no capture (its configure line says why)")
     ap.add_argument("--cpu-profile", nargs="?", const="", default=None, metavar="CSV",
                     help="the render-thread CPU profile (cpu_profile.h, temporary diagnostic keys): with no CSV, the latest "
                          "`cpu profile:` capture in the log (--file or --dir or --target), verbatim, with a VERDICT line; "
@@ -10378,6 +10692,9 @@ def main(argv=None):
 
     if args.version:
         return 0
+
+    if args.occlusion_census:
+        return print_occlusion_census(text)
 
     if args.cpu_profile is not None:
         return print_cpu_profile(text)
@@ -10837,6 +11154,8 @@ def self_test():
     if not self_test_periodic():
         ok = False
     if not self_test_cpu_profile():
+        ok = False
+    if not self_test_occlusion_census():
         ok = False
     if not self_test_camera_census():
         ok = False

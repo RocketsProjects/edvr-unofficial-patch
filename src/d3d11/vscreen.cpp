@@ -69,6 +69,7 @@
 #include "vscreen_footprint.h"   // fix.vscreen_res_width = auto's footprint instrument (the on-foot screen's width in the eye)
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "flat_runtime.h"
+#include "occlusion_census.h"   // the draw wrappers below, and their install (occlusionCensusInstallWrappers)
 #include "flat_temporal.h"   // bounded, flat-profile-only scene discovery
 #include "../common/runtime_profile.h"
 #include "intro_panel.h"
@@ -4662,6 +4663,93 @@ struct DrawClock {
     }
 };
 
+// ---- the occlusion census's draw wrappers (occlusion_census.h) ----------------------------------------------------
+// Installed over the real draw pointers only while a capture records (occlusionCensusInstallWrappers, below), so an unarmed
+// session keeps the game's trampolines in those slots and pays nothing. Each wrapper brackets the real call with the
+// census's begin and end and forwards the call unchanged. Off-capture both calls return at their first test.
+struct OccReal {
+    PFN_Draw draw = nullptr;
+    PFN_DrawIndexed drawIndexed = nullptr;
+    PFN_DrawInstanced drawInstanced = nullptr;
+    PFN_DrawIndexedInstanced drawIndexedInstanced = nullptr;
+    PFN_DrawIndirectArgs drawInstancedIndirect = nullptr;
+    PFN_DrawIndirectArgs drawIndexedInstancedIndirect = nullptr;
+    PFN_DrawAuto drawAuto = nullptr;
+};
+OccReal g_occReal;
+
+// Does the bound RTV0 land on the scene's colour target? VR: the eye texture, the draw path's own answer for this binding
+// (rtv0Eye). Flat: a 2D target the size the flat runtime's scene sizes name.
+bool occlusionSceneNow() {
+    State* s = g_state;
+    if (!s) return false;
+    // The scene's size: the flat runtime's render size in flat, the eye texture's in VR.
+    uint32_t w = 0, h = 0;
+    if (runtimeFlatProfile()) {
+        uint32_t ow = 0, oh = 0;
+        if (!flatRuntimeSceneSizes(&w, &h, &ow, &oh)) return false;
+    } else {
+        w = s->eyeW;
+        h = s->eyeH;
+    }
+    ResourceInfo info;
+    void* rtv = bindingGet(BindSlot::Rtv0);
+    if (!rtv) {
+        // A depth-only pass (no colour target): on the scene when its depth view is the scene's size. The census tags it
+        // depthonly, so a pre-pass is identifiable in the report.
+        void* dsv = bindingGet(BindSlot::Dsv0);
+        return dsv && w && bindingResolve(dsv, &info) && info.isTexture2D && info.a == w && info.b == h;
+    }
+    if (runtimeFlatProfile()) return w && bindingResolve(rtv, &info) && info.isTexture2D && info.a == w && info.b == h;
+    return s->rtv0Eye;
+}
+
+void STDMETHODCALLTYPE occDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
+    occlusion::Ticket t;
+    occlusionCensusBegin(self, 'D', count, 1, occlusionSceneNow(), &t);
+    g_occReal.draw(self, count, start);
+    occlusionCensusEnd(self, t);
+}
+void STDMETHODCALLTYPE occDrawIndexed(ID3D11DeviceContext* self, UINT count, UINT startIndex, INT baseVertex) {
+    occlusion::Ticket t;
+    occlusionCensusBegin(self, 'I', count, 1, occlusionSceneNow(), &t);
+    g_occReal.drawIndexed(self, count, startIndex, baseVertex);
+    occlusionCensusEnd(self, t);
+}
+void STDMETHODCALLTYPE occDrawInstanced(ID3D11DeviceContext* self, UINT perInstance, UINT instances, UINT startVertex,
+                                        UINT startInstance) {
+    occlusion::Ticket t;
+    occlusionCensusBegin(self, 'N', perInstance, instances, occlusionSceneNow(), &t);
+    g_occReal.drawInstanced(self, perInstance, instances, startVertex, startInstance);
+    occlusionCensusEnd(self, t);
+}
+void STDMETHODCALLTYPE occDrawIndexedInstanced(ID3D11DeviceContext* self, UINT perInstance, UINT instances,
+                                               UINT startIndex, INT baseVertex, UINT startInstance) {
+    occlusion::Ticket t;
+    occlusionCensusBegin(self, 'X', perInstance, instances, occlusionSceneNow(), &t);
+    g_occReal.drawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance);
+    occlusionCensusEnd(self, t);
+}
+// The GPU-driven draws name no count on the CPU: they are measured and counted, and their triangles are reported as 0.
+void STDMETHODCALLTYPE occDrawInstancedIndirect(ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
+    occlusion::Ticket t;
+    occlusionCensusBegin(self, 'Y', 0, 1, occlusionSceneNow(), &t);
+    g_occReal.drawInstancedIndirect(self, args, off);
+    occlusionCensusEnd(self, t);
+}
+void STDMETHODCALLTYPE occDrawIndexedInstancedIndirect(ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
+    occlusion::Ticket t;
+    occlusionCensusBegin(self, 'Z', 0, 1, occlusionSceneNow(), &t);
+    g_occReal.drawIndexedInstancedIndirect(self, args, off);
+    occlusionCensusEnd(self, t);
+}
+void STDMETHODCALLTYPE occDrawAuto(ID3D11DeviceContext* self) {
+    occlusion::Ticket t;
+    occlusionCensusBegin(self, 'A', 0, 1, occlusionSceneNow(), &t);
+    g_occReal.drawAuto(self);
+    occlusionCensusEnd(self, t);
+}
+
 // The flat profile's draws never reach beginPanelOverride: its thunks take the flat branch first, and the census's per-draw record
 // lives there. So the flat branch records the draw itself, before FlatRuntimeDrawScope substitutes any binding. Every flat draw is
 // recorded as an offscreen (DCO) line: flat has no eye textures to count, and the census arms its offscreen record for flat.
@@ -5011,6 +5099,39 @@ uint32_t readDistanceIndex(Config& cfg) {
 }
 
 }  // namespace
+
+// The occlusion census's install (occlusion_census.h): the real draw pointers point at the wrappers above only while a
+// capture records. Off, they are the game's own trampolines again.
+void occlusionCensusInstallWrappers(bool on) {
+    State* s = g_state;
+    if (!s) return;
+    if (on) {
+        g_occReal.draw = s->realDraw;
+        g_occReal.drawIndexed = s->realDrawIndexed;
+        g_occReal.drawInstanced = s->realDrawInstanced;
+        g_occReal.drawIndexedInstanced = s->realDrawIndexedInstanced;
+        g_occReal.drawInstancedIndirect = s->realDrawInstancedIndirect;
+        g_occReal.drawIndexedInstancedIndirect = s->realDrawIndexedInstancedIndirect;
+        g_occReal.drawAuto = s->realDrawAuto;
+        s->realDraw = &occDraw;
+        s->realDrawIndexed = &occDrawIndexed;
+        s->realDrawInstanced = &occDrawInstanced;
+        s->realDrawIndexedInstanced = &occDrawIndexedInstanced;
+        s->realDrawInstancedIndirect = &occDrawInstancedIndirect;
+        s->realDrawIndexedInstancedIndirect = &occDrawIndexedInstancedIndirect;
+        s->realDrawAuto = &occDrawAuto;
+        return;
+    }
+    // Only put back what is still ours: a hook that re-pointed a slot during the capture keeps its new value.
+    if (s->realDraw == &occDraw) s->realDraw = g_occReal.draw;
+    if (s->realDrawIndexed == &occDrawIndexed) s->realDrawIndexed = g_occReal.drawIndexed;
+    if (s->realDrawInstanced == &occDrawInstanced) s->realDrawInstanced = g_occReal.drawInstanced;
+    if (s->realDrawIndexedInstanced == &occDrawIndexedInstanced) s->realDrawIndexedInstanced = g_occReal.drawIndexedInstanced;
+    if (s->realDrawInstancedIndirect == &occDrawInstancedIndirect) s->realDrawInstancedIndirect = g_occReal.drawInstancedIndirect;
+    if (s->realDrawIndexedInstancedIndirect == &occDrawIndexedInstancedIndirect)
+        s->realDrawIndexedInstancedIndirect = g_occReal.drawIndexedInstancedIndirect;
+    if (s->realDrawAuto == &occDrawAuto) s->realDrawAuto = g_occReal.drawAuto;
+}
 
 bool vScreenPanelSize(uint32_t* width, uint32_t* height) {
     const State* s = g_state;

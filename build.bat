@@ -511,7 +511,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
-    "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" "src\d3d11\cpu_profile.cpp" ^
+    "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" "src\d3d11\cpu_profile.cpp" "src\d3d11\occlusion_census.cpp" "src\d3d11\occlusion_census_core.cpp" ^
     "src\d3d11\stall_watch.cpp" "src\d3d11\vram_tick.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
@@ -2212,6 +2212,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: GPU census test build failed & exit /b 1 )
 "%OBJ%\gpucensus\gpu_census_test.exe" --dry-run || exit /b 1
 "%OBJ%\gpucensus\gpu_census_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_occlusion_census_test
+REM The occlusion census's pure half (src\d3d11\occlusion_census_core.cpp): a real WARP device, three quads that must come out as
+REM one zero-sample draw, the depth-off and other-target trace counts, and the report and CSV formats edvr_log.py reads. The glue
+REM (occlusion_census.cpp) needs the whole DLL, so the rig does not link it.
+if not exist "%OBJ%\occlusioncensus" mkdir "%OBJ%\occlusioncensus"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\occlusioncensus\\" /Fe"%OBJ%\occlusioncensus\occlusion_census_test.exe" ^
+    "tools\occlusion_census_test\occlusion_census_test.cpp" "src\d3d11\occlusion_census_core.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: occlusion census rig build failed & exit /b 1 )
+"%OBJ%\occlusioncensus\occlusion_census_test.exe" --dry-run || exit /b 1
+"%OBJ%\occlusioncensus\occlusion_census_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_vr_world_mips_test
