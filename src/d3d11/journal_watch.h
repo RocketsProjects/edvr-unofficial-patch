@@ -128,6 +128,8 @@ uint32_t journalEmbarks();
 // Journal Docked and Undocked lines counted so far (the state dump's clock; zero in flat, as the two above).
 uint32_t journalDocks();
 uint32_t journalUndocks();
+// The Docked flag of the last Location line the watcher read (returns false when none has been read, or in flat).
+bool journalLocationDocked(bool* docked);
 
 // The live on-foot state from Status.json, updated by the game about once a
 // second. 6bb measured the flags HOLDING through the entire external-camera

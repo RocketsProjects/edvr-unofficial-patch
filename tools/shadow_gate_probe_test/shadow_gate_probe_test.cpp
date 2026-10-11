@@ -1,9 +1,7 @@
-// Test rig for the shadow gate probe's pure half (src/d3d11/shadow_gate_core.h):
-// the pinned bytes (the true copies accepted, a one-byte change refused), the
-// builder's centre and the window's centre and value against hand-worked cases,
-// the window's compare, the depth object's view match, the candidate choice, the
-// first failing gate in engine order, and the CSV and line formats (the header and
-// each row carry the same number of fields). No DLL and no game.
+// Test rig for the shadow gate probe's pure half (src/d3d11/shadow_gate_core.h), v2: the pinned bytes (the true copies
+// accepted, a one-byte change refused), the builder's centre against a hand-worked case, the view match, the candidate
+// choice, the first failing gate in engine order, the 23-column CSV, the header, candidate, callee-check, cadence,
+// sun-view and call lines. No DLL and no game.
 #include "../../src/d3d11/shadow_gate_core.h"
 
 #include <cmath>
@@ -70,8 +68,9 @@ int main(int argc, char** argv) {
     check(sg::kExpectedTimestamp == 1788384820u && sg::kExpectedImageSize == 104894464u, "build 332841 identity");
     check(sg::kCallbackReturnRva == sg::kCallbackSiteRva + 5, "the builder's callback returns after its 5-byte call");
     check(sg::kCalleeReturnRva == sg::kCalleeSiteRva + 5, "the callback's callee returns after its 5-byte call");
+    check(sg::kCadenceFrames == 600, "the cadence is 600 frames");
 
-    // --- The builder's centre: the hand-worked case q=(0,0,0,1), t=(1,2,3,0), c=(4,5,6,7).
+    // --- The builder's centre: the hand-worked case q=(0,0,0,1), t=(1,2,3,0), c=(4,5,6,7) gives (5,7,9,7).
     {
         const float q[4] = {0, 0, 0, 1}, t[4] = {1, 2, 3, 0}, c[4] = {4, 5, 6, 7};
         float out[4] = {};
@@ -79,32 +78,7 @@ int main(int argc, char** argv) {
         check(near(out[0], 5) && near(out[1], 7) && near(out[2], 9) && near(out[3], 7), "builder centre, identity pose");
     }
 
-    // --- The window's centre: Q = identity rotation with translation (10,20,30);
-    // M = identity with translation (1,2,3); local = (1,2,3) -> P = (11,22,33), C = (12,24,36).
-    {
-        float Q[15] = {}, M[15] = {};
-        Q[0] = 1; Q[5] = 1; Q[10] = 1; Q[12] = 10; Q[13] = 20; Q[14] = 30;
-        M[0] = 1; M[5] = 1; M[10] = 1; M[12] = 1; M[13] = 2; M[14] = 3;
-        const float local[3] = {1, 2, 3};
-        const sg::Vec3 c = sg::windowCentre(Q, M, local);
-        check(near(c.x, 12) && near(c.y, 24) && near(c.z, 36), "window centre, translated frames");
-    }
-
-    // --- The window's value: C = (3,4,0), origin 0, r = 0.1, k1 = 2, k2 = 0.5, lod 1: d = 5, v = 0.7.
-    {
-        const sg::Vec3 C{3, 4, 0};
-        const float origin[3] = {0, 0, 0};
-        float d = 0;
-        const float v = sg::windowValue(C, origin, 0.1f, 2.0f, 0.5f, 1.0f, &d);
-        check(near(d, 5.0f) && near(v, 0.7f, 1e-4f), "window value and distance");
-        check(sg::windowPasses(0.8f, v), "window passes when T0 >= v");
-        check(!sg::windowPasses(0.6f, v), "window refuses when T0 < v");
-        check(sg::windowPasses(0.7f, v), "window passes at equality (T0 == v)");
-        const float v2 = sg::windowValue(C, origin, 0.1f, 2.0f, 0.5f, 2.0f, nullptr);
-        check(near(v2, 0.9f, 1e-4f), "window value scales with the LOD scale");
-    }
-
-    // --- The depth object's view match: views at ctx+0x40 + k*0x6A0.
+    // --- The view match: views at ctx+0x40 + k*0x6A0.
     {
         const uintptr_t ctx = 0x100000;
         check(sg::viewIndexOf(ctx + 0x40 + 3 * 0x6A0, ctx, 8) == 3, "a view object matches its index");
@@ -134,7 +108,7 @@ int main(int argc, char** argv) {
         check(ties[0].record == 1, "a tie keeps the earlier candidate");
     }
 
-    // --- The first failing gate, in engine order.
+    // --- The first failing gate, in engine order (G2 is the engine's window bit).
     {
         sg::GateInput in;
         in.g1 = false;
@@ -163,7 +137,7 @@ int main(int argc, char** argv) {
               "gate names");
     }
 
-    // --- The CSV: the header and each row carry the same number of fields.
+    // --- The CSV: 23 columns, the header and each row agree; the replica columns are gone.
     {
         sg::CsvRow r;
         r.candidate = 3;
@@ -180,9 +154,6 @@ int main(int argc, char** argv) {
         r.viewBits = 0x20;
         r.g1 = 1;
         r.windowBit = 0;
-        r.windowV = 0.7f;
-        r.windowT0 = 0.6f;
-        r.windowRepl = 0;
         r.recBit = 0;
         r.builderReached = 1;
         r.builderRow = 42;
@@ -194,14 +165,17 @@ int main(int argc, char** argv) {
         char line[512];
         const int n = sg::formatCsvRow(line, sizeof(line), 77, r);
         check(n > 0, "a CSV row formats");
-        check(countFields(sg::csvHeader()) == countFields(line), "the CSV row has the header's field count");
-        check(std::strstr(line, "0x1234") != nullptr && std::strstr(line, ",G2") != nullptr &&
-                  std::strstr(line, "sun") != nullptr,
-              "the CSV row carries the record, the view role and the first failing gate");
-        check(std::strncmp(line, "77,3,contains,", 14) == 0, "the CSV row starts with frame and candidate");
+        const std::string row = line;
+        check(countFields(sg::csvHeader()) == 23, "the header has 23 columns");
+        check(countFields(row) == 23, "the CSV row has 23 fields");
+        check(row.rfind("77,3,contains,0x1234,0x5678,0x1000,child,1500.50,1200.25,1,5,sun,0x20,1,0,0,1,42,1,-1,1,-1,G2", 0) == 0,
+              "the CSV row's fields are in header order");
+        check(std::string(sg::csvHeader()).find("window_v") == std::string::npos &&
+                  std::string(sg::csvHeader()).find("window_repl") == std::string::npos,
+              "the replica columns are gone");
     }
 
-    // --- The header line, and a candidate line.
+    // --- The header, the candidate line, and the callee check.
     {
         sg::HeaderInfo h;
         h.frame = 77;
@@ -212,20 +186,14 @@ int main(int argc, char** argv) {
         h.camera[0] = 1.5f;
         h.camera[1] = -2.0f;
         h.camera[2] = 3.25f;
-        h.sunList = "";
-        h.depthObjects = 2;
-        h.depthMatched = 0;
         h.csvName = "shadow_gate_20261011_120000.csv";
         char line[640];
         sg::formatHeaderLine(line, sizeof(line), h);
         const std::string s = line;
         check(s.rfind("shadow gate probe: frame=77", 0) == 0, "the header starts with the frame");
-        check(s.find("sun=none") != std::string::npos, "an empty sun list says none");
-        check(s.find("depth=0/2") != std::string::npos, "the depth match count is printed");
         check(s.find("csv=shadow_gate_20261011_120000.csv") != std::string::npos, "the header names the CSV");
-        h.sunList = "3,5";
-        sg::formatHeaderLine(line, sizeof(line), h);
-        check(std::string(line).find("sun=3,5") != std::string::npos, "the sun list is printed");
+        check(s.find("window_mismatch") == std::string::npos && s.find("sun=") == std::string::npos,
+              "the header carries no replica and no sun list (the cadence reports those)");
 
         sg::CandidateLine c;
         c.index = 0;
@@ -242,6 +210,52 @@ int main(int argc, char** argv) {
         check(cs.find("rec=0x2000") != std::string::npos && cs.find("sun[v3=G3 v5=admit]") != std::string::npos &&
                   cs.find("main[v0=admit]") != std::string::npos,
               "a candidate line carries the record and both summaries");
+
+        char check1[200];
+        sg::formatCalleeCheck(check1, sizeof(check1), 0, 0, 0, 0x7FF42B45D5u);
+        check(std::string(check1).find("not applicable") != std::string::npos,
+              "the callee check is not applicable when vis_applies is 0 in every row");
+        sg::formatCalleeCheck(check1, sizeof(check1), 3, 0, 0, 0x7FF42B45D5u);
+        check(std::string(check1).find("no callee call") != std::string::npos, "the callee check says when no call was seen");
+        sg::formatCalleeCheck(check1, sizeof(check1), 3, 5, 0x7FF42B45D5u, 0x7FF42B45D5u);
+        check(std::string(check1).find("match") != std::string::npos && std::string(check1).find("MISMATCH") == std::string::npos,
+              "the callee check matches the builder site");
+        sg::formatCalleeCheck(check1, sizeof(check1), 3, 5, 0x1u, 0x7FF42B45D5u);
+        check(std::string(check1).find("MISMATCH") != std::string::npos, "the callee check reports a mismatch");
+    }
+
+    // --- The cadence: histogram, per-frame row, the sun view line, the call line.
+    {
+        uint32_t counts[5] = {};
+        sg::addToHistogram(counts, 0);
+        sg::addToHistogram(counts, 0);
+        sg::addToHistogram(counts, 1);
+        sg::addToHistogram(counts, 4);
+        sg::addToHistogram(counts, 9);
+        check(counts[0] == 2 && counts[1] == 1 && counts[2] == 0 && counts[4] == 2, "the histogram buckets 0, 1, 2, 3 and 4+");
+        char h[200];
+        sg::formatHistogram(h, sizeof(h), "shadow cadence depth calls per frame:", counts);
+        check(std::string(h) == "shadow cadence depth calls per frame: 0=2 1=1 2=0 3=0 4+=2", "the histogram line");
+
+        char row[160];
+        sg::formatCadenceRow(row, sizeof(row), 4242, 1, -1, 3, 0);
+        check(std::string(row) == "4242,1,-1,3,0" && countFields(sg::cadenceHeader()) == countFields(row),
+              "the cadence row matches its header");
+
+        const float origin[3] = {10, 20, 30};
+        char v[400];
+        sg::formatSunViewLine(v, sizeof(v), 3, 0x1000 + 3 * 0x6A0, 0x30ull, 0.5f, 2.0f, origin, 2, 0);
+        const std::string vs = v;
+        check(vs.find("shadow sun view 3:") == 0 && vs.find("bits=0x30") != std::string::npos &&
+                  vs.find("depth_hits=2 msm_hits=0 shadow=yes") != std::string::npos,
+              "the sun view line names the view, its bits and the shadow hit");
+        sg::formatSunViewLine(v, sizeof(v), 4, 0x1000, 0, 0.0f, 0.0f, origin, 0, 0);
+        check(std::string(v).find("shadow=no") != std::string::npos, "a view no shadow builder named says so");
+
+        char cl[300];
+        sg::formatCallLine(cl, sizeof(cl), 7, "depth", 88, 0x10, 0x20, 0x30, 0x40, 2);
+        check(std::string(cl) == "shadow call 7: depth frame=88 rcx=0x10 rdx=0x20 r8=0x30 r9=0x40 view=2",
+              "the call line carries the four arguments and the view");
     }
 
     std::printf("shadow_gate_probe_test: %d checks, %d failures\n", g_checks, g_failures);

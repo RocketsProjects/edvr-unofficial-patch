@@ -2640,6 +2640,14 @@ void chooseCameraRows() {
             const jumpguard::Decision jd = jumpguard::decide(g_jumpGuard, g_rowsRing[pick].rows, jumpAltRows, jumpAltN);
             jumpguard::note(g_jumpStats, jd);
             const int use = jumpguard::applied(g_jumpKeyOn, jd);
+            // The TCWR marks (diag.camera_writes): the legacy pick the guard rejected, either key, and the write it applied
+            // in its place, key on. A Pause dump then shows the flip the guard masks.
+            if (g_camWritesOn) {
+                std::lock_guard<std::mutex> lock(g_camMutex);
+                if (jd.rejected) camwrites::markRejected(g_camRing, g_rowsFrame, g_rowsRing[pick].observedSeq);
+                if (use >= 0) camwrites::markPick(g_camRing, g_rowsFrame, g_rowsRing[jumpAltRing[use]].observedSeq,
+                                                  camwrites::kPickGuard);
+            }
             if (use >= 0) {
                 applyIdx = jumpAltRing[use];
                 replaced = true;

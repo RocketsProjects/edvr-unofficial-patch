@@ -1,16 +1,14 @@
-// The state dump (state_dump_probe.h): the engine side. The pure half (the reader
-// table, the regions, the capped diff, the CSV and the lines) is in state_dump_core.h.
+// The state dump (state_dump_probe.h), engine side, v2 (2026-10-11, after flight 5). The pure half (the reader table,
+// the regions, the capped diff, the length parse, the CSV and the lines) is in state_dump_core.h.
 //
-// Four detours on the docking-state readers (0x12C3C20, 0x12CAF80, 0x12CADE0, 0x12CB320).
-// Each reader takes its object in rcx; the detour forwards rcx and returns RAX, and records
-// the object and AL after the forward. The probe never calls the getters the readers call.
-// While the gate is closed (no capture) the relays go straight to the originals.
+// Four detours on the docking-state readers (0x12C3C20, 0x12CAF80, 0x12CADE0, 0x12CB320). Each reader takes its object
+// in rcx; the detour forwards rcx and returns RAX, and records the object and AL after the forward. The probe never calls
+// the getters the readers call. While the gate is closed (no capture) the relays go straight to the originals.
 //
-// Per owned frame, at the Present tick: the readers' last observation of the frame, the
-// journal counters and the Status words, and for each distinct object the readers have named
-// (up to four): its first 0x400 bytes, the 0x40 bytes at +0x340, and the 0x100 bytes behind
-// the pointer at +0x240, each diffed against the previous frame. Every read is SEH-guarded
-// and a fault is recorded, not raised.
+// Per owned frame, at the Present tick: the readers' last observation of the frame, the journal counters, the Location
+// line's Docked flag and the Status words, and for each distinct object the readers have named (up to eight tracks): its
+// first 0x400 bytes, the 0x80 bytes at +0x300 (which holds +0x330..+0x345), and the 0x100 bytes behind the pointer at
+// +0x240, each diffed against the previous frame. Every read is SEH-guarded and a fault is recorded, not raised.
 #include "state_dump_probe.h"
 
 #include <windows.h>
@@ -34,7 +32,7 @@ namespace edvr {
 namespace {
 
 constexpr uint64_t kDiagDelayMs = 20000;
-constexpr int kLogLineCap = 60;
+constexpr int kLogLineCap = 80;
 
 // Engine memory, read under SEH. POD only.
 bool readMem(void* dst, uintptr_t src, size_t n) noexcept {
@@ -123,7 +121,7 @@ bool prepareRelay(void* trampoline, void* context) noexcept {
 
 // ---------------------------------------------------------------------------
 // The reader observers. Each reader returns its code in AL; the observer returns RAX unchanged.
-using ReaderFn = uintptr_t(__fastcall*)(uintptr_t self);
+using ReaderFn = uintptr_t (__fastcall*)(uintptr_t self);
 
 uintptr_t observeReader(int i, uintptr_t self) noexcept;
 __declspec(noinline) uintptr_t __fastcall stateReader0(uintptr_t self) noexcept { return observeReader(0, self); }
@@ -199,7 +197,7 @@ struct Track {
     uintptr_t addr = 0;
     bool havePrev = false;
     uint8_t obj[sd::kObjBytes] = {};
-    uint8_t sub[sd::kSubBytes] = {};
+    uint8_t mid[sd::kMidBytes] = {};
     uint8_t ptr[sd::kPtrBytes] = {};
     uintptr_t ptrValue = 0;
 };
@@ -217,15 +215,17 @@ bool g_pending = false;
 const char* g_pendingTrigger = "";
 bool g_flat = false;
 bool g_capturing = false;
-uint32_t g_firstFrame = 0;             // the first work frame of the capture
-uint32_t g_lastRowFrame = 0;
+uint32_t g_frames = sd::kDefaultFrames;
+uint32_t g_firstFrame = 0;
 const char* g_trigger = "";
 uint32_t g_callsLast[sd::kReaders] = {};
-uint32_t g_codeLast[sd::kReaders] = {};
+int g_codeLast[sd::kReaders] = {};
 bool g_codeSeen[sd::kReaders] = {};
 uintptr_t g_objectLast[sd::kReaders] = {};
 sd::Counters g_countersLast{};
 bool g_countersSeen = false;
+int g_locLast = -2;           // the last Location Docked value written to the log (-2: none yet)
+int g_statusLast = -2;        // the last Status docked value written to the log
 Track g_tracks[sd::kTracks];
 std::vector<Row> g_rows;
 int g_linesLeft = kLogLineCap;
@@ -235,12 +235,11 @@ std::string g_detourStatus;
 // Snapshots one track's three regions and diffs them against the previous frame.
 void trackObject(Track& t, uintptr_t addr, std::string& changes, uint32_t& changed, uint32_t& faults) {
     uint8_t obj[sd::kObjBytes] = {};
-    uint8_t sub[sd::kSubBytes] = {};
+    uint8_t mid[sd::kMidBytes] = {};
     uint8_t ptr[sd::kPtrBytes] = {};
     uintptr_t pointer = 0;
-    const bool objOk = readMem(obj, addr, sizeof(obj));
-    const bool subOk = readMem(sub, addr + sd::kSubOffset, sizeof(sub));
-    if (!objOk || !subOk) ++faults;
+    if (!readMem(obj, addr, sizeof(obj))) ++faults;
+    if (!readMem(mid, addr + sd::kMidOffset, sizeof(mid))) ++faults;
     if (readVal(&pointer, addr + sd::kPtrOffset) && pointer) {
         if (!readMem(ptr, pointer, sizeof(ptr))) {
             std::memset(ptr, 0, sizeof(ptr));
@@ -250,57 +249,45 @@ void trackObject(Track& t, uintptr_t addr, std::string& changes, uint32_t& chang
     } else {
         pointer = 0;
     }
-    char name[24];
+    const unsigned long long tag = static_cast<unsigned long long>(addr & 0xFFFFu);
     if (t.havePrev) {
         sd::Change list[sd::kChangesPerRegion];
-        int total = 0;
-        int n = sd::diffBytes(t.obj, obj, sizeof(obj), 0, list, sd::kChangesPerRegion, &total);
-        if (n || total) {
-            std::snprintf(name, sizeof(name), "A%llX.obj", static_cast<unsigned long long>(addr & 0xFFFFu));
-            std::string s(512, '\0');
-            size_t at = 0;
-            at = sd::appendChanges(&s[0], s.size(), at, name, list, n, total);
-            s.resize(at);
-            changes += (changes.empty() ? "" : " ") + s;
+        struct Region { const uint8_t* was; const uint8_t* now; size_t n; uint32_t base; const char* kind; };
+        const Region regions[3] = {
+            {t.obj, obj, sizeof(obj), 0, "obj"},
+            {t.mid, mid, sizeof(mid), static_cast<uint32_t>(sd::kMidOffset), "mid"},
+            {t.ptr, ptr, sizeof(ptr), static_cast<uint32_t>(sd::kPtrOffset), "ptr"},
+        };
+        for (const Region& r : regions) {
+            int total = 0;
+            const int n = sd::diffBytes(r.was, r.now, r.n, r.base, list, sd::kChangesPerRegion, &total);
+            if (!n && !total) continue;
+            char name[32];
+            std::snprintf(name, sizeof(name), "A%llX.%s", tag, r.kind);
+            char buf[1600];
+            const size_t len = sd::appendChanges(buf, sizeof(buf), 0, name, list, n, total);
+            buf[len] = '\0';
+            changes += (changes.empty() ? "" : " ");
+            changes += buf;
+            changed += static_cast<uint32_t>(total);
         }
-        changed += static_cast<uint32_t>(total);
-        n = sd::diffBytes(t.sub, sub, sizeof(sub), static_cast<uint32_t>(sd::kSubOffset), list,
-                          sd::kChangesPerRegion, &total);
-        if (n || total) {
-            std::snprintf(name, sizeof(name), "A%llX.sub", static_cast<unsigned long long>(addr & 0xFFFFu));
-            std::string s(512, '\0');
-            size_t at = sd::appendChanges(&s[0], s.size(), 0, name, list, n, total);
-            s.resize(at);
-            changes += (changes.empty() ? "" : " ") + s;
-        }
-        changed += static_cast<uint32_t>(total);
-        n = sd::diffBytes(t.ptr, ptr, sizeof(ptr), static_cast<uint32_t>(sd::kPtrOffset), list,
-                          sd::kChangesPerRegion, &total);
-        if (n || total) {
-            std::snprintf(name, sizeof(name), "A%llX.ptr", static_cast<unsigned long long>(addr & 0xFFFFu));
-            std::string s(512, '\0');
-            size_t at = sd::appendChanges(&s[0], s.size(), 0, name, list, n, total);
-            s.resize(at);
-            changes += (changes.empty() ? "" : " ") + s;
-        }
-        changed += static_cast<uint32_t>(total);
         if (pointer != t.ptrValue) {
-            char p[64];
-            std::snprintf(p, sizeof(p), "%sA%llX.pointer:%llX>%llX", changes.empty() ? "" : " ",
-                          static_cast<unsigned long long>(addr & 0xFFFFu),
+            char p[80];
+            std::snprintf(p, sizeof(p), "%sA%llX.pointer:%llX>%llX", changes.empty() ? "" : " ", tag,
                           static_cast<unsigned long long>(t.ptrValue), static_cast<unsigned long long>(pointer));
             changes += p;
         }
     }
     std::memcpy(t.obj, obj, sizeof(obj));
-    std::memcpy(t.sub, sub, sizeof(sub));
+    std::memcpy(t.mid, mid, sizeof(mid));
     std::memcpy(t.ptr, ptr, sizeof(ptr));
     t.ptrValue = pointer;
     t.addr = addr;
     t.havePrev = true;
 }
 
-// Collects the row of one finished frame (stamp == frame): counters, Status words, the readers, the tracks.
+// Collects the row of one finished frame (stamp == frame): counters, the dock values, the Status words, the readers, and
+// the tracks.
 void collectRow(uint32_t frame) {
     Row row;
     sd::FrameRow& f = row.fields;
@@ -310,11 +297,16 @@ void collectRow(uint32_t frame) {
     f.counters.undocks = journalUndocks();
     f.counters.disembarks = journalDisembarks();
     f.counters.embarks = journalEmbarks();
+    bool locDocked = false;
+    const bool locKnown = journalLocationDocked(&locDocked);
+    f.locKnown = locKnown ? 1 : 0;
+    f.locDocked = locKnown ? (locDocked ? 1 : 0) : -1;
     const JournalRawStatus raw = journalRawStatus();
     f.flags = raw.flags;
     f.flags2 = raw.flags2;
     f.flagsKnown = raw.flagsKnown;
     f.flags2Known = raw.flags2Known;
+    f.statusDocked = raw.flagsKnown ? static_cast<int>(raw.flags & 1u) : -1;
 
     for (int i = 0; i < sd::kReaders; ++i) {
         const Slot& s = g_slot[i];
@@ -322,13 +314,8 @@ void collectRow(uint32_t frame) {
         const bool called = s.stamp.load(std::memory_order_relaxed) == frame && now != g_callsLast[i];
         f.calls[i] = called ? now - g_callsLast[i] : 0;
         g_callsLast[i] = now;
-        if (called) {
-            f.code[i] = static_cast<int>(s.code.load(std::memory_order_relaxed));
-            f.object[i] = s.object.load(std::memory_order_relaxed);
-        } else {
-            f.code[i] = -1;
-            f.object[i] = s.object.load(std::memory_order_relaxed);   // the last object it named, for tracking
-        }
+        f.code[i] = called ? static_cast<int>(s.code.load(std::memory_order_relaxed)) : -1;
+        f.object[i] = s.object.load(std::memory_order_relaxed);   // the last object it named, for tracking
     }
 
     // The distinct objects the readers have named: each gets a track (a fresh one when none is free).
@@ -371,16 +358,30 @@ void logEvents(const Row& r) {
     }
     g_countersLast = c;
     g_countersSeen = true;
+    if (g_linesLeft > 0 && r.fields.locDocked != g_locLast) {
+        char line[120];
+        sd::formatDockLine(line, sizeof(line), r.fields.frame, "location_docked", r.fields.locDocked);
+        Log::get().note("%s", line);
+        --g_linesLeft;
+        g_locLast = r.fields.locDocked;
+    }
+    if (g_linesLeft > 0 && r.fields.statusDocked != g_statusLast) {
+        char line[120];
+        sd::formatDockLine(line, sizeof(line), r.fields.frame, "status_docked", r.fields.statusDocked);
+        Log::get().note("%s", line);
+        --g_linesLeft;
+        g_statusLast = r.fields.statusDocked;
+    }
     for (int i = 0; i < sd::kReaders && g_linesLeft > 0; ++i) {
         if (r.fields.code[i] < 0) continue;
-        if (!g_codeSeen[i] || g_codeLast[i] != static_cast<uint32_t>(r.fields.code[i])) {
+        if (!g_codeSeen[i] || g_codeLast[i] != r.fields.code[i]) {
             char what[48];
             std::snprintf(what, sizeof(what), "reader%d code %d", i, r.fields.code[i]);
             char line[160];
             sd::formatEventLine(line, sizeof(line), r.fields.frame, what, 0);
             Log::get().note("%s", line);
             --g_linesLeft;
-            g_codeLast[i] = static_cast<uint32_t>(r.fields.code[i]);
+            g_codeLast[i] = r.fields.code[i];
             g_codeSeen[i] = true;
         }
         if (r.fields.object[i] && r.fields.object[i] != g_objectLast[i] && g_linesLeft > 0) {
@@ -395,7 +396,7 @@ void logEvents(const Row& r) {
         }
     }
     if (r.changedBytes && g_linesLeft > 0) {
-        char line[200];
+        char line[160];
         sd::formatEventLine(line, sizeof(line), r.fields.frame, "bytes changed", r.changedBytes);
         Log::get().note("%s", line);
         --g_linesLeft;
@@ -422,19 +423,21 @@ void finishCapture(uint32_t frame) {
     if (f) {
         std::fprintf(f, "%s\n", sd::csvHeader());
         for (const Row& r : g_rows) {
-            char line[1024];
+            std::string line(4096, '\0');
             sd::FrameRow fr = r.fields;
             fr.changes = r.changes.c_str();
-            sd::formatFrameRow(line, sizeof(line), fr);
-            std::fprintf(f, "%s\n", line);
+            const int n = sd::formatFrameRow(&line[0], line.size(), fr);
+            if (n > 0) line.resize(static_cast<size_t>(n) < line.size() ? static_cast<size_t>(n) : line.size() - 1);
+            std::fprintf(f, "%s\n", line.c_str());
         }
         std::fclose(f);
     } else {
         Log::get().note("state dump: could not open edvr_logs\\%s; the lines above are complete.", csvName);
     }
     const sd::Counters& c = g_countersLast;
-    Log::get().note("state dump: done frames=%u from=%u docks=%u undocks=%u disembarks=%u embarks=%u "
-                    "faults=%u csv=%s (the readers' codes and objects are in the CSV; the journal counts are cumulative).",
+    Log::get().note("state dump: done frames=%u from=%u docks=%u undocks=%u disembarks=%u embarks=%u faults=%u csv=%s "
+                    "(the readers' codes and objects are in the CSV; the journal counts are cumulative and each event "
+                    "is counted once).",
                     static_cast<unsigned>(g_rows.size()), g_firstFrame, c.docks, c.undocks, c.disembarks, c.embarks,
                     g_faults, csvName);
     g_rows.clear();
@@ -450,8 +453,13 @@ void startCapture(uint32_t firstFrame, const char* trigger) {
         return;
     }
     g_detourStatus = ensureDetours(base);
+    std::string raw = Config::get().getString("diag.state_dump_frames", "");
+    uint32_t frames = sd::kDefaultFrames;
+    if (!sd::parseFrames(raw.c_str(), &frames))
+        Log::get().note("state dump: diag.state_dump_frames = '%s' is not a whole number; %u frames.", raw.c_str(), frames);
+    g_frames = frames;
     g_rows.clear();
-    g_rows.reserve(sd::kFrames);
+    g_rows.reserve(g_frames);
     for (Slot& s : g_slot) {
         s.object.store(0);
         s.code.store(0);
@@ -466,6 +474,8 @@ void startCapture(uint32_t firstFrame, const char* trigger) {
     }
     g_countersSeen = false;
     g_countersLast = {};
+    g_locLast = -2;
+    g_statusLast = -2;
     g_faults = 0;
     g_linesLeft = kLogLineCap;
     for (Track& t : g_tracks) t = Track{};
@@ -478,10 +488,11 @@ void startCapture(uint32_t firstFrame, const char* trigger) {
 
     sd::StartInfo info;
     info.firstFrame = firstFrame;
+    info.frames = g_frames;
     info.trigger = trigger;
     info.detours = g_detourStatus.c_str();
     info.csvName = "state_dump_<stamp>.csv (written at the end)";
-    char line[400];
+    char line[480];
     sd::formatStartLine(line, sizeof(line), info);
     Log::get().note("%s", line);
 }
@@ -491,6 +502,11 @@ void startCapture(uint32_t firstFrame, const char* trigger) {
 void stateDumpInstall(bool flatProfile) {
     g_flat = flatProfile;
     const std::string v = Config::get().getString("diag.state_dump", "off");
+    const std::string frames = Config::get().getString("diag.state_dump_frames", "");
+    uint32_t n = sd::kDefaultFrames;
+    if (!sd::parseFrames(frames.c_str(), &n))
+        Log::get().note("state dump: diag.state_dump_frames = '%s' is not a whole number; the capture is %u frames.",
+                        frames.c_str(), n);
     if (v == "on") {
         g_diagOn = true;
         g_waitingForScene = !flatProfile;
@@ -499,11 +515,12 @@ void stateDumpInstall(bool flatProfile) {
                             "bind hotkey.state_dump there.");
         else
             Log::get().note("state dump: diag.state_dump = on: one %u-frame capture, 20 s after the first in-scene frame.",
-                            sd::kFrames);
+                            n);
     } else if (v != "off" && !v.empty()) {
         Log::get().note("state dump: diag.state_dump = '%s' is not on or off; treated as off.", v.c_str());
     } else {
-        Log::get().note("state dump: diag.state_dump = off: nothing is hooked until hotkey.state_dump is pressed.");
+        Log::get().note("state dump: diag.state_dump = off: nothing is hooked until hotkey.state_dump is pressed "
+                        "(the capture is %u frames).", n);
     }
 }
 
@@ -515,7 +532,7 @@ void stateDumpRequest(const char* trigger) {
     }
     g_pending = true;
     g_pendingTrigger = trigger;
-    Log::get().note("state dump: requested by %s; %u frames are captured from the next frame.", trigger, sd::kFrames);
+    Log::get().note("state dump: requested by %s; the capture starts at the next frame.", trigger);
 }
 
 void stateDumpFrame(uint32_t frame) {
@@ -523,9 +540,7 @@ void stateDumpFrame(uint32_t frame) {
     if (g_capturing) {
         collectRow(frame);
         logEvents(g_rows.back());
-        if (g_rows.size() >= sd::kFrames) {
-            finishCapture(frame);
-        }
+        if (g_rows.size() >= g_frames) finishCapture(frame);
     }
     // The work after this tick is stamped frame + 1.
     g_stamp.store(frame + 1, std::memory_order_release);

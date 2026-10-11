@@ -1,18 +1,19 @@
 #pragma once
-// The shadow gate probe's pure half (shadow_gate_probe.cpp; TEMPORARY, the D0
-// diagnostic of docs/station-interior-2026-10-11.md). No Windows, no engine
-// memory: the build 332841 layout, the window and the builder's transform as
-// the decompiles give them (analysis\decomp\decomp_4331300.txt,
-// decomp_4312040.txt, decomp_42B4420.txt), the sun-view match, the candidate
-// choice, the first failing gate, and the text of every log and CSV line. The
-// rig tools\shadow_gate_probe_test compiles this header alone.
+// The shadow gate probe's pure half (shadow_gate_probe.cpp; TEMPORARY, the D0 diagnostic of
+// docs/station-interior-2026-10-11.md, v2). No Windows, no engine memory: the build 332841 layout and RVAs, the
+// pinned bytes, the builder's centre transform (as cull_gate_probe.cpp has it), the view match, the candidate choice,
+// the first failing gate, and the text of every log and CSV line. The rig tools\shadow_gate_probe_test compiles it alone.
+//
+// v2 (2026-10-11, after flight 5): the window replica is gone (it disagreed with the engine's bit about a fifth of the
+// time). G2 is the engine's own output mask. The sun views come from the depth and MSM builders' arguments, matched
+// against the render context's view array, and reported with a 600-frame cadence of those calls.
 //
 // Gate order, as the engine applies it to one record and one view:
-//   G1  the collection's mask holds the view's bits          (window, FUN_144331300)
-//   G2  the distance window passes for the group's base      (window: T0 >= v)
-//   LOD the record's view mask keeps the bit after the store  (store, FUN_144312040)
-//   G3  the view's planes do not reject the transformed box  (builder, FUN_1404F4E10)
-//   G4  the visibility callback does not veto                (builder, FUN_14288AC40 -> FUN_14288A930)
+//   G1   the collection's mask holds the view's bits          (window, FUN_144331300)
+//   G2   the window's output holds the view's bits            (the engine's verdict, not a replica)
+//   LOD  the record's view mask keeps the bit after the store (store, FUN_144312040)
+//   G3   the view's planes do not reject the transformed box  (builder, FUN_1404F4E10)
+//   G4   the visibility callback does not veto                (builder, FUN_14288AC40 -> FUN_14288A930)
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -36,8 +37,7 @@ constexpr uintptr_t kDepthRva = 0x5B2C80u;          // DirectionalShadows.Depth 
 constexpr uintptr_t kMsmRva = 0x5B3530u;            // the MSM pass
 constexpr uintptr_t kPlanesRva = 0x4F4E10u;         // FUN_1404F4E10(view, point, interval)
 
-// Bytes read from the exe at those RVAs. A hook installs only when the target
-// starts with them (the rig refuses a one-byte change).
+// Bytes read from the exe at those RVAs. A hook installs only when the target starts with them.
 constexpr uint8_t kWindowPin[9] = {0x48, 0x8B, 0xC4, 0x53, 0x57, 0x48, 0x83, 0xEC, 0x68};
 constexpr uint8_t kCalleePin[8] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57};
 constexpr uint8_t kDepthPin[5] = {0x48, 0x89, 0x5C, 0x24, 0x10};
@@ -49,50 +49,41 @@ constexpr uint8_t kCallbackSitePin[5] = {0xE8, 0x6B, 0x66, 0x5D, 0xFE};
 // Layout. Views: ctx+0x40 + k*0x6A0 for k < ctx+0x1A940 (capped at 64 by the engine).
 constexpr uintptr_t kCtxViews = 0x40;
 constexpr uintptr_t kCtxCount = 0x1A940;
-constexpr uintptr_t kCtxOrigin = 0x00;      // float4: the camera in the records' world frame (the store's window origin)
-constexpr uintptr_t kCtxLodScale = 0x30;    // float: the window's LOD scale
+constexpr uintptr_t kCtxOrigin = 0x00;      // float3: the camera in the records' world frame (unverified)
 constexpr uintptr_t kViewBytes = 0x6A0;
-constexpr uintptr_t kViewOrigin = 0x540;    // float4: the window's origin
+constexpr uintptr_t kViewOrigin = 0x540;    // float3: the window's origin
 constexpr uintptr_t kViewK1 = 0x550;        // float: window slope
 constexpr uintptr_t kViewK2 = 0x560;        // float: window offset
 constexpr uintptr_t kViewBits = 0x570;      // u64: the view's mask bits
 constexpr uintptr_t kViewVisFlag = 0x68D;   // byte: bit 0 enables the callback
 constexpr uint32_t kMaxViews = 64;
-// Bucket (collection) fields, read from the window's first argument E.
+// Bucket (collection) fields, read from the window's first argument.
 constexpr uintptr_t kBucketCtx = 0x00;      // render context
-constexpr uintptr_t kBucketTable = 0x08;    // LOD threshold table; count u32 at +0x70, floats at 16-byte steps
 constexpr uintptr_t kBucketBase = 0x28;     // first record
 constexpr uintptr_t kBucketCount = 0x30;    // record count
 constexpr uintptr_t kBucketMask = 0x48;     // the collection's active view mask (G1)
-constexpr uintptr_t kTableCount = 0x70;
 // Record fields (stride 0x2F0).
 constexpr uintptr_t kRecStride = 0x2F0;
-constexpr uintptr_t kRecPosePtr = 0x190;    // pointer Q: a 3x4 column-major transform at Q[0..14]; M = *(Q+0x50)
-constexpr uintptr_t kRecWorld = 0x240;      // float4: world bounding centre
+constexpr uintptr_t kRecWorld = 0x240;      // float3: world bounding centre
 constexpr uintptr_t kRecMask = 0x208;       // u64: final view mask (the store)
-constexpr uintptr_t kRecNibbles = 0x210;    // 4 x u64: LOD nibbles
-constexpr uintptr_t kRecLocal = 0x270;      // float3: local centre
 constexpr uintptr_t kRecRadius = 0x280;     // float: radius
-constexpr uintptr_t kRecPoseCtx = 0x290;    // the builder's pose context
 constexpr uintptr_t kRecChildren = 0x2A8;   // pointer: child list; count u64 at +0x2B0
 constexpr uintptr_t kRecChildCount = 0x2B0;
-// Pose context (the builder's frame, noteBuilder in cull_gate_probe.cpp).
+// Pose context (the builder's frame, as cull_gate_probe.cpp reads it).
 constexpr uintptr_t kPoseQuat = 0x10, kPoseT = 0x20, kPoseCentre = 0x80, kPoseExtents = 0x90;
 
 // The probe's own limits and thresholds.
 constexpr float kNearMetres = 2000.0f;      // "within 2 km"
 constexpr size_t kCandidatesEach = 8;       // K for each of the two lists
-
-struct Vec3 { float x, y, z; };
+constexpr uint32_t kCadenceFrames = 600;    // the cadence window after a press, in frames
 
 // True when `got` starts with the `n` bytes of `want`.
 inline bool pinMatches(const uint8_t* got, const uint8_t* want, size_t n) noexcept {
     return got && want && std::memcmp(got, want, n) == 0;
 }
 
-// The builder's transformed centre (decomp_42B4420.txt:196-237), as
-// cull_gate_probe.cpp builderCentre: q = pose+0x10 (quaternion), t = pose+0x20,
-// c = pose+0x80 (float4). The rig pins it against a hand-worked case.
+// The builder's transformed centre (decomp_42B4420.txt:196-237), as cull_gate_probe.cpp builderCentre: q = pose+0x10
+// (quaternion), t = pose+0x20, c = pose+0x80 (float4). The rig pins it against a hand-worked case.
 inline void builderCentre(const float q[4], const float t[4], const float c[4], float out[4]) noexcept {
     const float w2 = q[3] + q[3];
     const float dot = q[0] * c[0] + q[1] * c[1] + q[2] * c[2];
@@ -103,37 +94,7 @@ inline void builderCentre(const float q[4], const float t[4], const float c[4], 
     out[3] = (c[3] * q[3] - c[3] * q[3]) * w2 + ww * c[3] + (-c[3]) + dot * w2 + t[3];
 }
 
-// The window's world centre (decomp_4331300.txt:113-128): C = M * (Q * L), with
-// Q the record's pose (columns at Q[0..2], Q[4..6], Q[8..10], translation at
-// Q[12..14]), M the pose context's transform at *(Q+0x50) (the same layout),
-// and L = the record's local centre (rec+0x270..0x278).
-inline Vec3 windowCentre(const float* Q, const float* M, const float local[3]) noexcept {
-    const float lx = local[0], ly = local[1], lz = local[2];
-    const float px = Q[0] * lx + Q[4] * ly + Q[8] * lz + Q[12];
-    const float py = Q[1] * lx + Q[5] * ly + Q[9] * lz + Q[13];
-    const float pz = Q[2] * lx + Q[6] * ly + Q[10] * lz + Q[14];
-    return Vec3{M[0] * px + M[4] * py + M[8] * pz + M[12],
-                M[1] * px + M[5] * py + M[9] * pz + M[13],
-                M[2] * px + M[6] * py + M[10] * pz + M[14]};
-}
-
-// The window's value v = k1 * (1/d - r) * lodScale + k2, d = |C - origin|
-// (decomp_4331300.txt:129-158). The engine uses rcpps/rsqrtps, so its value
-// differs in the third digit; the logs print both sides of the comparison.
-inline float windowValue(const Vec3& C, const float origin[3], float radius, float k1, float k2,
-                         float lodScale, float* distOut) noexcept {
-    const float dx = C.x - origin[0], dy = C.y - origin[1], dz = C.z - origin[2];
-    const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (distOut) *distOut = d;
-    const float inv = d > 0.0f ? 1.0f / d : INFINITY;
-    return k1 * (inv - radius) * lodScale + k2;
-}
-
-// The window passes when the table's first threshold is not below the value
-// (decomp_4331300.txt:170-176: the compare is `T0 < v` -> reject).
-inline bool windowPasses(float t0, float v) noexcept { return !(t0 < v); }
-
-// The view whose address is `object` (the depth builder's first argument), or -1.
+// The view whose address is `object` (a shadow builder's argument), or -1.
 inline int viewIndexOf(uintptr_t object, uintptr_t ctx, uint32_t count) noexcept {
     if (!object || !ctx) return -1;
     const uint32_t n = count < kMaxViews ? count : kMaxViews;
@@ -152,8 +113,7 @@ struct Candidate {
     bool contains = false;      // the sphere holds the camera
 };
 
-// The camera test: distance from the camera to the centre, and whether the
-// sphere contains it.
+// The camera test: distance from the camera to the centre, and whether the sphere contains it.
 inline Candidate makeCandidate(uintptr_t record, uintptr_t bucket, const float centre[3], float radius,
                                const float camera[3]) noexcept {
     Candidate c;
@@ -169,8 +129,7 @@ inline Candidate makeCandidate(uintptr_t record, uintptr_t bucket, const float c
     return c;
 }
 
-// Keeps the K largest-radius candidates offered, largest first. A tie keeps the
-// earlier candidate.
+// Keeps the K largest-radius candidates offered, largest first. A tie keeps the earlier candidate.
 template <size_t K>
 class LargestRadius {
 public:
@@ -202,7 +161,7 @@ enum class Gate : uint8_t { None, G1, NoWindow, G2, Lod, Unreached, G3, G4 };
 struct GateInput {
     bool g1 = false;            // the bucket mask holds the view's bits
     bool windowKnown = false;   // a window observation covers the record's bucket
-    bool window = false;        // the base's window output holds the view's bits
+    bool window = false;        // the engine's window output holds the view's bits
     bool recMask = false;       // rec+0x208 (final) holds the view's bits
     bool builderReached = false;
     int planes = 2;             // -1 outside, 0 straddle, 1 inside, 2 not evaluated
@@ -249,9 +208,7 @@ struct CsvRow {
     const char* viewRole = "";      // sun | main | other
     uint64_t viewBits = 0;
     int g1 = 0;
-    int windowBit = -1;             // -1 when no window observation covers the bucket
-    float windowV = 0, windowT0 = 0;
-    int windowRepl = -1;            // the replicated verdict (-1 when unknown)
+    int windowBit = -1;             // the engine's window output bit; -1 when no window observation covers the bucket
     int recBit = 0;
     int builderReached = 0;
     int64_t builderRow = -1;
@@ -264,23 +221,21 @@ struct CsvRow {
 
 inline const char* csvHeader() noexcept {
     return "frame,candidate,kind,record,bucket,base,role,radius_m,dist_m,contains,view,view_role,view_bits,"
-           "g1_bucket,window_bit,window_v,window_t0,window_repl,rec208_bit,builder_reached,builder_row,"
-           "builder_mask_bit,planes,vis_applies,g4,first_fail";
+           "g1_bucket,window_bit,rec208_bit,builder_reached,builder_row,builder_mask_bit,planes,vis_applies,g4,first_fail";
 }
 
 inline int formatCsvRow(char* out, size_t cap, uint32_t frame, const CsvRow& r) noexcept {
     return std::snprintf(out, cap,
-                         "%u,%u,%s,0x%llX,0x%llX,0x%llX,%s,%.2f,%.2f,%d,%u,%s,0x%llX,%d,%d,%.6g,%.6g,%d,%d,%d,%lld,%d,%d,%d,%d,%s",
+                         "%u,%u,%s,0x%llX,0x%llX,0x%llX,%s,%.2f,%.2f,%d,%u,%s,0x%llX,%d,%d,%d,%d,%lld,%d,%d,%d,%d,%s",
                          frame, r.candidate, r.kind, static_cast<unsigned long long>(r.record),
                          static_cast<unsigned long long>(r.bucket), static_cast<unsigned long long>(r.base), r.role,
                          static_cast<double>(r.radius), static_cast<double>(r.dist), r.contains, r.view, r.viewRole,
-                         static_cast<unsigned long long>(r.viewBits), r.g1, r.windowBit, static_cast<double>(r.windowV),
-                         static_cast<double>(r.windowT0), r.windowRepl, r.recBit, r.builderReached,
+                         static_cast<unsigned long long>(r.viewBits), r.g1, r.windowBit, r.recBit, r.builderReached,
                          static_cast<long long>(r.builderRow), r.builderMaskBit, r.planes, r.visApplies, r.g4,
                          gateName(r.gate));
 }
 
-// One summary line per capture.
+// The capture's summary line.
 struct HeaderInfo {
     uint32_t frame = 0;
     const char* trigger = "";
@@ -289,29 +244,21 @@ struct HeaderInfo {
     uint32_t views = 0;
     float camera[3] = {};
     int main = 0;
-    const char* sunList = "";       // "" when none matched; else e.g. "3,5"
-    uint32_t depthObjects = 0, depthMatched = 0;
-    uint32_t msmObjects = 0, msmMatched = 0;
     uint32_t buckets = 0, records = 0, builders = 0, buildersDropped = 0, callbacks = 0, callbacksExtra = 0;
-    uint32_t windowMismatch = 0;
     const char* csvName = "";
 };
 
 inline int formatHeaderLine(char* out, size_t cap, const HeaderInfo& h) noexcept {
     return std::snprintf(out, cap,
                          "shadow gate probe: frame=%u trigger=%s build=%s ctx=0x%llX views=%u camera=(%.1f,%.1f,%.1f) "
-                         "main=%d sun=%s depth=%u/%u msm=%u/%u buckets=%u records=%u builders=%u dropped=%u "
-                         "callbacks=%u extra=%u window_mismatch=%u csv=%s",
+                         "main=%d buckets=%u records=%u builders=%u dropped=%u callbacks=%u extra=%u csv=%s",
                          h.frame, h.trigger, h.build, static_cast<unsigned long long>(h.ctx), h.views,
                          static_cast<double>(h.camera[0]), static_cast<double>(h.camera[1]),
-                         static_cast<double>(h.camera[2]), h.main, h.sunList[0] ? h.sunList : "none",
-                         h.depthMatched, h.depthObjects, h.msmMatched, h.msmObjects, h.buckets, h.records,
-                         h.builders, h.buildersDropped, h.callbacks, h.callbacksExtra, h.windowMismatch,
-                         h.csvName);
+                         static_cast<double>(h.camera[2]), h.main, h.buckets, h.records, h.builders,
+                         h.buildersDropped, h.callbacks, h.callbacksExtra, h.csvName);
 }
 
-// One candidate: its identity, its place in the group, and the first failing
-// gate for each sun view and the main view (up to eight of each).
+// One candidate: its identity and the first failing gate for each sun view and for the main view.
 struct CandidateLine {
     uint32_t index = 0;
     const char* kind = "";
@@ -329,6 +276,59 @@ inline int formatCandidateLine(char* out, size_t cap, const CandidateLine& c) no
                          c.index, c.kind, static_cast<unsigned long long>(c.record),
                          static_cast<unsigned long long>(c.bucket), c.role, static_cast<double>(c.radius),
                          static_cast<double>(c.dist), c.sun[0] ? c.sun : "-", c.main[0] ? c.main : "-");
+}
+
+// The callee check: applies only when the callback can be called (vis_applies in some row). Without that, the check
+// is not applicable and says so.
+inline int formatCalleeCheck(char* out, size_t cap, uint32_t visRows, uint32_t callees, uintptr_t firstReturn,
+                             uintptr_t siteReturn) noexcept {
+    if (visRows == 0)
+        return std::snprintf(out, cap, "callee check: not applicable (vis_applies is 0 in every row; the callback is not called)");
+    if (callees == 0)
+        return std::snprintf(out, cap, "callee check: no callee call while vis applies (rows=%u)", visRows);
+    return std::snprintf(out, cap, "callee check: first_callee_return=0x%llX builder site=0x%llX %s",
+                         static_cast<unsigned long long>(firstReturn), static_cast<unsigned long long>(siteReturn),
+                         firstReturn == siteReturn ? "match" : "MISMATCH");
+}
+
+// The cadence: depth and MSM calls per frame over the 600 frames after a press, as a histogram (0, 1, 2, 3, 4 or more).
+inline int formatHistogram(char* out, size_t cap, const char* name, const uint32_t counts[5]) noexcept {
+    return std::snprintf(out, cap, "%s 0=%u 1=%u 2=%u 3=%u 4+=%u", name, counts[0], counts[1], counts[2], counts[3],
+                         counts[4]);
+}
+
+inline void addToHistogram(uint32_t counts[5], uint32_t perFrame) noexcept {
+    ++counts[perFrame >= 4 ? 4 : perFrame];
+}
+
+inline const char* cadenceHeader() noexcept { return "frame,dock_status,dock_location,depth_calls,msm_calls"; }
+
+// One frame of the cadence. dockStatus and dockLocation are 1 docked, 0 not, -1 unknown.
+inline int formatCadenceRow(char* out, size_t cap, uint32_t frame, int dockStatus, int dockLocation, uint32_t depth,
+                            uint32_t msm) noexcept {
+    return std::snprintf(out, cap, "%u,%d,%d,%u,%u", frame, dockStatus, dockLocation, depth, msm);
+}
+
+// One view of the render context: its address, its mask bits and window constants, and how many recorded shadow
+// builder calls named this address (depth and MSM).
+inline int formatSunViewLine(char* out, size_t cap, uint32_t k, uintptr_t ptr, uint64_t bits, const float k1,
+                             const float k2, const float origin[3], uint32_t depthHits, uint32_t msmHits) noexcept {
+    return std::snprintf(out, cap,
+                         "shadow sun view %u: ptr=0x%llX bits=0x%llX k1=%.6g k2=%.6g origin=(%.1f,%.1f,%.1f) "
+                         "depth_hits=%u msm_hits=%u shadow=%s",
+                         k, static_cast<unsigned long long>(ptr), static_cast<unsigned long long>(bits),
+                         static_cast<double>(k1), static_cast<double>(k2), static_cast<double>(origin[0]),
+                         static_cast<double>(origin[1]), static_cast<double>(origin[2]), depthHits, msmHits,
+                         (depthHits || msmHits) ? "yes" : "no");
+}
+
+// One recorded shadow builder call: its frame, which builder, its four arguments, and the view whose address one of
+// them is (-1 when none is).
+inline int formatCallLine(char* out, size_t cap, uint32_t index, const char* which, uint32_t frame, uintptr_t a,
+                          uintptr_t b, uintptr_t c, uintptr_t d, int view) noexcept {
+    return std::snprintf(out, cap, "shadow call %u: %s frame=%u rcx=0x%llX rdx=0x%llX r8=0x%llX r9=0x%llX view=%d",
+                         index, which, frame, static_cast<unsigned long long>(a), static_cast<unsigned long long>(b),
+                         static_cast<unsigned long long>(c), static_cast<unsigned long long>(d), view);
 }
 
 }  // namespace edvr::shadowgate

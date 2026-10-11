@@ -931,6 +931,26 @@ int main() {
                   std::strcmp(p.pick, "-") == 0 && !p.drawn && !p.rot && !p.pair && std::strstr(empty, " stk=- pick=- drawn=0 rot=0 pair=0") != nullptr,
                   "camera writes format: no stack and no pick print as - and parse back");
             check(!cw::parseWrite("TCWR f9 s4 nonsense", p), "camera writes parse: a malformed line is refused");
+            // The jump guard's marks (2026-10-11): pick=guard and rejected=1 format and parse back; a line from before the
+            // rejected field has four fields and reads as not rejected.
+            cw::Write g;
+            g.stkN = 0;
+            g.pick = cw::kPickGuard;
+            g.rejected = true;
+            char guardLine[640] = {};
+            check(cw::formatWrite(guardLine, sizeof(guardLine), 9u, g) > 0 &&
+                  std::strstr(guardLine, " pick=guard drawn=0 rot=0 pair=0 rejected=1") != nullptr &&
+                  cw::parseWrite(guardLine, p) && p.rejected && std::strcmp(p.pick, "guard") == 0,
+                  "camera writes format: the guard's pick and rejected mark format and parse back");
+            check(std::strcmp(cw::pickName(cw::kPickGuard), "guard") == 0, "camera writes pick name: guard");
+            cw::Write old;
+            old.stkN = 0;
+            char oldLine[640] = {};
+            check(cw::formatWrite(oldLine, sizeof(oldLine), 9u, old) > 0, "camera writes format: an unmarked write formats");
+            char* cut = std::strstr(oldLine, " rejected=");
+            if (cut) *cut = '\0';
+            check(cut != nullptr && cw::parseWrite(oldLine, p) && !p.rejected,
+                  "camera writes parse: a line from before the rejected field reads as not rejected");
             char head[96] = {};
             check(cw::formatFrame(head, sizeof(head), 9u, 256u, 44u) > 0 && std::strcmp(head, "TCWRF f9 writes=256 overflow=44") == 0,
                   "camera writes format: the frame header line");

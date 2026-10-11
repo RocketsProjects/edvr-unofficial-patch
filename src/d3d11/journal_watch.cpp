@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -87,6 +88,9 @@ struct Published {
     uint32_t embarks = 0;
     uint32_t docks = 0;       // journal Docked lines (the state dump's clock; no other reader)
     uint32_t undocks = 0;     // journal Undocked lines
+    // The Docked flag of the last Location line in a read buffer (the Location event carries "Docked":true|false).
+    bool     locationKnown = false;
+    bool     locationDocked = false;
     // When a jump tunnel MAY be on screen: armed at StartJump, cleared by
     // the event that resolves it (FSDJump for hyperspace, SupercruiseEntry
     // for the other branch -- StartJump fires for both, and telling them
@@ -139,6 +143,8 @@ struct Visible {
     std::atomic<uint32_t> embarks{0};
     std::atomic<uint32_t> docks{0};
     std::atomic<uint32_t> undocks{0};
+    std::atomic<bool>     locationKnown{false};
+    std::atomic<bool>     locationDocked{false};
     std::atomic<uint64_t> jumpArmedMs{0};
     std::atomic<bool>     fsdJumpKnown{false};
     std::atomic<bool>     fsdJumpLive{false};
@@ -171,6 +177,8 @@ void applyPublished(const Published& p) {
     g_v.embarks.store(p.embarks, kRelaxed);
     g_v.docks.store(p.docks, kRelaxed);
     g_v.undocks.store(p.undocks, kRelaxed);
+    g_v.locationKnown.store(p.locationKnown, kRelaxed);
+    g_v.locationDocked.store(p.locationDocked, kRelaxed);
     g_v.jumpArmedMs.store(p.jumpArmedMs, kRelaxed);
     g_v.fsdJumpKnown.store(p.fsdJumpKnown, kRelaxed);
     g_v.fsdJumpLive.store(p.fsdJumpLive, kRelaxed);
@@ -229,6 +237,9 @@ struct Session {
     std::wstring file;           // the journal currently tailed
     HANDLE       handle = INVALID_HANDLE_VALUE;
     uint64_t     offset = 0;
+    // The byte position past the last counted event token, per journal file name. A replayed file, or a token the carry
+    // scans twice, sits below it and counts nothing (the undock double count, 2026-10-11).
+    std::map<std::wstring, uint64_t> countedTo;
     // Said once: a journal was adopted that we could not prove is ours, so it
     // is being tailed from the end rather than replayed. See newestJournal.
     // `ownNoted` retires that statement when a proven-ours file replaces it.
@@ -344,7 +355,16 @@ std::wstring newestJournal(const Session& s, bool& ours, size_t& enumerated) {
                           : names[static_cast<size_t>(pick.index)];
 }
 
-void onEvent(Session& s, const char* name, uint32_t len) {
+// The counters count each token once: a token at a byte position already counted for this file name is a replay (a file
+// reopened from the top) or a carry scanned twice, and counts nothing. The position is the token's absolute offset.
+bool countOnce(Session& s, uint64_t at) {
+    uint64_t& high = s.countedTo[s.file];
+    if (at < high) return false;
+    high = at + 1;
+    return true;
+}
+
+void onEvent(Session& s, const char* name, uint32_t len, uint64_t at) {
     // The five that matter. Everything else in the stream is somebody else's
     // business, and not keeping it is the privacy posture: names only, and
     // only these names do anything.
@@ -356,13 +376,13 @@ void onEvent(Session& s, const char* name, uint32_t len) {
                             "menu.");
         }
     } else if (len == 9 && memcmp(name, "Disembark", 9) == 0) {
-        ++s.pub.disembarks;
+        if (countOnce(s, at)) ++s.pub.disembarks;
     } else if (len == 6 && memcmp(name, "Embark", 6) == 0) {
-        ++s.pub.embarks;
+        if (countOnce(s, at)) ++s.pub.embarks;
     } else if (len == 6 && memcmp(name, "Docked", 6) == 0) {
-        ++s.pub.docks;
+        if (countOnce(s, at)) ++s.pub.docks;
     } else if (len == 8 && memcmp(name, "Undocked", 8) == 0) {
-        ++s.pub.undocks;
+        if (countOnce(s, at)) ++s.pub.undocks;
     } else if (len == 8 && memcmp(name, "Shutdown", 8) == 0) {
         // The game is leaving. Gameplay ends with it; a relaunch gets a new
         // journal and a fresh LoadGame.
@@ -385,13 +405,38 @@ void onEvent(Session& s, const char* name, uint32_t len) {
 const char kEventTok[] = "\"event\":\"";
 constexpr uint32_t kEventTokLen = sizeof(kEventTok) - 1;
 
-void scanRange(Session& s, const char* p, uint32_t n) {
+// The Location line's "Docked":true|false, read from the same buffer (the line's own text, up to its newline). A value that
+// the buffer does not hold is not read; the next Location line gives it again.
+void noteLocation(Session& s, const char* p, uint32_t n, uint32_t from) {
+    static const char kDocked[] = "\"Docked\":";
+    constexpr uint32_t kKeyLen = sizeof(kDocked) - 1;
+    const uint32_t lim = from + 600 < n ? from + 600 : n;
+    for (uint32_t j = from; j + kKeyLen < lim; ++j) {
+        if (p[j] == '\n') return;
+        if (memcmp(p + j, kDocked, kKeyLen) != 0) continue;
+        const uint32_t v = j + kKeyLen;
+        if (lim - v >= 4 && memcmp(p + v, "true", 4) == 0) {
+            s.pub.locationKnown = true;
+            s.pub.locationDocked = true;
+        } else if (lim - v >= 5 && memcmp(p + v, "false", 5) == 0) {
+            s.pub.locationKnown = true;
+            s.pub.locationDocked = false;
+        }
+        return;
+    }
+}
+
+// `base` is the absolute file offset of p[0], so a token's position is its absolute offset.
+void scanRange(Session& s, const char* p, uint32_t n, uint64_t base) {
     for (uint32_t i = 0; i + kEventTokLen < n; ++i) {
         if (memcmp(p + i, kEventTok, kEventTokLen) != 0) continue;
         const uint32_t start = i + kEventTokLen;
         uint32_t end = start;
         while (end < n && p[end] != '"' && end - start < 40) ++end;
-        if (end < n && p[end] == '"') onEvent(s, p + start, end - start);
+        if (end < n && p[end] == '"') {
+            onEvent(s, p + start, end - start, base + i);
+            if (end - start == 8 && memcmp(p + start, "Location", 8) == 0) noteLocation(s, p, n, end);
+        }
         i = end;
     }
 }
@@ -513,8 +558,11 @@ void scanEvents(Session& s, const char* data, uint32_t len) {
         memcpy(stitched + s.carryLen, data, take);
         stitchedLen = s.carryLen + take;
     }
-    if (stitchedLen) scanRange(s, stitched, stitchedLen);
-    scanRange(s, data, len);
+    // The read has already advanced s.offset past this chunk, so the chunk starts at s.offset - len; the carry is the
+    // bytes just before it.
+    const uint64_t chunkStart = s.offset - len;
+    if (stitchedLen) scanRange(s, stitched, stitchedLen, chunkStart - s.carryLen);
+    scanRange(s, data, len, chunkStart);
 
     // Keep the tail as the next carry. Anything already scanned in `stitched`
     // that also sits in `data`'s head double-scans harmlessly: LoadGame and
@@ -1007,6 +1055,11 @@ uint32_t journalDisembarks() { return runtimeFlatProfile() ? 0u : peek(g_v.disem
 uint32_t journalEmbarks() { return runtimeFlatProfile() ? 0u : peek(g_v.embarks); }
 uint32_t journalDocks() { return runtimeFlatProfile() ? 0u : peek(g_v.docks); }
 uint32_t journalUndocks() { return runtimeFlatProfile() ? 0u : peek(g_v.undocks); }
+bool journalLocationDocked(bool* docked) {
+    if (runtimeFlatProfile() || !peek(g_v.locationKnown)) return false;
+    if (docked) *docked = peek(g_v.locationDocked);
+    return true;
+}
 
 bool journalInJumpTunnel() {
     if (runtimeFlatProfile()) return false;

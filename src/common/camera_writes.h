@@ -27,6 +27,7 @@ constexpr size_t kDumpLines = 6000;  // the Pause dump's cap, newest frames firs
 constexpr uint8_t kPickLegacy = 1u;  // the write today's chooser picked this frame
 constexpr uint8_t kPickTag = 2u;     // the write the headset tag names: the latest stamped write this frame
 constexpr uint8_t kPickIpd = 4u;     // the write the IPD pair rule chose this frame (camera_ipd_pair.h); printed as "ipd" ahead of the others
+constexpr uint8_t kPickGuard = 8u;   // the write the camera jump guard applied in place of the legacy pick (camera_jump_guard.h, key on); printed as "guard"
 constexpr int kProjIndex[7] = {0, 2, 5, 6, 10, 11, 14};
 
 struct Write {
@@ -40,6 +41,7 @@ struct Write {
     uint8_t pick = 0;          // kPickLegacy | kPickTag | kPickIpd
     bool pair = false;         // the write is in an IPD pair this frame: a reference or its partner (camera_ipd_pair.h), whether or not chosen
     bool drawn = false;        // an eye's scene draw this frame observed this write as the object's latest
+    bool rejected = false;     // the legacy pick this frame, which the camera jump guard rejected (printed as rejected=1; either key)
     uint32_t stkN = 0;
     uint32_t stk[kStack] = {}; // exe RVAs, innermost first
     float T[3] = {};           // the rows' translation (column 3)
@@ -128,6 +130,14 @@ inline bool markPick(Ring& ring, uint32_t frame, uint32_t seq, uint8_t bit) {
     return true;
 }
 
+// Marks the write with clock seq as the legacy pick the camera jump guard rejected this frame. False when it has no record this frame.
+inline bool markRejected(Ring& ring, uint32_t frame, uint32_t seq) {
+    Write* w = findWrite(ring, frame, seq);
+    if (!w) return false;
+    w->rejected = true;
+    return true;
+}
+
 // Marks the write with clock seq as a member of an IPD pair this frame (camera_ipd_pair.h). False when it has no record this frame.
 inline bool markPair(Ring& ring, uint32_t frame, uint32_t seq) {
     Write* w = findWrite(ring, frame, seq);
@@ -157,6 +167,7 @@ inline int rvasInRange(const void* const* frames, int n, uintptr_t base, size_t 
 }
 
 inline const char* pickName(uint8_t p) {
+    if (p & kPickGuard) return "guard";
     if (p & kPickIpd) return "ipd";
     switch (p & 3u) {
         case 1u: return "legacy";
@@ -193,8 +204,8 @@ inline int formatWrite(char* buf, size_t n, uint32_t frame, const Write& w) {
         }
     }
     if (m <= 0 || static_cast<size_t>(len) + 40 >= n) return 0;
-    m = std::snprintf(buf + len, n - static_cast<size_t>(len), " pick=%s drawn=%d rot=%d pair=%d",
-                      pickName(w.pick), w.drawn ? 1 : 0, w.rot ? 1 : 0, w.pair ? 1 : 0);
+    m = std::snprintf(buf + len, n - static_cast<size_t>(len), " pick=%s drawn=%d rot=%d pair=%d rejected=%d",
+                      pickName(w.pick), w.drawn ? 1 : 0, w.rot ? 1 : 0, w.pair ? 1 : 0, w.rejected ? 1 : 0);
     if (m <= 0 || static_cast<size_t>(len + m) >= n) return 0;
     return len + m;
 }
@@ -213,6 +224,7 @@ struct Parsed {
     uint32_t stkN = 0;
     char pick[8] = {};
     bool drawn = false, rot = false, pair = false;
+    bool rejected = false;   // the jump guard's mark; false for a line written before the field
 };
 
 // Parses one TCWR line (formatWrite's format). False when a field is missing or malformed.
@@ -256,14 +268,16 @@ inline bool parseWrite(const char* line, Parsed& out) {
             break;
         }
     }
-    int drawn = -1, rot = -1, pair = -1;
+    int drawn = -1, rot = -1, pair = -1, rejected = 0;
     char pick[8] = {};
-    const int tail = std::sscanf(p, " pick=%7s drawn=%d rot=%d pair=%d", pick, &drawn, &rot, &pair);
-    if (tail != 4) return false;
+    // rejected= is the jump guard's mark (2026-10-11); a line written before it has four fields, and reads as not rejected.
+    const int tail = std::sscanf(p, " pick=%7s drawn=%d rot=%d pair=%d rejected=%d", pick, &drawn, &rot, &pair, &rejected);
+    if (tail != 5 && tail != 4) return false;
     std::memcpy(out.pick, pick, sizeof(out.pick));
     out.drawn = drawn != 0;
     out.rot = rot != 0;
     out.pair = pair != 0;
+    out.rejected = tail == 5 && rejected != 0;
     if (out.stkN > static_cast<uint32_t>(kStack)) out.stkN = static_cast<uint32_t>(kStack);
     return true;
 }

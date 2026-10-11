@@ -4,15 +4,15 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 
 ## Status
 
-- **State:** analysis and design; the M2 state dump is built on `claude/shadow-gate-probe` (which merges this doc), not installed, not flown. Nothing fixed. M1 is blocked on draw identity (see Measurement).
+- **State:** analysis and design; the M2 state dump (v2, after flight 5) and the jump guard's TCWR marks are built on `claude/shadow-gate-probe` (which merges this doc), not installed, not flown. Nothing fixed. M1 is blocked on draw identity (see Measurement).
 - **Primary: sealed hangar.** Docked, pad lowered, doors closed. Submit only the hangar cell and suppress the sun. Blocked on storage of pad and door state (P9).
 - **Secondary: closed panes.** Seated inside a station (doors open, or flying inside). Cull the SocialSpace (concourse) records and replace the bay windows with mirror-like opaque glass (stage 1, Sean's decision). Impostor is a later stage only.
 - **Concourse:** the SocialSpace sub-area under StationInteriorHub, created at station load (P1).
 - **Triggers now:** seated = Status Flags bits 24-26 or Flags2 bits 1-2 (EDVR `journalSeatedFromFlags`). Disembark = journal Disembark with SRV, Taxi and Multicrew false (P5). Status OnFoot lags about 6 s, so it is not a restore trigger.
 - **Ruled out:** Status.json as the sealed signal; ToggleCockpitRender as a render switch; InteriorStateChangeActivity as a switch (P7).
 - **Open:** pad and door storage (P9); cell radius; pane draw hashes and ownership; env slot numbers; player_location read path (P10).
-- **Next flight, no engine change:** M2 (one 600-frame capture around one pad cycle and one door cycle) and M3 (an open-pad outpost). The M1 draw link is the open item.
-- **Probe keys (TEMPORARY):** `hotkey.state_dump` (unbound by default) and `diag.state_dump = off`. **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
+- **Next flight, no engine change:** the flight plan in the Built v2 section of Measurement: F4 (the shadow gate probe) twice, F3 (the state dump) with a deliberate launch inside its window, a 1 km return and F4, and Pause presses in flight with `diag.camera_writes` on. Open-pad outpost (M3) is in the same section. The M1 draw link is the open item.
+- **Probe keys (TEMPORARY):** `hotkey.state_dump` (unbound by default), `diag.state_dump = off`, and `diag.state_dump_frames = 3000` (60 to 6000). **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
 
 ## Proven
 
@@ -110,6 +110,27 @@ The probe never calls the getters. Per owned frame, at the Present tick (under i
 What the flight must settle: which reader object is the LandingPad and which holds the lighting properties (the +0x240 region); what the reader codes mean (the readers branch on the getter's bool, and the codes are the observed AL values); and whether NoHangarPresent appears in any reader code (P6 says it is written by 0x12C0F11, which the readers do not call).
 
 **M3, flight step at an open-pad outpost (no new code).** Dock at an outpost whose pad is open. Press `hotkey.state_dump`, then raise the pad and lower it within the 600 frames. In the dump, read the reader codes and objects, the Flags and Flags2 words, the journal Docked event, and the pad fields (the +0x240 region and the bytes that change with the raise and lower). NoHangarPresent is not one of the four reader codes. Observing it directly needs the writer 0x12C0F11's function entry, which is not yet identified; until then the step reports the codes the readers return, and the gate in A stays false only if the reader codes say so.
+
+### Built v2, 2026-10-11 (after flight 5; branch `claude/shadow-gate-probe`; not installed, not flown)
+
+**What flight 5 showed for M2.** The 600-frame dump (about 7 s) was too short to catch a pad or door movement. Reader 2 (object `0x254C4D94AE8`) ran only during the door-cycle dump. The session started docked (`Location` carried `Docked:true`), and the journal had no Docked event. `undocks` read 2 against one Undocked line.
+
+**The undock count, explained and fixed.** Two causes in `journal_watch.cpp`, both counting a token twice. (1) The chunk carry: the last 32 bytes of each read are stitched in front of the next read and scanned again, so an event token in that tail counted twice. (2) A reopen (a file switch, or a fault) replays a provable journal from the top (lines 579 to 585). Both now count a token once, by its absolute byte position per journal file name (`countOnce`). Disembark and Embark counts are affected by the same double count, so they now deduplicate too; that changes their numbers (reported with the build).
+
+**The dock state.** The Location line's `"Docked":true|false` is read from the same read buffer (`noteLocation`) and published through `journalLocationDocked`. The state dump's CSV carries `loc_known`, `loc_docked` (from Location) and `status_docked` (Status Flags bit 0). A change in either is logged as a `state dump:` line, beside the Docked and Undocked counts.
+
+**The capture.** `diag.state_dump_frames` sets the length (default 3000, clamped to 60 to 6000; a value that is not a whole number takes the default and says so). Each reader object is tracked (up to eight objects): `+0x000` to `+0x3FF` (which holds `+0x18` and `+0x30`), `+0x300` to `+0x37F` (which holds `+0x330` to `+0x345`), and the 0x100 bytes behind `*(+0x240)`. Up to 48 changed bytes are listed per region per frame, up from 16.
+
+**The jump guard's marks (TCWR, `diag.camera_writes`).** `pick=guard` is set on the write the guard applied in place of the legacy pick (key on). `rejected=1` is set on the legacy pick the guard rejected (either key), so a Pause dump shows the competing writes and the flip the guard masks. The TCWR line gains a `rejected=0|1` field after `pair=`; `guard` is a new pick name; lines written before the field read as not rejected. The marks use the write's own frame clock.
+
+**The flight plan (Sean, 2026-10-11).**
+1. Docked, pad lowered, doors closed: F4 (`hotkey.shadow_gate_probe`) in a bright phase, then F4 again in a dark phase.
+2. F3 (`hotkey.state_dump`, 3000 frames, about 35 s at 90 fps). Within that window, deliberately launch: the pad rises and the doors open. The dump's per-frame rows give the lead.
+3. Fly out about 1 km from the same station, and press F4 once.
+4. In flight, inside and outside the station, press Pause a few times with `diag.camera_writes = on`.
+5. Outposts (M3): dock at an outpost whose pad is open, press F3, raise and lower the pad within the window, and read the reader codes, the Location and Status docked values, the Docked event, and the pad object's changed bytes. NoHangarPresent is not one of the four reader codes (P6); observing it needs the writer 0x12C0F11's entry, which is not identified yet.
+
+**Format changes in this build.** The state dump CSV has 26 columns (`loc_known`, `loc_docked` and `status_docked` sit before `flags_hex`). The shadow gate CSV has 23 columns (the window replica columns are gone), and a shadow cadence CSV is new. TCWR lines carry `rejected=` and the `guard` pick.
 
 ## Open items
 
