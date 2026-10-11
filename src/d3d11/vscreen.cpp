@@ -1,6 +1,7 @@
 #include "vscreen.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
+#include "sun_pass_probe.h"   // the hangar sun probe's skip (TEMPORARY): beginPanelOverride asks it once per draw
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
 #include "../common/d3d11_gpu_command_slots.h"
 #include "vr_runtime.h"
@@ -1892,6 +1893,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     }
 
     s->glareClamp = 0;
+    // The hangar sun probe (TEMPORARY, sun_pass_probe.h): a draw issued inside RenderDirLights while its skip is on is not forwarded. Before the
+    // foreign-context return, so a sun-pass draw on any context is counted; a draw the probe skips is not counted by the census (its own line says so).
+    if (sunPassProbeSkipDraw()) return DrawVerdict::kSkip;
     if (foreignContext(self)) {
         noteForeignDraw(self);
         // Round seventeen: recorded before the decline, every token read

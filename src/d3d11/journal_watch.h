@@ -102,6 +102,11 @@ struct JournalRawStatus {
     uint32_t statusSamples = 0;
     bool guiKnown = false;
     uint32_t gui = 0;
+    // The raw Status.json words of the last parsed sample (the hangar sun probe's decode, sun_pass_probe_core.h). Ungated by profile.
+    bool flagsKnown = false;
+    uint32_t flags = 0;
+    bool flags2Known = false;
+    uint32_t flags2 = 0;
 };
 JournalRawStatus journalRawStatus();
 

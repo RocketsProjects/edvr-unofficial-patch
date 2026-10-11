@@ -4,15 +4,16 @@ Offline analysis of `EliteDangerous64.exe` (build 332841, PE stamp 1788384820, i
 
 ## Status
 
-- **State:** static analysis done; design written; nothing implemented; no flight since the 2026-10-11 reproduction.
+- **State:** the sun probe is built on `claude/hangar-sun-probe` (committed; green `build.bat`; NOT installed, NOT flown). Nothing fixed. The entry at the end says what it does and what the flight needs.
 - **Bug:** docked in a station hangar, the walls and floor brighten and darken with the station's rotation; shadows of ships outside cross them.
 - **Ruled out:** EDVR, by --suspend flat flight 2026-10-11.
 - **H1, favourite:** the station hull is not admitted to the sun's shadow map. Ship shadows reach the hangar, so the map is populated; the hull records are not. Candidate mechanism: per-record view masks (P9). Open: which bit or plane excludes the hull.
 - **H2:** a per-pixel bypass. The shadow resolve's flag byte says "no occlusion" on the walls (bit 2 clear, or bits 6-7 select a static term). Open: the flag byte on the walls.
 - **H3:** the sun is not the source; ambient or IBL carries the star. Unlikely for the ship shadows (IBL casts none), not excluded for the brightness. Open: skip the directional draw and see whether the cycle stops.
 - **Open leads:** the byte group at 0x5E889C0-C3 (P8), no writer found; whether Status.json Docked is set at surface ports (I3).
+- **Probe keys (TEMPORARY; remove when the arc closes, quoting each):** `diag.sun_pass_skip = on|off` in `[diag]` of edvr.ini (the skip's state at start, default off); `hotkey.sun_pass_skip` in `[hotkey]` (unbound by default; a press flips the skip and logs the flip). Neither is a settings-page row.
 - **Fix order:** B (attenuate the directional pass constant while docked in a station), then A (light-object intensity), then C (admit the hull to the shadow views, the root-cause fix). Nothing implemented.
-- **Next flight:** flat, Coriolis or Orbis hangar, two full cycles. Eye dump of the walls per phase (flag bits 2, 6, 7; shadow mask); draw census of the DirectionalShadows passes inside vs 1 km outside; bytes at 0x5E889C0-C3 at each phase and at the dock event; one skip of the directional draw; Status flags at each state. Decision table below.
+- **Next flight:** the probe flight in the entry at the end (rotating station, docked hangar, skip toggled in a bright phase, then a 1 km census). Below is the earlier plan, still valid for the wall eye dump: flat, Coriolis or Orbis hangar, two full cycles. Eye dump of the walls per phase (flag bits 2, 6, 7; shadow mask); draw census of the DirectionalShadows passes inside vs 1 km outside; bytes at 0x5E889C0-C3 at each phase and at the dock event; one skip of the directional draw; Status flags at each state. Decision table below.
 
 ## Proven
 
@@ -115,3 +116,42 @@ The pass structure is engine-internal, so the VR runtime (OpenXR, OpenVR, Oculus
 ## Method
 
 The scripts (PE walk with `.pdata`, RIP-relative and call scans, capstone dumps) are in the session scratchpad and are not committed. The RVAs reproduce with them.
+
+## 2026-10-11: the sun probe (built, not flown)
+
+Branch `claude/hangar-sun-probe`, from `03bdfac5`. A full `build.bat` is green: `sun_pass_probe_test` 53 checks, 0 failed; config contract 128 keys, all agree; the receipt is written. Not merged, not installed, not flown.
+
+**What it does.** A CodeHook on RenderDirLights (exe+0x5AC9C0), both profiles.
+- Gate: build identity (PE timestamp 1788384820, image size 104894464); the 32 prologue bytes; the deferred lighting frame's call at exe+0x284E159 (`e8 62 e8 d5 fd`, target verified as 0x5AC9C0). Any miss is one `inert:` line and nothing patched.
+- Arguments, from the disassembly: rcx (`this`), rdx and r8 are read; r9 is written before it is read; no stack argument is read; the function returns `this` in rax. The detour takes four register arguments and forwards them.
+- A thread-local scope is held across the forwarded call. In `vscreen.cpp` `beginPanelOverride` (the four draw thunks, 'D' 'I' 'N' 'X') asks `sunPassProbeSkipDraw()` after the glare reset and before the foreign-context return. Inside the scope every draw is counted; with the skip on, the draw is not forwarded (`kSkip`).
+- Status.json: the raw `Flags` and `Flags2` words, logged at the first sample and on each change. The decode uses only the bits EDVR already reads (Flags 4, 24-26, 30; Flags2 0-2). Docked (bit 0) and Landed (bit 1) are this doc's I3 reading, unconfirmed. No hangar bit is confirmed, so the line prints the design doc's gate as `inside_gate`.
+- Memory watch: 4 bytes at exe+0x5E889C0, read once a frame under SEH after the section table says the RVA is readable; logged on change, and the first read is logged as the baseline.
+- A 10 s window line.
+
+**Log formats** (prefix `hangar sun probe:`):
+- `live at EliteDangerous64.exe+0x5AC9C0 ... skip=on|off initially.` or `inert: <why>.`
+- `status Flags=0x.. Flags2=0x.. frame=.. (docked=.. landed=.. supercruise=.. onfoot=.. seated=.. inside_gate=..)`
+- `0x5E889C0 bytes=.. .. .. .. (frame=.., status Flags=..)`
+- `dirlights_calls=.. draws_in_scope=.. skipped=.. toggle=on|off`
+- `skip toggle -> on|off at frame=..`
+
+**Coverage limits.** The count is a lower bound. DrawAuto and the indirect draws do not pass `beginPanelOverride`, and the Draw thunk's `g_vrWorldInternal` early return is before it too. A draw the probe skips is not in the census's unseen count; the probe's own `skipped=` is the figure to use.
+
+**Deviations from the brief.**
+- The 10 s line is written in both toggle states, not only while on: the draws issued with the skip off are the count the probe is for. A window with no activity writes nothing.
+- `inhangar?` became `inside_gate`; see the Status note.
+- The census tag `sun=1` is not implemented. The census record path was not read, and it was not cheap.
+- Found by the build: `gate_test` needs a new tick in `presentFrameBoundary()` to be a `BoundaryTick` (done, `tkSunPassProbe`); a `# dev:` line in the ini adds a settings-page row and changes `hotkey_capture_test`'s counts (dropped; the key is bound by hand).
+
+**Why the skip is not expected to leave broken state (checked, not measured).** The skip drops Draw calls only. The sun pass's state binds and constant-buffer Map/Unmap calls still run, and the next pass binds its own state. Not checked: whether a later pass reads a target the sun pass would have written. The flight's census shows the sun pass's targets; a skipped phase that looks wrong on those is the first place to look.
+
+**Flight (Sean; not run here).**
+1. Bind `hotkey.sun_pass_skip` in `[hotkey]` of edvr.ini, and `hotkey.dump_draws` (flat defaults the census to NUMLOCK).
+2. Install this build with `tools\install_edvr.py` (dry-run first). Confirm the version line with `python tools\edvr_log.py --target <target> --expect-build HEAD --version`.
+3. Dock at a rotating station hangar. Wait through one bright and one dark phase. In the bright phase press the skip key. Record: the flip line, whether the walls and the ship shadows change, and the cycle.
+4. One draw census in the hangar. Then launch, hold about 1 km outside the same station, one more census.
+5. If convenient, a surface port: read its status line (Docked, Landed).
+6. Note the window lines with the skip off and on (`dirlights_calls`, `draws_in_scope`), and any visual side effect in the skipped phase.
+
+**Gate.** Trace the instruments before flying: the install line always appears (live or inert with the reason), the status line appears at the first journal sample, and the window line appears only when the sun pass ran.

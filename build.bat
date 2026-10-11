@@ -550,6 +550,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_reveal.cpp" ^
     "src\d3d11\fss_heal.cpp" ^
     "src\d3d11\vertex_resync_hook.cpp" ^
+    "src\d3d11\sun_pass_probe.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -1521,6 +1522,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: c2 coexist test build failed & exit /b 1 )
 "%BUILD%\c2_coexist_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_sun_pass_probe_test
+echo [edvr] === sun_pass_probe_test.exe ===
+REM The hangar sun probe's pure half (src\d3d11\sun_pass_probe_core.h, TEMPORARY): the RenderDirLights gate held to bytes typed from the exe, the sun
+REM pass's scope balance (a throw included), the skip table, the Status.json decode, the memory watch's readability and change detector, the 10 s
+REM window, and the text of the log lines. No DLL and no game.
+if not exist "%OBJ%\sunpassprobe" mkdir "%OBJ%\sunpassprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\sunpassprobe\\" ^
+    /Fe"%BUILD%\sun_pass_probe_test.exe" "tools\sun_pass_probe_test\sun_pass_probe_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: sun pass probe test build failed & exit /b 1 )
+"%BUILD%\sun_pass_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_vr_camera_census_test

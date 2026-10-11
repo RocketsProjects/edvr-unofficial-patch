@@ -110,6 +110,9 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         std::strcmp(key, "hotkey.menu") == 0 ||
         std::strcmp(key, "fix.temporal_aa_model") == 0 ||
         std::strcmp(key, "hotkey.dump_draws") == 0 ||
+        // TEMPORARY, the hangar sun probe (sun_pass_probe.h): the skip's key and its initial state, so the flat profile reads them.
+        std::strcmp(key, "hotkey.sun_pass_skip") == 0 ||
+        std::strcmp(key, "diag.sun_pass_skip") == 0 ||
         std::strcmp(key, "fix.render_sharpness") == 0 ||
         // The interface quality (flat panel row; ui_panel_scale.cpp's flat factor and the flat UI layer). The VR layer reads it
         // too, but stays inert in flat: it is live only with fix.temporal_aa on through this gate, which refuses that key.

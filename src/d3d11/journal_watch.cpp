@@ -110,6 +110,12 @@ struct Published {
     // not in a ship or SRV". Known whenever Flags is in the file.
     bool     seatedKnown = false;
     bool     seated = false;
+    // The raw Status.json words of the same sample, for the hangar sun probe (sun_pass_probe_core.h decodes them). A word is known
+    // when its field is in the file; the value is zero otherwise.
+    bool     flagsKnown = false;
+    uint32_t flags = 0;
+    bool     flags2Known = false;
+    uint32_t flags2 = 0;
     // GuiFocus from Status.json: 9 is the Full System Scanner. The game
     // states the MODE outright -- entry and exit by any path (keybind,
     // ESC, an interdiction yanking the player out of supercruise) all
@@ -136,6 +142,10 @@ struct Visible {
     std::atomic<bool>     onFoot{false};
     std::atomic<bool>     seatedKnown{false};
     std::atomic<bool>     seated{false};
+    std::atomic<bool>     flagsKnown{false};
+    std::atomic<uint32_t> flags{0};
+    std::atomic<bool>     flags2Known{false};
+    std::atomic<uint32_t> flags2{0};
     std::atomic<bool>     fssFocusKnown{false};
     std::atomic<bool>     fssFocus{false};
     std::atomic<uint32_t> guiFocus{0};
@@ -162,6 +172,10 @@ void applyPublished(const Published& p) {
     g_v.onFoot.store(p.onFoot, kRelaxed);
     g_v.seatedKnown.store(p.seatedKnown, kRelaxed);
     g_v.seated.store(p.seated, kRelaxed);
+    g_v.flagsKnown.store(p.flagsKnown, kRelaxed);
+    g_v.flags.store(p.flags, kRelaxed);
+    g_v.flags2Known.store(p.flags2Known, kRelaxed);
+    g_v.flags2.store(p.flags2, kRelaxed);
     g_v.fssFocusKnown.store(p.fssFocusKnown, kRelaxed);
     g_v.fssFocus.store(p.fssFocus, kRelaxed);
     g_v.guiFocus.store(p.guiFocus, kRelaxed);
@@ -433,6 +447,10 @@ void pollStatus(Session& s) {
         // as zero here; the pair is only consulted with onFootKnown too.
         s.pub.seatedKnown = sawFlags;
         s.pub.seated = sawFlags && journalSeatedFromFlags(flags, sawFlags2 ? flags2 : 0u);
+        s.pub.flagsKnown = sawFlags;
+        s.pub.flags = sawFlags ? flags : 0u;
+        s.pub.flags2Known = sawFlags2;
+        s.pub.flags2 = sawFlags2 ? flags2 : 0u;
         // Bit 30 of Flags: the FSD jump itself -- the tunnel, not the
         // countdown before it. The distinction is what scopes the witchspace
         // star fix off the forming-wormhole phase, where the game still
@@ -1009,6 +1027,10 @@ JournalRawStatus journalRawStatus() {
     r.statusSamples = peek(g_v.statusSamples);
     r.guiKnown = peek(g_v.fssFocusKnown);
     r.gui = peek(g_v.guiFocus);
+    r.flagsKnown = peek(g_v.flagsKnown);
+    r.flags = peek(g_v.flags);
+    r.flags2Known = peek(g_v.flags2Known);
+    r.flags2 = peek(g_v.flags2);
     return r;
 }
 
