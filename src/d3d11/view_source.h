@@ -16,6 +16,7 @@ struct Resolved {
     float origin[3] = {};              // the render context's view 0 origin (ctx + 0x40 + 0x540): the position the earlier code used
     bool originOk = false;
     float originGapM = -1.0f;          // distance from the pose position to the origin (-1 when either is missing)
+    const char* reason = "";           // why the pose is or is not there: a sentence for the log (never empty after a resolve)
 };
 
 // Resolves the frame's view. ctx is the render context (a bucket's first qword); null reads only the rows. False when neither the rows

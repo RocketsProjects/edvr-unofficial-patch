@@ -1,7 +1,8 @@
-// The view the aim comes from (view_source.h; TEMPORARY). The explorer cam and the seated view read the rows the temporal pass chose for the
-// frame, which are the game's view-to-world [R | c] (view_source_core.h). The origin is the render context's view 0 origin (ctx + 0x40 +
-// 0x540), reported alongside so the frames can be checked against each other. On foot, without the explorer cam, the chosen rows are not
-// the on-foot camera and no on-foot camera is read yet, so the source is the origin and no pose is claimed.
+// The view the aim comes from (view_source.h; TEMPORARY). In order: the explorer cam's free camera, from its activity's world pose while its
+// placement stands (explorer_cam.cpp, explorerCamWorldPose); seated, the rows the temporal pass chose for the frame (the game's view-to-world
+// [R | c], view_source_core.h), which exist only after the eye treat, so the admission store often finds none; otherwise the origin: the
+// render context's view 0 origin (ctx + 0x40 + 0x540), with no pose. On foot without a placement no pose is read, because the chosen rows
+// are not the on-foot camera and the on-foot camera's rows are not read yet. Every result names its reason, so a log says why there is no aim.
 #include "view_source.h"
 
 #include <windows.h>
@@ -9,7 +10,7 @@
 #include <cmath>
 #include <cstring>
 
-#include "explorer_cam.h"    // explorerCamSessionActive()
+#include "explorer_cam.h"    // explorerCamWorldPose(), explorerCamSessionActive()
 #include "journal_watch.h"   // journalOnFootKnown(), journalOnFoot()
 #include "temporal_pass.h"   // temporalPassChosenRows()
 #include "ui_layer.h"        // uiLayerLiveForWorldRoute(), uiLayerWorldScreenHeld()
@@ -47,24 +48,51 @@ bool resolveView(uintptr_t ctx, Resolved* out) noexcept {
     if (!out) return false;
     *out = Resolved{};
     out->originOk = ctx != 0 && readMem(out->origin, ctx + kCtxView0 + kViewOrigin, sizeof(out->origin));
-    const bool explorer = explorerCamSessionActive();
+
+    // 1. The explorer cam: the free camera's world pose while its placement stands. The session flag alone is not the state (it is on
+    //    for the preset before the free camera), so the placement decides.
+    float pos[3] = {}, fwd[3] = {};
+    const bool explorerPose = explorerCamWorldPose(pos, fwd);
+    const bool explorerOn = explorerCamSessionActive();
     const bool foot = onFootNow();
-    // The chosen rows are read where they are the camera: with the explorer cam on (its eye rows follow the free camera) and seated. On
-    // foot without the explorer cam they are not the on-foot camera, so none are read.
+
+    // 2. Seated: the rows the temporal pass chose for this frame. They exist only after the eye treat, so a call made before it finds none.
     bool rowsOk = false;
-    if (explorer || !foot) {
+    Pose rowPose;
+    const char* rowsReason = "";
+    if (!explorerPose && !foot) {
         float rows[12] = {};
         bool bound = false;
-        Pose p;
-        if (temporalPassChosenRows(rows, &bound) && poseFromRows(rows, &p)) {
-            out->pose = p;
+        if (!temporalPassChosenRows(rows, &bound)) {
+            rowsReason = "no chosen rows at this call (the temporal pass chooses them at the eye treat)";
+        } else if (!poseFromRows(rows, &rowPose)) {
+            rowsReason = "the chosen rows are not a frame (orthonormal axes and a finite origin are required)";
+        } else {
             rowsOk = true;
         }
     }
-    out->source = chooseSource(explorer, foot, rowsOk);
-    out->poseOk = rowsOk;
-    if (rowsOk && out->originOk) out->originGapM = distance3(out->pose.pos, out->origin);
-    return rowsOk || out->originOk;
+
+    const bool poseOk = explorerPose || rowsOk;
+    out->source = chooseSource(explorerPose, foot, poseOk);
+    out->poseOk = poseOk;
+    if (explorerPose) {
+        for (int k = 0; k < 3; ++k) {
+            out->pose.pos[k] = pos[k];
+            out->pose.fwd[k] = fwd[k];
+        }
+        out->reason = "explorer cam placed: the free camera's world pose";
+    } else if (rowsOk) {
+        out->pose = rowPose;
+        out->reason = "eye rows: the chosen rows of this frame";
+    } else if (explorerOn) {
+        out->reason = "explorer cam session on, but no placement stands (no free camera pose)";
+    } else if (foot) {
+        out->reason = "on foot without an explorer cam placement: the on-foot camera's rows are not read yet";
+    } else {
+        out->reason = rowsReason;
+    }
+    if (poseOk && out->originOk) out->originGapM = distance3(out->pose.pos, out->origin);
+    return poseOk || out->originOk;
 }
 
 }  // namespace edvr::view

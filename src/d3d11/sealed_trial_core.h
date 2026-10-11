@@ -73,19 +73,21 @@ struct Window {
     uint64_t sunSkipped = 0;      // sun pair draws the trial skipped in the window
     uint64_t evalNs = 0;
     uint64_t faults = 0;          // reads or writes that failed (the record is left as it was)
+    uint64_t torn = 0;            // a cull whose put-back failed too: the record may be left half culled (see cullRecordFaultSafe)
 };
 
-// "sealed trial: window 5 s culled=.. kept=.. kept_unjudged=.. sun_pairs_skipped=.. eval_ms=.. faults=.. radius_m=..". The
+// "sealed trial: window 5 s culled=.. kept=.. kept_unjudged=.. sun_pairs_skipped=.. eval_ms=.. faults=.. torn=.. radius_m=..". The
 // radius is the one the window ran at (a step closes the window of the old radius first).
 // The view the rule's sphere was centred on is named at the end: "view source = explorer cam" (or eye rows, vscreen, origin).
 inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, const char* viewSource) noexcept {
     return std::snprintf(out, cap,
                          "sealed trial: window %llu s culled=%llu kept=%llu kept_unjudged=%llu sun_pairs_skipped=%llu "
-                         "eval_ms=%.3f faults=%llu radius_m=%.1f view source = %s",
+                         "eval_ms=%.3f faults=%llu torn=%llu radius_m=%.1f view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
                          static_cast<unsigned long long>(w.kept), static_cast<unsigned long long>(w.keptUnknown),
                          static_cast<unsigned long long>(w.sunSkipped), static_cast<double>(w.evalNs) / 1.0e6,
-                         static_cast<unsigned long long>(w.faults), static_cast<double>(radiusM), viewSource);
+                         static_cast<unsigned long long>(w.faults), static_cast<unsigned long long>(w.torn),
+                         static_cast<double>(radiusM), viewSource);
 }
 
 // "sealed trial: on at frame F (radius R m; camera (x,y,z) or unknown; the sun pair is skipped; records outside the sphere
@@ -143,6 +145,43 @@ inline int formatStepRefused(char* out, size_t cap, float radiusM, uint32_t fram
     return std::snprintf(out, cap,
                          "sealed trial: the radius keys act only while the trial is on (radius %.1f m at frame %u); "
                          "nothing changed", static_cast<double>(radiusM), frame);
+}
+
+// The cull of one record, with its fault handling (sealed_trial.cpp; the rig tests it against a fake memory). The record's view mask and its
+// admitted flag are read first and written only after both are read: a failed read touches nothing, a failed mask write touches nothing,
+// and a failed admitted write puts the mask back, so a fault always leaves the record as the store wrote it (kept). A failed put-back is
+// reported as torn: the one case where the record may be left half culled, counted and named.
+enum class Cull : uint8_t { kCulled = 0, kUntouched = 1, kRestored = 2, kTorn = 3 };
+enum class CullField : uint8_t { kMaskRead = 0, kAdmittedRead = 1, kMaskWrite = 2, kAdmittedWrite = 3, kRestoreWrite = 4 };
+
+template <typename Mem>
+inline Cull cullRecordFaultSafe(Mem& m, CullField* failed, uint64_t* value) noexcept {
+    uint64_t oldMask = 0;
+    uint8_t oldAdmitted = 0;
+    if (!m.readMask(&oldMask)) {
+        *failed = CullField::kMaskRead;
+        *value = 0;
+        return Cull::kUntouched;
+    }
+    if (!m.readAdmitted(&oldAdmitted)) {
+        *failed = CullField::kAdmittedRead;
+        *value = oldMask;
+        return Cull::kUntouched;
+    }
+    if (!m.writeMask(0)) {
+        *failed = CullField::kMaskWrite;
+        *value = oldMask;
+        return Cull::kUntouched;
+    }
+    if (!m.writeAdmitted(0)) {
+        *failed = CullField::kAdmittedWrite;
+        *value = oldAdmitted;
+        if (m.writeMask(oldMask)) return Cull::kRestored;
+        *failed = CullField::kRestoreWrite;
+        *value = oldMask;
+        return Cull::kTorn;
+    }
+    return Cull::kCulled;
 }
 
 }  // namespace edvr::sealed

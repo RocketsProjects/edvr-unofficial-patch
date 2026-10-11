@@ -57,7 +57,10 @@ std::atomic<bool> g_rayOk{false};
 float g_eye[3] = {};
 float g_fwd[3] = {};
 float g_nearM = 0.0f, g_farM = 0.0f;
-const char* g_viewName = "";          // the view the aim came from: explorer cam | eye rows | vscreen | origin | frustum fallback
+const char* g_viewName = "";          // the view the aim came from: explorer cam | eye rows | origin | frustum fallback
+const char* g_noAimReason = "";       // why there is no forward: the resolver's reason, and the frustum's
+char g_noAimBuf[256] = {};            // the text g_noAimReason points at when it is built here
+uintptr_t g_collectBucket = 0;        // the collection's first bucket: the aim is tried again at its draws (the rows exist after the eye treat)
 float g_originGapM = -1.0f;           // the rows' distance from the render context's view 0 origin (-1: unknown)
 
 struct Cand {
@@ -196,6 +199,7 @@ bool computeRay(uintptr_t bucket) noexcept {
     uintptr_t ctx = 0;
     if (!bucket || !readVal(&ctx, bucket) || !ctx) {
         g_viewName = "origin";
+        g_noAimReason = "no render context was read from the bucket";
         return false;
     }
     view::Resolved v;
@@ -207,13 +211,17 @@ bool computeRay(uintptr_t bucket) noexcept {
         g_nearM = 0.0f;
         g_farM = 0.0f;
         g_viewName = view::sourceName(v.source);
+        g_noAimReason = "";
         return true;
     }
     if (frustumRay(ctx)) {
         g_viewName = "frustum fallback";
+        g_noAimReason = "";
         return true;
     }
     g_viewName = view::sourceName(v.source);
+    std::snprintf(g_noAimBuf, sizeof(g_noAimBuf), "%s; the frustum has no opposite near and far pair within the sanity limits", v.reason);
+    g_noAimReason = g_noAimBuf;
     return false;
 }
 
@@ -360,6 +368,11 @@ bool probeDraw(ID3D11DeviceContext* ctx, DrawEntry& e, LookReplayFn replay, void
 // Records one draw of the collected frame (the census wrappers call this before their own bracket) and tests its centre.
 void lookProbeDrawImpl(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances, LookReplayFn replay,
                        void* arg) {
+    // The eye has treated by the draws, so the rows of this frame may exist now: a last try at the aim while it is missing.
+    if (!g_rayOk.load(std::memory_order_acquire) && g_collectBucket && g_aimTries.load(std::memory_order_relaxed) < kAimTries) {
+        g_aimTries.fetch_add(1, std::memory_order_relaxed);
+        g_rayOk.store(computeRay(g_collectBucket), std::memory_order_release);
+    }
     const uint32_t index = g_drawN.fetch_add(1, std::memory_order_relaxed);
     if (index >= kMaxDrawEntries) {
         g_drawOverflow.fetch_add(1, std::memory_order_relaxed);
@@ -447,6 +460,7 @@ void resetCollection() {
     g_drawOverflow.store(0, std::memory_order_relaxed);
     g_probeFails.store(0, std::memory_order_relaxed);
     g_aimTries.store(0, std::memory_order_relaxed);
+    g_collectBucket = 0;
     g_rawN.store(0, std::memory_order_relaxed);
     g_rawOverflow.store(0, std::memory_order_relaxed);
     g_rayOk.store(false, std::memory_order_relaxed);
@@ -578,6 +592,7 @@ void writeReport() {
     s.trigger = g_trigger.c_str();
     s.forwardKnown = g_rayOk.load(std::memory_order_acquire);
     s.viewSource = g_viewName;
+    s.noAim = g_noAimReason;
     for (int k = 0; k < 3; ++k) {
         s.forward[k] = g_fwd[k];
         s.eye[k] = g_eye[k];
@@ -703,6 +718,7 @@ bool lookProbeWantsDraws() noexcept {
 void lookProbeAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
     if (g_phase.load(std::memory_order_acquire) != kCollecting || !record) return;
     g_recScanned.fetch_add(1, std::memory_order_relaxed);
+    if (!g_collectBucket) g_collectBucket = bucket;
     // The frame's aim: the first store call that can read a pose fixes it; up to kAimTries calls try.
     if (!g_rayOk.load(std::memory_order_acquire) && g_aimTries.load(std::memory_order_relaxed) < kAimTries) {
         g_aimTries.fetch_add(1, std::memory_order_relaxed);

@@ -55,6 +55,8 @@ uint64_t explorerCamFindJointSeen();                         // every FindJoint 
 // Is an Explorer Cam session on? True from F5's request until the session ends (the camera closed, F5 pressed again, or Explorer Cam stood down). An atomic read,
 // safe from any thread: the hotkey menu uses it to lock the Explorer Cam key's row, because that key is also the way out.
 bool explorerCamSessionActive();
+// The free camera's world origin and forward while a placement stands (the activity's world block; see explorer_cam.cpp). False otherwise.
+bool explorerCamWorldPose(float pos[3], float fwd[3]) noexcept;
 
 // An unload (FreeLibrary): puts the avatar dither-fade global back to -1 if EDVR still holds it at 0. Frame-thread context; SEH-guarded.
 void explorerCamShutdown();

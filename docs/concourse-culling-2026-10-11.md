@@ -4,7 +4,7 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 
 ## Status
 
-- **State:** analysis and design. Flight 7 flew the sealed-hangar trial at 80 m in the docked hangar: nothing missing (see Measurement). Built v4 on `claude/hangar-test-5` (from `claude/hangar-test-4`, which carries the camera rule): the radius steps, the 5 s windows and the ladder; full build green; the step census and the approach flight are not flown yet. Nothing fixed. M1 is blocked on draw identity (see Measurement).
+- **State:** analysis and design. Flight 7 flew the sealed-hangar trial at 80 m in the docked hangar: nothing missing (see Measurement). Built v6 on `claude/hangar-test-7` (see Built v6): the box is ruled out; the cull is fault-safe and the window line counts `torn=`; the step census and the approach flight are not flown yet. Nothing fixed. M1 is blocked on draw identity (see Measurement).
 - **Primary: sealed hangar.** Docked, pad lowered, doors closed. Submit only the hangar cell and suppress the sun. Blocked on storage of pad and door state (P9).
 - **Secondary: closed panes.** Seated inside a station (doors open, or flying inside). Cull the SocialSpace (concourse) records and replace the bay windows with mirror-like opaque glass (stage 1, Sean's decision). Impostor is a later stage only.
 - **Concourse:** the SocialSpace sub-area under StationInteriorHub, created at station load (P1).
@@ -56,6 +56,7 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 - Status.json as the sealed signal: Flags do not separate a lowered pad from a raised one.
 - An interior visibility toggle: none found (P7).
 - Helper 0x802500: called from thousands of sites; not a state reader.
+- Box cull shape (an oriented box for the sealed trial): ruled out, because the planes test 0x4F4E10 has no box input (Built v6).
 
 ## Design
 
@@ -216,6 +217,16 @@ Two things follow. The frustum route cannot aim: the main view has no opposite n
 Hypotheses and refutations:
 - **H-P (props):** the far props are kept because their base or group, whose sphere reaches the camera, is kept, and the children inherit it. Supported if children kept only by their base are a large share of the kept children and the props' `parent_address` is a kept base. Refuted if those children are few, and the props are kept as `unjudged`.
 - **H-V (view):** the explorer cam's rows follow the free camera. Refuted if the look probe's note says they do not, or if the view source is `eye rows` while Explorer Cam is on.
+
+### Built v6, 2026-10-11 (branch `claude/hangar-test-7`; not installed, not flown)
+
+**The box is ruled out.** The planes test `0x4F4E10` (build 332841, gate matched) takes a point (`[rdx]`, four floats) and a radius (lane 0 of the sixteen bytes at `[r8]`). It tests both against the plane array of its first argument (`[rcx+0x30]`, count `[rcx+0x44]`; the builder passes its view object as rcx) with dot products and plus or minus the radius, and it reads no extents. So the engine's test has no oriented box to read. The builder (0x42B4420, the call at 0x42B4595) copies the point from `rbp-0x30` and the radius from `rbp-0x20`. Where those locals are loaded from is the research's pose-context reading, not re-verified here. The research also reports that a record's sphere is the union of its own sphere and its children's. That is not re-verified here either.
+
+**The shape key is not in this build.** The `sealed_trial_shape` wiring (the key, its hotkey and the ini default `box`) was never committed: `sealedTrialShapeToggle` was declared and called but never defined, so the tree would not link. A box for the trial would be EDVR's own construction, a box from the children's spheres, not the engine's test, and it needs the children's spheres in the observer. Whether to build that is a choice for Sean.
+
+**Faults.** The store's observer runs the cull through `cullRecordFaultSafe`: it reads the record's mask and admitted flag, writes both, and puts the mask back if the admitted write fails. A failed read or write leaves the record as the store wrote it (kept, counted in `faults`). A put-back that also fails is `torn`: the one case where the record may be left half culled (mask zero, admitted flag still set). The window line reads `faults=N torn=N`.
+
+**Next flight.** The Built v5 plan, with one check added: `torn=` on every window line reads 0. A nonzero `torn` is the first thing to report, with its window line.
 
 ## Open items
 

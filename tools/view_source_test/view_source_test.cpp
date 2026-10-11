@@ -132,6 +132,29 @@ int main(int argc, char** argv) {
               "an arbitrary orientation: the forward (column 2) is recovered");
     }
 
+    // ---- The explorer cam's world block (row vectors): the axes are the rows, the origin is row 3, the forward is row 2 (not column 2).
+    {
+        Pose p;
+        const float ident[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1};
+        check(poseFromWorldBlock(ident, &p) && close(p.pos[0], 5, 1e-5f) && close(p.pos[1], 6, 1e-5f) && close(p.pos[2], 7, 1e-5f) &&
+                  close(p.fwd[2], 1, 1e-5f),
+              "an identity world block: the origin is row 3 and the forward is row 2");
+        // Yawed to face +X: row 0 right (0,0,-1), row 1 up, row 2 forward (1,0,0); column 2 would be (-1,0,0), so this tells them apart.
+        const float yaw[16] = {0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 3, 0, 4, 1};
+        check(poseFromWorldBlock(yaw, &p) && close(p.pos[0], 3, 1e-5f) && close(p.pos[2], 4, 1e-5f) && close(p.fwd[0], 1, 1e-5f) &&
+                  close(p.fwd[2], 0, 1e-5f),
+              "a yawed world block: the forward is row 2 (+X), not column 2");
+        float badLen[16] = {0, 0, -1, 0, 0, 1, 0, 0, 2, 0, 0, 0, 3, 0, 4, 1};
+        Pose q;
+        q.pos[0] = 42.0f;
+        check(!poseFromWorldBlock(badLen, &q) && q.pos[0] == 42.0f, "a world block whose row 2 is not unit length is refused, output untouched");
+        float badNan[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1};
+        badNan[13] = std::nanf("");
+        check(!poseFromWorldBlock(badNan, &q), "a NaN in the origin is refused");
+        const float skewRows[16] = {1, 0, 0, 0, 0, 0.6f, 0.8f, 0, 0, 0.6f, 0.8f, 0, 0, 0, 0, 1};   // rows 1 and 2 are equal: dot 1
+        check(!poseFromWorldBlock(skewRows, &q), "world rows 1 and 2 that are not orthogonal are refused");
+    }
+
     // ---- The refusals: a scaled axis, non-orthogonal axes, a NaN, a huge position; the output is left as it was.
     {
         Pose p;

@@ -152,15 +152,16 @@ struct Summary {
     float eye[3] = {};
     uint32_t recordsScanned = 0, recordsInRay = 0, recordsListed = 0;
     uint32_t draws = 0, drawsProbed = 0, drawsCovering = 0, drawsListed = 0;
-    const char* viewSource = "";   // explorer cam | eye rows | vscreen | origin | frustum (view_source_core.h; the view the aim came from)
+    const char* viewSource = "";   // explorer cam | eye rows | origin | frustum fallback (view_source_core.h; the view the aim came from)
+    const char* noAim = "";        // when there is no forward: why (the resolver's reason, and the frustum's)
     const char* csvName = "";
 };
 
 inline int formatSummary(char* out, size_t cap, const Summary& s) noexcept {
     if (!s.forwardKnown)
-        return std::snprintf(out, cap, "look probe: frame=%u trigger=%s view source = %s forward=unknown (no pose from the "
-                                       "rows and no frustum pair; records not aimed) draws=%u probed=%u covering=%u csv=%s",
-                             s.frame, s.trigger, s.viewSource, s.draws, s.drawsProbed, s.drawsCovering, s.csvName);
+        return std::snprintf(out, cap, "look probe: frame=%u trigger=%s view source = %s forward=unknown (%s; records not "
+                                       "aimed) draws=%u probed=%u covering=%u csv=%s",
+                             s.frame, s.trigger, s.viewSource, s.noAim, s.draws, s.drawsProbed, s.drawsCovering, s.csvName);
     return std::snprintf(out, cap,
                          "look probe: frame=%u trigger=%s view source = %s eye=(%.2f,%.2f,%.2f) forward=(%.4f,%.4f,%.4f) records=%u scanned, "
                          "%u on the ray within %.0f m, %u listed; draws=%u probed=%u covering the centre=%u listed=%u csv=%s",

@@ -42,7 +42,7 @@ std::atomic<bool> g_on{false};
 // The live radius: the configured start, then the ladder's rungs while the trial is on. Changed on the render thread (the step keys);
 // the store's observer reads it through the atomic.
 std::atomic<float> g_radius{sealed::kDefaultRadiusM};
-std::atomic<uint64_t> g_culled{0}, g_kept{0}, g_keptUnknown{0}, g_sunSkipped{0}, g_evalNs{0}, g_faults{0};
+std::atomic<uint64_t> g_culled{0}, g_kept{0}, g_keptUnknown{0}, g_sunSkipped{0}, g_evalNs{0}, g_faults{0}, g_torn{0};
 std::atomic<uint32_t> g_frameStamp{0};       // advanced at every Present tick: the observer resolves the view once per frame
 std::atomic<bool> g_cameraKnown{false};
 uint64_t g_windowStartMs = 0;                // render thread only
@@ -101,6 +101,7 @@ void resetWindow() noexcept {
     g_sunSkipped.store(0);
     g_evalNs.store(0);
     g_faults.store(0);
+    g_torn.store(0);
 }
 
 sealed::Window takeWindow() noexcept {
@@ -111,6 +112,7 @@ sealed::Window takeWindow() noexcept {
     w.sunSkipped = g_sunSkipped.load();
     w.evalNs = g_evalNs.load();
     w.faults = g_faults.load();
+    w.torn = g_torn.load();
     return w;
 }
 
@@ -443,6 +445,17 @@ bool sealedTrialSkipsSunPair() noexcept { return g_on.load(std::memory_order_acq
 
 void sealedTrialNoteSunSkip() noexcept { g_sunSkipped.fetch_add(1, std::memory_order_relaxed); }
 
+// The record's view mask and admitted flag through the guarded reads and writes, for the fault-safe cull (sealed_trial_core.h).
+namespace {
+struct RecordFields {
+    uintptr_t rec;
+    bool readMask(uint64_t* out) noexcept { return readVal(out, rec + kRecMask); }
+    bool readAdmitted(uint8_t* out) noexcept { return readVal(out, rec + kRecAdmitted); }
+    bool writeMask(uint64_t v) noexcept { return writeMem(rec + kRecMask, &v, sizeof(v)); }
+    bool writeAdmitted(uint8_t v) noexcept { return writeMem(rec + kRecAdmitted, &v, sizeof(v)); }
+};
+}  // namespace
+
 // The rule for one record the store has written. Every read and write is validated; a failure leaves the record as the store wrote it and
 // counts a fault. The view the sphere is centred on is resolved once per frame (the first record of the frame).
 void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
@@ -489,12 +502,22 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
     } else if (sealed::keepRecord(centre, radius, cam, trialR)) {
         g_kept.fetch_add(1, std::memory_order_relaxed);
     } else {
-        const uint64_t none = 0;
-        const uint8_t notAdmitted = 0;
-        if (writeMem(record + kRecMask, &none, sizeof(none)) && writeMem(record + kRecAdmitted, &notAdmitted, 1))
-            g_culled.fetch_add(1, std::memory_order_relaxed);
-        else
-            g_faults.fetch_add(1, std::memory_order_relaxed);
+        RecordFields fields{record};
+        sealed::CullField failed = sealed::CullField::kMaskRead;
+        uint64_t value = 0;
+        switch (sealed::cullRecordFaultSafe(fields, &failed, &value)) {
+            case sealed::Cull::kCulled:
+                g_culled.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case sealed::Cull::kUntouched:
+            case sealed::Cull::kRestored:
+                g_faults.fetch_add(1, std::memory_order_relaxed);   // the record is as the store wrote it: kept, not judged
+                break;
+            case sealed::Cull::kTorn:
+                g_faults.fetch_add(1, std::memory_order_relaxed);
+                g_torn.fetch_add(1, std::memory_order_relaxed);     // the one case the record may be left half culled
+                break;
+        }
     }
     if (g_repPhase.load(std::memory_order_relaxed) == kRepCollecting && g_observed.size() < g_observed.capacity())
         g_observed.push_back(Observed{bucket, record});

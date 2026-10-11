@@ -24,6 +24,7 @@
 #include "explorer_cam.h"
 #include "engine_motion_ready.h"
 #include "explorer_cam_core.h"
+#include "view_source_core.h"
 #include "explorer_cam_fade_core.h"
 #include "explorer_cam_follow_core.h"
 #include "explorer_cam_settings_core.h"
@@ -247,6 +248,15 @@ __declspec(noinline) bool sehReadObserved(const uint8_t* a, ecm::Observed* o) no
 __declspec(noinline) bool sehReadPose(const uint8_t* a, float out[16]) noexcept {
     __try {
         std::memcpy(out, a + ecm::kOffLocalPose, 64);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// The activity's world block (+0x70, float[16]), read under SEH: the free camera's world pose, the block the witness reads.
+__declspec(noinline) bool sehReadWorldPose(const uint8_t* a, float out[16]) noexcept {
+    __try {
+        std::memcpy(out, a + 0x70, 64);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -2532,6 +2542,23 @@ ExplorerCamSkeleton explorerCamSkeleton(int site) {
 }
 uint64_t explorerCamFindJointSeen() { return g_findSeen.load(std::memory_order_relaxed); }
 bool explorerCamSessionActive() { return g_sessionActive.load(std::memory_order_acquire); }
+
+// The free camera's world pose while a placement stands: the activity's world block at +0x70 (rows 0-2 the camera's world axes, row 3 its
+// origin, row vectors). The placement is the real state: the session flag can be on while no placement stands (the preset before the
+// free camera). Read-only: copies the block under SEH and writes nothing. False when no placement stands or the block is not a frame.
+bool explorerCamWorldPose(float pos[3], float fwd[3]) noexcept {
+    const uint64_t act = g_placedActivity.load(std::memory_order_acquire);
+    if (!act) return false;
+    float m[16] = {};
+    if (!sehReadWorldPose(reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(act)), m)) return false;
+    edvr::view::Pose p;
+    if (!edvr::view::poseFromWorldBlock(m, &p)) return false;
+    for (int k = 0; k < 3; ++k) {
+        pos[k] = p.pos[k];
+        fwd[k] = p.fwd[k];
+    }
+    return true;
+}
 
 #ifdef EDVR_EXPLORER_CAM_TEST
 namespace explorercamtest {

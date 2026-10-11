@@ -93,6 +93,13 @@ int main(int argc, char** argv) {
               "the window line carries the counts");
         check(s.find("eval_ms=2.500") != std::string::npos && s.find("radius_m=80.0") != std::string::npos,
               "the window line carries the time and the radius");
+        check(s.find("faults=0 torn=0 radius_m=80.0") != std::string::npos,
+              "the window line carries the fault count and the torn count, in that order, before the radius");
+        w.faults = 3;
+        w.torn = 1;
+        se::formatWindow(line, sizeof(line), w, 80.0f, "eye rows");
+        check(std::string(line).find("faults=3 torn=1 radius_m=80.0") != std::string::npos,
+              "a torn cull is counted in the window line");
         se::formatWindow(line, sizeof(line), w, 60.0f, "explorer cam");
         check(std::string(line).find("radius_m=60.0") != std::string::npos, "a window at 60 m says so");
         check(std::string(line).find("view source = explorer cam") != std::string::npos, "a window names its view source");
@@ -195,6 +202,82 @@ int main(int argc, char** argv) {
         check(contains(line, "act only while the trial is on") && contains(line, "radius 40.0 m at frame 11") &&
                   contains(line, "nothing changed"),
               "a step key with the trial off is refused and says nothing changed");
+    }
+
+    // --- The cull with its fault handling, against a fake record: each failure point leaves the record as the store wrote it (kept),
+    //     except a failed put-back, which is named as torn.
+    {
+        struct FakeRecord {
+            uint64_t mask = 0x3F;
+            uint8_t admitted = 1;
+            bool failMaskRead = false, failAdmittedRead = false, failMaskWrite = false, failAdmittedWrite = false, failRestore = false;
+            int maskWrites = 0;
+            bool readMask(uint64_t* v) {
+                if (failMaskRead) return false;
+                *v = mask;
+                return true;
+            }
+            bool readAdmitted(uint8_t* v) {
+                if (failAdmittedRead) return false;
+                *v = admitted;
+                return true;
+            }
+            bool writeMask(uint64_t v) {
+                ++maskWrites;
+                if (maskWrites == 1 && failMaskWrite) return false;
+                if (maskWrites == 2 && failRestore) return false;
+                mask = v;
+                return true;
+            }
+            bool writeAdmitted(uint8_t v) {
+                if (failAdmittedWrite) return false;
+                admitted = v;
+                return true;
+            }
+        };
+        se::CullField f = se::CullField::kMaskRead;
+        uint64_t val = 0;
+        {
+            FakeRecord r;
+            const se::Cull c = se::cullRecordFaultSafe(r, &f, &val);
+            check(c == se::Cull::kCulled && r.mask == 0 && r.admitted == 0, "a clean cull clears the mask and the admitted flag");
+        }
+        {
+            FakeRecord r;
+            r.failMaskRead = true;
+            const se::Cull c = se::cullRecordFaultSafe(r, &f, &val);
+            check(c == se::Cull::kUntouched && f == se::CullField::kMaskRead && r.mask == 0x3F && r.admitted == 1,
+                  "a failed mask read leaves the record as the store wrote it");
+        }
+        {
+            FakeRecord r;
+            r.failAdmittedRead = true;
+            const se::Cull c = se::cullRecordFaultSafe(r, &f, &val);
+            check(c == se::Cull::kUntouched && f == se::CullField::kAdmittedRead && r.mask == 0x3F && r.admitted == 1,
+                  "a failed admitted read leaves the record untouched");
+        }
+        {
+            FakeRecord r;
+            r.failMaskWrite = true;
+            const se::Cull c = se::cullRecordFaultSafe(r, &f, &val);
+            check(c == se::Cull::kUntouched && f == se::CullField::kMaskWrite && r.mask == 0x3F && r.admitted == 1,
+                  "a failed mask write leaves the record untouched");
+        }
+        {
+            FakeRecord r;
+            r.failAdmittedWrite = true;
+            const se::Cull c = se::cullRecordFaultSafe(r, &f, &val);
+            check(c == se::Cull::kRestored && f == se::CullField::kAdmittedWrite && r.mask == 0x3F && r.admitted == 1,
+                  "a failed admitted write puts the mask back: the record is kept");
+        }
+        {
+            FakeRecord r;
+            r.failAdmittedWrite = true;
+            r.failRestore = true;
+            const se::Cull c = se::cullRecordFaultSafe(r, &f, &val);
+            check(c == se::Cull::kTorn && f == se::CullField::kRestoreWrite && r.mask == 0 && r.admitted == 1,
+                  "a failed put-back is reported as torn, naming the field");
+        }
     }
 
     std::printf("sealed_trial_test: %d checks, %d failures\n", g_checks, g_failures);

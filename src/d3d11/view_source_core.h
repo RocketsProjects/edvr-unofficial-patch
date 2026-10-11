@@ -74,4 +74,29 @@ inline bool poseFromRows(const float rows[12], Pose* out) noexcept {
     return true;
 }
 
+// Reads a pose from a world block of the row-vector kind (the explorer cam's activity block at +0x70, float[16]): m[4i + k] for i = 0..2 are the
+// camera's world axes (right, up, forward) as rows, and row 3 (m[12..14]) is its origin. The forward is row 2's first three entries. The same
+// sanity limits as poseFromRows apply: the axes are unit length and mutually orthogonal, and the origin is finite and within the limit.
+inline bool poseFromWorldBlock(const float m[16], Pose* out) noexcept {
+    for (int i = 0; i < 16; ++i)
+        if (!std::isfinite(m[i])) return false;
+    for (int i = 0; i < 3; ++i) {
+        const float len = std::sqrt(m[4 * i] * m[4 * i] + m[4 * i + 1] * m[4 * i + 1] + m[4 * i + 2] * m[4 * i + 2]);
+        if (std::fabs(len - 1.0f) > kRowLengthTol) return false;
+    }
+    for (int a = 0; a < 3; ++a)
+        for (int b = a + 1; b < 3; ++b) {
+            const float d = m[4 * a] * m[4 * b] + m[4 * a + 1] * m[4 * b + 1] + m[4 * a + 2] * m[4 * b + 2];
+            if (std::fabs(d) > kRowOrthoTol) return false;
+        }
+    Pose p;
+    for (int k = 0; k < 3; ++k) {
+        p.pos[k] = m[12 + k];
+        if (std::fabs(p.pos[k]) > kPosLimitM) return false;
+    }
+    for (int k = 0; k < 3; ++k) p.fwd[k] = m[8 + k];   // row 2: the camera's forward axis
+    *out = p;
+    return true;
+}
+
 }  // namespace edvr::view
