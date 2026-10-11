@@ -10001,6 +10001,220 @@ def print_cpu_csv(text):
     return 0
 
 
+# ---- the occlusion census (src\d3d11\occlusion_census.cpp, occlusion_census_core.cpp) ---------------------------------
+# Four frames of the scene's draws, each with an occlusion query. A capture's report names how much of the scene's
+# triangles drew no visible pixel, the shader pairs that did, and the largest such draws. Every line is "occlusion
+# census: ..." after the log's timestamp; the per-draw CSV is written beside the log (edvr_logs\occlusion_census_<stamp>.csv).
+_OCC_CFG_RE = re.compile(r"occlusion census: (not armed|diag\.occlusion_census = \S+)")
+_OCC_START_RE = re.compile(r"occlusion census: recording frames 1-(\d+) of the scene's draws \((\w+) target, from (.+)\); "
+                           r"stamp (\w+)\.")
+_OCC_SUMMARY_RE = re.compile(r"occlusion census: frames=(\d+) draws=(\d+) zero_sample_draws=(\d+) \(([\d.]+)%\) "
+                             r"triangles=(\d+) zero_sample_triangles=(\d+) \(([\d.]+)%\) skipped_no_depth=(\d+)")
+_OCC_ACC_RE = re.compile(r"occlusion census: accounting scene_draws=(\d+) measured=(\d+) ready=(\d+) lost=(\d+) "
+                         r"overflow=(\d+) no_query=(\d+) other_target=(\d+) foreign_context=(\d+)")
+_OCC_PAIR_RE = re.compile(r"occlusion census: vs=([0-9A-F]{16}) ps=([0-9A-F]{16}) draws=(\d+) zero=(\d+) tris=(\d+) "
+                          r"zero_tris=(\d+) max_tris_single_draw=(\d+) samples_p50=(\d+)")
+_OCC_TOP_RE = re.compile(r"occlusion census: top zero draw rank=(\d+) frame=(\d+) eye=(\S+) vs=([0-9A-F]{16}) "
+                         r"ps=([0-9A-F]{16}) kind=(\S) count=(\d+) instances=(\d+) tris=(\d+) rt=(\d+) dsv=(\d+) "
+                         r"depth=(\S+)")
+_OCC_LOST_RE = re.compile(r"occlusion census: results lost: (\d+) measured draws")
+_OCC_END_RE = re.compile(r"occlusion census: end rows=(\d+) csv=(\S+)")
+
+
+def parse_occlusion_census(text):
+    """The occlusion captures in a graphics log, oldest first, and the configure line ("not armed" or the on mode).
+
+    A capture opens at its "recording frames" line and closes at its "end rows=" line. One still open when the log stops is
+    returned with done False: its queries were never read back, which is what a log cut short looks like.
+    """
+    caps = []
+    cur = None
+    cfg = None
+    for raw in text.splitlines():
+        at = raw.find("occlusion census:")
+        if at < 0:
+            continue
+        line = raw[at:]
+        m = _OCC_CFG_RE.search(line)
+        if m and cfg is None and cur is None:
+            cfg = m.group(1)
+            continue
+        m = _OCC_START_RE.search(line)
+        if m:
+            if cur is not None:
+                cur["done"] = False
+                caps.append(cur)
+            cur = {"frames": int(m.group(1)), "target": m.group(2), "trigger": m.group(3), "stamp": m.group(4),
+                   "summary": None, "acc": None, "pairs": [], "tops": [], "lost": 0, "noDraws": False,
+                   "end": None, "done": False}
+            continue
+        if cur is None:
+            continue
+        if "armed, but no draw reached the scene target" in line:
+            cur["noDraws"] = True
+            continue
+        m = _OCC_SUMMARY_RE.search(line)
+        if m:
+            g = m.groups()
+            cur["summary"] = {"frames": int(g[0]), "draws": int(g[1]), "zero": int(g[2]), "zeroPct": float(g[3]),
+                              "tris": int(g[4]), "zeroTris": int(g[5]), "zeroTrisPct": float(g[6]),
+                              "noDepth": int(g[7])}
+            continue
+        m = _OCC_ACC_RE.search(line)
+        if m:
+            g = [int(x) for x in m.groups()]
+            cur["acc"] = {"sceneDraws": g[0], "measured": g[1], "ready": g[2], "lost": g[3], "overflow": g[4],
+                          "noQuery": g[5], "otherTarget": g[6], "foreignContext": g[7]}
+            continue
+        m = _OCC_PAIR_RE.search(line)
+        if m:
+            g = m.groups()
+            cur["pairs"].append({"vs": g[0], "ps": g[1], "draws": int(g[2]), "zero": int(g[3]), "tris": int(g[4]),
+                                 "zeroTris": int(g[5]), "maxTris": int(g[6]), "p50": int(g[7])})
+            continue
+        m = _OCC_TOP_RE.search(line)
+        if m:
+            g = m.groups()
+            cur["tops"].append({"rank": int(g[0]), "frame": int(g[1]), "eye": g[2], "vs": g[3], "ps": g[4],
+                                "kind": g[5], "count": int(g[6]), "instances": int(g[7]), "tris": int(g[8]),
+                                "rt": int(g[9]), "dsv": int(g[10]), "depth": g[11]})
+            continue
+        m = _OCC_LOST_RE.search(line)
+        if m:
+            cur["lost"] = int(m.group(1))
+            continue
+        m = _OCC_END_RE.search(line)
+        if m:
+            cur["end"] = {"rows": int(m.group(1)), "csv": m.group(2)}
+            cur["done"] = True
+            caps.append(cur)
+            cur = None
+    if cur is not None:
+        cur["done"] = False
+        caps.append(cur)
+    return caps, cfg
+
+
+def print_occlusion_census(text):
+    """The occlusion captures, with a VERDICT per capture. Exit 0 complete, 4 when the log stops during one, 3 when it has no
+    capture at all (its configure line, if any, says why)."""
+    caps, cfg = parse_occlusion_census(text)
+    if not caps:
+        if cfg:
+            print("[edvr] occlusion census: %s; no capture in this log. Press hotkey.occlusion_census (or set "
+                  "diag.occlusion_census = on) and read the log again." % cfg)
+        else:
+            print("[edvr] no occlusion census: lines at all: this log predates the instrument, or it is another build")
+        return 3
+    rc = 0
+    for n, c in enumerate(caps, 1):
+        print("occlusion census capture %d: stamp %s, %s target, from %s" % (n, c["stamp"], c["target"], c["trigger"]))
+        s = c["summary"]
+        if not c["done"]:
+            print("  VERDICT: the log stops during this capture: its queries were never read back")
+            rc = 4
+        if c["noDraws"] or (s is not None and s["draws"] == 0 and c["acc"] and c["acc"]["sceneDraws"] == 0):
+            print("  VERDICT: armed, but no draw reached the scene target; the scene target test matched nothing")
+        if s is not None:
+            print("  draws=%d zero_sample_draws=%d (%.1f%%) triangles=%d zero_sample_triangles=%d (%.1f%%) "
+                  "skipped_no_depth=%d" % (s["draws"], s["zero"], s["zeroPct"], s["tris"], s["zeroTris"],
+                                           s["zeroTrisPct"], s["noDepth"]))
+            if s["draws"]:
+                print("  VERDICT: %.1f%% of the measured scene triangles drew no visible pixel at their draw"
+                      % s["zeroTrisPct"])
+        if c["acc"]:
+            a = c["acc"]
+            print("  accounting: scene_draws=%d measured=%d ready=%d lost=%d overflow=%d no_query=%d other_target=%d "
+                  "foreign_context=%d" % (a["sceneDraws"], a["measured"], a["ready"], a["lost"], a["overflow"],
+                                          a["noQuery"], a["otherTarget"], a["foreignContext"]))
+        if c["lost"]:
+            print("  VERDICT: results lost: %d measured draws never answered; they are left out of the figures" % c["lost"])
+        for p in c["pairs"][:10]:
+            print("  pair vs=%s ps=%s draws=%d zero=%d tris=%d zero_tris=%d max_tris=%d samples_p50=%d"
+                  % (p["vs"], p["ps"], p["draws"], p["zero"], p["tris"], p["zeroTris"], p["maxTris"], p["p50"]))
+        for t in c["tops"][:5]:
+            print("  top rank=%d frame=%d %s vs=%s ps=%s kind=%s count=%d instances=%d tris=%d depth=%s"
+                  % (t["rank"], t["frame"], t["eye"], t["vs"], t["ps"], t["kind"], t["count"], t["instances"],
+                     t["tris"], t["depth"]))
+        if c["end"]:
+            print("  csv: edvr_logs\\%s (%d rows)" % (c["end"]["csv"], c["end"]["rows"]))
+    return rc
+
+
+def self_test_occlusion_census():
+    ok = True
+    done = (
+        "[10:00:00.001] occlusion census: not armed (diag.occlusion_census = off). Nothing is measured until "
+        "hotkey.occlusion_census is pressed.\n"
+        "[10:01:00.000] occlusion census: capture requested by hotkey.occlusion_census; it starts at the next frame tick "
+        "and records 4 frames.\n"
+        "[10:01:00.050] occlusion census: recording frames 1-4 of the scene's draws (eye target, from "
+        "hotkey.occlusion_census); stamp 20261011_100100.\n"
+        "[10:01:00.900] occlusion census: 4 frames recorded; reading the queries back over the following frames.\n"
+        "[10:01:01.000] occlusion census: frames=4 draws=3 zero_sample_draws=1 (33.3%) triangles=6 "
+        "zero_sample_triangles=2 (33.3%) skipped_no_depth=1\n"
+        "[10:01:01.001] occlusion census: accounting scene_draws=4 measured=3 ready=3 lost=0 overflow=0 no_query=0 "
+        "other_target=1 foreign_context=0\n"
+        "[10:01:01.002] occlusion census: vs=0000000000000003 ps=0000000000000002 draws=1 zero=1 tris=2 zero_tris=2 "
+        "max_tris_single_draw=2 samples_p50=0\n"
+        "[10:01:01.003] occlusion census: top zero draw rank=1 frame=1 eye=eye vs=0000000000000003 "
+        "ps=0000000000000002 kind=D count=6 instances=1 tris=2 rt=1 dsv=2 depth=test-write\n"
+        "[10:01:01.004] occlusion census: end rows=4 csv=occlusion_census_20261011_100100.csv\n"
+    )
+    caps, cfg = parse_occlusion_census(done)
+    if cfg is None or "not armed" not in cfg or len(caps) != 1:
+        print("occlusion census: a complete capture did not parse: cfg=%r caps=%d" % (cfg, len(caps)))
+        return False
+    c = caps[0]
+    if (not c["done"] or c["summary"]["draws"] != 3 or c["summary"]["zero"] != 1 or c["summary"]["noDepth"] != 1
+            or c["acc"]["otherTarget"] != 1 or len(c["pairs"]) != 1 or c["pairs"][0]["vs"] != "0000000000000003"
+            or c["tops"][0]["depth"] != "test-write" or c["tops"][0]["tris"] != 2 or c["end"]["rows"] != 4):
+        print("occlusion census: the summary, accounting, pair or top lines did not parse: %r" % (c,))
+        ok = False
+    if print_occlusion_census(done) != 0:
+        print("occlusion census: a complete capture should exit 0")
+        ok = False
+
+    # A log cut short during a capture: the capture is open, and the exit says so.
+    cut = (
+        "[10:05:00.000] occlusion census: capture requested by hotkey.occlusion_census; it starts at the next frame tick "
+        "and records 4 frames.\n"
+        "[10:05:00.050] occlusion census: recording frames 1-4 of the scene's draws (flat target, from "
+        "hotkey.occlusion_census); stamp 20261011_100500.\n"
+    )
+    caps, _ = parse_occlusion_census(cut)
+    if len(caps) != 1 or caps[0]["done"] or caps[0]["target"] != "flat" or print_occlusion_census(cut) != 4:
+        print("occlusion census: a capture the log stops during did not read as unfinished (exit 4)")
+        ok = False
+
+    # Armed, with no scene draw: the trace names it, and the lost-results line is read.
+    empty = (
+        "[10:06:00.050] occlusion census: recording frames 1-4 of the scene's draws (eye target, from "
+        "hotkey.occlusion_census); stamp 20261011_100600.\n"
+        "[10:06:00.900] occlusion census: armed, but no draw reached the scene target in these frames (other_target=9 "
+        "foreign_context=0): the scene target test matched nothing, or nothing was drawn there.\n"
+        "[10:06:01.000] occlusion census: frames=4 draws=0 zero_sample_draws=0 (0.0%) triangles=0 "
+        "zero_sample_triangles=0 (0.0%) skipped_no_depth=0\n"
+        "[10:06:01.001] occlusion census: results lost: 2 measured draws never returned a result; they are left out of "
+        "every figure here.\n"
+        "[10:06:01.002] occlusion census: end rows=0 csv=occlusion_census_20261011_100600.csv\n"
+    )
+    caps, _ = parse_occlusion_census(empty)
+    if (len(caps) != 1 or not caps[0]["noDraws"] or caps[0]["lost"] != 2 or not caps[0]["done"]):
+        print("occlusion census: the no-draws or lost-results trace did not parse: %r" % (caps,))
+        ok = False
+
+    # Never armed: no capture, and the configure line says so.
+    caps, cfg = parse_occlusion_census("[10:00:00.001] occlusion census: not armed (diag.occlusion_census = off).\n")
+    if caps or cfg != "not armed":
+        print("occlusion census: a never-armed log did not read as never armed")
+        ok = False
+    if print_occlusion_census("[10:00:00.001] occlusion census: not armed (diag.occlusion_census = off).\n") != 3:
+        print("occlusion census: a never-armed log should exit 3")
+        ok = False
+    return ok
+
+
 def self_test_cpu_profile():
     import contextlib
     import io
@@ -10170,6 +10384,11 @@ def main(argv=None):
                          "periodic lays the `periodic work:` timing against "
                          "the flight's long frames (graphics log plus its "
                          "runtime log)")
+    ap.add_argument("--occlusion-census", action="store_true",
+                    help="the occlusion census (occlusion_census.cpp, temporary diagnostic keys): every `occlusion census:` "
+                         "capture in the log, with a VERDICT per capture: the share of the scene's triangles that drew no "
+                         "visible pixel, the shader pairs and the largest draws. Exit 0 complete, 4 when the log stops during "
+                         "one, 3 when it has no capture (its configure line says why)")
     ap.add_argument("--cpu-profile", nargs="?", const="", default=None, metavar="CSV",
                     help="the render-thread CPU profile (cpu_profile.h, temporary diagnostic keys): with no CSV, the latest "
                          "`cpu profile:` capture in the log (--file or --dir or --target), verbatim, with a VERDICT line; "
@@ -10378,6 +10597,9 @@ def main(argv=None):
 
     if args.version:
         return 0
+
+    if args.occlusion_census:
+        return print_occlusion_census(text)
 
     if args.cpu_profile is not None:
         return print_cpu_profile(text)
@@ -10837,6 +11059,8 @@ def self_test():
     if not self_test_periodic():
         ok = False
     if not self_test_cpu_profile():
+        ok = False
+    if not self_test_occlusion_census():
         ok = False
     if not self_test_camera_census():
         ok = False

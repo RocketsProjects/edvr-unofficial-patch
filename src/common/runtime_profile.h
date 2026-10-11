@@ -112,6 +112,8 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         std::strcmp(key, "hotkey.dump_draws") == 0 ||
         // The render-thread CPU profile (cpu_profile.h, temporary diagnostic keys): unlisted, flat reads them as "off".
         std::strcmp(key, "hotkey.profile_cpu") == 0 || std::strcmp(key, "diag.profile_cpu") == 0 ||
+        // The occlusion census (occlusion_census.h, temporary diagnostic keys): unlisted, flat reads them as "off".
+        std::strcmp(key, "hotkey.occlusion_census") == 0 || std::strcmp(key, "diag.occlusion_census") == 0 ||
         std::strcmp(key, "fix.render_sharpness") == 0 ||
         // The interface quality (flat panel row; ui_panel_scale.cpp's flat factor and the flat UI layer). The VR layer reads it
         // too, but stays inert in flat: it is live only with fix.temporal_aa on through this gate, which refuses that key.
