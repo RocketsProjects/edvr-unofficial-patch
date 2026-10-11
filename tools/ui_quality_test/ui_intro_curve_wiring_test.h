@@ -34,12 +34,12 @@ using worldroute::readText;
 using worldroute::WirePin;
 
 // The squeezed statements the pins read, each the text of one statement of vscreen.cpp with its comments and whitespace out.
-const char* const kClear = "s->curveThisDraw=false;s->introCurveThisDraw=false;";
-const char* const kSet = "if(kind=='X'&&count==6&&introCurveWants())s->introCurveThisDraw=introCurveOnComposite(self,kind,count,instances);";
-const char* const kEnd = "if(g_state->introCurveThisDraw){g_state->introCurveThisDraw=false;introCurveEndDraw();}";
+const char* const kClear = "s->curveThisDraw=false;if(s->introOwnerAllowed)s->introCurveThisDraw=false;";
+const char* const kSet = "if(s->introOwnerAllowed&&kind=='X'&&count==6&&introCurveWants())s->introCurveThisDraw=introCurveOnComposite(self,kind,count,instances);";
+const char* const kEnd = "if(g_state->introOwnerAllowed&&g_state->introCurveThisDraw){g_state->introCurveThisDraw=false;runIntroOwned(g_state->introOwnerAllowed,[&]{introCurveEndDraw();});}";
 const char* const kGuard =
     "if(panelCurveWants()&&srv0IsPanelSized(s,kind,count)&&!(kind=='X'&&count==6&&bindingShaderHash(BindSlot::Vs)==kIntroCompositeVsHash))s->curveThisDraw=true;";
-const char* const kCandidate = "if((v==DrawVerdict::kIntroPanel||forwardInputs.read(forwardInputs.fact.introCurveThisDrawStripGate,[&]{returng_state->introCurveThisDraw;},[&]{returng_state->introCurveThisDraw;}))&&owner&&panelCurveSurfaceWanted()){";
+const char* const kCandidate = "if(g_state->introOwnerAllowed&&(v==DrawVerdict::kIntroPanel||forwardInputs.read(forwardInputs.fact.introCurveThisDrawStripGate,[&]{returng_state->introCurveThisDraw;},[&]{returng_state->introCurveThisDraw;}))&&owner&&panelCurveSurfaceWanted()){";
 const char* const kNumbers =
     "if(v==DrawVerdict::kIntroPanel){if(introPanelStripArmed()){stripGain=introPanelStripGain();stripToward=1;stripReverseU=introPanelStripReverseU();}}"
     "else{stripGain=introCurveGain();stripToward=introCurveToward();stripReverseU=introCurveReverseU();}";
@@ -50,7 +50,11 @@ const char* const kObserved =
 const char* const kLambda = "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,[]{returndetail::g_uiLayerIssueBlocked;},[]{returnuiLayerIssueBlocked();})){";
 const char* const kDim =
     "constboolstripDim=stripIssued&&panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced);"
-    "booldimIssued=stripDim;if(!stripDim){draw(AlteredDrawClass::None);dimIssued=true;}splashDimEnd(self);";
+    "booldimIssued=stripDim;if(!stripDim){draw(AlteredDrawClass::None);dimIssued=true;}"
+    "runIntroOwned(g_state->introOwnerAllowed,[&]{splashDimEnd(self);});";
+const char* const kDimBegin =
+    "if(g_state->introOwnerAllowed&&(v==DrawVerdict::kBackdrop||v==DrawVerdict::kIntroPanel))"
+    "runIntroOwned(g_state->introOwnerAllowed,[&]{dimBegan=splashDimBegin(self);});if(dimBegan){";
 const char* const kTick =
     "tkIntroCurve.run([&]{constboolsceneFrame=g_state->eyeDrawsLastFrame>=kSceneEyeDraws;"
     "frameIntroLifecycleStage(kIntroLifecycleCurve,g_state->ownerCtx,sceneFrame?1u:0u,introCurveTick);"
@@ -60,7 +64,7 @@ const char* const kRetire =
     "Log::get().note(\"intro curve: %llu strip draw(s) in all (the movie's, the splash's and the splash dim's re-issues of either); the splash recogniser handed over %llu "
     "composite draw(s)\",static_cast<unsignedlonglong>(drawn),static_cast<unsignedlonglong>(introCurveInfo().armed));}";
 // The intro claim and splash recognizer have separate handlers. Runtime order is pinned by EyeSequence below.
-const char* const kMovieClaimEnd = "if(kind=='X'&&count==6&&introPanelWants())";
+const char* const kMovieClaimEnd = "if(s->introOwnerAllowed&&kind=='X'&&count==6&&introPanelWants())";
 const char* const kIntroCurveRung =
     "InterestGated<SiteId::kIntroCurveObserve, SiteKind::Observe,\n"
     "                  draw_interest::InterestId::IntroCurveObserve>";
@@ -83,6 +87,7 @@ std::vector<WirePin> wiringPins(const std::string& text, const std::string& ladd
     const std::string thunk = quietBody(text, "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(");
     const std::string gate = quietBody(text, "bool drawGateSubscribed(State* s) {");
     const std::string gateRegistration = quietBody(text, "bool registerLegacyDrawGates(State* state, std::uint32_t* registeredCount = nullptr) {");
+    const std::string gateOwner = quietBody(text, "bool legacyDrawGateOwnerAllowed(const LegacyDrawGateRegistration& registration,");
     const std::string frame = quietBody(text, "void vScreenFrameBoundary() {");
     const std::string shut = quietBody(text, "void shutdownVScreenFixes() {");
     const std::string note = quietBody(text, "void introCurveNoteRetired() {");
@@ -98,13 +103,13 @@ std::vector<WirePin> wiringPins(const std::string& text, const std::string& ladd
     const std::string introCurveSite = siteBody(bpo, "kIntroCurveObserve");
     const std::string introPanelSite = siteBody(bpo, "kIntroPanelClaim");
 
-    // The splash's flag: its own, cleared at the top of every beginPanelOverride (before anything can set it), set in one place only, and put away
+    // The splash's flag: its own, cleared for an admitted Intro owner at the top of every beginPanelOverride (before anything can set it), set in one place only, and put away
     // by the thunk after forwardWithVerdict -- the draw and the dim have used it by then -- on every way out of that call.
     pins.push_back({"flag-lifetime",
                     has(all, "boolintroCurveThisDraw=false;") && has(bpo, kClear) && has(bpo, kSet) && inOrder(bpo, {kClear, kSet}) &&
                         countOf(all, "introCurveOnComposite(") == 1 && countOf(all, "introCurveEndDraw()") == 1 &&
                         inOrder(thunk, {"forwardWithVerdict(trace,self,v,'X',", "introPanelEndDraw(self);", kEnd}),
-                    "intro curve wiring [flag-lifetime]: introCurveThisDraw is cleared right after curveThisDraw at the top of beginPanelOverride, before the one place that "
+                    "intro curve wiring [flag-lifetime]: an admitted Intro owner clears introCurveThisDraw right after curveThisDraw at the top of beginPanelOverride, before the one place that "
                     "sets it, and the thunk puts the numbers away (introCurveEndDraw) and the flag after forwardWithVerdict, once"});
     // The recognition: shape first, then introCurveWants() (one load at curvature 0), in the eye branch and before the eye-side verdicts it composes
     // with are returned.
@@ -127,20 +132,25 @@ std::vector<WirePin> wiringPins(const std::string& text, const std::string& ladd
                     "composite's, and the new term sits behind panelCurveWants()"});
     // The arming predicate is adapted to a named subscription, published to the registry, and consumed through its aggregate at the frame gate.
     pins.push_back({"gate",
-                    has(all, "EDVR_GATE_GLOBAL(intro_curve,introCurveWants())") &&
+                    has(all, "EDVR_GATE_INTRO(intro_curve,introCurveWants())") &&
                         has(all, "Ownerowner=Owner::Core;") &&
-                        has(all, "{\"legacy.intro-curve\",&drawGate_intro_curve,false}") &&
+                        has(all, "{\"legacy.hologram-depth\",&drawGate_hologram_depth,true,LegacyGateOwner::Intro}") &&
+                        has(all, "{\"legacy.backdrop\",&drawGate_backdrop,true,LegacyGateOwner::Intro}") &&
+                        has(all, "{\"legacy.loader-panel\",&drawGate_loader_panel,true,LegacyGateOwner::Intro}") &&
+                        has(all, "{\"legacy.intro-panel\",&drawGate_intro_panel,true,LegacyGateOwner::Intro}") &&
+                        has(all, "{\"legacy.intro-curve\",&drawGate_intro_curve,true,LegacyGateOwner::Intro}") &&
+                        has(gateOwner, "caseLegacyGateOwner::Intro:returnstate&&state->introOwnerAllowed;") &&
+                        has(gateRegistration, "if(!legacyDrawGateOwnerAllowed(registration,state))continue;") &&
                         has(gateRegistration, "pluginRegistryRegisterLegacyDrawGate(registration.name") &&
                         has(gate, "pluginRegistryWantsDraws(s)") &&
                         has(all, "drawGateSet(drawGateSubscribed(s));") && countOf(all, "introCurveWants()") == 2,
-                    "intro curve wiring [gate]: the named adapter follows introCurveWants(), its entry is published to the registry, and the frame gate consumes the registry aggregate (the on-foot strip's panelCurveWants() stands down "
-                    "on its own)"});
+                    "intro curve wiring [gate]: the named adapter and all five Intro-only subscriptions carry explicit Intro ownership, Core remains the default, denied rows are filtered before registration, and the frame gate consumes the registry aggregate (the on-foot strip remains separately active)"});
     // The strip's site: after the verdict's Begin and the layer's Begin, before the game's own issue, the layer's End and the dim; the dim follows.
     pins.push_back({"strip-site",
                     inOrder(fwd, {"boolstripIssued=false;", "autoobservedDraw=[&](AlteredDrawaltered){", "forwardVerdictBegin(self,v);",
                                   "constboollayered=uiLayer&&uiLayerBegin(self);", "floatstripGain=0.0f;intstripToward=0;boolstripReverseU=false;", kCandidate,
                                   "stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced);",
-                                  "constbooloriginalIssued=observedDraw(", "if(layered){uiLayerEnd(self);", "if(v==DrawVerdict::kBackdrop){backdropEnd(self);",
+                                  "constbooloriginalIssued=observedDraw(", "if(layered){uiLayerEnd(self);", "if(v!=DrawVerdict::kNone){if(v==DrawVerdict::kBackdrop){runIntroOwned(g_state->introOwnerAllowed,[&]{backdropEnd(self);});",
                                   "splashDimBegin(self)", "panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced)",
                                   "draw(AlteredDrawClass::None);", "splashDimEnd(self);", "forwardVerdictEnd(self,v);"}) &&
                         countOf(fwd, "panelCurveSurfaceDraw(") == 2 && countOf(all, "panelCurveSurfaceDraw(") == 2,
@@ -149,8 +159,8 @@ std::vector<WirePin> wiringPins(const std::string& text, const std::string& ladd
                     "panelCurveSurfaceDraw has two call sites, and the u direction starts false"});
     // The unarmed path is today's text: the game's own issue, the lambda it goes through (one early return added), and the dim's own draw.
     pins.push_back({"unarmed-text",
-                    has(fwd, kObserved) && has(fwd, kLambda) && has(fwd, kDim) &&
-                        has(fwd, "if((v==DrawVerdict::kBackdrop||v==DrawVerdict::kIntroPanel)&&splashDimBegin(self)){") &&
+                    has(fwd, kObserved) && has(fwd, kLambda) && has(fwd, kDim) && has(fwd, kDimBegin) &&
+                        countOf(fwd, "splashDimBegin(self)") == 1 && countOf(fwd, "splashDimEnd(self)") == 1 &&
                         inOrder(fwd, {"autoobservedDraw=[&](AlteredDrawaltered){", "if(owner&&forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,[]{returndetail::g_uiLayerIssueBlocked;},[]{returnuiLayerIssueBlocked();})){",
                                        "returnfalse;}", "if(stripIssued){", "returntrue;", "constboolissued=draw(altered);"}),
                     "intro curve wiring [unarmed-text]: `const bool originalIssued = observedDraw(...)` is the text it was, the lambda only gains `if (stripIssued) return true;` "
@@ -210,14 +220,15 @@ struct Flip {
 
 // The raw text of the blocks the controls move or delete (verbatim from vscreen.cpp).
 const char* const kRawClear = R"x(            s->curveThisDraw = false;
-            s->introCurveThisDraw = false;
+            if (s->introOwnerAllowed) s->introCurveThisDraw = false;
 )x";
-const char* const kRawSet = R"x(            if (kind == 'X' && count == 6 && introCurveWants())
+const char* const kRawSet = R"x(            if (s->introOwnerAllowed && kind == 'X' && count == 6 && introCurveWants())
                 s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);
 )x";
-const char* const kRawEnd = R"x(      if (g_state->introCurveThisDraw) {
+const char* const kRawEnd = R"x(      if (g_state->introOwnerAllowed && g_state->introCurveThisDraw) {
           g_state->introCurveThisDraw = false;
-          introCurveEndDraw();
+          runIntroOwned(g_state->introOwnerAllowed,
+                        [&] { introCurveEndDraw(); });
       }
 )x";
 const char* const kRawBegin = "        forwardVerdictBegin(self, v);\n";
@@ -274,8 +285,9 @@ const char* const kRawObservedEarlyBad = R"x(        if (stripIssued) {
 
 void testIntroCurveControls(const std::string& text, const std::string& ladderText) {
     const std::vector<Flip> flips = {
-        {"the flag is never cleared at the top", {{"if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);\n            s->curveThisDraw = false;\n            s->introCurveThisDraw = false;", "if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);\n            s->curveThisDraw = false;"}}, "flag-lifetime"},
-        {"the recogniser is asked for every draw", {{"if (kind == 'X' && count == 6 && introCurveWants())", "if (introCurveWants())"}}, "recognition"},
+        {"the flag is never cleared at the top", {{"if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);\n            s->curveThisDraw = false;\n            if (s->introOwnerAllowed) s->introCurveThisDraw = false;", "if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);\n            s->curveThisDraw = false;"}}, "flag-lifetime"},
+        {"the recogniser is asked for every draw", {{"if (s->introOwnerAllowed && kind == 'X' && count == 6 && introCurveWants())", "if (s->introOwnerAllowed && introCurveWants())"}}, "recognition"},
+        {"an absent Intro owner still reaches the recogniser", {{"s->introOwnerAllowed && kind == 'X' && count == 6 && introCurveWants()", "kind == 'X' && count == 6 && introCurveWants()"}}, "recognition"},
         {"the flag is set whatever the recogniser said", {{"s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);", "s->introCurveThisDraw = true;"}}, "recognition"},
         {"the on-foot recogniser claims the intro composite again", {{"!(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash)", "true"}}, "guard"},
         {"the strip is asked past the refusal", {{"if (stripToward != 0 && !uiLayerIssueBlocked()) {", "if (stripToward != 0) {"}}, "strip-args"},

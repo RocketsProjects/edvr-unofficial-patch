@@ -1117,8 +1117,15 @@ void caseR12() {
               "R12g: the registry table includes the footprint adapter under its stable subscription name");
         check(has(vs, "{\"legacy.transition-flash-eye-count\", &drawGate_transition_flash_eye_count, true, LegacyGateOwner::Comfort}") &&
                   has(vs, "{\"legacy.remlok\", &drawGate_remlok, true, LegacyGateOwner::CockpitVisuals}") &&
-                  has(vs, "{\"legacy.sun-glare\", &drawGate_sun_glare, true, LegacyGateOwner::CockpitOrComfort}"),
-              "R12g: Comfort, Cockpit and shared-glare legacy rows carry their explicit owner metadata");
+                  has(vs, "{\"legacy.sun-glare\", &drawGate_sun_glare, true, LegacyGateOwner::CockpitOrComfort}") &&
+                  has(vs, "Owner owner = Owner::Core;") &&
+                  has(vs, "{\"legacy.hologram-depth\", &drawGate_hologram_depth, true, LegacyGateOwner::Intro}") &&
+                  has(vs, "{\"legacy.backdrop\", &drawGate_backdrop, true, LegacyGateOwner::Intro}") &&
+                  has(vs, "{\"legacy.loader-panel\", &drawGate_loader_panel, true, LegacyGateOwner::Intro}") &&
+                  has(vs, "{\"legacy.intro-panel\", &drawGate_intro_panel, true, LegacyGateOwner::Intro}") &&
+                  has(vs, "{\"legacy.intro-curve\", &drawGate_intro_curve, true, LegacyGateOwner::Intro}") &&
+                  has(vs, "case LegacyGateOwner::Intro:\n        return state && state->introOwnerAllowed;"),
+              "R12g: Cockpit, Comfort, Intro and shared-glare rows carry precise ownership while unmarked rows remain Core");
         check(has(vs, "EDVR_GATE_OWNED(space_dust, spaceDustHidden())") &&
                   has(vs, "{\"legacy.space-dust\", &drawGate_space_dust, true, LegacyGateOwner::CockpitVisuals}") &&
                   has(ownedGate, "runCockpitVisualsOwned(s && s->cockpitVisualsOwnerAllowed, [&] {") &&

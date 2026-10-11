@@ -120,16 +120,20 @@ def M(name, rig, expect, edits, why, header_edits=None):
 
 
 # ---- wiring: the raw text of vscreen.cpp's blocks the mutations move or delete (the self-test finds each exactly once) ------------------
-W_CLEAR = "            s->curveThisDraw = false;\n            s->introCurveThisDraw = false;\n"
-W_SET = "            if (s->rtv0Eye && kind == 'X' && count == 6 && introCurveWants())\n                s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);\n"
-W_END = "      if (g_state->introCurveThisDraw) {\n          g_state->introCurveThisDraw = false;\n          introCurveEndDraw();\n      }\n"
+W_CLEAR = "            s->curveThisDraw = false;\n            if (s->introOwnerAllowed) s->introCurveThisDraw = false;\n"
+W_SET = "            if (s->introOwnerAllowed && kind == 'X' && count == 6 && introCurveWants())\n                s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);\n"
+W_END = ("      if (g_state->introOwnerAllowed && g_state->introCurveThisDraw) {\n"
+         "          g_state->introCurveThisDraw = false;\n"
+         "          runIntroOwned(g_state->introOwnerAllowed,\n"
+         "                        [&] { introCurveEndDraw(); });\n"
+         "      }\n")
 W_BEGIN = "        forwardVerdictBegin(self, v);\n"
 W_OBSERVED = ("    const bool originalIssued=observedDraw(alteredClass == AlteredDrawClass::Verdict\n"
               "                                               ? AlteredDraw(alteredClass, alteredFixOf(v)) : AlteredDraw(alteredClass));\n")
 W_STRIP_START = "    float stripGain = 0.0f;\n"
 W_GUARD = ("            if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&\n"
            "                !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash))\n")
-W_GATE = '    {"legacy.intro-curve", &drawGate_intro_curve, false},\n'
+W_GATE = '    {"legacy.intro-curve", &drawGate_intro_curve, true, LegacyGateOwner::Intro},\n'
 W_DIM = ("            const bool stripDim = stripIssued && panelCurveSurfaceDraw(\n"
          "                self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);\n")
 W_DIM_CALL = "panelCurveSurfaceDraw(\n                self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);"
@@ -142,7 +146,7 @@ W_INTRO_GATE = ("forwardInputs.read(\n"
                 "            forwardInputs.fact.introCurveThisDrawStripGate,\n"
                 "            [&] { return g_state->introCurveThisDraw; },\n"
                 "            [&] { return g_state->introCurveThisDraw; })")
-W_CANDIDATE = "if ((v == DrawVerdict::kIntroPanel || " + W_INTRO_GATE + ") && owner && panelCurveSurfaceWanted()) {"
+W_CANDIDATE = "if (g_state->introOwnerAllowed &&\n        (v == DrawVerdict::kIntroPanel || " + W_INTRO_GATE + ") && owner && panelCurveSurfaceWanted()) {"
 W_STRIP_CALL = "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);"
 W_TICK = ("        tkIntroCurve.run([&] {\n            const bool sceneFrame = g_state->eyeDrawsLastFrame >= kSceneEyeDraws;\n"
           "            frameIntroLifecycleStage(kIntroLifecycleCurve, g_state->ownerCtx,\n"
@@ -328,7 +332,7 @@ MUTANTS = [
     M("end-eye-not-marked", "layer", "the eye is the route's, as a flat screen's is",
       [("    g_eye[plan.eye].worldSeq = plan.seq;\n", "")], "a landed re-issue does not mark the eye as the route's"),
     # ---- wiring: the surface strip in vscreen.cpp (the movie and the splash), end to end through ui_quality_test --wiring ------------------
-    wiring("iw-flag-never-cleared", "flag-lifetime", [(W_CLEAR, "    s->curveThisDraw = false;\n")], "the splash's flag is not cleared at the top of beginPanelOverride"),
+    wiring("iw-flag-never-cleared", "flag-lifetime", [(W_CLEAR, "            s->curveThisDraw = false;\n")], "the splash's flag is not cleared at the top of beginPanelOverride"),
     wiring("iw-flag-thunk-leaves-it", "flag-lifetime", [(W_END, "")], "the thunk never puts the numbers and the flag away"),
     wiring("iw-flag-put-away-before-the-draw", "flag-lifetime",
            [(W_END, ""), ("      using Api = std::remove_reference_t<decltype(api)>;\n"
@@ -342,7 +346,7 @@ MUTANTS = [
                           "          std::remove_reference_t<decltype(cpu)>,\n"
                           "          Api>(trace, self, 'X', perInstance, instances, args);\n" + W_END)],
            "the numbers are put away before the draw and the dim have used them"),
-    wiring("iw-recognition-without-wants", "recognition", [("if (kind == 'X' && count == 6 && introCurveWants())", "if (kind == 'X' && count == 6)")],
+    wiring("iw-recognition-without-wants", "recognition", [("if (s->introOwnerAllowed && kind == 'X' && count == 6 && introCurveWants())", "if (s->introOwnerAllowed && kind == 'X' && count == 6)")],
            "the recogniser is asked at curvature 0 too"),
     wiring_ladder("iw-recognition-below-the-backdrop", "recognition", LADDER_EYE_ORDER,
                   LADDER_EYE_ORDER.replace("    " + LADDER_INTRO_RUNG + ",\n", "").replace(
@@ -390,9 +394,9 @@ MUTANTS = [
              "const bool stripDim = panelCurveSurfaceDraw(\n                self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);")],
            "the dim draws the strip even when the main draw's strip did not draw"),
     wiring("iw-candidate-asks-first", "candidate",
-           [(W_CANDIDATE, "if (panelCurveSurfaceWanted() && (v == DrawVerdict::kIntroPanel || " + W_INTRO_GATE + ") && owner) {")],
+           [(W_CANDIDATE, "if (g_state->introOwnerAllowed && panelCurveSurfaceWanted() && (v == DrawVerdict::kIntroPanel || " + W_INTRO_GATE + ") && owner) {")],
            "every draw pays the cross-TU question"),
-    wiring("iw-candidate-every-draw", "candidate", [(W_CANDIDATE, "if (owner && panelCurveSurfaceWanted()) {")], "every draw is a candidate for the strip"),
+    wiring("iw-candidate-every-draw", "candidate", [(W_CANDIDATE, "if (g_state->introOwnerAllowed && owner && panelCurveSurfaceWanted()) {")], "every draw is a candidate for the strip"),
     wiring("iw-args-movie-gain", "strip-args", [("stripGain = introPanelStripGain();", "stripGain = introCurveGain();")], "the movie is drawn at the splash's gain"),
     wiring("iw-args-movie-direction", "strip-args", [("                stripToward = 1;\n", "                stripToward = -1;\n")], "the movie bends the other way"),
     wiring("iw-args-splash-direction", "strip-args", [("stripToward = introCurveToward();", "stripToward = 1;")], "the splash's direction is a constant"),

@@ -14,18 +14,18 @@
   a separate phase; supported settings remain owned by one plugin.
 - **Current integration:** main `f9609927` incorporated in this checkpoint.
   Sampler startup is `752c7412`; dormant admission is `d9c42281`.
-  Performance's four startup absence gates pass the full 169-job gate:
-  `build/full-performance-absence-offline-20261010-r2.log`
-  (receipt `57716674`). Legacy kept; availability closed; Steam held.
+  Performance's startup gates pass full offline validation (169 jobs):
+  `build/full-performance-absence-offline-20261010-r2.log` (`57716674`).
   Explorer Cam startup/tick/shutdown gates pass focused and full builds:
   `build/full-explorer-absence-offline-20261011-r3.log` (receipt `faeff569`).
   Cockpit's eight-family boundaries pass full offline validation:
   `build/full-cockpit-absence-offline-20261011-r2.log` (receipt `1ba4e55b`).
   Comfort's startup and native absence boundaries pass full offline validation:
   `build/full-comfort-absence-offline-20261011-r4.log` (receipt `bcd91fc6`).
-- **Module progress:** Performance, Explorer, Cockpit and Comfort pass offline.
-  Intro, On-foot, Temporal AA and Diagnostics owner gates remain. Selections
-  stay unavailable; whole-group runtime absence and launch order remain open.
+  Intro's startup/subscription/callback gates pass full offline validation:
+  `build/full-intro-absence-offline-20261011-r2.log` (receipt `09b71d3e`).
+- **Module progress:** five owners pass offline. On-foot, Temporal AA and
+  Diagnostics remain. Selections unavailable; runtime absence/order open.
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
   Capture uses consumed values; unarmed paths construct no predicate payload.
@@ -5166,3 +5166,53 @@ This remains offline development evidence. Actual admitted runtime startup,
 whole-profile absence and CPU/GPU acceptance remain open. Main-to-feature sync
 does not authorize a feature-to-main merge. Steam installation remains on hold;
 no live configuration, install, promotion or flight was performed.
+
+### 2026-10-11 — Intro startup and callback absence boundaries
+
+Intro now caches one default-false startup owner decision before its vScreen
+configuration. The exported Decision query uses the exact version, kind and
+size, and only `S_OK` enters the authoritative startup rule. A strict selected
+Intro owner keeps its hooks reachable through the dormant-startup check; Legacy
+keeps the previous dormant expression. No per-frame admission query was added.
+
+The cache gates hologram depth, backdrop, loader panel, intro panel/video and
+loading dim across startup/reload configuration, lifecycle registration,
+dispatch and direct fallbacks, real draw queries/captures, begin/end and strip
+composition, frame/retirement work, and shutdown. Five legacy subscriptions
+become state-backed Intro rows and are omitted before registration when absent.
+The shared `panel_curve` surface service and scene-arrival publication remain
+available to their independent consumers.
+
+The real WARP visitor fixture starts with active Intro state, connects an SRV
+resource-query counter with a required positive control, and checks zero
+candidate queries on a denied Intro panel claim. A denied Intro curve
+observation retains its core trace without creating a table entry or staging
+copy; the allowed control creates exactly one of each. The fixture restores
+configuration and bindings and requires exclusive ownership of its curve table.
+Stored legacy callbacks are force-enumerated for all eight
+Cockpit/Comfort/Intro combinations: totals 14, 21, 19, 25, 19, 26, 24 and 30,
+with exact family counts 6/4/5 and one shared-glare callback when Cockpit or
+Comfort is present.
+
+Review corrected initial double counting of Intro's five reclassified rows and
+a Flat fixture that confused valid Legacy startup with strict profile
+applicability. The source oracle retains the 104 previous mutations and adds 14
+Intro cases; TargetSharp's 13 mutations remain intact.
+
+Focused attempts corrected stale UI source anchors, connected the WARP SRV
+control to the actual view resolver, and added the admission implementation to
+the dispatch rig's link inputs. Focused R3 passed all six jobs. Full R1 found
+older Intro wiring mutation anchors; the repair preserves all 94 mutations, and
+the existing wiring executable rejects all 50 wiring cases at their named pins.
+Full R2 passes all 169 jobs, both production DLLs, the 127-key config contract,
+exports, and the self-contained installer's actual resources:
+`build/full-intro-absence-offline-20261011-r2.log`, receipt `09b71d3e`. The 118
+grouped lifecycle mutations and 13 TargetSharp mutations remain intact.
+
+Generated selection availability remains empty. The startup fixture covers
+failed queries, pending/provider-rejected Legacy decisions, Flat Legacy
+semantics and malformed wire rejection; it cannot currently execute a generated
+strict-admitted positive startup. Allowed callback controls prove the module
+routes, not cross-DLL selected-profile launch order. Actual runtime absence and
+CPU/GPU acceptance remain open. Steam installation remains on hold, and this
+checkpoint does not authorize a feature-to-main merge.

@@ -34,6 +34,9 @@
 #include "../../src/d3d11/fss_panel.h"
 #include "../../src/d3d11/fss_reveal.h"
 #include "../../src/d3d11/cockpit_visuals_owner_gate.h"
+#include "../../src/d3d11/intro_curve.h"
+#include "../../src/d3d11/intro_panel.h"
+#include "../../src/d3d11/panel_curve.h"
 #include "../../src/d3d11/sunglare_fix.h"
 #include "../../src/d3d11/sunglare_nomination_observation.h"
 #include "../../src/d3d11/plugin_registry.h"
@@ -2743,44 +2746,170 @@ bool testNvPrecedenceSubprocesses() {
     return true;
 }
 
-bool testCockpitComfortLegacyGateRegistration() {
-    std::uint32_t deniedCount = 0, deniedCockpit = 0, deniedComfort = 0,
-                  deniedShared = 0;
-    const bool deniedRegistered = edvr::vScreenLegacyGateRegistrationTest(
-        false, false, &deniedCount, &deniedCockpit, &deniedComfort,
-        &deniedShared);
+bool testCockpitComfortIntroLegacyGateRegistration() {
+    const auto checkInventory = [](bool cockpitAllowed, bool comfortAllowed,
+                                   bool introAllowed, std::uint32_t expectedRows,
+                                   std::uint32_t expectedCockpit,
+                                   std::uint32_t expectedComfort,
+                                   std::uint32_t expectedIntro,
+                                   std::uint32_t expectedShared,
+                                   const char* label) {
+        std::uint32_t rows = 0, cockpit = 0, comfort = 0, intro = 0, shared = 0;
+        const bool registered = edvr::vScreenLegacyGateRegistrationTest(
+            cockpitAllowed, comfortAllowed, introAllowed, &rows, &cockpit,
+            &comfort, &intro, &shared);
+        return check(registered && rows == expectedRows &&
+                         cockpit == expectedCockpit && comfort == expectedComfort &&
+                         intro == expectedIntro && shared == expectedShared,
+                     label);
+    };
     bool okay = true;
-    okay &= check(deniedRegistered && deniedCount == 19 && deniedCockpit == 0 &&
-                      deniedComfort == 0 && deniedShared == 0,
-                  "actual legacy registration omits both absent owners and shared glare");
+    okay &= checkInventory(false, false, false, 14, 0, 0, 0, 0,
+                           "real legacy registry omits absent Cockpit, Comfort, Intro and shared-glare rows");
+    okay &= checkInventory(true, false, false, 21, 6, 0, 0, 1,
+                           "Cockpit-only admission restores its six stored callbacks and shared glare");
+    okay &= checkInventory(false, true, false, 19, 0, 4, 0, 1,
+                           "Comfort-only admission restores its four stored callbacks and shared glare");
+    okay &= checkInventory(true, true, false, 25, 6, 4, 0, 1,
+                           "existing Cockpit-plus-Comfort callback counts stay exact with Intro absent");
+    okay &= checkInventory(false, false, true, 19, 0, 0, 5, 0,
+                           "Intro-only admission restores exactly five Intro callbacks without shared glare");
+    okay &= checkInventory(true, false, true, 26, 6, 0, 5, 1,
+                           "Cockpit-plus-Intro admits both exact callback families and shared glare");
+    okay &= checkInventory(false, true, true, 24, 0, 4, 5, 1,
+                           "Comfort-plus-Intro admits both exact callback families and shared glare");
+    okay &= checkInventory(true, true, true, 30, 6, 4, 5, 1,
+                           "all admitted owners restore exact stored callback counts and all subscriptions");
+    return okay;
+}
 
-    std::uint32_t cockpitCount = 0, cockpitCallbacks = 0,
-                  noComfortCallbacks = 0, cockpitShared = 0;
-    const bool cockpitRegistered = edvr::vScreenLegacyGateRegistrationTest(
-        true, false, &cockpitCount, &cockpitCallbacks, &noComfortCallbacks,
-        &cockpitShared);
-    okay &= check(cockpitRegistered && cockpitCount == 26 &&
-                      cockpitCallbacks == 6 && noComfortCallbacks == 0 &&
-                      cockpitShared == 1,
-                  "Cockpit admission restores actual callbacks and shared glare while Comfort stays absent");
+bool testIntroOwnerDeniedVisitor(ID3D11Device* device,
+                                 ID3D11DeviceContext* context) {
+    if (!device || !context) return check(false, "Intro owner visitor has a real WARP device/context");
 
-    std::uint32_t comfortCount = 0, noCockpitCallbacks = 0,
-                  comfortCallbacks = 0, comfortShared = 0;
-    const bool comfortRegistered = edvr::vScreenLegacyGateRegistrationTest(
-        false, true, &comfortCount, &noCockpitCallbacks, &comfortCallbacks,
-        &comfortShared);
-    okay &= check(comfortRegistered && comfortCount == 24 &&
-                      noCockpitCallbacks == 0 && comfortCallbacks == 4 &&
-                      comfortShared == 1,
-                  "Comfort admission restores actual callbacks and shared glare while Cockpit stays absent");
+    auto& config = edvr::Config::get();
+    const std::string savedIntroMode = config.getString("fix.intro_video", "screen");
+    const std::string savedCurvature = config.getString("fix.panel_curvature", "0");
+    const void* savedSrv = edvr::bindingGet(edvr::BindSlot::PsSrv0);
+    const void* savedVs = edvr::bindingGet(edvr::BindSlot::Vs);
+    const std::uint64_t savedVsHash = edvr::bindingShaderHash(edvr::BindSlot::Vs);
+    const std::uint32_t savedResourceAttempts = g_resourceAttempts;
+    const edvr::IntroCurveInfo priorCurveState = edvr::introCurveInfo();
+    const bool curveStateIsClean = priorCurveState.entries == 0 &&
+        priorCurveState.staging == 0 && !priorCurveState.retired &&
+        !priorCurveState.standDown;
+    ID3D11Buffer* priorCbRaw = nullptr;
+    context->VSGetConstantBuffers(2, 1, &priorCbRaw);
+    ComPtr<ID3D11Buffer> priorCb;
+    priorCb.Attach(priorCbRaw);
 
-    std::uint32_t bothCount = 0, bothCockpit = 0, bothComfort = 0,
-                  bothShared = 0;
-    const bool bothRegistered = edvr::vScreenLegacyGateRegistrationTest(
-        true, true, &bothCount, &bothCockpit, &bothComfort, &bothShared);
-    okay &= check(bothRegistered && bothCount == 30 &&
-                      bothCockpit == 6 && bothComfort == 4 && bothShared == 1,
-                  "admitting both owners preserves both actual legacy callback families");
+    bool okay = true;
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    ComPtr<ID3D11Buffer> cb;
+    D3D11_TEXTURE2D_DESC textureDesc{};
+    textureDesc.Width = 8;
+    textureDesc.Height = 8;
+    textureDesc.MipLevels = 1;
+    textureDesc.ArraySize = 1;
+    textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    textureDesc.SampleDesc.Count = 1;
+    textureDesc.Usage = D3D11_USAGE_DEFAULT;
+    textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    HRESULT hr = device->CreateTexture2D(&textureDesc, nullptr, &texture);
+    if (SUCCEEDED(hr)) hr = device->CreateShaderResourceView(texture.Get(), nullptr, &srv);
+    D3D11_BUFFER_DESC cbDesc{};
+    cbDesc.ByteWidth = 80;
+    cbDesc.Usage = D3D11_USAGE_DEFAULT;
+    cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (SUCCEEDED(hr)) hr = device->CreateBuffer(&cbDesc, nullptr, &cb);
+    okay &= check(SUCCEEDED(hr) && srv && cb,
+                  "Intro absence fixture creates real WARP SRV and 80-byte composite buffer");
+    okay &= check(curveStateIsClean,
+                  "Intro curve owner fixture requires an exclusive clean module table before staging entries");
+
+    if (SUCCEEDED(hr) && srv && cb && curveStateIsClean) {
+        config.set("fix.intro_video", "screen");
+        edvr::introPanelConfigure(config);
+        config.set("fix.panel_curvature", "0.3");
+        edvr::panelCurveConfigure(config);
+        edvr::bindingSet(edvr::BindSlot::PsSrv0, srv.Get());
+        edvr::bindingSetShader(edvr::BindSlot::Vs, reinterpret_cast<void*>(1),
+                               edvr::kIntroCompositeVsHash);
+        context->VSSetConstantBuffers(2, 1, cb.GetAddressOf());
+        okay &= check(edvr::introPanelWants() && edvr::introCurveWants() &&
+                          edvr::panelCurveSurfaceWanted(),
+                      "stale Intro modules and the shared Core/On-foot curve surface are active before owner denial");
+
+        edvr::VTableHook resourceHook;
+        const bool hookReady = hookResource(resourceHook, srv.Get());
+        edvr::ResourceInfo queriedResource{};
+        g_resourceAttempts = 0;
+        const bool queryResolved = hookReady && edvr::bindingResolve(srv.Get(), &queriedResource);
+        okay &= check(queryResolved && queriedResource.isTexture2D &&
+                          queriedResource.a == textureDesc.Width &&
+                          queriedResource.b == textureDesc.Height &&
+                          g_resourceAttempts == 1,
+                      "real WARP SRV resolver control proves the candidate-query counter is connected");
+
+        if (hookReady) {
+            g_resourceAttempts = 0;
+            edvr::VScreenPredicateTestResult panelDenied{};
+            const bool panelVisited = edvr::vScreenPredicateTestVisit(
+                static_cast<std::uint16_t>(edvr::draw_ladder::SiteId::kIntroPanelClaim),
+                context, context, 0, false, true, &panelDenied,
+                true, true, 'X', 6, 1, 0, 0, 0, false);
+            okay &= check(panelVisited && panelDenied.token.valid() &&
+                              panelDenied.siteResult.outcome ==
+                                  edvr::draw_ladder::SiteOutcome::Declined &&
+                              g_resourceAttempts == 0 && edvr::introPanelWants(),
+                          "owner-denied real Intro panel visitor declines before candidate SRV query despite stale active module state");
+            resourceHook.uninstall();
+            g_originalGetResource = nullptr;
+        } else {
+            okay &= check(false, "Intro panel denial requires a hooked WARP SRV query counter");
+        }
+
+        const edvr::IntroCurveInfo before = edvr::introCurveInfo();
+        edvr::VScreenPredicateTestResult curveDenied{};
+        const bool deniedVisited = edvr::vScreenPredicateTestVisit(
+            static_cast<std::uint16_t>(edvr::draw_ladder::SiteId::kIntroCurveObserve),
+            context, context, 0, false, true, &curveDenied,
+            true, true, 'X', 6, 1, 0, 0, 0, false);
+        const edvr::IntroCurveInfo afterDenied = edvr::introCurveInfo();
+        okay &= check(deniedVisited && curveDenied.token.valid() &&
+                          curveDenied.siteResult.outcome ==
+                              edvr::draw_ladder::SiteOutcome::Observed &&
+                          afterDenied.entries == before.entries &&
+                          afterDenied.copying == before.copying &&
+                          afterDenied.staging == before.staging &&
+                          edvr::panelCurveSurfaceWanted(),
+                      "owner-denied real Intro curve visitor keeps core trace and On-foot surface live without module buffer query/copy");
+
+        edvr::VScreenPredicateTestResult curveAllowed{};
+        const bool allowedVisited = edvr::vScreenPredicateTestVisit(
+            static_cast<std::uint16_t>(edvr::draw_ladder::SiteId::kIntroCurveObserve),
+            context, context, 0, false, true, &curveAllowed,
+            true, true, 'X', 6, 1, 0, 0, 0, true);
+        const edvr::IntroCurveInfo afterAllowed = edvr::introCurveInfo();
+        okay &= check(allowedVisited && curveAllowed.token.valid() &&
+                          curveAllowed.siteResult.outcome ==
+                              edvr::draw_ladder::SiteOutcome::Observed &&
+                          afterAllowed.entries == before.entries + 1 &&
+                          afterAllowed.copying == before.copying + 1 &&
+                          afterAllowed.staging == before.staging + 1,
+                      "owner-allowed real Intro curve visitor reaches module and creates one actual staging copy");
+        edvr::introCurveShutdown();
+    }
+
+    context->VSSetConstantBuffers(2, 1, priorCb.GetAddressOf());
+    edvr::bindingSet(edvr::BindSlot::PsSrv0, const_cast<void*>(savedSrv));
+    edvr::bindingSetShader(edvr::BindSlot::Vs, const_cast<void*>(savedVs), savedVsHash);
+    config.set("fix.intro_video", savedIntroMode.c_str());
+    edvr::introPanelConfigure(config);
+    config.set("fix.panel_curvature", savedCurvature.c_str());
+    edvr::panelCurveConfigure(config);
+    g_resourceAttempts = savedResourceAttempts;
     return okay;
 }
 } // namespace
@@ -4461,7 +4590,8 @@ int main(int argc, char** argv) {
 
         okay &= testSunglareNomination(device, immediate);
         okay &= testCockpitOwnerDeniedGlareAndCore(device, immediate);
-        okay &= testCockpitComfortLegacyGateRegistration();
+        okay &= testIntroOwnerDeniedVisitor(device, immediate);
+        okay &= testCockpitComfortIntroLegacyGateRegistration();
         for (std::uint32_t i = 0; i < 4; ++i)
             edvr::bindingSet(static_cast<edvr::BindSlot>(
                                  static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i), nullptr);

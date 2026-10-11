@@ -2004,6 +2004,7 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNO
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\plugindispatch\\" ^
     /Fe"%BUILD%\plugin_dispatch_test.exe" "tools\plugin_dispatch_test\plugin_dispatch_test.cpp" ^
     "src\d3d11\plugin_registry.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" "src\common\guard.cpp" ^
+    "src\common\plugin_selection_admission.cpp" ^
     "src\plugins\comfort\exposure\exposure_actions.cpp" "src\plugins\comfort\exposure\exposure_dispatch.cpp" ^
     "src\plugins\comfort\exposure\exposure_lifecycle.cpp" ^
     "src\plugins\comfort\scanners\scanner_lifecycle.cpp" "src\plugins\comfort\comfort_lifecycle.cpp" ^

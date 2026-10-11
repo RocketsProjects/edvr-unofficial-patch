@@ -66,8 +66,26 @@ def check(lifecycle: str, vscreen: str) -> None:
                   "frameStage,", "shutdownStage,"):
         assert field in ops
 
+    admission_reader = body(vscreen, "IntroStartupAdmission readIntroStartupAdmission() noexcept")
+    assert admission_reader.count("edvrQueryPluginAdmissionV1(") == 1
+    assert "sizeof(decision), &decision" in admission_reader
+    assert "introStartupAdmission(decision, status == S_OK)" in admission_reader
+    assert vscreen.count("edvrQueryPluginAdmissionV1(") == 1
+    install = body(vscreen, "void installVScreenFixes(ID3D11Device* device, HookMode mode)")
+    ordered(install, "const IntroStartupAdmission introAdmission = readIntroStartupAdmission();",
+            "const bool introOwnerAllowed = introAdmission.ownerAllowed;", "Config& cfg = Config::get();",
+            "!introAdmission.strictSelection", "g_state->introOwnerAllowed = introOwnerAllowed;")
+    assert "introAdmission.strictSelection" in install
+
     ensure = body(vscreen, "bool ensureIntroVideoLifecycle()")
-    assert "if (!g_state) return false;" in ensure
+    select = body(vscreen, "void selectIntroVideoLifecycle()")
+    assert "if (!g_state || !g_state->introOwnerAllowed) return false;" in ensure
+    assert "runIntroOwned(g_state && g_state->introOwnerAllowed" in select
+    ordered(select, "runIntroOwned(g_state && g_state->introOwnerAllowed",
+            "ensureIntroVideoLifecycle()")
+
+    ensure = body(vscreen, "bool ensureIntroVideoLifecycle()")
+    assert "if (!g_state || !g_state->introOwnerAllowed) return false;" in ensure
     assert "pluginRegistryRegisterLifecycle(introVideoLifecycleOps())" in ensure
     assert "pluginRegistryHasLifecycle" not in ensure
     select = body(vscreen, "void selectIntroVideoLifecycle()")
@@ -77,7 +95,7 @@ def check(lifecycle: str, vscreen: str) -> None:
     ordered(configure_stage_dispatch,
             "pluginRegistryConfigureLifecycleStage(kIntroPluginIndex, stage, &cfg)",
             "fallback(cfg)")
-    assert "        return;\n    fallback(cfg);" in configure_stage_dispatch
+    assert "            return;\n        fallback(cfg);" in configure_stage_dispatch
     assert "if (g_introLifecycleRegistered &&" in configure_stage_dispatch
     assert "pluginRegistryRegisterLifecycle" not in configure_stage_dispatch
     configure_dispatch = body(vscreen, "void configureIntroVideoLifecycle(Config& cfg)")
@@ -116,7 +134,7 @@ def check(lifecycle: str, vscreen: str) -> None:
     ordered(frame_stage_dispatch,
             "pluginRegistryFrameLifecycleStage(kIntroPluginIndex, stage, context,",
             "fallback(context, sceneFrame != 0)")
-    assert "        return;\n    fallback(context, sceneFrame != 0);" in frame_stage_dispatch
+    assert "            return;\n        fallback(context, sceneFrame != 0);" in frame_stage_dispatch
     assert "pluginRegistryRegisterLifecycle" not in frame_stage_dispatch
 
     frame_body = body(vscreen, "void vScreenFrameBoundary()")
@@ -141,12 +159,20 @@ def check(lifecycle: str, vscreen: str) -> None:
                     "void frameIntroVideoLifecycle(uint32_t sceneFrame)",
                     "void frameIntroLifecycleStage("):
         assert "pluginRegistryRegisterLifecycle" not in body(vscreen, wrapper)
+    for wrapper in ("void configureIntroVideoLifecycle(Config& cfg)",
+                    "void configureIntroLifecycleStage(",
+                    "void frameIntroVideoLifecycle(uint32_t sceneFrame)",
+                    "void frameIntroLifecycleStage(",
+                    "void shutdownIntroLifecycleStage(",
+                    "void shutdownIntroVideoLifecycle()"):
+        owner_body = body(vscreen, wrapper)
+        assert "runIntroOwned(" in owner_body and "g_state->introOwnerAllowed" in owner_body
 
     shutdown_stage_dispatch = body(vscreen, "void shutdownIntroLifecycleStage(")
     ordered(shutdown_stage_dispatch,
             "pluginRegistryShutdownLifecycleStage(kIntroPluginIndex, stage)",
             "fallback()")
-    assert "        return;\n    fallback();" in shutdown_stage_dispatch
+    assert "            return;\n        fallback();" in shutdown_stage_dispatch
     assert "pluginRegistryRegisterLifecycle" not in shutdown_stage_dispatch
     shutdown_dispatch = body(vscreen, "void shutdownIntroVideoLifecycle()")
     ordered(shutdown_dispatch, "const bool registered = g_introLifecycleRegistered;",
@@ -180,7 +206,9 @@ def check(lifecycle: str, vscreen: str) -> None:
                      "introCurveEndDraw()"):
         assert required in vscreen
     backdrop_begin = body(vscreen, "__declspec(noinline) void forwardVerdictBegin(")
-    assert "case DrawVerdict::kBackdrop:     backdropBegin(self);" in backdrop_begin
+    assert "case DrawVerdict::kBackdrop:" in backdrop_begin
+    assert "runIntroOwned(g_state && g_state->introOwnerAllowed," in backdrop_begin
+    assert "[&] { backdropBegin(self); }" in backdrop_begin
     draw_forwarder = body(vscreen, "void forwardWithVerdict(")
     ordered(draw_forwarder, "splashDimBegin(self)", "splashDimEnd(self)")
     assert "DrawVerdict::kIntroPanel" in draw_forwarder
@@ -231,6 +259,15 @@ def replace_in_function(source: str, signature: str, old: str, new: str) -> str:
 
 
 def self_test(lifecycle: str, vscreen: str) -> None:
+    expect_rejected("strict admitted Intro startup bypass removed", lifecycle,
+                    replace_in_function(
+        vscreen, "void installVScreenFixes(ID3D11Device* device, HookMode mode)",
+        "!introAdmission.strictSelection", "false"))
+    expect_rejected("Intro lifecycle registration bypasses owner gate", lifecycle,
+                    replace_in_function(
+        vscreen, "void selectIntroVideoLifecycle()",
+        "runIntroOwned(g_state && g_state->introOwnerAllowed, [&] {",
+        "if (g_state && g_state->introOwnerAllowed) {"))
     expect_rejected("legacy configure order", replace_once(
         lifecycle, "introSkipConfigure(cfg);\n    introUpscaleConfigure(cfg);",
         "introUpscaleConfigure(cfg);\n    introSkipConfigure(cfg);"), vscreen)
@@ -244,18 +281,18 @@ def self_test(lifecycle: str, vscreen: str) -> None:
     expect_rejected("configure success must return before fallback", lifecycle,
                     replace_in_function(
         vscreen, "void configureIntroLifecycleStage(",
-        "        return;\n    fallback(cfg);",
-        "        ;\n    fallback(cfg);"))
+        "            return;\n        fallback(cfg);",
+        "            ;\n        fallback(cfg);"))
     expect_rejected("frame success must return before fallback", lifecycle,
                     replace_in_function(
         vscreen, "void frameIntroLifecycleStage(",
-        "        return;\n    fallback(context, sceneFrame != 0);",
-        "        ;\n    fallback(context, sceneFrame != 0);"))
+        "            return;\n        fallback(context, sceneFrame != 0);",
+        "            ;\n        fallback(context, sceneFrame != 0);"))
     expect_rejected("shutdown success must return before fallback", lifecycle,
                     replace_in_function(
         vscreen, "void shutdownIntroLifecycleStage(",
-        "        return;\n    fallback();",
-        "        ;\n    fallback();"))
+        "            return;\n        fallback();",
+        "            ;\n        fallback();"))
     expect_rejected("refresh registration before stages", lifecycle, replace_in_function(
         vscreen, "void vScreenRefreshConfig()",
         "selectIntroVideoLifecycle();\n    configureIntroLifecycleStage(kIntroLifecycleLoader, cfg,",

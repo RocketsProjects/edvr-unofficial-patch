@@ -6,6 +6,7 @@
 #include "../../src/plugins/comfort/scanners/scanner_lifecycle.h"
 #include "../../src/plugins/comfort/comfort_lifecycle.h"
 #include "../../src/d3d11/comfort_owner_gate.h"
+#include "../../src/d3d11/intro_owner_gate.h"
 #include "../../src/plugins/explorer_cam/explorer_cam_lifecycle.h"
 #include "../../src/d3d11/fss_panel.h"
 #include "../../src/d3d11/fss_reveal.h"
@@ -1510,6 +1511,77 @@ void comfortOwnerDeniedLifecycleFallbacks() {
         edvr::kComfortTransitionFlashLifecycleComponent);
 }
 
+void testIntroStartupAdmissionSnapshot() {
+    using namespace edvr::plugin_selection;
+    using namespace edvr::plugin_selection::admission_v1;
+
+    DecisionV1 unavailable{};
+    const auto failedQuery = edvr::introStartupAdmission(unavailable, false);
+    check(!failedQuery.ownerAllowed && !failedQuery.strictSelection,
+          "failed Intro admission query denies startup and leaves strict-selection false");
+
+    const auto contract = admission_v1::contract();
+    const auto makeSnapshot = [&](PluginSelectionProfileV1 profile) {
+        PluginSelectionSnapshotV1 snapshot{};
+        const std::uint32_t profileBit = profile == PluginSelectionProfileV1::Vr
+            ? edvr::plugins::kVrProfileBit : edvr::plugins::kFlatProfileBit;
+        snapshot.structSize = sizeof(snapshot);
+        snapshot.abiVersion = kPluginSelectionSnapshotVersionV1;
+        snapshot.recordState = static_cast<std::uint32_t>(
+            PluginSelectionSnapshotStateV1::Supported);
+        snapshot.installedProfile = snapshot.recordProfile =
+            static_cast<std::uint32_t>(profile);
+        snapshot.recordSchemaVersion = 1;
+        snapshot.recordCatalogSchemaVersion =
+            snapshot.compiledCatalogSchemaVersion = contract.catalogSchemaVersion;
+        for (std::uint32_t i = 0; i < edvr::plugins::kPluginCount; ++i) {
+            const auto& plugin = edvr::plugins::kManifest[i];
+            if ((plugin.profileMask & profileBit) &&
+                (plugin.selectionAvailableProfileMask & profileBit))
+                snapshot.recordedPluginMask |= 1u << i;
+        }
+        std::memcpy(snapshot.catalogFingerprint, contract.catalogFingerprint,
+                    sizeof(snapshot.catalogFingerprint));
+        return snapshot;
+    };
+
+    const auto vrSnapshot = makeSnapshot(PluginSelectionProfileV1::Vr);
+    const DecisionV1 vrCandidate = decide(S_OK, &vrSnapshot,
+        PluginSelectionProfileV1::Vr, 0x12345000u);
+    const auto vrIntro = edvr::introStartupAdmission(vrCandidate, true);
+    const bool vrAdmitted = vrCandidate.mode ==
+        static_cast<std::uint32_t>(Mode::AdmittedSelection);
+    check(vrIntro.ownerAllowed && vrIntro.strictSelection == vrAdmitted,
+          vrAdmitted
+              ? "valid admitted VR selection enables Intro strict startup"
+              : "valid Legacy VR pending decision preserves Intro startup while strict bypass stays off");
+
+    const DecisionV1 providerRejected = decide(S_OK, &vrSnapshot,
+        PluginSelectionProfileV1::Vr, 0);
+    const auto legacyRejected = edvr::introStartupAdmission(providerRejected, true);
+    check(providerRejected.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
+              legacyRejected.ownerAllowed && !legacyRejected.strictSelection,
+          "valid zero-provider/readiness Legacy decision preserves Intro owner behavior without strict bypass");
+
+    const auto flatSnapshot = makeSnapshot(PluginSelectionProfileV1::Flat);
+    const DecisionV1 flatCandidate = decide(S_OK, &flatSnapshot,
+        PluginSelectionProfileV1::Flat, 0x12345000u);
+    const auto flatIntro = edvr::introStartupAdmission(flatCandidate, true);
+    const bool introSupportsFlat = (edvr::plugins::kManifest[
+        edvr::plugins::kPluginIntro].profileMask & edvr::plugins::kFlatProfileBit) != 0;
+    const bool flatAdmitted = flatCandidate.mode ==
+        static_cast<std::uint32_t>(Mode::AdmittedSelection);
+    check(flatIntro.ownerAllowed == (!flatAdmitted || introSupportsFlat) &&
+              flatIntro.strictSelection == (flatAdmitted && introSupportsFlat),
+          "Flat strict admission follows the Intro manifest mask while valid Legacy keeps startup ownership");
+
+    DecisionV1 malformed = vrCandidate;
+    malformed.reserved[0] = 1;
+    const auto rejectedWire = edvr::introStartupAdmission(malformed, true);
+    check(!rejectedWire.ownerAllowed && !rejectedWire.strictSelection,
+          "malformed published Intro decision fails closed");
+}
+
 void pilotAndDiagnosticsLifecycleAdmission() {
     constexpr uint32_t kCockpit = edvr::plugins::kPluginCockpitVisuals;
     constexpr uint32_t kDiagnostics = edvr::plugins::kPluginDiagnostics;
@@ -1638,6 +1710,7 @@ int main(int argc, char** argv) {
     comfortComponentRegistryDispatch();
     scannerComfortLifecycleDispatch();
     comfortOwnerDeniedLifecycleFallbacks();
+    testIntroStartupAdmissionSnapshot();
     pilotAndDiagnosticsLifecycleAdmission();
     std::printf("PASS: plugin dispatch (%u checks)\n", checks);
     return 0;

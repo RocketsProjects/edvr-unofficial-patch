@@ -45,6 +45,7 @@ SLICE_PATHS = {
     "explorer_owner_gate": ROOT / "src/d3d11/explorer_cam_owner_gate.h",
     "explorer_fixture": ROOT / "tools/explorer_cam_test/explorer_cam_test.cpp",
     "cockpit_owner_gate": ROOT / "src/d3d11/cockpit_visuals_owner_gate.h",
+    "intro_owner_gate": ROOT / "src/d3d11/intro_owner_gate.h",
     "comfort_owner_gate": ROOT / "src/d3d11/comfort_owner_gate.h",
     "cockpit_api_fixture": ROOT / "tools/cockpit_api_test/cockpit_api_test.cpp",
     "vscreen_predicate_fixture": ROOT / "tools/vscreen_predicate_test/vscreen_predicate_test.cpp",
@@ -333,6 +334,7 @@ def check_module_slices(sources: dict[str, str]) -> None:
     explorer_owner_gate = sources["explorer_owner_gate"]
     explorer_fixture = sources["explorer_fixture"]
     cockpit_owner_gate = sources["cockpit_owner_gate"]
+    intro_owner_gate = sources["intro_owner_gate"]
     cockpit_api_fixture = sources["cockpit_api_fixture"]
     vscreen_predicate_fixture = sources["vscreen_predicate_fixture"]
     sunglare = sources["sunglare"]
@@ -790,10 +792,15 @@ def check_module_slices(sources: dict[str, str]) -> None:
     # Comfort glare-train observation remains available while denied.
     if "bool cockpitVisualsOwnerAllowed = false;" not in vscreen:
         raise AssertionError("Cockpit owner cache must default to denied")
+    if "bool introOwnerAllowed = false;" not in vscreen:
+        raise AssertionError("Intro owner cache must default to denied")
     if "if (!ownerAllowed) return false;\n    std::forward<Callback>(callback)();\n    return true;" not in cockpit_owner_gate:
         raise AssertionError("denied Cockpit owner helper must return without invoking its callback")
-    if vscreen.count("ownerAllowedForStartup(") != 1:
-        raise AssertionError("Cockpit ownership must be queried once at VScreen startup")
+    cockpit_query_token = ("ownerAllowedForStartup(\n"
+                           "            plugins::kPluginCockpitVisuals)")
+    if vscreen.count(cockpit_query_token) != 1 or \
+            vscreen.count("readIntroStartupAdmission()") != 2:
+        raise AssertionError("Cockpit owner and Intro decision each need exactly one VScreen startup snapshot")
     if "ownerAllowedForStartup" in body(vscreen, "void vScreenFrameBoundary()") or \
             "ownerAllowedForStartup" in body(vscreen, "void shutdownVScreenFixes()"):
         raise AssertionError("Cockpit Present and shutdown must use the cached startup decision")
@@ -801,7 +808,7 @@ def check_module_slices(sources: dict[str, str]) -> None:
     query_start = startup.find("ownerAllowedForStartup(")
     query_end = startup.find(");", query_start)
     query = startup[query_start:query_end + 2] if query_start >= 0 and query_end >= 0 else ""
-    ordered(startup, "ownerAllowedForStartup(",
+    ordered(startup, cockpit_query_token,
             "runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {")
     if "plugins::kPluginCockpitVisuals" not in query:
         raise AssertionError("VScreen startup must sample the Cockpit admission decision")
@@ -810,10 +817,92 @@ def check_module_slices(sources: dict[str, str]) -> None:
     if "cockpitVisualsPluginOps()" not in startup_gate:
         raise AssertionError("denied Cockpit ownership must skip its optional factory/registration")
     if startup.count("cockpitVisualsPluginOps()") != 1 or \
-            startup.count("ownerAllowedForStartup(") != 1:
+            startup.count(cockpit_query_token) != 1:
         raise AssertionError("Cockpit startup factory/query must each have one gated callsite")
     if "(cockpitVisualsOwnerAllowed ||\n         !(comfortOwnerAllowed && exposureDampingActive()))" not in startup:
         raise AssertionError("dormant vScreen must preserve Comfort glare observation when Cockpit is denied")
+
+    # Intro shares vScreen's transport but owns its factory, lifecycle and
+    # draw side effects. Its one startup query must precede config/factory
+    # work; all module callbacks remain behind the cached decision.
+    if "if (!ownerAllowed) return false;\n    std::forward<Callback>(callback)();\n    return true;" not in intro_owner_gate:
+        raise AssertionError("denied Intro owner helper must return without invoking its callback")
+    intro_admission_reader = body(vscreen, "IntroStartupAdmission readIntroStartupAdmission()")
+    ordered(intro_admission_reader, "edvrQueryPluginAdmissionV1(",
+            "plugin_admission_transport::kQueryVersionV1",
+            "QueryKindV1::Decision", "sizeof(decision), &decision",
+            "return introStartupAdmission(decision, status == S_OK);")
+    if intro_admission_reader.count("edvrQueryPluginAdmissionV1(") != 1 or \
+            "status == S_OK" not in intro_admission_reader or \
+            "decision.size" in intro_admission_reader or \
+            "ownerAllowedForStartup(" in intro_admission_reader:
+        raise AssertionError("Intro reader must make one exact Decision query and hand exact S_OK status to the pure admission helper")
+    intro_decision_helper = body(intro_owner_gate, "inline IntroStartupAdmission introStartupAdmission(")
+    ordered(intro_decision_helper, "if (!querySucceeded) return {};",
+            "plugin_selection::admission_v1::ownerAllowedForStartup(",
+            "decision, plugins::kPluginIntro", "result.strictSelection = result.ownerAllowed &&",
+            "Mode::AdmittedSelection")
+    if "decision.size" in intro_decision_helper or \
+            "decision.version" in intro_decision_helper:
+        raise AssertionError("Intro helper must delegate wire validation to the authoritative pure owner rule")
+    ordered(startup, "readIntroStartupAdmission();", "Config& cfg = Config::get();")
+    if startup.count("readIntroStartupAdmission()") != 1 or \
+            "const IntroStartupAdmission introAdmission = readIntroStartupAdmission();" not in startup or \
+            "const bool introOwnerAllowed = introAdmission.ownerAllowed;" not in startup or \
+            "g_state->introOwnerAllowed = introOwnerAllowed;" not in startup:
+        raise AssertionError("Intro admission must be sampled once and cached before its configuration")
+    if "!introAdmission.strictSelection &&" not in startup:
+        raise AssertionError("only strict Intro admission may keep the dormant-hook path awake")
+    intro_registration = body(vscreen, "void selectIntroVideoLifecycle()")
+    if "runIntroOwned(g_state && g_state->introOwnerAllowed" not in intro_registration or \
+            "g_introLifecycleRegistered = ensureIntroVideoLifecycle();" not in body(
+                intro_registration, "runIntroOwned(g_state && g_state->introOwnerAllowed, [&] {"):
+        raise AssertionError("Intro lifecycle factory/registration must be enclosed by cached owner admission")
+    intro_factory = body(vscreen, "bool ensureIntroVideoLifecycle()")
+    ordered(intro_factory, "if (!g_state || !g_state->introOwnerAllowed) return false;",
+            "pluginRegistryRegisterLifecycle(introVideoLifecycleOps())")
+    if vscreen.count("introVideoLifecycleOps()") != 1:
+        raise AssertionError("Intro lifecycle factory must have one owner-checked registration callsite")
+    for signature, calls in (
+            ("void configureIntroLifecycleStage(",
+             ("pluginRegistryConfigureLifecycleStage(kIntroPluginIndex, stage, &cfg)",
+              "fallback(cfg)")),
+            ("void configureIntroVideoLifecycle(Config& cfg)",
+             ("pluginRegistryConfigureLifecycle(kIntroPluginIndex, &cfg)",
+              "introSkipConfigure(cfg)", "introUpscaleConfigure(cfg)")),
+            ("void frameIntroLifecycleStage(",
+             ("pluginRegistryFrameLifecycleStage(kIntroPluginIndex, stage, context,",
+              "fallback(context, sceneFrame != 0)")),
+            ("void frameIntroVideoLifecycle(uint32_t sceneFrame)",
+             ("pluginRegistryFrameLifecycle(kIntroPluginIndex, sceneFrame)",
+              "introSkipTick(sceneFrame != 0)")),
+            ("void shutdownIntroLifecycleStage(",
+             ("pluginRegistryShutdownLifecycleStage(kIntroPluginIndex, stage)",
+              "fallback()")),
+            ("void shutdownIntroVideoLifecycle()",
+             ("pluginRegistryShutdownLifecycle(kIntroPluginIndex)",
+              "introUpscaleShutdown()", "introSkipShutdown()"))):
+        scope = body(vscreen, signature)
+        gate_start = "runIntroOwned(g_state && g_state->introOwnerAllowed, [&] {"
+        gated = body(scope, gate_start)
+        if any(call not in gated for call in calls):
+            raise AssertionError(f"{signature} must gate its registry and direct fallback routes")
+    for signature in ("void vScreenRefreshConfig()", "void installVScreenFixes("):
+        scope = body(vscreen, signature)
+        if scope.count("configureIntroLifecycleStage(") != 4 or \
+                scope.count("configureIntroVideoLifecycle(cfg)") != 1 or \
+                scope.count("selectIntroVideoLifecycle()") != 1:
+            raise AssertionError(f"{signature} must retain the complete Intro config sweep")
+        for call in ("holoConfigure(cfg)",):
+            if scope.count(call) != 1 or call not in body(
+                    scope, "runIntroOwned(" ):
+                raise AssertionError(f"{signature} must owner-gate {call}")
+    intro_interests = body(vscreen, "static bool configureLegacyDrawInterests(")
+    intro_interest_gate = body(intro_interests,
+                               "runIntroOwned(introOwnerAllowed, [&] {")
+    if "enable(InterestId::IntroCurveObserve, introCurveDrawInterestConfigured());" not in intro_interest_gate or \
+            "enable(InterestId::PanelCurveObserve, panelCurveDrawInterestConfigured());" not in intro_interests:
+        raise AssertionError("Intro curve interest must be gated while shared On-foot panel curve stays active")
 
     # Both startup and reload configure all module-owned settings from the
     # cached bit. Keep exact call counts to catch a newly added ungated route.
@@ -889,6 +978,35 @@ def check_module_slices(sources: dict[str, str]) -> None:
         branch = visitor_site(site_id)
         if "!s->cockpitVisualsOwnerAllowed" not in branch:
             raise AssertionError(f"Cockpit draw route {site_id} bypasses cached ownership")
+    intro_panel_site = visitor_site("kIntroPanelClaim")
+    intro_curve_site = visitor_site("kIntroCurveObserve")
+    if "s->introOwnerAllowed && kind == 'X' && count == 6 && introPanelWants()" not in intro_panel_site or \
+            "s->introOwnerAllowed && kind == 'X' && count == 6 && introCurveWants()" not in intro_curve_site:
+        raise AssertionError("Intro visitors must gate both panel resolution and curve module work")
+    forward_begin = body(vscreen, "__declspec(noinline) void forwardVerdictBegin(")
+    forward_end = body(vscreen, "__declspec(noinline) void forwardVerdictEnd(")
+    if "runIntroOwned(g_state && g_state->introOwnerAllowed,\n                      [&] { holoBegin(self); })" not in forward_begin or \
+            "runIntroOwned(g_state && g_state->introOwnerAllowed,\n                      [&] { backdropBegin(self); })" not in forward_begin or \
+            "runIntroOwned(g_state && g_state->introOwnerAllowed,\n                      [&] { holoEnd(self); })" not in forward_end:
+        raise AssertionError("Intro begin/end forwarding must stay behind cached owner admission")
+    frame_boundary = body(vscreen, "void vScreenFrameBoundary()")
+    intro_tick_gate = body(frame_boundary,
+                           "runIntroOwned(g_state->introOwnerAllowed, [&] {")
+    if any(token not in intro_tick_gate for token in
+           ("tkIntroPanel.run(", "tkIntroCurve.run(", "tkIntroSkip.run(", "tkLoaderPanel.run(")):
+        raise AssertionError("the complete Intro tick/bookkeeping bundle must be skipped without its owner")
+    shutdown_scope = body(vscreen, "void shutdownVScreenFixes()")
+    if "runIntroOwned(g_state->introOwnerAllowed, [&] { holoShutdown(); });" not in shutdown_scope or \
+            "shutdownIntroLifecycleStage(kIntroLifecycleBackdrop, backdropShutdown);" not in shutdown_scope or \
+            "panelCurveShutdown();" not in shutdown_scope:
+        raise AssertionError("Intro teardown must be gated while shared On-foot curve teardown stays live")
+    hooked_draw = body(vscreen, "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(")
+    if "if (v == DrawVerdict::kIntroPanel && g_state->introOwnerAllowed)" not in hooked_draw or \
+            "introPanelEndDraw(self);" not in hooked_draw or \
+            "if (g_state->introOwnerAllowed && g_state->introCurveThisDraw)" not in hooked_draw or \
+            "runIntroOwned(g_state->introOwnerAllowed," not in hooked_draw or \
+            "introCurveEndDraw();" not in hooked_draw:
+        raise AssertionError("direct Intro panel/curve draw-end routes must remain owner-gated")
     glare_skip_branch = visitor_site("kSunglareSkip")
     denied_glare = body(glare_skip_branch,
                         "if (!s->cockpitVisualsOwnerAllowed)")
@@ -1072,8 +1190,10 @@ def check_module_slices(sources: dict[str, str]) -> None:
         raise AssertionError("VScreen must not re-query Comfort admission during setup, Present, or shutdown")
     if "comfortOwnerAllowed" not in body(vscreen, "void vScreenFrameBoundary()"):
         raise AssertionError("Comfort frame paths must use the cached State bit")
-    if "configureLegacyDrawInterests(g_state->cockpitVisualsOwnerAllowed,\n                                 g_state->comfortOwnerAllowed);" not in vstartup:
-        raise AssertionError("legacy draw-interest configuration must receive both cached owner decisions")
+    if "configureLegacyDrawInterests(g_state->cockpitVisualsOwnerAllowed,\n                                 g_state->comfortOwnerAllowed,\n                                 g_state->introOwnerAllowed);" not in vstartup or \
+            "configureLegacyDrawInterests(s->cockpitVisualsOwnerAllowed,\n                                 s->comfortOwnerAllowed,\n                                 s->introOwnerAllowed);" not in body(
+                vscreen, "void vScreenRefreshConfig()"):
+        raise AssertionError("legacy draw-interest configuration must receive all three cached owner decisions")
     interests = body(vscreen, "static bool configureLegacyDrawInterests(")
     if "runComfortOwned(comfortOwnerAllowed, [&] {\n        enable(InterestId::FssPanel" not in interests or \
             "runComfortOwned(comfortOwnerAllowed, [&] {\n        filtersFit = filtersFit && append(fssPanelDrawInterestFilters)" not in interests:
@@ -1095,13 +1215,19 @@ def check_module_slices(sources: dict[str, str]) -> None:
     for token in ("LegacyGateOwner::Core: return true;",
                   "case LegacyGateOwner::Comfort:",
                   "return state && state->comfortOwnerAllowed;",
+                  "case LegacyGateOwner::Intro:",
+                  "return state && state->introOwnerAllowed;",
                   "case LegacyGateOwner::CockpitOrComfort:",
                   "state->comfortOwnerAllowed"):
         if token not in owner_filter:
             raise AssertionError(f"legacy draw registration owner filter lost {token}")
     registrations = body(vscreen, "constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] =")
+    if registrations.count('{"legacy.') != 30:
+        raise AssertionError("state-backed owner metadata must preserve the exact 30-row legacy registry table")
     for row in ("legacy.transition-flash-eye-count", "legacy.fss-resolution",
-                "legacy.fss-panel", "legacy.fss-reveal", "legacy.sun-glare"):
+                "legacy.fss-panel", "legacy.fss-reveal", "legacy.sun-glare",
+                "legacy.hologram-depth", "legacy.backdrop", "legacy.loader-panel",
+                "legacy.intro-panel", "legacy.intro-curve"):
         if row not in registrations:
             raise AssertionError(f"Comfort draw-gate registration missing {row}")
     for row in ("{\"legacy.transition-flash-eye-count\", &drawGate_transition_flash_eye_count, true, LegacyGateOwner::Comfort}",
@@ -1113,9 +1239,22 @@ def check_module_slices(sources: dict[str, str]) -> None:
     if ("{\"legacy.sun-glare\", &drawGate_sun_glare, true, "
             "LegacyGateOwner::CockpitOrComfort}" not in registrations):
         raise AssertionError("shared glare gate must remain subscribed for either admitted owner")
+    for row in (
+            "{\"legacy.hologram-depth\", &drawGate_hologram_depth, true, LegacyGateOwner::Intro}",
+            "{\"legacy.backdrop\", &drawGate_backdrop, true, LegacyGateOwner::Intro}",
+            "{\"legacy.loader-panel\", &drawGate_loader_panel, true, LegacyGateOwner::Intro}",
+            "{\"legacy.intro-panel\", &drawGate_intro_panel, true, LegacyGateOwner::Intro}",
+            "{\"legacy.intro-curve\", &drawGate_intro_curve, true, LegacyGateOwner::Intro}"):
+        if row not in registrations:
+            raise AssertionError(f"Intro draw subscription must carry cached owner State: {row}")
+    if '{"legacy.panel-curve", &drawGate_panel_curve, false}' not in registrations:
+        raise AssertionError("shared On-foot panel curve bridge must remain Core-owned")
     comfort_gates = body(vscreen, "#define EDVR_GATE_COMFORT(name, expression)")
     if "if (!s || !s->comfortOwnerAllowed) return 0;" not in comfort_gates:
         raise AssertionError("owner-only Comfort draw bridges must exit before evaluating module predicates")
+    intro_gates = body(vscreen, "#define EDVR_GATE_INTRO(name, expression)")
+    if "if (!s || !s->introOwnerAllowed) return 0;" not in intro_gates:
+        raise AssertionError("owner-only Intro draw bridges must exit before evaluating module predicates")
 
     scanner_config = body(vscreen, "void configureScannerLifecycleStage(")
     scanner_frame = body(vscreen, "void frameScannerLifecycleStage(")
@@ -1247,7 +1386,7 @@ def check_module_slices(sources: dict[str, str]) -> None:
         raise AssertionError("Comfort denied lifecycle/fallback fixture is missing or not invoked")
     if "core context census remains live in the real visitor while Comfort ownership is denied" not in vscreen_predicate_fixture:
         raise AssertionError("core context service must remain live in the denied-owner visitor fixture")
-    for token in ("kFssPanelClaim", "kFssRevealClaim", "true, false, 'N', 6, 1, 5, 6",
+    for token in ("kFssPanelClaim", "kFssRevealClaim", "true, false, 'X', 6, 1, 5, 6",
                   "g_getVertexShaderCalls == 0", "owner-present stale FSS panel reaches the real scanner selector"):
         if token not in vscreen_predicate_fixture:
             raise AssertionError(f"real denied Scanner visitor fixture lost {token}")
@@ -1255,19 +1394,40 @@ def check_module_slices(sources: dict[str, str]) -> None:
             "                              &deniedScanner, true, false, 'X', 6, 1, 5, 6)" not in
             vscreen_predicate_fixture):
         raise AssertionError("FSS panel real visitor must pass Comfort denied to its owner gate")
-    if "testCockpitComfortLegacyGateRegistration()" not in vscreen_predicate_fixture or \
-            "okay &= testCockpitComfortLegacyGateRegistration();" not in vscreen_predicate_fixture:
+    if "testCockpitComfortIntroLegacyGateRegistration()" not in vscreen_predicate_fixture or \
+            "okay &= testCockpitComfortIntroLegacyGateRegistration();" not in vscreen_predicate_fixture:
         raise AssertionError("actual legacy registry owner-filter fixture is missing or not invoked")
-    gate_fixture = body(vscreen_predicate_fixture, "bool testCockpitComfortLegacyGateRegistration()")
-    for token in ("vScreenLegacyGateRegistrationTest(\n        false, false",
-                  "deniedCount == 19 && deniedCockpit == 0 &&",
-                  "deniedComfort == 0 && deniedShared == 0",
-                  "cockpitCallbacks == 6 && noComfortCallbacks == 0",
-                  "cockpitShared == 1", "vScreenLegacyGateRegistrationTest(\n        false, true",
-                  "comfortCallbacks == 4", "comfortShared == 1",
-                  "bothCockpit == 6 && bothComfort == 4 && bothShared == 1"):
+    gate_fixture = body(vscreen_predicate_fixture, "bool testCockpitComfortIntroLegacyGateRegistration()")
+    for token in ("checkInventory(false, false, false, 14, 0, 0, 0, 0",
+                  "checkInventory(true, false, false, 21, 6, 0, 0, 1",
+                  "checkInventory(false, true, false, 19, 0, 4, 0, 1",
+                  "checkInventory(true, true, false, 25, 6, 4, 0, 1",
+                  "checkInventory(false, false, true, 19, 0, 0, 5, 0",
+                  "checkInventory(true, false, true, 26, 6, 0, 5, 1",
+                  "checkInventory(false, true, true, 24, 0, 4, 5, 1",
+                  "checkInventory(true, true, true, 30, 6, 4, 5, 1"):
         if token not in gate_fixture:
             raise AssertionError(f"real owner-filter registration fixture lost {token}")
+    intro_visitor_fixture = body(vscreen_predicate_fixture,
+                                 "bool testIntroOwnerDeniedVisitor(")
+    for token in ("SiteId::kIntroPanelClaim", "SiteId::kIntroCurveObserve",
+                  "true, true, 'X', 6, 1, 0, 0, 0, false",
+                  "SiteOutcome::Declined", "g_resourceAttempts == 0",
+                  "SiteOutcome::Observed", "afterDenied.entries == before.entries",
+                  "edvr::panelCurveSurfaceWanted()", "afterAllowed.entries == before.entries + 1",
+                  "okay &= testIntroOwnerDeniedVisitor(device, immediate);"):
+        if token not in intro_visitor_fixture and token not in vscreen_predicate_fixture:
+            raise AssertionError(f"real Intro denied/admitted visitor fixture lost {token}")
+    admission_fixture = body(plugin_dispatch_fixture, "void testIntroStartupAdmissionSnapshot()")
+    for token in ("introStartupAdmission(unavailable, false)",
+                  "introStartupAdmission(vrCandidate, true)",
+                  "vrIntro.strictSelection == vrAdmitted",
+                  "introStartupAdmission(providerRejected, true)",
+                  "introStartupAdmission(malformed, true)",
+                  "legacyRejected.ownerAllowed && !legacyRejected.strictSelection",
+                  "testIntroStartupAdmissionSnapshot();"):
+        if token not in admission_fixture and token not in plugin_dispatch_fixture:
+            raise AssertionError(f"Intro startup query/Legacy/strict selection fixture lost {token}")
     registry_visit = body(registry, "uint32_t pluginRegistryVisitLegacyDrawGatesForTest(")
     if "for (uint32_t i = 0; i < g_legacyCount; ++i)" not in registry_visit or \
             "gate.predicate(gate.state ? gate.state : legacyState)" not in registry_visit:
@@ -1767,9 +1927,101 @@ def self_test_slices(sources: dict[str, str]) -> None:
 
     changed = dict(sources)
     changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],
-        "okay &= testCockpitComfortLegacyGateRegistration();",
+        "okay &= testCockpitComfortIntroLegacyGateRegistration();",
         "/* actual registry fixture omitted */")
     expect_slice("actual owner-filtered registry callback fixture is invoked", changed)
+
+    changed = dict(sources)
+    changed["intro_owner_gate"] = once(changed["intro_owner_gate"],
+        "if (!querySucceeded) return {};", "if (querySucceeded) return {};")
+    expect_slice("failed Intro admission queries remain default-denied", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "return introStartupAdmission(decision, status == S_OK);",
+        "return introStartupAdmission(decision, true);")
+    expect_slice("Intro query success must reflect exact S_OK", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "const IntroStartupAdmission introAdmission = readIntroStartupAdmission();",
+        "const IntroStartupAdmission introAdmission{};")
+    expect_slice("Intro startup samples one published decision before config", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "!introAdmission.strictSelection &&", "!introOwnerAllowed &&")
+    expect_slice("only strict admitted Intro may bypass preserved Legacy dormancy", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "runIntroOwned(g_state && g_state->introOwnerAllowed, [&] {\n"
+        "        g_introLifecycleRegistered = ensureIntroVideoLifecycle();",
+        "runIntroOwned(true, [&] {\n"
+        "        g_introLifecycleRegistered = ensureIntroVideoLifecycle();")
+    expect_slice("Intro lifecycle factory remains behind its cached owner gate", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "if (!g_state || !g_state->introOwnerAllowed) return false;\n"
+        "    return pluginRegistryRegisterLifecycle(introVideoLifecycleOps());",
+        "if (!g_state || g_state->introOwnerAllowed) return false;\n"
+        "    return pluginRegistryRegisterLifecycle(introVideoLifecycleOps());")
+    expect_slice("Intro registry cannot construct or register its lifecycle while denied", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "runIntroOwned(introOwnerAllowed, [&] {\n"
+        "        enable(InterestId::IntroCurveObserve, introCurveDrawInterestConfigured());",
+        "runIntroOwned(true, [&] {\n"
+        "        enable(InterestId::IntroCurveObserve, introCurveDrawInterestConfigured());")
+    expect_slice("Intro curve draw-interest configuration remains owner-gated", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "s->introOwnerAllowed && kind == 'X' && count == 6 && introPanelWants()",
+        "kind == 'X' && count == 6 && introPanelWants()")
+    expect_slice("Intro panel resolver cannot bypass cached ownership", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "runIntroOwned(g_state && g_state->introOwnerAllowed,\n"
+        "                      [&] { holoBegin(self); });",
+        "runIntroOwned(true,\n"
+        "                      [&] { holoBegin(self); });")
+    expect_slice("Intro begin forwarding remains owner-gated", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "runIntroOwned(g_state->introOwnerAllowed, [&] {\n"
+        "        tkIntroPanel.run(",
+        "runIntroOwned(true, [&] {\n"
+        "        tkIntroPanel.run(")
+    expect_slice("complete Intro frame bookkeeping remains owner-gated", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "{\"legacy.intro-panel\", &drawGate_intro_panel, true, LegacyGateOwner::Intro}",
+        "{\"legacy.intro-panel\", &drawGate_intro_panel, true, LegacyGateOwner::Core}")
+    expect_slice("Intro draw subscription retains Intro ownership metadata", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "{\"legacy.panel-curve\", &drawGate_panel_curve, false}",
+        "{\"legacy.panel-curve\", &drawGate_panel_curve, true, LegacyGateOwner::Intro}")
+    expect_slice("shared On-foot panel curve remains Core-owned", changed)
+
+    changed = dict(sources)
+    changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],
+        "okay &= testIntroOwnerDeniedVisitor(device, immediate);",
+        "/* Intro WARP denial/admission visitor omitted */")
+    expect_slice("real Intro denied/admitted visitor fixture stays invoked", changed)
+
+    changed = dict(sources)
+    changed["plugin_dispatch_fixture"] = once(changed["plugin_dispatch_fixture"],
+        "testIntroStartupAdmissionSnapshot();",
+        "/* Intro startup admission fixture omitted */")
+    expect_slice("Intro startup strict/Legacy decision fixture stays invoked", changed)
 
     changed = dict(sources)
     changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],
