@@ -1,16 +1,15 @@
-// The hangar sun probe's pure half (src\d3d11\sun_pass_probe_core.h), held to the exe. TEMPORARY, like the probe.
+// The hangar sun probe's pure half (src\d3d11\sun_pass_probe_core.h), held to the pair it keys on. TEMPORARY, like the probe.
 //
 //   sun_pass_probe_test --self-test   runs every check and exits 0 when all pass.
 //
-// The bytes below are NOT copied from the header. They are read from EliteDangerous64.exe build 332841 (the Epic install, PE timestamp
-// 1788384820, image size 104894464) by reading the file at the RVAs and are typed here independently, so a typo in the header fails this rig.
+// The hashes below are NOT copied from the header. They are typed here from the census notes that name the sun pair (docs\scanner-body.md and
+// docs\ambient-occlusion.md), so a typo in the header fails this rig.
 
 #include "../../src/d3d11/sun_pass_probe_core.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <stdexcept>
-#include <thread>
 
 namespace sp = edvr::sunprobe;
 
@@ -27,81 +26,72 @@ void check(bool ok, const char* what) {
     }
 }
 
-// Read from the exe at RenderDirLights (RVA 0x5AC9C0), 32 bytes.
-const uint8_t kExeProlog[32] = {
-    0x48, 0x89, 0x5C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
-    0x48, 0x8B, 0xEC, 0x48, 0x83, 0xEC, 0x60, 0x33, 0xFF, 0x48, 0x89, 0x51, 0x40, 0x48, 0x8B, 0xD9};
-// Read from the exe at the call in the deferred lighting frame (RVA 0x284E159), 5 bytes.
-const uint8_t kExeCall[5] = {0xE8, 0x62, 0xE8, 0xD5, 0xFD};
+const uint64_t kVs = 0x7E38A6AA1269C901ull;   // typed here, not copied from the header
+const uint64_t kPs = 0x7CECABDE34FFBE9Eull;
 
-void gateChecks() {
-    check(sp::kRenderDirLightsRva == 0x5AC9C0u, "RenderDirLights RVA");
-    check(sp::kCallSiteRva == 0x284E159u, "call site RVA");
-    check(std::memcmp(sp::kPrologue, kExeProlog, 32) == 0, "header prologue equals the exe's 32 bytes");
-    check(std::memcmp(sp::kCallSite, kExeCall, 5) == 0, "header call bytes equal the exe's 5 bytes");
+void identityChecks() {
+    check(sp::identityMatches(1788384820u, 104894464u), "the build 332841 identity is accepted");
+    check(!sp::identityMatches(1788384821u, 104894464u), "a PE timestamp off by one is refused");
+    check(!sp::identityMatches(1788384820u, 104894465u), "an image size off by one is refused");
     check(sp::kMemoryWatchRva == 0x5E889C0u, "memory watch RVA");
-    check(sp::kPrologueBytes == 32, "prologue span is 32");
-
-    // Accepted: the real bytes, identity and call site.
-    check(sp::gateVerdict(1788384820u, 104894464u, kExeProlog, kExeCall) == nullptr, "gate accepts the real build");
-    // Identity refusals.
-    check(sp::gateVerdict(1788384821u, 104894464u, kExeProlog, kExeCall) != nullptr, "gate refuses a PE timestamp off by one");
-    check(sp::gateVerdict(1788384820u, 104894465u, kExeProlog, kExeCall) != nullptr, "gate refuses an image size off by one");
-    // Every single-byte change in the prologue is refused.
-    bool allRefused = true;
-    for (size_t i = 0; i < 32; ++i) {
-        uint8_t mut[32];
-        std::memcpy(mut, kExeProlog, 32);
-        mut[i] ^= 0x01;
-        if (sp::gateVerdict(1788384820u, 104894464u, mut, kExeCall) == nullptr) allRefused = false;
-    }
-    check(allRefused, "a one-bit change at any of the 32 prologue bytes is refused");
-    // A changed call site is refused, and so is a call whose bytes are right but whose target is another function.
-    uint8_t badCall[5];
-    std::memcpy(badCall, kExeCall, 5);
-    badCall[4] ^= 0x01;
-    check(sp::gateVerdict(1788384820u, 104894464u, kExeProlog, badCall) != nullptr, "gate refuses a one-byte change in the call");
-    uint8_t otherTarget[5] = {0xE8, 0x00, 0x00, 0x00, 0x00};   // a call to the next instruction: not the build's bytes, so refused on the bytes
-    check(sp::gateVerdict(1788384820u, 104894464u, kExeProlog, otherTarget) != nullptr, "gate refuses a call to another target (the bytes differ)");
-    check(sp::gateVerdict(1788384820u, 104894464u, nullptr, kExeCall) != nullptr, "gate refuses a missing prologue");
-    check(sp::gateVerdict(1788384820u, 104894464u, kExeProlog, nullptr) != nullptr, "gate refuses a missing call site");
+    check(sp::kMemoryWatchBytes == 4, "memory watch reads four bytes");
 }
 
-void scopeChecks() {
-    check(sp::sunPassDepth == 0, "depth starts at zero");
-    {
-        sp::DepthScope a(sp::sunPassDepth);
-        check(sp::sunPassDepth == 1, "one scope: depth 1");
-        {
-            sp::DepthScope b(sp::sunPassDepth);
-            check(sp::sunPassDepth == 2, "nested scope: depth 2");
-        }
-        check(sp::sunPassDepth == 1, "nested scope closed: depth 1");
-    }
-    check(sp::sunPassDepth == 0, "outer scope closed: depth 0");
-    // An exception thrown inside the scope still restores the count.
-    try {
-        sp::DepthScope c(sp::sunPassDepth);
-        throw std::runtime_error("the forward throws");
-    } catch (const std::runtime_error&) {
-    }
-    check(sp::sunPassDepth == 0, "a throw out of the scope restores depth 0");
-    // The depth is per thread: another thread's count does not show here.
-    bool otherThreadZero = false;
-    {
-        sp::DepthScope d(sp::sunPassDepth);
-        std::thread t([&] { otherThreadZero = (sp::sunPassDepth == 0); });
-        t.join();
-    }
-    check(otherThreadZero, "the depth is thread-local (another thread reads zero)");
+void pairChecks() {
+    check(sp::kSunVs == kVs, "the sun VS constant is 7E38A6AA1269C901");
+    check(sp::kSunPs == kPs, "the sun PS constant is 7CECABDE34FFBE9E");
+    check(sp::kSkipTableCount == 1, "the skip table has one entry (the sun)");
+    check(std::strcmp(sp::kSkipTable[0].name, "sun") == 0, "the entry is named sun");
+    check(sp::kSkipTable[0].vs == kVs && sp::kSkipTable[0].ps == kPs, "the entry lists the sun pair");
+}
+
+void classifyChecks() {
+    check(sp::classify(kVs, kPs) == sp::Match::kPair, "VS 7E38 with PS 7CEC: a pair");
+    check(sp::classify(kVs, 0x1234ull) == sp::Match::kVsOnly, "VS 7E38 with another PS: VS only");
+    check(sp::classify(0x1234ull, kPs) == sp::Match::kPsOnly, "PS 7CEC with another VS: PS only");
+    check(sp::classify(kPs, kVs) == sp::Match::kNone, "the two hashes swapped: nothing");
+    check(sp::classify(0, 0) == sp::Match::kNone, "no shaders bound: nothing");
+    check(sp::classify(0, kPs) == sp::Match::kPsOnly, "no VS bound, the sun PS: PS only");
+    check(sp::classify(kVs, 0) == sp::Match::kVsOnly, "the sun VS, no PS bound: VS only");
+    check(sp::classify(kVs ^ 1u, kPs ^ 1u) == sp::Match::kNone, "both hashes off by one bit: nothing");
+}
+
+void fieldChecks() {
+    check(sp::fieldFor(sp::Match::kPair) == sp::kFieldPairs, "a pair counts in pairs");
+    check(sp::fieldFor(sp::Match::kVsOnly) == sp::kFieldVsOnly, "a VS-only draw counts in VS only");
+    check(sp::fieldFor(sp::Match::kPsOnly) == sp::kFieldPsOnly, "a PS-only draw counts in PS only");
+    check(sp::fieldFor(sp::Match::kNone) == sp::kFieldCount, "an unmatched draw counts nowhere");
+    check(sp::kFieldCount == 4, "four window counters");
 }
 
 void skipChecks() {
-    check(!sp::skipsDraw(0, false), "outside the scope, toggle off: forwarded");
-    check(!sp::skipsDraw(0, true), "outside the scope, toggle on: forwarded (never skipped outside the sun pass)");
-    check(!sp::skipsDraw(1, false), "inside the scope, toggle off: forwarded (the count still runs)");
-    check(sp::skipsDraw(1, true), "inside the scope, toggle on: skipped");
-    check(sp::skipsDraw(2, true), "nested inside the scope, toggle on: skipped");
+    check(sp::skipsDraw(sp::Match::kPair, true), "a pair, toggle on: skipped");
+    check(!sp::skipsDraw(sp::Match::kPair, false), "a pair, toggle off: forwarded (still counted)");
+    check(!sp::skipsDraw(sp::Match::kVsOnly, true), "a VS-only draw, toggle on: forwarded");
+    check(!sp::skipsDraw(sp::Match::kPsOnly, true), "a PS-only draw, toggle on: forwarded");
+    check(!sp::skipsDraw(sp::Match::kNone, true), "an unmatched draw, toggle on: forwarded");
+}
+
+// The glue's counting, replayed on a draw sequence: a pair counts in pairs and, with the toggle on, in skipped too.
+void countingChecks() {
+    uint64_t counts[sp::kFieldCount] = {};
+    const sp::Match seq[] = {sp::Match::kPair, sp::Match::kVsOnly, sp::Match::kNone, sp::Match::kPair, sp::Match::kPsOnly, sp::Match::kPair};
+    for (sp::Match m : seq) {
+        const size_t f = sp::fieldFor(m);
+        if (f != sp::kFieldCount) ++counts[f];
+        if (sp::skipsDraw(m, true)) ++counts[sp::kFieldSkipped];
+    }
+    check(counts[sp::kFieldPairs] == 3, "three pairs counted");
+    check(counts[sp::kFieldVsOnly] == 1 && counts[sp::kFieldPsOnly] == 1, "one VS-only and one PS-only counted");
+    check(counts[sp::kFieldSkipped] == 3, "all three pairs skipped with the toggle on");
+
+    uint64_t off[sp::kFieldCount] = {};
+    for (sp::Match m : seq) {
+        const size_t f = sp::fieldFor(m);
+        if (f != sp::kFieldCount) ++off[f];
+        if (sp::skipsDraw(m, false)) ++off[sp::kFieldSkipped];
+    }
+    check(off[sp::kFieldPairs] == 3 && off[sp::kFieldSkipped] == 0, "toggle off: pairs counted, none skipped");
 }
 
 void statusChecks() {
@@ -187,18 +177,27 @@ void windowChecks() {
     check(!sp::windowDue(9999, 0), "9.999 s: not due");
     check(sp::windowDue(10000, 0), "10 s: due");
     check(!sp::windowDue(5, 10), "clock behind the window start: not due");
+    sp::Window empty;
+    check(!sp::windowActive(empty), "an empty window is not written");
+    sp::Window halfOnly;
+    halfOnly.psOnly = 1;
+    check(sp::windowActive(halfOnly), "a PS-only count alone makes the window active");
+    sp::Window skippedOnly;
+    skippedOnly.skipped = 1;
+    check(sp::windowActive(skippedOnly), "a skip alone makes the window active");
 }
 
 void formatChecks() {
     char buf[400];
     sp::Window w;
-    w.calls = 3;
-    w.draws = 40;
+    w.pairs = 40;
     w.skipped = 40;
+    w.vsOnly = 2;
+    w.psOnly = 1;
     sp::formatWindow(buf, sizeof(buf), w, true);
-    check(std::strcmp(buf, "hangar sun probe: dirlights_calls=3 draws_in_scope=40 skipped=40 toggle=on") == 0, "window line text (on)");
+    check(std::strcmp(buf, "hangar sun probe: sun pair draws=40 skipped=40 (VS only=2, PS only=1) toggle=on") == 0, "window line text (on)");
     sp::formatWindow(buf, sizeof(buf), w, false);
-    check(std::strcmp(buf, "hangar sun probe: dirlights_calls=3 draws_in_scope=40 skipped=40 toggle=off") == 0, "window line text (off)");
+    check(std::strcmp(buf, "hangar sun probe: sun pair draws=40 skipped=40 (VS only=2, PS only=1) toggle=off") == 0, "window line text (off)");
 
     const uint8_t bytes[4] = {0x12, 0x34, 0xAB, 0xCD};
     sp::StatusWords words;
@@ -216,9 +215,9 @@ void formatChecks() {
         "status line text");
 
     sp::formatToggle(buf, sizeof(buf), true, 100);
-    check(std::strcmp(buf, "hangar sun probe: skip toggle -> on at frame=100 (the draws in scope are not forwarded)") == 0, "toggle line text (on)");
+    check(std::strcmp(buf, "hangar sun probe: skip toggle -> on at frame=100 (the sun pair's draws are not forwarded)") == 0, "toggle line text (on)");
     sp::formatToggle(buf, sizeof(buf), false, 101);
-    check(std::strcmp(buf, "hangar sun probe: skip toggle -> off at frame=101 (the draws in scope are forwarded as before)") == 0, "toggle line text (off)");
+    check(std::strcmp(buf, "hangar sun probe: skip toggle -> off at frame=101 (the sun pair's draws are forwarded as before)") == 0, "toggle line text (off)");
 }
 
 }  // namespace
@@ -228,9 +227,12 @@ int main(int argc, char** argv) {
         std::printf("usage: sun_pass_probe_test --self-test\n");
         return 2;
     }
-    gateChecks();
-    scopeChecks();
+    identityChecks();
+    pairChecks();
+    classifyChecks();
+    fieldChecks();
     skipChecks();
+    countingChecks();
     statusChecks();
     watchChecks();
     readableChecks();

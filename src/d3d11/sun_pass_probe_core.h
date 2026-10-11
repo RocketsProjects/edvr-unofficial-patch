@@ -1,20 +1,21 @@
 #pragma once
-// The hangar sun probe (TEMPORARY diagnostic; docs\hangar-sunlight-2026-10-11.md says what it is for). Pure: the build-332841 identity and the
-// RenderDirLights gate, the nesting scope that marks a draw as issued inside the sun pass, the skip decision, the Status.json decode, the memory-watch
-// change detector, the 10 s window, and the text of every log line. No Windows and no globals beyond the thread's depth. The glue is
-// src\d3d11\sun_pass_probe.cpp; the rig is tools\sun_pass_probe_test.
+// The hangar sun probe (TEMPORARY diagnostic; docs\hangar-sunlight-2026-10-11.md says what it is for). Pure: the build-332841 identity (for the memory
+// watch only), the sun pair and its skip table, the draw classification and the skip decision, the Status.json decode, the memory-watch change
+// detector, the 10 s window, and the text of every log line. No Windows and no globals. The glue is src\d3d11\sun_pass_probe.cpp; the rig is
+// tools\sun_pass_probe_test.
 //
-// WHAT THE GATE PINS, read out of EliteDangerous64.exe build 332841 (PE timestamp 1788384820, image size 104894464):
-//   RenderDirLights, RVA 0x5AC9C0 (3492 bytes). It binds the sun's constants and issues the directional light's draws. Its only direct caller in this
-//   build is the deferred lighting frame at RVA 0x284CB70, through the call at RVA 0x284E159 (e8 62 e8 d5 fd; 0x284E15E - 0x22A179E = 0x5AC9C0).
-//   Arguments, from the disassembly: rcx is `this` (stored at [rcx+0x40] and [rcx+0x48], and returned in rax as rbx); rdx is a pointer that is
-//   dereferenced at [rdx+0xE0] and stored at [rcx+0x40]; r8 is an object pointer that is tested and addref'd through r13 (lock inc [r13+8]). r9 is
-//   written (xor r9d,r9d) before it is read. No stack argument is read: the only rsp-relative reads above the frame are the restore of rbx from its
-//   own save slot at entry+0x20. The detour forwards rcx, rdx, r8 and r9 (r9 is harmless when unused) and returns the original's rax.
+// WHAT THE SKIP KEYS ON. The sun's per-frame light is a full-screen deferred pass. Its vertex shader VS 7E38A6AA1269C901 forms the per-eye view rays
+// from a five-float quad, and its pixel shader PS 7CECABDE34FFBE9E is the deferred resolve: it reads the shadow mask at t3 and multiplies the direct
+// diffuse and specular by one channel of it (docs\ambient-occlusion.md, P5; docs\scanner-body.md, "The mechanism"). A draw is the sun pass when its
+// bound pair is an entry of the skip table. The draw hook reads the bound content hashes (binding_shadow.h), so no engine code is patched.
+//
+// WHAT IS NOT THE SKIP. RenderDirLights (EliteDangerous64.exe RVA 0x5AC9C0) binds the directional constants and the G-buffer and shadow inputs into a
+// pass object. Its one call in the 2026-10-11 flight issued no draw through the draw hooks, and its body makes no ID3D11 draw call. The probe does not
+// key on it. (docs\hangar-sunlight-2026-10-11.md, the second 2026-10-11 entry.)
 //
 // WHAT THE STATUS DECODE TRUSTS. EDVR's journal_watch.h/.cpp reads Flags bit 4 (supercruise), bits 24-26 (seated: main ship, fighter, SRV), bit 30
 // (the FSD jump), and Flags2 bit 0 (OnFoot) and bits 1-2 (taxi, multicrew), all from Elite's Status.json, and those are the verified bits here.
-// Flags bit 0 (Docked) and bit 1 (Landed) are the design doc's reading (its I3), NOT yet confirmed on a flight; the first flight logs the raw words so
+// Flags bit 0 (Docked) and bit 1 (Landed) are the design doc's reading (its I3), NOT yet confirmed on a flight; the flight logs the raw words so
 // they can be checked. No hangar bit is confirmed in any published table reachable from here, so the probe prints the raw Flags and Flags2 in hex on
 // every line and reports the design doc's inside gate as `inside_gate`, not as an in-hangar bit.
 
@@ -25,65 +26,62 @@
 
 namespace edvr::sunprobe {
 
-// ---- identity and the gate, build 332841 ----------------------------------------------------------------------------------------------------------------------
+// ---- build identity: the memory watch's RVA is build-specific (build 332841 only) -----------------------------------------------------------------------
 constexpr uint32_t kExpectedTimestamp = 1788384820u;
 constexpr uint32_t kExpectedImageSize = 104894464u;
-constexpr uint32_t kRenderDirLightsRva = 0x5AC9C0u;     // RenderDirLights, the sun's direct light
-constexpr size_t kPrologueBytes = 32;                    // the first 32 bytes, read from the exe; CodeHook steals the first 5 (one mov)
-constexpr uint8_t kPrologue[kPrologueBytes] = {
-    0x48, 0x89, 0x5C, 0x24, 0x20,  0x55,  0x56,  0x57,  0x41, 0x54,  0x41, 0x55,  0x41, 0x56,  0x41, 0x57,
-    0x48, 0x8B, 0xEC,  0x48, 0x83, 0xEC, 0x60,  0x33, 0xFF,  0x48, 0x89, 0x51, 0x40,  0x48, 0x8B, 0xD9};
-constexpr uint32_t kCallSiteRva = 0x284E159u;            // the deferred lighting frame's call to RenderDirLights
-constexpr size_t kCallSpan = 5;                          // e8 rel32
-constexpr uint8_t kCallSite[kCallSpan] = {0xE8, 0x62, 0xE8, 0xD5, 0xFD};
-
-// ---- the memory watch and the window ---------------------------------------------------------------------------------------------------------------------------
-constexpr uint32_t kMemoryWatchRva = 0x5E889C0u;         // the 4-byte group the light dispatch reads (design doc P8); read-only
-constexpr size_t kMemoryWatchBytes = 4;
-constexpr uint32_t kImageScnMemRead = 0x40000000u;       // IMAGE_SCN_MEM_READ
-constexpr uint64_t kWindowMs = 10000;                    // the periodic line's period
-
-// Gate verdict. nullptr when every check passes; otherwise the reason, for the one log line.
 inline bool identityMatches(uint32_t timestamp, uint32_t imageSize) {
     return timestamp == kExpectedTimestamp && imageSize == kExpectedImageSize;
 }
-inline bool prologueMatches(const uint8_t* bytes) {
-    return bytes && std::memcmp(bytes, kPrologue, kPrologueBytes) == 0;
-}
-// site: kCallSpan bytes at kCallSiteRva. The bytes must be the build's call, and its target (next instruction plus rel32) must be RenderDirLights.
-inline bool callSiteMatches(const uint8_t* site) {
-    if (!site || std::memcmp(site, kCallSite, kCallSpan) != 0) return false;
-    int32_t rel = 0;
-    std::memcpy(&rel, site + 1, 4);
-    const int64_t target = int64_t(kCallSiteRva) + int64_t(kCallSpan) + int64_t(rel);
-    return target == int64_t(kRenderDirLightsRva);
-}
-inline const char* gateVerdict(uint32_t timestamp, uint32_t imageSize, const uint8_t* prologue, const uint8_t* site) {
-    if (!identityMatches(timestamp, imageSize)) return "not build 332841 (PE timestamp or image size differs)";
-    if (!prologueMatches(prologue)) return "the first 32 bytes of RenderDirLights differ from build 332841's";
-    if (!callSiteMatches(site)) return "the deferred lighting frame's call to RenderDirLights at exe+0x284E159 is not where build 332841 has it";
-    return nullptr;
-}
 
-// ---- the sun pass's nesting on this thread ----------------------------------------------------------------------------------------------------------------------
-// The detour holds a DepthScope across the original call. A draw issued on this thread while the depth is above zero was issued by the sun pass.
-// The scope's destructor restores the count on every exit, a C++ throw included, so the count cannot drift.
-inline thread_local uint32_t sunPassDepth = 0;
-class DepthScope {
-public:
-    explicit DepthScope(uint32_t& depth) noexcept : depth_(depth) { ++depth_; }
-    ~DepthScope() { --depth_; }
-    DepthScope(const DepthScope&) = delete;
-    DepthScope& operator=(const DepthScope&) = delete;
-private:
-    uint32_t& depth_;
+// ---- the sun pair and the skip table ----------------------------------------------------------------------------------------------------------------------
+constexpr uint64_t kSunVs = 0x7E38A6AA1269C901ull;   // the full-screen deferred vertex shader (per-eye view rays)
+constexpr uint64_t kSunPs = 0x7CECABDE34FFBE9Eull;   // the deferred resolve pixel shader (direct light times the shadow mask)
+struct ShaderPair {
+    uint64_t vs;
+    uint64_t ps;
+    const char* name;
 };
-// The skip: only a draw inside the sun pass, and only while the toggle is on. Outside the scope nothing is ever skipped.
-inline bool skipsDraw(uint32_t depth, bool toggleOn) noexcept {
-    return depth > 0 && toggleOn;
+// A draw is skipped (behind the toggle) when its bound VS and PS are both an entry here. One entry: the sun.
+inline constexpr ShaderPair kSkipTable[] = {
+    {kSunVs, kSunPs, "sun"},
+};
+constexpr size_t kSkipTableCount = sizeof(kSkipTable) / sizeof(kSkipTable[0]);
+
+// What one draw's bound shaders say. A pair is an entry that lists both hashes. The two half matches are counted apart, so a shader that changed in
+// some later build shows as a half match with no pairs.
+enum class Match { kNone, kVsOnly, kPsOnly, kPair };
+inline Match classify(uint64_t vs, uint64_t ps) {
+    bool vsHit = false;
+    bool psHit = false;
+    for (size_t i = 0; i < kSkipTableCount; ++i) {
+        const bool v = vs == kSkipTable[i].vs;
+        const bool p = ps == kSkipTable[i].ps;
+        if (v && p) return Match::kPair;
+        vsHit = vsHit || v;
+        psHit = psHit || p;
+    }
+    if (vsHit) return Match::kVsOnly;
+    if (psHit) return Match::kPsOnly;
+    return Match::kNone;
 }
 
-// ---- the Status.json decode -------------------------------------------------------------------------------------------------------------------------------------
+// The window's counters, as indices into the glue's array of atomics. A pair counts in kFieldPairs and, when it is skipped, in kFieldSkipped as well.
+enum Field : size_t { kFieldPairs = 0, kFieldVsOnly, kFieldPsOnly, kFieldSkipped, kFieldCount };
+// The counter a draw of this match adds to first (kFieldCount for none).
+inline size_t fieldFor(Match m) {
+    switch (m) {
+        case Match::kPair: return kFieldPairs;
+        case Match::kVsOnly: return kFieldVsOnly;
+        case Match::kPsOnly: return kFieldPsOnly;
+        default: return kFieldCount;
+    }
+}
+// The skip: only a pair, and only while the toggle is on. Every other draw is forwarded.
+inline bool skipsDraw(Match m, bool toggleOn) noexcept {
+    return m == Match::kPair && toggleOn;
+}
+
+// ---- the Status.json decode -------------------------------------------------------------------------------------------------------------------------------
 constexpr uint32_t kFlagDocked = 1u << 0;        // design doc I3: unconfirmed
 constexpr uint32_t kFlagLanded = 1u << 1;        // design doc I3: unconfirmed
 constexpr uint32_t kFlagSupercruise = 1u << 4;   // journal_watch.cpp (verified in EDVR)
@@ -118,7 +116,10 @@ inline StatusView decodeStatus(const StatusWords& w) {
     return v;
 }
 
-// ---- the memory watch ------------------------------------------------------------------------------------------------------------------------------------------
+// ---- the memory watch ------------------------------------------------------------------------------------------------------------------------------------
+constexpr uint32_t kMemoryWatchRva = 0x5E889C0u;         // the 4-byte group the light dispatch reads (design doc P8); read-only
+constexpr size_t kMemoryWatchBytes = 4;
+constexpr uint32_t kImageScnMemRead = 0x40000000u;       // IMAGE_SCN_MEM_READ
 struct WatchSample {
     bool known = false;
     uint8_t bytes[kMemoryWatchBytes] = {};
@@ -143,17 +144,22 @@ inline bool rvaReadable(uint32_t rva, const SectionSpan* secs, size_t n) {
     return false;
 }
 
-// ---- the 10 s window --------------------------------------------------------------------------------------------------------------------------------------------
+// ---- the 10 s window --------------------------------------------------------------------------------------------------------------------------------------
+constexpr uint64_t kWindowMs = 10000;                    // the periodic line's period
 struct Window {
-    uint64_t calls = 0;     // detour entries (RenderDirLights calls)
-    uint64_t draws = 0;     // draws issued inside the sun pass, toggle on or off
-    uint64_t skipped = 0;   // of those, the draws not forwarded (toggle on)
+    uint64_t pairs = 0;     // draws whose bound VS and PS are a table pair, toggle on or off
+    uint64_t vsOnly = 0;    // draws whose VS is the table's VS and whose PS is not its partner
+    uint64_t psOnly = 0;    // draws whose PS is the table's PS and whose VS is not its partner
+    uint64_t skipped = 0;   // of the pair draws, the ones not forwarded (toggle on)
 };
+inline bool windowActive(const Window& w) {
+    return w.pairs != 0 || w.vsOnly != 0 || w.psOnly != 0 || w.skipped != 0;
+}
 inline bool windowDue(uint64_t nowMs, uint64_t sinceMs) {
     return nowMs >= sinceMs && nowMs - sinceMs >= kWindowMs;
 }
 
-// ---- the log lines' text ----------------------------------------------------------------------------------------------------------------------------------------
+// ---- the log lines' text ----------------------------------------------------------------------------------------------------------------------------------
 inline int formatStatus(char* buf, size_t n, const StatusWords& w, uint32_t frame) {
     const StatusView v = decodeStatus(w);
     char f[16] = "-", f2[16] = "-";
@@ -170,12 +176,12 @@ inline int formatWatch(char* buf, size_t n, const uint8_t bytes[kMemoryWatchByte
         static_cast<unsigned>(kMemoryWatchRva), bytes[0], bytes[1], bytes[2], bytes[3], static_cast<unsigned>(frame), f);
 }
 inline int formatWindow(char* buf, size_t n, const Window& w, bool toggleOn) {
-    return std::snprintf(buf, n, "hangar sun probe: dirlights_calls=%llu draws_in_scope=%llu skipped=%llu toggle=%s",
-        static_cast<unsigned long long>(w.calls), static_cast<unsigned long long>(w.draws), static_cast<unsigned long long>(w.skipped),
-        toggleOn ? "on" : "off");
+    return std::snprintf(buf, n, "hangar sun probe: sun pair draws=%llu skipped=%llu (VS only=%llu, PS only=%llu) toggle=%s",
+        static_cast<unsigned long long>(w.pairs), static_cast<unsigned long long>(w.skipped),
+        static_cast<unsigned long long>(w.vsOnly), static_cast<unsigned long long>(w.psOnly), toggleOn ? "on" : "off");
 }
 inline int formatToggle(char* buf, size_t n, bool toggleOn, uint32_t frame) {
-    return std::snprintf(buf, n, "hangar sun probe: skip toggle -> %s at frame=%u (the draws in scope are %s)",
+    return std::snprintf(buf, n, "hangar sun probe: skip toggle -> %s at frame=%u (the sun pair's draws are %s)",
         toggleOn ? "on" : "off", static_cast<unsigned>(frame), toggleOn ? "not forwarded" : "forwarded as before");
 }
 

@@ -1566,8 +1566,8 @@ exit /b 0
 
 :rig_sun_pass_probe_test
 echo [edvr] === sun_pass_probe_test.exe ===
-REM The hangar sun probe's pure half (src\d3d11\sun_pass_probe_core.h, TEMPORARY): the RenderDirLights gate held to bytes typed from the exe, the sun
-REM pass's scope balance (a throw included), the skip table, the Status.json decode, the memory watch's readability and change detector, the 10 s
+REM The hangar sun probe's pure half (src\d3d11\sun_pass_probe_core.h, TEMPORARY): the sun pair and its skip table, the draw classification, the skip
+REM decision, the build-332841 identity, the Status.json decode, the memory watch's readability and change detector, the 10 s
 REM window, and the text of the log lines. No DLL and no game.
 if not exist "%OBJ%\sunpassprobe" mkdir "%OBJ%\sunpassprobe"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^

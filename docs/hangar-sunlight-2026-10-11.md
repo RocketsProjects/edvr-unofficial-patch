@@ -4,20 +4,23 @@ Offline analysis of `EliteDangerous64.exe` (build 332841, PE stamp 1788384820, i
 
 ## Status
 
-- **State:** the sun probe is built on `claude/hangar-sun-probe` (committed; green `build.bat`; NOT installed, NOT flown). Nothing fixed. The entry at the end says what it does and what the flight needs.
+- **State:** rebuilt on `claude/hangar-sun-probe2` (from `c09b563a`). No engine hook: the skip keys on the sun pair (VS 7E38A6AA1269C901, PS 7CECABDE34FFBE9E) in the draw hook. Built; NOT installed, NOT flown; nothing fixed. The second 2026-10-11 entry at the end says what changed and what the flight needs.
 - **Bug:** docked in a station hangar, the walls and floor brighten and darken with the station's rotation; shadows of ships outside cross them.
 - **Ruled out:** EDVR, by --suspend flat flight 2026-10-11.
+- **Ruled out:** RenderDirLights (0x5AC9C0) as the per-frame sun draw, because it ran once in the flight, its scope counted zero draws, and no draw slot is in its direct callees (second entry).
+- **Sun draw, inferred (strong):** the full-screen deferred pair VS 7E38A6AA1269C901 + PS 7CECABDE34FFBE9E (the resolve that reads the shadow mask at t3). Not yet counted in a hangar: the flight log has no census lines.
 - **H1, favourite:** the station hull is not admitted to the sun's shadow map. Ship shadows reach the hangar, so the map is populated; the hull records are not. Candidate mechanism: per-record view masks (P9). Open: which bit or plane excludes the hull.
 - **H2:** a per-pixel bypass. The shadow resolve's flag byte says "no occlusion" on the walls (bit 2 clear, or bits 6-7 select a static term). Open: the flag byte on the walls.
-- **H3:** the sun is not the source; ambient or IBL carries the star. Unlikely for the ship shadows (IBL casts none), not excluded for the brightness. Open: skip the directional draw and see whether the cycle stops.
-- **Open leads:** the byte group at 0x5E889C0-C3 (P8), no writer found; whether Status.json Docked is set at surface ports (I3).
+- **H3:** the sun is not the source; ambient or IBL carries the star. Unlikely for the ship shadows (IBL casts none), not excluded for the brightness. The pair skip tests it: a cycle that continues with the pair skipped means the sun is not the source.
+- **Open leads:** the byte group at 0x5E889C0-C3 (P8), no writer found; it read `01 01 01 01` through the logged span and did not move at docking. Whether Status.json Docked is set at surface ports (I3). The per-frame issuer of the pair is not identified (candidates in the second entry).
+- **Flight blocker:** the 2026-10-11 flight log hit `log.max_mb` at about 10:50:09 and wrote nothing after it. Raise `log.max_mb` in edvr.ini before the next flight.
 - **Probe keys (TEMPORARY; remove when the arc closes, quoting each):** `diag.sun_pass_skip = on|off` in `[diag]` of edvr.ini (the skip's state at start, default off); `hotkey.sun_pass_skip` in `[hotkey]` (unbound by default; a press flips the skip and logs the flip). Neither is a settings-page row.
 - **Fix order:** B (attenuate the directional pass constant while docked in a station), then A (light-object intensity), then C (admit the hull to the shadow views, the root-cause fix). Nothing implemented.
-- **Next flight:** the probe flight in the entry at the end (rotating station, docked hangar, skip toggled in a bright phase, then a 1 km census). Below is the earlier plan, still valid for the wall eye dump: flat, Coriolis or Orbis hangar, two full cycles. Eye dump of the walls per phase (flag bits 2, 6, 7; shadow mask); draw census of the DirectionalShadows passes inside vs 1 km outside; bytes at 0x5E889C0-C3 at each phase and at the dock event; one skip of the directional draw; Status flags at each state. Decision table below.
+- **Next flight:** the second entry at the end: docked at a rotating hangar, the window line must show `sun pair draws` above zero; press the key in a bright phase; then one 1 km census if the pair is confirmed. The earlier wall eye dump plan (flag bits 2, 6, 7; the shadow mask per phase) still stands.
 
 ## Proven
 
-**P1. The sun's direct light is `RenderDirLights`, RVA 0x5AC9C0** (3492 B). Its marker "RenderDirectionalLights" is referenced at 0x5AD238. It binds these per-pass constants: `c_directionalLightColour` 0x50B9950, `c_directionalLightDirection` 0x50B9970, `c_directionalLightShadowCollectMask` 0x50B9990, `c_numDirectionalLights` 0x50B99B8, `c_directionalShadowActive` 0x50B99D0, `c_globalLightScale` 0x50B9A20, `c_shadowTransparancy` 0x50B9AC0, `c_directionalLightTransparency` 0x50B9AD8, plus `c_shadowCollectTexture`, `c_shadowTexture`, `c_albedoFlagsTexture`, `c_depthTexture`. No other function binds the five scalars by name (RIP-relative and pointer-table scans).
+**P1. The sun's constants are bound by `RenderDirLights`, RVA 0x5AC9C0** (3492 B; corrected 2026-10-11: a builder that issues no draw, see the second entry). Its marker "RenderDirectionalLights" is referenced at 0x5AD238. It binds these per-pass constants: `c_directionalLightColour` 0x50B9950, `c_directionalLightDirection` 0x50B9970, `c_directionalLightShadowCollectMask` 0x50B9990, `c_numDirectionalLights` 0x50B99B8, `c_directionalShadowActive` 0x50B99D0, `c_globalLightScale` 0x50B9A20, `c_shadowTransparancy` 0x50B9AC0, `c_directionalLightTransparency` 0x50B9AD8, plus `c_shadowCollectTexture`, `c_shadowTexture`, `c_albedoFlagsTexture`, `c_depthTexture`. No other function binds the five scalars by name (RIP-relative and pointer-table scans).
 
 **P2. Its caller is the deferred lighting frame, RVA 0x284CB70** (8580 B; direct call at 0x284E159).
 
@@ -117,7 +120,7 @@ The pass structure is engine-internal, so the VR runtime (OpenXR, OpenVR, Oculus
 
 The scripts (PE walk with `.pdata`, RIP-relative and call scans, capstone dumps) are in the session scratchpad and are not committed. The RVAs reproduce with them.
 
-## 2026-10-11: the sun probe (built, not flown)
+## 2026-10-11: the sun probe (built, not flown; superseded by the second entry)
 
 Branch `claude/hangar-sun-probe`, from `03bdfac5`. A full `build.bat` is green: `sun_pass_probe_test` 53 checks, 0 failed; config contract 128 keys, all agree; the receipt is written. Not merged, not installed, not flown.
 
@@ -155,3 +158,37 @@ Branch `claude/hangar-sun-probe`, from `03bdfac5`. A full `build.bat` is green: 
 6. Note the window lines with the skip off and on (`dirlights_calls`, `draws_in_scope`), and any visual side effect in the skipped phase.
 
 **Gate.** Trace the instruments before flying: the install line always appears (live or inert with the reason), the status line appears at the first journal sample, and the window line appears only when the sun pass ran.
+
+## 2026-10-11, second entry: the sun pair, and why 0x5AC9C0 was wrong
+
+Branch `claude/hangar-sun-probe2`, from `origin/claude/hangar-combined-test` (`c09b563a`, build v0.19.1-39-gc09b563a). This supersedes the entry above: the CodeHook on 0x5AC9C0 is gone.
+
+**What the flight showed** (`edvr_gfx_20261011_104619.log`). The probe went live at 10:46:19 with `skip=off`. One window line followed at 10:46:29: `dirlights_calls=1 draws_in_scope=0 skipped=0`. No other RenderDirLights line appears in the span. The dock is inside the span: Status went from `Flags=0x00000000` (menu, frame 4) to `Flags=0x00000005 Flags2=0x00016009` on foot at 10:48:31 (frame 8654), and to `Flags=0x0900000D` seated at 10:48:46. The log reached its cap (`log.max_mb`) at about 10:50:09 and wrote no window or status line after it. So the docked hangar was watched for about 100 s (10:48:31 to 10:50:09) with the probe live, and RenderDirLights was not called. The memory watch read `01 01 01 01` at frame 2 and never changed in the span.
+
+**Why 0x5AC9C0 was wrong.** ruled out: RenderDirLights as the per-frame sun draw, because its one call came at 10:46:29, before the dock, its scope counted zero draws, and its direct callees make no draw call.
+- Callers (`sun2\xr.py`): one direct call, at 0x284E159, inside 0x284CB70 (the deferred frame, 8580 B). 0x284CB70 has no direct caller; its address sits in a `.rdata` pointer table at 0x52E94E8, and that table's reader was not found.
+- The call site allocates a 0x420-byte object (`call 0x53a590`, ecx = 0x420), passes it as `this`, and stores the returned object at `[pass+0xc0]` (0x284E159 to 0x284E166). RenderDirLights builds an object; the frame keeps it. It has no vtable store.
+- Its body (0x5AC9C0 to 0x5AD764) binds the `c_*` constants and the G-buffer and shadow inputs by name (P1). Its indirect calls are `call [rax]` only. Its direct helpers 0x5B4FC0 and 0x5B44C0 bind the local-light volumes (`DeferredShadingEffectManager.*VB`, `PositionAndRange`), and 0x5ADC20 builds a four-entry array of shadow inputs. None calls the context's draw slots (offsets 0x60, 0x68, 0x90, 0x98, 0x120, 0x128, 0x130).
+- The renderer-setup strings sit in the same function (`Failed to init renderers. Will retry.`, `Graphics/GraphicsConfigurationOverride.xml`, `GraphConf.bak`). Inferred: 0x284CB70 is renderer setup, which runs at load, not the per-frame frame.
+
+**The per-frame sun draw** (inferred; not yet counted in a hangar).
+- The pair: VS 7E38A6AA1269C901 forms per-eye view rays from a five-float quad. PS 7CECABDE34FFBE9E is the deferred resolve: it reads the shadow mask at t3, picks a channel with `dp3` against `cb2[44]`, and multiplies the direct diffuse and specular by it (`docs\ambient-occlusion.md` 691-705; `docs\scanner-body.md` 77-79: once per eye per frame).
+- Why it is the sun: it is the one full-screen directional pass (local lights draw volumes, not a quad). Its shadow mask is the sun's shadow resolve (PS 7EAC71963E66C5FE, fixture `tools\flat_temporal_test\fixtures`). RenderDirLights binds `c_directionalLightShadowCollectMask`, `c_directionalShadowActive` and `c_shadowCollectTexture`, which the resolve needs.
+- Not proven: the PS bytecode is not in the repo (only the VS and the shadow PS are fixtures); this log has no hash hits, so no hangar census exists; "once per eye per frame" is the scanner-body note.
+- Coverage: the four draw thunks test `g_vrWorldInternal` before the probe, but only EDVR's own world-layer scopes set it (ui_layer, vr_world_mips, vr_world_route, the worldScreenReissue paths), so the game's frame is not hidden. The pair check sits after the foreign-context return, because the bindings are the immediate context's.
+- Not identified: the function that issues the pair each frame. Readers of render-state offset 0x3588 (the cached pass object) are 0x2890680 (362 B; reads the object's float at +0x18, calls 0x28634E0, a scale helper) and 0x288E3A0 (1586 B). Neither is shown to issue the draw.
+
+**The probe, as built.**
+- No engine hook: the CodeHook on 0x5AC9C0, its relay, its prologue gate and its depth scope are removed.
+- `beginPanelOverride` (vscreen.cpp, after the foreign-context return) passes the bound VS and PS (`bindingShaderHash`) to `sunPassProbeSkipDraw(vs, ps)`. A pair draw is counted in every window and is not forwarded while the toggle is on.
+- Window line: `hangar sun probe: sun pair draws=N skipped=M (VS only=K, PS only=L) toggle=on|off`. Zero pairs in a docked window means the pair is not this hangar's draw. VS only or PS only means the partner changed.
+- Keys unchanged: `diag.sun_pass_skip`, `hotkey.sun_pass_skip`. The memory watch (build 332841 only) and the Status decode are unchanged.
+- Rig: `tools\sun_pass_probe_test` (pair constants, classification, counting, skip decision, identity, status, watch, readability, window and log text).
+
+**Flight (Sean; not run here).**
+1. Raise `log.max_mb` in edvr.ini (256 holds a session). Bind `hotkey.sun_pass_skip` (F7 in this ini). Dry run, install, then `python tools\edvr_log.py --target <target> --expect-build HEAD --version`.
+2. Dock at a rotating hangar. The window line must show `sun pair draws` above zero. If pairs are zero, or only VS or PS shows, stop and read the counts before anything else.
+3. In a bright phase press the key. Record the flip line, the walls, the ship shadows, and whether the cycle continues. Press again to restore.
+4. Judge by the cycle, not the darkness. With the pair skipped, the whole deferred direct light goes if the resolve carries more than the sun. A stopped cycle is the evidence; walls going dark alone is not.
+
+**Open.** The per-frame issuer of the pair (candidates above). The reader of the 0x52E94E8 table. Fix B's slot is re-derived after the pair flight.

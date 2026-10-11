@@ -2031,7 +2031,7 @@ void configureDiagnosticHotkeys() {
          "hotkey.occlusion_census", "occlusion census",
          "hotkey: occlusion_census is set but bound nothing, so the occlusion census cannot be armed by key this session.",
          " A press measures the next four frames of scene draws; the occlusion census: lines follow in the graphics log."},
-        // TEMPORARY, the hangar sun probe (sun_pass_probe.h): a press flips the RenderDirLights skip. Empty is off, as above.
+        // TEMPORARY, the hangar sun probe (sun_pass_probe.h): a press flips the sun pair's draw skip. Empty is off, as above.
         {&s.sunSkipKey, &s.sunSkipKeyText, Config::get().getString("hotkey.sun_pass_skip", ""),
          "hotkey.sun_pass_skip", "hangar sun probe skip toggle",
          "hotkey: sun_pass_skip is set but bound nothing, so the sun pass skip cannot be toggled this session.",
@@ -2893,7 +2893,7 @@ void hookDevice(ID3D11Device* device) {
             // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): a CodeHook on Frontier's input-assembler flush, once, in BOTH profiles -- the stale
             // cache is the game's, not VR's. A build that is not 332841 is one log line and nothing patched.
             vertexResyncInstall();
-            // The hangar sun probe (TEMPORARY, sun_pass_probe.cpp): a CodeHook on RenderDirLights, both profiles. A build that is not 332841 is one line.
+            // The hangar sun probe (TEMPORARY, sun_pass_probe.cpp): the draw skip keys on the sun pair, both profiles, with no engine hook. The memory watch is build 332841 only.
             sunPassProbeInstall(runtimeFlatProfile());
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on, VR only (a flat session says
             // it is inert). A build that is not 332841 is scanned for the call site; anything short of one match is one log line and nothing patched.

@@ -1894,9 +1894,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     }
 
     s->glareClamp = 0;
-    // The hangar sun probe (TEMPORARY, sun_pass_probe.h): a draw issued inside RenderDirLights while its skip is on is not forwarded. Before the
-    // foreign-context return, so a sun-pass draw on any context is counted; a draw the probe skips is not counted by the census (its own line says so).
-    if (sunPassProbeSkipDraw()) return DrawVerdict::kSkip;
     if (foreignContext(self)) {
         noteForeignDraw(self);
         // Round seventeen: recorded before the decline, every token read
@@ -1908,6 +1905,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
         return DrawVerdict::kNone;
     }
+    // The hangar sun probe (TEMPORARY, sun_pass_probe.h): a draw whose bound VS and PS are the sun pair is not forwarded while its skip is on. It sits after
+    // the foreign-context return, because the bindings are the immediate context's: a deferred context's draw is not tested. A skipped draw is not in the census.
+    if (sunPassProbeSkipDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;
     if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);
     // Cleared before anything can set it, on every draw, so a substitution
     // can never be attributed to a draw that did not ask for one.
