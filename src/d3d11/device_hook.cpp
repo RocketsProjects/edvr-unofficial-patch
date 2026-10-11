@@ -321,6 +321,8 @@ struct State {
     uint64_t dumpDueMs = 0;
     uint32_t missedDumpNotes = 0;
     uint32_t missedCensusNotes = 0;
+    uint32_t missedOcclusionNotes = 0;
+    uint32_t missedSunSkipNotes = 0;
     bool     threadNoted = false;
 
     // Crash sentinel for the d3d11 half.
@@ -463,6 +465,20 @@ constexpr uint64_t kConfigPollMs = 1000;
 constexpr uint32_t kMissedDumpNotes = 3;
 
 State* g_state = nullptr;
+
+// The same silent-failure note for any diagnostic key that is gated on focus. Hotkey::pressedWith sets its
+// missed flag on every such press; a key whose flag is never read fails with nothing in the log, which is
+// exactly how the occlusion census and the sun-skip keys looked dead on the 2026-10-11 flight (their presses
+// were thrown away for focus and nothing said so). Read once per frame, said at most kMissedDumpNotes times.
+void missedDiagnosticPressNote(Hotkey& key, uint32_t& notes, const char* what) {
+    if (!key.takeMissedWhileUnfocused() || notes >= kMissedDumpNotes) return;
+    ++notes;
+    Log::get().note(
+        "%s was pressed, but another window had focus, so nothing was done. EDVR only acts on its hotkeys "
+        "while Elite itself is the active window. Click on the game window and press it again. Said at most "
+        "%u times a session.",
+        what, kMissedDumpNotes);
+}
 
 // Which slot the flip timeline anchors its page on.
 //
@@ -1323,6 +1339,9 @@ void tickHotkeys() {
     occlusionCensusFrameTick();
     // The hangar sun probe's skip toggle (TEMPORARY; sun_pass_probe.h): one flip per press, logged with its frame.
     if (g_state->sunSkipKey.pressed()) sunPassProbeToggle(static_cast<uint32_t>(g_state->frameCounter));
+    // The two keys above are gated on focus like the others, and said nothing when a press was refused for it.
+    missedDiagnosticPressNote(g_state->occlusionKey, g_state->missedOcclusionNotes, "The occlusion census key");
+    missedDiagnosticPressNote(g_state->sunSkipKey, g_state->missedSunSkipNotes, "The hangar sun probe skip key");
     if (g_state->missedCensusNotes < kMissedDumpNotes &&
         g_state->censusKey.takeMissedWhileUnfocused()) {
         ++g_state->missedCensusNotes;

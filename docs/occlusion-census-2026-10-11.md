@@ -20,7 +20,10 @@
   depth-only pre-pass draw, whole-frame rollback on overflow, the lost-results and no-draws trace states, the CSV and report formats.
 - Parser: `python tools\edvr_log.py --occlusion-census` (self-test in edvr_log.py's gate).
 - Open: the flight below. Nothing is concluded from a single flight.
-- Ruled out: none yet.
+- Hotkey: the 2026-10-11 flight (10:46) never fired `hotkey.occlusion_census` (F6). Presses were refused by focus, most likely; see Log.
+- Ruled out (hotkey path, 2026-10-11): Elite binding F6 (Custom.4.2.binds has no Key_F6, only F1, F9, F11, F12); a fault
+  in tickHotkeys (none logged); a dead live rebind (setBinding re-registers and the rig covers it); a suspended menu (suspension is only
+  set by a menu capture, and the log's first "menu: open" is at 10:48:29); a discarded request (it logs unconditionally when pressed).
 - Caveat that limits the reading (not a bug): a zero means "hidden at the moment this draw was issued". A draw Elite issues
   before the walls that hide it still has samples. So a low zero share does not prove Elite culls well, and a high one proves
   the draws were wasted at their draw time. See "Limits".
@@ -89,3 +92,10 @@ Each press is one capture. Note in the doc which capture is which; do not averag
 
 - 2026-10-11: instrument built (branch `claude/occlusion-census`, base `claude/vr-camera-writes` 46805658). Keys
   `hotkey.occlusion_census` and `diag.occlusion_census`, both allowed in flat. Rig and parser added.
+- 2026-10-11: flight edvr_gfx_20261011_104619 (v0.19.1-39-gc09b563a, VR). The live reload at 10:46:53 bound F6 (census) and
+  F7 (sun-skip). Neither key ever logged a request or a flip. Both loggers print on every accepted press, so the Hotkey
+  edge was never true. Pause, on the same build, dumped twelve times from 10:49. The two keys had no focus-refused note
+  (only the history and census keys did), so a press refused for focus was silent. The fix makes the note apply to both.
+  Which window had focus during the 10:46:53 to 10:48:29 presses is not in the log; the next flight decides it: a line
+  "The occlusion census key was pressed, but another window had focus" means focus, and no such line with no request
+  means look elsewhere.
