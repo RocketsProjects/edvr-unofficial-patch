@@ -331,7 +331,133 @@ inline void runCopier(ID3D11Device* device,Check check) {
         copy::reset();
     }
 }
+// The lock instrument: the sampling arithmetic, that an unsampled acquisition reads no clock, the thread classes, the
+// maxima, the relabelled stale skip, every caller reaching its own cell, and the exact text of the two log lines.
+namespace lockclock {
+inline int64_t now=0;inline unsigned reads=0;
+inline int64_t fixed() noexcept {++reads;return now+=100;}   // wait 100 ticks, hold 100 ticks per sampled acquisition
+inline const int64_t* script=nullptr;inline size_t scriptAt=0;
+inline int64_t scripted() noexcept {++reads;return script[scriptAt++];}
+// Records, at each read, whether another thread finds g_mutex held: the three reads must see free, held, held.
+inline std::vector<int> mutexHeld;
+inline int64_t probing() noexcept {
+    bool owned=false;
+    std::thread([&]{owned=!edvr::engine_velocity_primary_copy::g_mutex.try_lock();if(!owned)edvr::engine_velocity_primary_copy::g_mutex.unlock();}).join();
+    mutexHeld.push_back(owned?1:0);return int64_t(mutexHeld.size())*100;
+}
+}
+inline void formatBoth(const copy::LockWindow& w,double perUs,double seconds,char (&lines)[2][copy::kLockLineBytes]){for(unsigned half=0;half<2;++half)copy::formatLockLine(w,half,perUs,seconds,lines[half]);}
+inline void runLock(ID3D11Device* device,Check check) {
+    namespace emcpu=edvr::emcpu;
+    using Caller=copy::Caller;
+    constexpr unsigned kEmit=unsigned(Caller::Emit),kOther=unsigned(Caller::Other);
+    auto drain=[]{return copy::takeLockWindow();};
+    Record item=record(1);const uintptr_t where=addressOf(item);
+    const auto savedGate=emcpu::g_gate.load();emcpu::g_gate.store(0);   // no render thread unless a case says so
+    drain();
+    {   // Sampling arithmetic: any 6400 consecutive acquisitions of one caller on one thread are exactly 100 samples.
+        for(unsigned i=0;i<6400;++i)copy::invalidateEmission(where);
+        for(unsigned i=0;i<128;++i)copy::patches(nullptr,kFrame);
+        const auto w=drain();
+        check(w.n[kEmit][1]==100 && w.n[kOther][1]==2 && w.n[kEmit][0]==0,"lock instrument: one acquisition in 64 per caller is sampled, each caller counted on its own");
+    }
+    {   // An unsampled acquisition reads no clock; a sampled one reads it exactly three times.
+        copy::g_lockClock=&lockclock::fixed;lockclock::reads=0;lockclock::now=0;
+        for(unsigned i=0;i<640;++i)copy::invalidateEmission(where);
+        copy::g_lockClock=&emcpu::qpcNow;
+        const auto w=drain();
+        check(lockclock::reads==30 && w.n[kEmit][1]==10,"lock instrument: 640 acquisitions read the clock 30 times, three per sampled one, none for the other 630");
+        check(w.wait[kEmit][1]==1000 && w.hold[kEmit][1]==1000 && w.waitMax[kEmit][1]==100 && w.holdMax[kEmit][1]==100,
+              "lock instrument: wait is the acquire interval and hold the interval to the release");
+    }
+    {   // Where the three reads fall: before the acquire (mutex free), after it (held), before the release (still held).
+        drain();for(auto& tick:copy::t_lockTick)tick=63;
+        lockclock::mutexHeld.clear();copy::g_lockClock=&lockclock::probing;
+        copy::invalidateEmission(where);
+        copy::g_lockClock=&emcpu::qpcNow;drain();
+        check(lockclock::mutexHeld==std::vector<int>({0,1,1}),"lock instrument: the clock is read before the acquire, after it, and before the release");
+    }
+    {   // Maxima and sums from a script: two sampled acquisitions, waits 100 and 500 ticks, holds 100 and 300.
+        static const int64_t ticks[]={0,100,200, 1000,1500,1800};
+        drain();
+        for(auto& tick:copy::t_lockTick)tick=63;
+        lockclock::script=ticks;lockclock::scriptAt=0;lockclock::reads=0;copy::g_lockClock=&lockclock::scripted;
+        copy::invalidateEmission(where);                      // 64th: sampled, reads 0,100,200
+        for(unsigned i=0;i<63;++i)copy::invalidateEmission(where);
+        copy::invalidateEmission(where);                      // 128th: sampled, reads 1000,1500,1800
+        copy::g_lockClock=&emcpu::qpcNow;
+        const auto w=drain();
+        check(lockclock::reads==6 && w.n[kEmit][1]==2 && w.wait[kEmit][1]==600 && w.hold[kEmit][1]==400 && w.waitMax[kEmit][1]==500 && w.holdMax[kEmit][1]==300,
+              "lock instrument: sums and maxima over two sampled acquisitions");
+    }
+    {   // Thread classes: the thread named in engine motion's gate is the render thread; any other is not.
+        emcpu::g_gate.store(emcpu::currentThreadId());
+        for(auto& tick:copy::t_lockTick)tick=63;
+        copy::invalidateEmission(where);
+        std::thread other([&]{for(unsigned i=0;i<64;++i)copy::invalidateEmission(where);});other.join();
+        emcpu::g_gate.store(0);
+        const auto w=drain();
+        check(w.n[kEmit][0]==1 && w.n[kEmit][1]==1,"lock instrument: a sampled acquisition on the render thread and one elsewhere land in their own cells");
+    }
+    {   // A clear that finds the flag stale-true is a skip, filed under its own name.
+        copy::reset();drain();copy::g_claimsLive.store(true);
+        for(auto& tick:copy::t_lockTick)tick=63;
+        copy::invalidateDictionary(where);
+        const auto w=drain();
+        check(w.n[unsigned(Caller::ClearSkip)][1]==1 && w.n[unsigned(Caller::ClearWalk)][1]==0,"lock instrument: a locked clear with nothing to walk is filed as a clear skip");
+        copy::reset();
+    }
+    {   // Every caller reaches its own cell through the real entry points (a dead instrument would read zero everywhere).
+        copy::reset();drain();
+        Tree tree(1,1);Destination dst;tree.item(0,0,0)=record(2);
+        D3D11_BUFFER_DESC d{};d.ByteWidth=672;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.StructureByteStride=336;d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        Microsoft::WRL::ComPtr<ID3D11Buffer> pool;Record mapped[2]={record(3),record(4)};
+        if(device && SUCCEEDED(device->CreateBuffer(&d,nullptr,&pool))) {
+            for(auto& tick:copy::t_lockTick)tick=63;
+            claim(tree.item(0,0,0),kFrame);                                                   // emit
+            copy::beginMap(pool.Get(),mapped,sizeof(mapped),336,D3D11_MAP_WRITE_DISCARD,1,kFrame);   // beginMap
+            copy::copier(reinterpret_cast<uintptr_t>(mapped),336,addressOf(tree.item(0,0,0)),0,1,kFrame);   // copier (a claim is live)
+            copy::endMap(pool.Get(),1);                                                        // endMap
+            claim(tree.item(0,0,0),kFrame);                                                    // (the copier consumed the first claim)
+            copy::invalidateDictionary(tree.ptr());                                            // clear walk (a claim is live)
+            claim(tree.item(0,0,0),kFrame);
+            void* plan=copy::beginMergeOpaque(dst.ptr(),tree.anchor(0),kFrame);                // merge begin
+            copy::endMergeOpaque(plan,true);                                                   // merge end
+            copy::patches(pool.Get(),kFrame);                                                  // other
+            const auto w=drain();
+            bool each=true;
+            for(const Caller c:{Caller::MergeBegin,Caller::MergeEnd,Caller::ClearWalk,Caller::Copier,Caller::BeginMap,Caller::EndMap,Caller::Emit,Caller::Other})
+                each=each && w.n[unsigned(c)][1]==1;
+            check(each && w.n[unsigned(Caller::ClearSkip)][1]==0,"lock instrument: merge begin, merge end, clear walk, copier, beginMap, endMap, emit and other each reach their own cell");
+            copy::forget(pool.Get());
+        }
+        copy::reset();
+    }
+    {   // The text. One known window, exactly.
+        copy::LockWindow w;
+        const unsigned mergeBegin=unsigned(Caller::MergeBegin),copier=unsigned(Caller::Copier);
+        w.n[mergeBegin][1]=5;w.wait[mergeBegin][1]=5*200;w.waitMax[mergeBegin][1]=500;w.hold[mergeBegin][1]=5*400;w.holdMax[mergeBegin][1]=1000;
+        w.n[copier][0]=2;w.wait[copier][0]=2*3000;w.waitMax[copier][0]=4000;w.hold[copier][0]=2*100;w.holdMax[copier][0]=100;
+        char lines[2][copy::kLockLineBytes];formatBoth(w,1000.0,30.0,lines);
+        check(std::string(lines[0])=="engine motion: primary copy lock (sampled 1 in 64, 30 s, 1 of 2): merge begin: render n=0; other n=5 wait 0.2/0.5 us hold 0.4/1.0 us"
+                                    " | merge end: render n=0; other n=0 | clear skip: render n=0; other n=0 | clear walk: render n=0; other n=0"
+                                    " | copier: render n=2 wait 3.0/4.0 us hold 0.1/0.1 us; other n=0","lock instrument: line 1 text, exactly");
+        check(std::string(lines[1])=="engine motion: primary copy lock (sampled 1 in 64, 30 s, 2 of 2): beginMap: render n=0; other n=0 | endMap: render n=0; other n=0"
+                                    " | emit: render n=0; other n=0 | other: render n=0; other n=0","lock instrument: line 2 text, exactly");
+        // Worst plausible: a day of samples and a second-long wait on every cell, and the absolute worst, which must truncate cleanly.
+        copy::LockWindow big;
+        for(unsigned c=0;c<copy::kCallers;++c)for(unsigned k=0;k<2;++k){big.n[c][k]=1000000000000ull;big.wait[c][k]=big.n[c][k]*1000000ull;big.waitMax[c][k]=1000000000ull*1000;
+                                                                         big.hold[c][k]=big.n[c][k]*1000000ull;big.holdMax[c][k]=1000000000ull*1000;}
+        formatBoth(big,1000.0,1800.0,lines);
+        check(std::strlen(lines[0])<1150 && std::strlen(lines[1])<1150,"lock instrument: both lines fit the log line at worst plausible values");
+        for(unsigned c=0;c<copy::kCallers;++c)for(unsigned k=0;k<2;++k){big.n[c][k]=~0ull;big.wait[c][k]=~0ull;big.waitMax[c][k]=~0ull;big.hold[c][k]=~0ull;big.holdMax[c][k]=~0ull;}
+        formatBoth(big,0.001,1e9,lines);
+        check(std::strlen(lines[0])<copy::kLockLineBytes && std::strlen(lines[1])<copy::kLockLineBytes,"lock instrument: absurd values truncate inside the buffer and stay terminated");
+    }
+    emcpu::g_gate.store(savedGate);drain();
+}
 inline void run(ID3D11Device* device,Check check) {
+    runLock(device,check);
     runCopier(device,check);
     // --- (d) walk equivalence: the production walk and the pre-change walk leave identical state ---
     constexpr Shape shapes[]={
@@ -641,6 +767,11 @@ inline void run(ID3D11Device* device) {
         line("clear, no claims, one no-claim merge in flight, 8 nodes",perCall(kIterations,f),allocationsPerThousand(f));
         copy::endMergeOpaque(inFlight,true);copy::reset();
     }
+    {   // The mutex alone: a lock, a failed erase, an unlock. What every emit-hook call costs, and the floor under the lock instrument.
+        copy::reset();Record item=record(1);
+        auto f=[&]{copy::invalidateEmission(reinterpret_cast<uintptr_t>(&item));};
+        line("invalidateEmission, no claims (lock + failed erase)",perCall(kIterations,f),allocationsPerThousand(f));
+    }
     mergeBench(one,true,"merge begin+end, claims present, 1 node source");
     mergeBench(eight,true,"merge begin+end, claims present, 8 node source");
     // Four job threads contending, each on its own fake memory so only the observers' shared state is shared.
@@ -652,6 +783,9 @@ inline void run(ID3D11Device* device) {
         auto mergeOnly=[&](unsigned t){copy::endMergeOpaque(copy::beginMergeOpaque(dsts[t]->ptr(),trees[t]->anchor(),kFrame),true);};
         auto clearOnly=[&](unsigned t){copy::invalidateDictionary(trees[t]->ptr());};
         auto both=[&](unsigned t){mergeOnly(t);clearOnly(t);};
+        copy::reset();
+        lineThreads("invalidateEmission, no claims (lock + failed erase)",kThreads,contended(kThreads,kContended,[&](unsigned t){
+            copy::invalidateEmission(reinterpret_cast<uintptr_t>(&trees[t]->item(0,0,0)));}));
         copy::reset();
         lineThreads("merge begin+end, no claims, 1 node source",kThreads,contended(kThreads,kContended,mergeOnly));
         copy::reset();
