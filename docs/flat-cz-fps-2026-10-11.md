@@ -2,8 +2,8 @@
 
 ## Status
 
-State: BUILT on `claude/fps-drops-onfoot-czs-577f5a` in three commits (observers, copier, lock instrument), NOT FLOWN. A bounded
-experiment on one of three suspects, plus the instruments that say whether it was the right one. Not the fix.
+State: BUILT on `claude/fps-drops-onfoot-czs-577f5a` in four commits (observers, copier, lock lines, flat cpu by part), NOT FLOWN.
+A bounded experiment on one of three suspects, plus the instruments that say whether it was the right one. Not the fix.
 Report: flat v0.19.1 (Steam, build 6ACAF769), RTX 3050, "40 fps without the mod, 20-25 with DLSS" in on-foot CZs.
 Working files (gitignored): `reviews\flat-cz-fps-findings-2026-10-11.md`, `reviews\flat-cz-fps-review-2026-10-11.md`.
 
@@ -25,10 +25,16 @@ Built: (1) `g_claimsLive` + `ClaimLock` (the only way the header locks `g_mutex`
 merge with none gets a fixed token (no plan, walk or allocation), the walk uses small-buffer sets. (2) The copier skips the mutex
 for count 0, no lease, and one fitting lease when no claim, plan or pool patch is published (seqlock view `g_poolView`).
 (3) `ClaimLock` times 1 acquisition in 64 per caller: the log gains two `engine motion: primary copy lock (sampled 1 in 64, ...)`
-lines per 30 s, per caller and thread class, wait and hold, average/maximum us. Expected gain of (1)+(2): about 2-3 ms of 10-25.
+lines per 30 s, per caller and thread class, wait and hold, average/maximum us. (4) The `flat cpu 5s` line ends with
+`engine motion hooks by part (render thread, per clocked frame): emit ..., rigid emit ..., copier ..., merge ..., clear ...,
+jobs ..., builder ..., tees ...`: the fold into `engine motion hooks` split. NOT built: the `flat cpu 5s` line while temporal AA is
+off. Its GPU span (first game draw to Present) needs the draw path, a device and an owner thread that the off state never creates
+(`flatRuntimeActive()` is false, `s.device` unset), so it is more than 40 lines and touches the draw path. Expected gain of
+(1)+(2): about 2-3 ms of 10-25.
 What the lock lines would show: render-thread `copier`/`beginMap`/`endMap` wait near 0 and clear walks rare means the contention
 was removed; a large render `wait` against a large `other` hold names the holder; all-zero n while `copier spans` grows means
-the instrument did not run. Lock-free exits take no lock and are not in the lines.
+the instrument did not run. Lock-free exits take no lock and are not in the lines. The by-part tokens say which render-thread hook carries
+the 2 ms the review found, per clocked frame, with its call count.
 Open: was the reporter fine on 0.19.0? The observer and flat-substitution files are byte-identical between v0.19.0 and v0.19.1 and
 the always-on 0.19.1 additions all run in the 45 fps off state. Ask which `temporal_aa` mode and scene they ran on 0.19.0.
 Flights: F8 off / TAA / DLSS every 30 s in one on-foot CZ (the delta on another CPU), then the same CZ on this build: lock lines,
