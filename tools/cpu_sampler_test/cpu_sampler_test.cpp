@@ -339,6 +339,20 @@ bool testSelectAndCapture(const std::string& outDir, bool& wroteOutput) {
     while (!render.ready.load() || !busy.ready.load() || !idle.ready.load()) Sleep(1);
     const DWORD mainTid = GetCurrentThreadId();
 
+    // The owner: a thread created at a start address in a second test module that exports VR_GetGenericInterface. Its
+    // Win32 start address is in that module, so the choice must give it role=owner.
+    const std::string ownerPath = exeDirectory() + "\\owner_target.dll";
+    HMODULE ownerDll = LoadLibraryA(ownerPath.c_str());
+    auto ownerFn = ownerDll ? reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(ownerDll, "owner_test_thread")) : nullptr;
+    check(ownerDll && ownerFn && GetProcAddress(ownerDll, "VR_GetGenericInterface"),
+          "owner_target.dll exports owner_test_thread and VR_GetGenericInterface");
+    if (!ownerDll || !ownerFn) return false;
+    static LONG ownerStop = 0;
+    DWORD ownerTid = 0;
+    HANDLE ownerThread = CreateThread(nullptr, 0, ownerFn, &ownerStop, 0, &ownerTid);
+    check(ownerThread != nullptr, "the owner-role thread starts at an address in owner_target.dll");
+    if (!ownerThread) return false;
+
     // The choice and the sampling, on a worker of this exe (not the primary thread, which the choice must list as main).
     Session session;
     std::vector<std::string> lines;
@@ -374,16 +388,31 @@ bool testSelectAndCapture(const std::string& outDir, bool& wroteOutput) {
     tRender.join();
     tBusy.join();
     tIdle.join();
+    InterlockedExchange(&ownerStop, 1);
+    WaitForSingleObject(ownerThread, 5000);
+    CloseHandle(ownerThread);   // the module stays loaded until the checks below have read its exports
 
     std::printf("  choice: %s\n", how);
     check(sampled, "the choice and the sampling ran to the report");
-    check(picked >= 3, "the render thread, the main thread and the busy thread were chosen (three or more targets)");
+    check(picked >= 4, "the render thread, the main thread, the owner and the busy thread were chosen (four or more targets)");
+    const std::string pick(how);
+    char ownerText[48];
+    std::snprintf(ownerText, sizeof(ownerText), "owner=t%lu", static_cast<unsigned long>(ownerTid));
+    check(pick.find("owner candidates:") != std::string::npos && pick.find(ownerText) != std::string::npos,
+          "the pick line names the owner candidates and the owner it chose");
+    const int oIdx = session.targetIndex("owner");
+    check(oIdx >= 0 && session.targetAt(static_cast<unsigned>(oIdx)).tid == ownerTid,
+          "the owner-role thread is labelled owner and is the thread that started in owner_target.dll");
+    if (oIdx >= 0) check(std::strcmp(session.targetAt(static_cast<unsigned>(oIdx)).role, "owner") == 0,
+                         "its role is owner");
     const int rIdx = session.targetIndex("render");
     const int mIdx = session.targetIndex("main");
     char busyLabel[16];
     std::snprintf(busyLabel, sizeof(busyLabel), "t%lu", static_cast<unsigned long>(busy.tid));
     const int bIdx = session.targetIndex(busyLabel);
     check(rIdx >= 0 && mIdx >= 0 && bIdx >= 0, "the labels render, main and the busy thread are present");
+    if (bIdx >= 0) check(std::strcmp(session.targetAt(static_cast<unsigned>(bIdx)).role, "other") == 0,
+                         "the busy thread, started in the rig's own exe, is not the owner (role other)");
     if (mIdx >= 0) check(session.targetAt(static_cast<unsigned>(mIdx)).tid == mainTid, "main is the primary thread (the earliest created)");
     if (rIdx >= 0) check(session.targetAt(static_cast<unsigned>(rIdx)).tid == render.tid, "render is the thread that presents");
     if (bIdx >= 0) {
@@ -489,7 +518,18 @@ bool testSelectAndCapture(const std::string& outDir, bool& wroteOutput) {
         if (!r.hasRange) continue;
         uint32_t ob = 0, oe = 0;
         ++checked;
-        if (!oracleRange(r.module, r.begin, ob, oe) || ob != r.begin || oe != r.end) ++mismatched;
+        if (!oracleRange(r.module, r.begin, ob, oe) || ob != r.begin || oe != r.end) {
+            if (!mismatched) {
+                HMODULE mh = GetModuleHandleA(r.module.c_str());
+                DWORD64 ib = 0;
+                PRUNTIME_FUNCTION pf = mh ? RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(mh) + r.begin, &ib, nullptr) : nullptr;
+                std::printf("    first mismatch: %s+0x%x..0x%x (thread %s); module %p, lookup %p imageBase %llx%s\n",
+                            r.module.c_str(), r.begin, r.end, r.thread.c_str(), static_cast<void*>(mh),
+                            static_cast<void*>(pf), static_cast<unsigned long long>(ib),
+                            pf ? (pf->BeginAddress == r.begin ? " (begin matches)" : " (begin differs)") : " (no entry)");
+            }
+            ++mismatched;
+        }
     }
     std::printf("  .pdata ranges checked against RtlLookupFunctionEntry: %u, mismatched %u\n", checked, mismatched);
     check(checked > 0 && mismatched == 0, "every .pdata range the report names is the OS's own");
@@ -537,6 +577,7 @@ bool testSelectAndCapture(const std::string& outDir, bool& wroteOutput) {
     }
     check(emptyOk, "a session with no samples reports 'end samples=0', not a silent absence");
 
+    FreeLibrary(ownerDll);
     FreeLibrary(dll);
     return g_fails == 0;
 }

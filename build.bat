@@ -1226,6 +1226,12 @@ cl.exe /nologo /O2 /MT /LD /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO
     "tools\cpu_sampler_test\hot_target_dll.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: hot_target.dll build failed & exit /b 1 )
+REM The owner-role module: a second test DLL that exports VR_GetGenericInterface, so a thread started in it gets role=owner.
+cl.exe /nologo /O2 /MT /LD /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\cpusampler"\ /Fe"%OBJ%\cpusampler\owner_target.dll" ^
+    "tools\cpu_sampler_test\owner_target_dll.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: owner_target.dll build failed & exit /b 1 )
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"src\common" ^
     /Fo"%OBJ%\cpusampler"\ /Fe"%OBJ%\cpusampler\cpu_sampler_test.exe" ^
     "tools\cpu_sampler_test\cpu_sampler_test.cpp" ^
