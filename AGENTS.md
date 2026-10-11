@@ -2,6 +2,12 @@
 
 This is the only instructions file in the repo. CLAUDE.md is a one-line @AGENTS.md import because Claude Code reads only CLAUDE.md; do not add content there.
 
+These notes are for the maintainer's own agent sessions. An agent working
+for anyone else, in a contributor's fork or clone, takes the project facts
+below as they stand but not the Git section's "merge to main, push, no pull
+requests": it follows its own user's workflow, and contributions reach this
+repository as pull requests.
+
 Unofficial VR fixes for Elite Dangerous: Odyssey. A proxy DLL
 (`d3d11.dll` beside the game) and EDVR's own OpenXR runtime for
 Elite (`openvr_api.dll` in `Openvr\win64`), a config file, and an
@@ -207,6 +213,22 @@ minutes after a flight finally reproduced the effect being chased.
   stash stack with the main checkout. Never use bare `git stash` / `git
   stash pop`.
 
+## Agent material
+
+Text addressed to agents rather than people stays where anyone can strip it
+from a clone without reading it: `AGENTS.md` and `CLAUDE.md` at the root,
+where the tools look for them, and everything else agent-only (handoff
+prompts, plans, task lists) under `.agents\`. All of it is `export-ignore`
+in `.gitattributes`, so `git archive` and GitHub's source zips leave it out.
+`tools\check_agent_material.py` fails the build on an agent file missing
+from `.gitattributes`, and on a zero-width, bidi or tag character anywhere
+in tracked text.
+
+- `docs\` is written for people and is not agent material, even where an
+  agent wrote it.
+- No agent-addressed text in source comments, commit messages or release
+  notes: none of them can be stripped.
+
 ## Layout
 
 | Path | What |
@@ -218,5 +240,6 @@ minutes after a flight finally reproduced the effect being chased.
 | `src\common\` | config, logging, the crash sentinel |
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
 | `docs\` | one investigation doc per arc — read its `## Status` block first |
+| `.agents\` | agent-only material: handoff prompts, plans; `export-ignore`, never in an archive |
 | `build.bat` | full build, all gates; `--dll-only` is the receipt-guarded promotion path |
 | `package.bat <version>` | builds, tests, then packages a release |
