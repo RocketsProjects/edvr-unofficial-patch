@@ -1,5 +1,6 @@
 #include "edge_black.h"
 #include "edge_black_core.h"
+#include "edge_black_shader.h"   // kEdgeBlackGrid, held to the judgement's kGrid below
 #include "shader_swap.h"
 #include "temporal_shader_bytecode.h"   // edvr::kEdgeBlackBytecode, from build\gen
 #include "../common/log.h"
@@ -17,6 +18,7 @@ namespace edvr {
 namespace {
 
 using namespace edgeblack;
+static_assert(kGrid == kEdgeBlackGrid && kGrid % 8 == 0, "the shader writes the grid the judgement reads, in whole 8 x 8 thread groups");
 template <class T> using Ptr = Microsoft::WRL::ComPtr<T>;
 
 constexpr unsigned kDepth = kReadbackDepth;

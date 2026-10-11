@@ -39,16 +39,16 @@
   is WEAKENED: an exposed edge cannot float. The split: is the black in the image Elite
   SUBMITS (**H-image**; H-gen-edge is its late-tile form) or added after EDVR submits?
 - **BUILT, not flown (claude/cull-late-frames): the edge-black watch, always on.** Per
-  eye-frame, on the texture Elite submits (stage game, before any EDVR pass): a 64 x 64
-  point-sampled grid (max of R, G, B) from a compute shader, read back 4 frames deep without
-  waiting. TRANSIENT BLACK: under 0.004 (code 0-1 of 255; R8G8B8A8 read as code/255, the
-  texture's own encoding) in frame f, over 0.03 (code 8+) in f-1 and f+1, or lit, black,
-  black, lit. EVENT: 3+ touching transient points in an eye-frame, with points, cells,
-  centre, region (outer/inner by eye, thirds), border touch (0 = inside the view), head
-  speed. Graphics log: `edge black:` start line, first 60 events, a summary every 60 s
-  (zeros too), a closing line; `python tools\edvr_log.py --tally edge`. Cost: judgement 6.6
-  us per eye-frame (rig), one 8 x 8 dispatch, a 16 KB copy and a 16 KB Map; the log's
-  `periodic work: edge_black` line has the measured figure.
+  eye-frame, on the texture Elite submits (stage game, before any EDVR pass): a 128 x 128
+  point-sampled grid (max of R, G, B; two cells are ~1.5 deg on a 48 px/deg eye) from a
+  compute shader, read back 4 frames deep without waiting. TRANSIENT BLACK: under 0.004
+  (code 0-1 of 255; R8G8B8A8 read as code/255, the texture's own encoding) in frame f, over
+  0.03 (code 8+) in f-1 and f+1, or lit, black, black, lit. EVENT: 3+ touching transient
+  points in an eye-frame, with points, cells, centre, region (outer/inner by eye, thirds),
+  border touch (0 = inside the view), head speed. Graphics log: `edge black:` start line,
+  first 60 events, a summary every 60 s (zeros too), a closing line; `python
+  tools\edvr_log.py --tally edge`. Cost: judgement 25-28 us per eye-frame (rig, render
+  thread), a 64 KB copy and Map; the log's `periodic work: edge_black` line has the figure.
 - **THE FLIGHT (next):** the same flat low flight on the CROPPED Crystal Super (or Quest 3),
   the pilot counting flashes over a segment of known length. Game-stage events at about the
   pilot's count = H-image (border=0 events = H-gen-edge); zero events while flashes are seen
@@ -1084,8 +1084,8 @@ runtime's reprojection, the vendor compositor, the headset). Game-stage events a
 
 **The instrument (always on, TEMPORARY; src/d3d11/edge_black.cpp and edge_black_core.h, the grid shader edge_black_shader.h).** Hooked into the native temporal channel's
 `treat()` after the submit's own validation and before any EDVR pass touches the texture, so it runs whether or not temporal AA is on and reads exactly what the luma probe
-calls the stage "game". Per eye per frame: one 8 x 8 dispatch of 8 x 8 thread groups, each thread one point-sampled texel of a 64 x 64 grid (the centre of the cell, `u =
-(x + 0.5) / 64`, the largest of R, G, B), written to a 16 KB buffer, copied to a staging ring four frames deep, and the oldest ready staging buffer mapped without waiting (a
+calls the stage "game". Per eye per frame: one 16 x 16 dispatch of 8 x 8 thread groups, each thread one point-sampled texel of a 128 x 128 grid (the centre of the cell, `u =
+(x + 0.5) / 128`, the largest of R, G, B), written to a 64 KB buffer, copied to a staging ring four frames deep, and the oldest ready staging buffer mapped without waiting (a
 buffer not yet ready waits for the next frame; the verdict is two frames behind the draw plus the readback, three to four frames). No full-eye copy, no query, no device wait.
 The shader is compiled at build time by tools\temporal_shader_build into temporal_shader_bytecode.h (d3d11.dll must not import d3dcompiler_47.dll, the PE gate). The
 texture is read through a plain UNORM view: R8G8B8A8 and B8G8R8A8 as code/255, R10G10B10A2 as code/1023, R16G16B16A16 UNORM as code/65535, float formats as they are; an sRGB
@@ -1106,8 +1106,14 @@ further events are counted in the summaries only.`); every 60 s, events or none,
 centre c) largest K points; transient points total T; black-start points (black now, lit before, still black) S; samples lost L`; and `edge black: closed -- totals for the
 run: ...` when the channel closes. `python tools\edvr_log.py --target <t> --tally edge` tables them. No `edge black:` start line means the watch never ran.
 
-*Cost.* The CPU side is about a dozen D3D calls and the judgement of one grid (three passes over 4096 bytes: 6.6 us measured in the rig, on the development machine); the GPU
-side is 4096 single-texel loads and stores. The log's `periodic work: edge_black` line carries the measured per-eye figure from a real flight. Memory: 16 KB x 4 x 2 staging.
+*Cost.* The CPU side is about a dozen D3D calls and the judgement of one grid (three passes over 16384 bytes: 25 to 28 us measured in the rig (28.4 in the loaded full build), on the development machine, a render-thread cost per eye-frame, under the 40 us line); the GPU
+side is 16384 single-texel loads and stores, a 64 KB copy and a 64 KB Map. The log's `periodic work: edge_black` line carries the measured per-eye figure from a real flight. Memory: 64 KB x 4 x 2 staging.
+
+*The grid size (review, same day).* The first build sampled 64 x 64. On the cropped Crystal Super (4508 px wide, about 48 px a degree) that is a sample every 70 px, and an event
+needs three touching points, so a black shape under about 140 px (3 degrees) could go uncounted; a false negative would have read as H-after. The grid is 128 x 128: the floor
+is about 70 px (1.5 degrees). Nothing else changed (thresholds, the rule, three touching points, regions, lines). The judgement of one grid costs 25 to 28 us on the render
+thread per eye-frame in the rig (it was 6.6 us at 64), under the 40 us line that would have wanted it moved off that thread; the staging buffer is 64 KB a slot. The grid size is
+written once, in edge_black_shader.h (`kEdgeBlackGrid`, the shader text is built from it) and held to the judgement's `kGrid` by a static_assert.
 
 *Tests.* tools\edge_black_test (build.bat `:rig_edge_black_test`): the thresholds including the NaN and the boundaries, the region labels for both eyes, the clustering, the
 transient rule over a history (lit-black-lit, lit-black-black-lit, a black of three frames, a dim neighbour, a frame missing, a resize), black-start, the window, the event cap,

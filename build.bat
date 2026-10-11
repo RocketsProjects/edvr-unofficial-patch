@@ -1810,12 +1810,13 @@ exit /b 0
 echo [edvr] === edge-black watch: the transient rule, the grid shader on WARP, the exact log lines ===
 REM The production edge_black.cpp included directly with stubs for the log and the shader job; the pure judgement (edge_black_core.h) case by case, the
 REM production compute shader (the build's own bytecode, hence /I GEN) on WARP, and tools\edge_black_fixture.log held to what the core writes.
+REM /STACK: a Watch is 2 eyes x 4 frames x 32 KB of grids (a 128 x 128 grid); the rig keeps several on its stack, the DLL keeps one as a global.
 if not exist "%OBJ%\edgeblacktest" mkdir "%OBJ%\edgeblacktest"
 cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /I"%GEN%" ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\edgeblacktest\\" /Fe"%OBJ%\edgeblacktest\edge_black_test.exe" ^
     "tools\edge_black_test\edge_black_test.cpp" ^
-    /link /INCREMENTAL:NO /OPT:REF d3d11.lib dxgi.lib
+    /link /INCREMENTAL:NO /OPT:REF /STACK:16777216 d3d11.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: edge_black_test build failed & exit /b 1 )
 "%OBJ%\edgeblacktest\edge_black_test.exe" --dry-run || exit /b 1
 "%OBJ%\edgeblacktest\edge_black_test.exe" --self-test || exit /b 1

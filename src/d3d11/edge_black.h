@@ -1,14 +1,15 @@
 // The edge-black watch, the GPU half (docs\terrain-culling.md, 2026-10-10; TEMPORARY, an always-on instrument of this test build).
 //
 // Pilots see quick black flashes, square, at the outer corners of an eye over flat planet ground. Is the black IN the image Elite hands EDVR, or added
-// after EDVR submits? This samples the texture Elite submits -- the stage the luma probe calls "game" -- every frame, both eyes, on a 64 x 64 grid, and
-// judges it for transient black (edge_black_core.h has the rule and every line it writes).
+// after EDVR submits? This samples the texture Elite submits -- the stage the luma probe calls "game" -- every frame, both eyes, on a 128 x 128 grid, and
+// judges it for transient black (edge_black_core.h has the rule and every line it writes). 128 and not 64 so that a black shape two grid cells across (the
+// least that can make an event of three touching points) is about 1.5 degrees on a 4508 px, 48 px/deg eye; a 64 grid left anything under 3 degrees uncounted.
 //
-// COST. Per eye per frame, on the render thread: one 8 x 8 dispatch of 8 x 8 thread groups (4096 single-texel loads and 4096 four-byte stores: a few
-// microseconds of GPU), one 16 KB copy into a staging buffer of a ring four frames deep, one non-blocking Map of the oldest ready buffer (16 KB read, never
-// waited on: a buffer not yet ready is left for the next frame), and the pure judgement of the grid it returned (three passes over 4096 bytes). About a dozen
-// D3D calls and well under 50 microseconds of CPU a call; the periodic-work line "periodic work: edge_black" in the graphics log says what it measured.
-// No full-eye copy, no device wait, no query. The ring is the only memory it keeps (16 KB x 4 x 2 staging, 16 KB x 2 output).
+// COST. Per eye per frame, on the render thread: one dispatch of 16 x 16 thread groups of 8 x 8 (16384 single-texel loads and 16384 four-byte stores: a few
+// microseconds of GPU), one 64 KB copy into a staging buffer of a ring four frames deep, one non-blocking Map of the oldest ready buffer (64 KB read, never
+// waited on: a buffer not yet ready is left for the next frame), and the pure judgement of the grid it returned (three passes over 16384 bytes: about 25 to 27
+// microseconds measured in tools\edge_black_test). About a dozen D3D calls; the periodic-work line "periodic work: edge_black" in the graphics log says what
+// the whole of it measured in a flight. No full-eye copy, no device wait, no query. The ring is the only memory it keeps (64 KB x 4 x 2 staging, 64 KB x 2 output).
 #pragma once
 
 #include <cstdint>

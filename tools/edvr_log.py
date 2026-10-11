@@ -71,7 +71,7 @@ frames and were served before the next publish (Between), after it (Straddled), 
 located against the first frame published after it arrived (0p, +1p, +2p+, -1p-), with the calls above 1 and 2 degrees.
 
 --tally edge tables the edge-black watch (TEMPORARY, an always-on instrument of the cull-late-frames test build): the `edge black:` lines in the GRAPHICS log, which
-judge the texture Elite SUBMITS (before any EDVR pass) on a 64 x 64 grid per eye per frame for transient black, a point lit, black, lit. It tables the per-minute summaries,
+judge the texture Elite SUBMITS (before any EDVR pass) on a 128 x 128 grid per eye per frame for transient black, a point lit, black, lit. It tables the per-minute summaries,
 the listed events (eye, frame, time, size, centre, region, whether the cluster touches the grid edge, head speed) and the totals, with events per 4 minutes to set against
 the pilot's count of flashes. Events at about the pilot's rate mean the black is in Elite's own image; none while flashes are seen means it is added after EDVR submits
 (docs\terrain-culling.md). Exit 1 when the log has no such line.
@@ -1079,7 +1079,7 @@ def print_pose_arrival_tally(windows, notes):
 
 # --tally edge: the edge-black watch (src/d3d11/edge_black_core.h writes every line; tools\edge_black_test holds tools\edge_black_fixture.log, which this script's
 # --self-test reads, to exactly what it writes). TEMPORARY, an always-on instrument of the cull-late-frames test build (docs\terrain-culling.md, 2026-10-10). The watch
-# judges the texture Elite SUBMITS (stage game, before any EDVR pass) on a 64 x 64 grid per eye per frame, and writes to the GRAPHICS log:
+# judges the texture Elite SUBMITS (stage game, before any EDVR pass) on a 128 x 128 grid per eye per frame, and writes to the GRAPHICS log:
 #
 #   edge black: watching stage game (...); the first 60 events are listed, a summary every 60 s.
 #   edge black: event eye=E frame=N t=HH:MM:SS.mmm points=K cells=WxH centre=X,Y region=R border=B head=H deg/s|unknown (...)[ clusters=C]
@@ -11338,8 +11338,8 @@ EDGE_FIXTURE = "edge_black_fixture.log"
 
 def self_test_edge_black():
     """--tally edge on tools\\edge_black_fixture.log (which tools\\edge_black_test holds to exactly what src/d3d11/edge_black_core.h writes for the scripted run: 27000 frames
-    of both eyes at 11 ms, a 5 x 6 black square every 400th frame in eye 0's outer-bottom corner and a 4 x 4 one for two frames in eye 1's inner-top, a horizon band that makes
-    5120 black-start points and no transients; 119 events, the first 60 listed, five summaries -- the last cut short at 57 s -- and the closing totals), then on lines altered to
+    of both eyes at 11 ms, a 10 x 12 black square every 400th frame in eye 0's outer-bottom corner and an 8 x 8 one for two frames in eye 1's inner-top, a horizon band that makes
+    20480 black-start points and no transients; 119 events, the first 60 listed, five summaries -- the last cut short at 57 s -- and the closing totals), then on lines altered to
     break each thing the report depends on. Returns ok."""
     ok = True
 
@@ -11357,7 +11357,7 @@ def self_test_edge_black():
         return False
     text = read_text(fixture)
     p = parse_edge_black(text)
-    if p["start"] is None or not p["start"].startswith("watching stage game (the texture Elite submits, before any EDVR pass): a 64x64 grid per eye each frame") \
+    if p["start"] is None or not p["start"].startswith("watching stage game (the texture Elite submits, before any EDVR pass): a 128x128 grid per eye each frame") \
             or "readback 4 frames deep" not in p["start"]:
         fail("the start line -> %r" % (p["start"],))
     if len(p["events"]) != 60 or p["cap"] != 60 or len(p["windows"]) != 5 or p["close"] is None or p["unwatched"] or not p["sums"]:
@@ -11365,18 +11365,18 @@ def self_test_edge_black():
              % (len(p["events"]), p["cap"], len(p["windows"]), p["close"], p["unwatched"], p["sums"]))
         return False
     e0, e1 = p["events"][0], p["events"][1]
-    if e0 != {"eye": 0, "frame": 301, "t": "10:00:07.211", "points": 30, "cells": (5, 6), "centre": (0.04, 0.95), "region": "outer-bottom", "border": True, "head": 40, "clusters": 1}:
+    if e0 != {"eye": 0, "frame": 301, "t": "10:00:07.211", "points": 120, "cells": (10, 12), "centre": (0.04, 0.95), "region": "outer-bottom", "border": True, "head": 40, "clusters": 1}:
         fail("the first event parsed to %r" % (e0,))
-    if e1 != {"eye": 1, "frame": 601, "t": "10:00:10.511", "points": 16, "cells": (4, 4), "centre": (0.09, 0.16), "region": "inner-top", "border": False, "head": 70, "clusters": 1}:
+    if e1 != {"eye": 1, "frame": 601, "t": "10:00:10.511", "points": 64, "cells": (8, 8), "centre": (0.09, 0.16), "region": "inner-top", "border": False, "head": 70, "clusters": 1}:
         fail("the second event (eye 1, a square floating inside the view) parsed to %r" % (e1,))
     if [e["frame"] for e in p["events"] if e["head"] is None] != [1901, 5501, 9101, 12701]:
         fail("the events with no known head speed -> %r" % ([e["frame"] for e in p["events"] if e["head"] is None],))
     close = p["close"]
     if (close["frames"], close["eyes"], close["events"], close["largest"], close["transient"], close["bstart"], close["lost"], close["region"]) \
-            != (27000, 54000, 119, 30, 3714, 5120, 0, [67, 0, 0, 0, 0, 52, 0]):
+            != (27000, 54000, 119, 120, 12234, 20480, 0, [67, 0, 0, 0, 0, 52, 0]):
         fail("the closing totals parsed to %r" % (close,))
     w = p["windows"]
-    if [x["secs"] for x in w] != [60, 60, 60, 60, 57] or [x["events"] for x in w] != [24, 25, 22, 26, 22] or [x["bstart"] for x in w] != [0, 0, 5120, 0, 0] \
+    if [x["secs"] for x in w] != [60, 60, 60, 60, 57] or [x["events"] for x in w] != [24, 25, 22, 26, 22] or [x["bstart"] for x in w] != [0, 0, 20480, 0, 0] \
             or w[0]["region"] != [14, 0, 0, 0, 0, 10, 0] or w[4]["frames"] != 5179 or w[0]["eyes"] != 10911:
         fail("the summaries parsed to %r" % ([(x["secs"], x["events"], x["bstart"]) for x in w],))
     r = tally_edge_black(p)
@@ -11430,17 +11430,17 @@ def self_test_edge_black():
             f.write((head + text).encode("utf-8"))
         rc, out = run(["--dir", logs, "--tally", "edge"])
         for want in ("[edvr] tally edge: 5 one-minute summary line(s) over 5.0 min, 60 event line(s) (the watch stopped listing at 60; the rest are in the summaries); totals from the closing line",
-                     "[edvr] watching stage game (the texture Elite submits, before any EDVR pass): a 64x64 grid per eye each frame",
+                     "[edvr] watching stage game (the texture Elite submits, before any EDVR pass): a 128x128 grid per eye each frame",
                      " win  secs   frames      eyes  events  ob/om/ot/ib/im/it/c                    largest  transient  black-start  lost",
-                     "   1    60     5456     10911      24  14/0/0/0/0/10/0                             30        760            0     0",
-                     "   3    60     5455     10910      22  14/0/0/0/0/8/0                              30        714         5120     0",
-                     "   5    57     5179     10359      22  12/0/0/0/0/10/0                             30        690            0     0",
+                     "   1    60     5456     10911      24  14/0/0/0/0/10/0                            120       2500            0     0",
+                     "   3    60     5455     10910      22  14/0/0/0/0/8/0                             120       2352        20480     0",
+                     "   5    57     5179     10359      22  12/0/0/0/0/10/0                            120       2250            0     0",
                      "[edvr] totals: frames 27000, eyes sampled 54000, events 119 (outer-bottom 67, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top 52, centre 0), "
-                     "largest 30 point(s), transient points 3714, black-start points 5120, samples lost 0.",
+                     "largest 120 point(s), transient points 12234, black-start points 20480, samples lost 0.",
                      "[edvr] events per minute 24.04, per 4 minutes 96.2.",
-                     "   1 0         301 10:00:07.211     30     5x6 0.04,0.95   outer-bottom  1      40       ",
-                     "   2 1         601 10:00:10.511     16     4x4 0.09,0.16   inner-top     0      70       ",
-                     "   9 0        1901 10:00:24.811     30     5x6 0.04,0.95   outer-bottom  1      unknown  ",
+                     "   1 0         301 10:00:07.211    120   10x12 0.04,0.95   outer-bottom  1      40       ",
+                     "   2 1         601 10:00:10.511     64     8x8 0.09,0.16   inner-top     0      70       ",
+                     "   9 0        1901 10:00:24.811    120   10x12 0.04,0.95   outer-bottom  1      unknown  ",
                      "[edvr] the 60 listed event(s): eye 0 34, eye 1 26; touching the grid's edge (border=1) 34, floating inside the view (border=0) 26; more than one cluster 0; "
                      "head speed median 70 deg/s over 56 known, unknown 4.",
                      "IN Elite's own image (H-image; border=0 events are black shapes floating inside the view",

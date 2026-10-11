@@ -60,9 +60,9 @@ struct Lines {
     const std::string* find(const std::string& text) const { for (const auto& l : v) if (l.find(text) != std::string::npos) return &l; return nullptr; }
 };
 
-// A 64 x 64 grid of one value, with rectangles of another.
+// A 128 x 128 grid of one value, with rectangles of another.
 struct Grid {
-    std::vector<float> d;   // on the heap: a Grid is 16 KB and a statement makes five of them, on a stack that is 1 MB
+    std::vector<float> d;   // on the heap: a Grid is 64 KB and a statement makes five of them, on a stack that is 1 MB
     explicit Grid(float fill = 0.5f) : d(kPoints, fill) {}
     float* v() { return d.data(); }
     const float* v() const { return d.data(); }
@@ -82,8 +82,8 @@ static FrameInfo frame(uint64_t seq) {
 }
 
 // -------------------------------------------------------------------------------------------------------------------------------------------------
-// The scripted five-minute run (tools\edge_black_fixture.log): 11 ms a frame, both eyes. Every 400th frame from the 200th a 5 x 6 black square in eye 0's outer-bottom
-// corner for a frame; from the 500th, every 997th frame a 4 x 4 square in eye 1's inner-top for two frames; every 61st frame two stray black points in eye 1 (under the
+// The scripted five-minute run (tools\edge_black_fixture.log): 11 ms a frame, both eyes. Every 400th frame from the 200th a 10 x 12 black square in eye 0's outer-bottom
+// corner for a frame; from the 500th, every 997th frame an 8 x 8 square in eye 1's inner-top for two frames; every 61st frame two stray black points in eye 1 (under the
 // cluster size: counted as transient points, no event); from frame 12000 a black band enters from the top of both eyes over 600 frames, stays 100 and goes (a horizon:
 // black-start points and no transients); the head speed is known except on every 90th frame.
 static std::string fixtureLog() {
@@ -98,10 +98,10 @@ static std::string fixtureLog() {
         nowMs += 11;
         for (int eye = 0; eye < 2; ++eye) {
             Grid g(0.5f);
-            if (eye == 0 && f % 400 == 200) g.rect(0, 58, 5, 6, 0.0f);
-            if (eye == 1 && f >= 500 && ((f - 500) % 997 == 0 || (f - 500) % 997 == 1)) g.rect(4, 8, 4, 4, 0.0f);
+            if (eye == 0 && f % 400 == 200) g.rect(0, 116, 10, 12, 0.0f);
+            if (eye == 1 && f >= 500 && ((f - 500) % 997 == 0 || (f - 500) % 997 == 1)) g.rect(8, 16, 8, 8, 0.0f);
             if (eye == 1 && f % 61 == 5) { g.point(30, 30, 0.0f); g.point(31, 30, 0.0f); }
-            if (f >= 12000 && f < 12700) g.rect(0, 0, kGrid, std::min(8 + (f - 12000) / 12, 40), 0.0f);
+            if (f >= 12000 && f < 12700) g.rect(0, 0, kGrid, std::min(16 + (f - 12000) / 6, 80), 0.0f);
             FrameInfo info;
             info.seq = seq;
             const uint64_t t = 36000000ull + nowMs;
@@ -226,13 +226,14 @@ int main(int argc, char** argv) {
         set(12, 11);
         check(findClusters(f, kMinCluster, &c) == 1 && c.points == 3 && c.minX == 10 && c.maxX == 12 && c.minY == 10 && c.maxY == 11 && !c.border,
               "a third touching point makes a cluster of three: its bounding box in cells");
-        check(std::fabs(c.cx - 11.5f / 64.0f) < 1e-6f && std::fabs(c.cy - (10.5f + 11.5f + 11.5f) / 3.0f / 64.0f) < 1e-6f, "...and its centre, as normalised x, y");
+        check(std::fabs(c.cx - 11.5f / static_cast<float>(kGrid)) < 1e-6f && std::fabs(c.cy - (10.5f + 11.5f + 11.5f) / 3.0f / static_cast<float>(kGrid)) < 1e-6f,
+              "...and its centre, as normalised x, y");
         clear();
         set(10, 10); set(12, 10); set(14, 10);   // a gap of one between each: not touching
         check(findClusters(f, kMinCluster, &c) == 0 && c.points == 1, "three points with a gap between each do not touch");
         clear();
-        for (int x = 0; x < 3; ++x) set(x, 63);
-        check(findClusters(f, kMinCluster, &c) == 1 && c.border && c.minY == 63 && c.maxY == 63, "a cluster on the image's edge says so");
+        for (int x = 0; x < 3; ++x) set(x, kGrid - 1);
+        check(findClusters(f, kMinCluster, &c) == 1 && c.border && c.minY == kGrid - 1 && c.maxY == kGrid - 1, "a cluster on the image's edge says so");
         clear();
         for (int y = 20; y < 24; ++y) for (int x = 30; x < 34; ++x) set(x, y);   // 16
         set(5, 5); set(5, 6); set(6, 6);                                          // 3
@@ -245,7 +246,7 @@ int main(int argc, char** argv) {
         clear();
         for (int i = 0; i < kPoints; ++i) f[i] = 1;
         check(findClusters(f, kMinCluster, &c) == 1 && c.points == kPoints && c.border && std::fabs(c.cx - 0.5f) < 1e-6f && std::fabs(c.cy - 0.5f) < 1e-6f,
-              "the whole grid is one cluster of 4096, centred (no stack overflow)");
+              "the whole grid is one cluster of 128 x 128 = 16384, centred (no stack overflow)");
         clear();
         for (int i = 0; i < kGrid; ++i) { set(i, i); set(kGrid - 1 - i, i); }
         check(findClusters(f, kMinCluster, &c) == 1 && c.points == 2 * kGrid - 0 && c.border, "two diagonals crossing at the middle are one cluster");
@@ -361,7 +362,7 @@ int main(int argc, char** argv) {
         info.wall = {9, 5, 7, 42};
         info.headDegPerSec = 61.4f;
         Cluster c;
-        c.points = 25; c.minX = 0; c.maxX = 4; c.minY = 58; c.maxY = 63; c.cx = 0.0390625f; c.cy = 0.9453125f; c.border = true;
+        c.points = 25; c.minX = 0; c.maxX = 4; c.minY = 122; c.maxY = 127; c.cx = 0.0390625f; c.cy = 0.9453125f; c.border = true;
         char line[384];
         formatEvent(line, 0, info, c, 0, 1);
         check(std::string(line) == "edge black: event eye=0 frame=12345 t=09:05:07.042 points=25 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=61 deg/s",
@@ -375,7 +376,7 @@ int main(int argc, char** argv) {
         char start[640];
         formatStart(start, "R8G8B8A8_TYPELESS", "code / 255");
         check(std::string(start) ==
-                  "edge black: watching stage game (the texture Elite submits, before any EDVR pass): a 64x64 grid per eye each frame, the largest of R, G, B at each point "
+                  "edge black: watching stage game (the texture Elite submits, before any EDVR pass): a 128x128 grid per eye each frame, the largest of R, G, B at each point "
                   "through a plain view of R8G8B8A8_TYPELESS (code / 255, the texture's own encoding); black below 0.004, lit above 0.03; an event is 3 or more touching "
                   "transient-black points (lit, black, lit; or lit, black, black, lit); readback 4 frames deep; the first 60 events are listed, a summary every 60 s.",
               "the start line, exact: the stage, the grid, the thresholds, the encoding, the readback depth");
@@ -407,18 +408,18 @@ int main(int argc, char** argv) {
         // A window of events.
         for (int k = 0; k < 4; ++k) {
             w.ingest(0, lit.v(), frame(++seq), now += 11, lines);
-            w.ingest(0, Grid().rect(0, 58, 5, 6, 0.0f).v(), frame(++seq), now += 11, lines);
+            w.ingest(0, Grid().rect(0, 116, 10, 12, 0.0f).v(), frame(++seq), now += 11, lines);
             w.ingest(0, lit.v(), frame(++seq), now += 11, lines);
             w.ingest(0, lit.v(), frame(++seq), now += 11, lines);
         }
-        check(w.window().events == 4 && w.window().region[0] == 4 && w.window().largest == 30 && w.listed() == 4 && lines.count("edge black: event eye=0 ") == 4,
+        check(w.window().events == 4 && w.window().region[0] == 4 && w.window().largest == 120 && w.listed() == 4 && lines.count("edge black: event eye=0 ") == 4,
               "four flashes in an eye: four events, in outer-bottom, the largest of 30 points, each listed");
         const std::string* e = lines.find("edge black: event eye=0 ");
-        check(e && contains(*e, "points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=unknown"), "...an event line reads as it should (border, region, no head pose)");
+        check(e && contains(*e, "points=120 cells=10x12 centre=0.04,0.95 region=outer-bottom border=1 head=unknown"), "...an event line reads as it should (border, region, no head pose)");
         // The cap.
         for (int k = 0; k < 70; ++k) {
             w.ingest(1, lit.v(), frame(++seq), now += 11, lines);
-            w.ingest(1, Grid().rect(60, 4, 4, 4, 0.0f).v(), frame(++seq), now += 11, lines);
+            w.ingest(1, Grid().rect(120, 8, 8, 8, 0.0f).v(), frame(++seq), now += 11, lines);
             w.ingest(1, lit.v(), frame(++seq), now += 11, lines);
             w.ingest(1, lit.v(), frame(++seq), now += 11, lines);
         }
@@ -433,7 +434,7 @@ int main(int argc, char** argv) {
         Watch r;
         Lines rl;
         r.ingest(0, lit.v(), frame(1), 0, rl);
-        r.ingest(0, Grid().rect(0, 58, 5, 6, 0.0f).v(), frame(2), 11, rl);
+        r.ingest(0, Grid().rect(0, 116, 10, 12, 0.0f).v(), frame(2), 11, rl);
         r.ingest(0, lit.v(), frame(3), 22, rl);
         r.resetEye(0);
         check(r.window().lost == 3, "a reset of an eye (a resize) counts the frames it held as lost");
@@ -461,7 +462,7 @@ int main(int argc, char** argv) {
         const auto t1 = std::chrono::steady_clock::now();
         const double us = std::chrono::duration<double, std::micro>(t1 - t0).count() / n;
         std::printf("edge_black_test: the judgement of one eye's grid averages %.1f us on this machine\n", us);
-        check(us < 1000.0, "the judgement of one eye's grid costs far under a millisecond (it is three passes over 4096 bytes)");
+        check(us < 1000.0, "the judgement of one eye's grid costs far under a millisecond (it is three passes over 16384 bytes)");
     }
 
     // ---- the fixture ---------------------------------------------------------------------------------------------------------------------------------
@@ -494,7 +495,7 @@ int main(int argc, char** argv) {
     // ---- the GPU half, on WARP, with the build's own compute shader --------------------------------------------------------------------------------------
     Gpu gpu;
     gpu.init();
-    const UINT W = 256, H = 192;   // a cell is 4 x 3 texels
+    const UINT W = 512, H = 384;   // a cell is 4 x 3 texels (128 x 128 cells)
     const uint32_t full[4] = {0, 0, W, H};
     const auto eventLines = [&] {
         std::vector<std::string> out;
@@ -506,11 +507,11 @@ int main(int argc, char** argv) {
         auto lit = gpu.texture(W, H, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
         auto flash = gpu.texture(W, H, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
         gpu.fill(lit.Get(), W, H, 128, {});
-        gpu.fill(flash.Get(), W, H, 128, {{0, 168, 24, 192}});
+        gpu.fill(flash.Get(), W, H, 128, {{0, H - 24, 24, H}});
         for (uint64_t s = 1; s <= 9; ++s) sampleFrame(gpu, s == 5 ? flash.Get() : lit.Get(), 0, s, full);
         const auto events = eventLines();
         check(events.size() == 1, "GPU: a one-frame black square in the corner of a lit eye texture is exactly one event");
-        check(!events.empty() && contains(events[0], "event eye=0 frame=5 ") && contains(events[0], "points=48 cells=6x8 centre=0.05,0.94 region=outer-bottom border=1 head=unknown"),
+        check(!events.empty() && contains(events[0], "event eye=0 frame=5 ") && contains(events[0], "points=48 cells=6x8 centre=0.02,0.97 region=outer-bottom border=1 head=unknown"),
               "...frame 5, 48 points (6 x 8 cells of 4 x 3 texels), the centre of the corner, outer-bottom, on the border");
         check(testLog.size() >= 2 && testLog[0].rfind("edge black: watching stage game ", 0) == 0 && contains(testLog[0], "through a plain view of R8G8B8A8_TYPELESS (code / 255,"),
               "...after one start line, naming the format and its encoding");
@@ -529,7 +530,7 @@ int main(int argc, char** argv) {
         auto lit = gpu.texture(W, H, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE);
         auto flash = gpu.texture(W, H, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE);
         gpu.fill(lit.Get(), W, H, 128, {});
-        gpu.fill(flash.Get(), W, H, 128, {{0, 168, 24, 192}});
+        gpu.fill(flash.Get(), W, H, 128, {{0, H - 24, 24, H}});
         for (uint64_t s = 1; s <= 9; ++s) sampleFrame(gpu, s == 5 || s == 6 ? flash.Get() : lit.Get(), 1, s, full);
         const auto events = eventLines();
         check(events.size() == 2 && contains(events[0], "event eye=1 frame=5 ") && contains(events[0], "region=inner-bottom") && contains(events[1], "event eye=1 frame=6 "),
@@ -540,7 +541,7 @@ int main(int argc, char** argv) {
         auto lit = gpu.texture(W, H, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE);
         auto flash = gpu.texture(W, H, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE);
         gpu.fill(lit.Get(), W, H, 128, {});
-        gpu.fill(flash.Get(), W, H, 128, {{0, 168, 24, 192}});
+        gpu.fill(flash.Get(), W, H, 128, {{0, H - 24, 24, H}});
         float head[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
         for (uint64_t s = 1; s <= 9; ++s) {
             const float a = 0.02f * static_cast<float>(s);   // a steady turn about y; the frames are however far apart the machine ran them
@@ -553,37 +554,37 @@ int main(int argc, char** argv) {
     }
     {   // a region of a bigger texture, and a mirrored eye
         resetGpuState();
-        const UINT TW = 320, TH = 240;
+        const UINT TW = 640, TH = 480;
         auto lit = gpu.texture(TW, TH, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE);
         auto outside = gpu.texture(TW, TH, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE);
         auto inside = gpu.texture(TW, TH, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE);
         gpu.fill(lit.Get(), TW, TH, 128, {});
-        gpu.fill(outside.Get(), TW, TH, 128, {{288, 0, 320, 240}, {0, 0, 32, 240}, {0, 208, 320, 240}});   // everything outside the region
-        gpu.fill(inside.Get(), TW, TH, 128, {{32, 184, 56, 208}});                                         // the region's bottom-left corner
-        const uint32_t region[4] = {32, 16, 288, 208};   // 256 x 192
+        gpu.fill(outside.Get(), TW, TH, 128, {{576, 0, 640, 480}, {0, 0, 64, 480}, {0, 416, 640, 480}});   // everything outside the region
+        gpu.fill(inside.Get(), TW, TH, 128, {{64, 392, 88, 416}});                                         // the region's bottom-left corner
+        const uint32_t region[4] = {64, 32, 576, 416};   // 512 x 384
         for (uint64_t s = 1; s <= 9; ++s) sampleFrame(gpu, s == 5 ? outside.Get() : lit.Get(), 0, s, region);
         check(eventLines().empty(), "GPU: black outside the submitted region, however much of it, is not seen");
         for (uint64_t s = 11; s <= 19; ++s) sampleFrame(gpu, s == 15 ? inside.Get() : lit.Get(), 0, s, region);
         const auto events = eventLines();
-        check(events.size() == 1 && contains(events[0], "frame=15 ") && contains(events[0], "points=48 cells=6x8 centre=0.05,0.94 region=outer-bottom border=1"),
+        check(events.size() == 1 && contains(events[0], "frame=15 ") && contains(events[0], "points=48 cells=6x8 centre=0.02,0.97 region=outer-bottom border=1"),
               "...and the region's own corner is the image's corner: the same 48 points at the same cells as the whole-texture case");
         testLog.clear();
         g_eye[0] = EyeGpu();
         g_watch = Watch();
         for (uint64_t s = 21; s <= 29; ++s) sampleFrame(gpu, s == 25 ? inside.Get() : lit.Get(), 0, s, region, true, false);
         const auto flipped = eventLines();
-        check(flipped.size() == 1 && contains(flipped[0], "frame=25 ") && contains(flipped[0], "points=48 cells=6x8 centre=0.95,0.94 region=inner-bottom border=1"),
+        check(flipped.size() == 1 && contains(flipped[0], "frame=25 ") && contains(flipped[0], "points=48 cells=6x8 centre=0.98,0.97 region=inner-bottom border=1"),
               "...a mirrored eye (bounds the other way round) is un-mirrored: the corner that was left is the right, an inner corner of eye 0");
     }
     {   // a resize in the middle of a flash
         resetGpuState();
         auto litA = gpu.texture(W, H, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE);
         auto flashA = gpu.texture(W, H, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE);
-        auto litB = gpu.texture(320, H, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE);
+        auto litB = gpu.texture(640, H, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_SHADER_RESOURCE);
         gpu.fill(litA.Get(), W, H, 128, {});
-        gpu.fill(flashA.Get(), W, H, 128, {{0, 168, 24, 192}});
-        gpu.fill(litB.Get(), 320, H, 128, {});
-        const uint32_t regionB[4] = {0, 0, 320, H};
+        gpu.fill(flashA.Get(), W, H, 128, {{0, H - 24, 24, H}});
+        gpu.fill(litB.Get(), 640, H, 128, {});
+        const uint32_t regionB[4] = {0, 0, 640, H};
         sampleFrame(gpu, litA.Get(), 0, 1, full);
         sampleFrame(gpu, litA.Get(), 0, 2, full);
         sampleFrame(gpu, flashA.Get(), 0, 3, full);
@@ -623,7 +624,7 @@ int main(int argc, char** argv) {
         auto flash = gpu.texture(W, H, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
         std::vector<uint16_t> half(static_cast<size_t>(W) * H * 4, 0x3800), halfFlash;   // 0x3800 = 0.5
         halfFlash = half;
-        for (UINT y = 168; y < 192; ++y) for (UINT x = 0; x < 24; ++x) { uint16_t* p = &halfFlash[(static_cast<size_t>(y) * W + x) * 4]; p[0] = p[1] = p[2] = 0; }
+        for (UINT y = H - 24; y < H; ++y) for (UINT x = 0; x < 24; ++x) { uint16_t* p = &halfFlash[(static_cast<size_t>(y) * W + x) * 4]; p[0] = p[1] = p[2] = 0; }
         gpu.ctx->UpdateSubresource(lit.Get(), 0, nullptr, half.data(), W * 8, 0);
         gpu.ctx->UpdateSubresource(flash.Get(), 0, nullptr, halfFlash.data(), W * 8, 0);
         for (uint64_t s = 1; s <= 9; ++s) sampleFrame(gpu, s == 5 ? flash.Get() : lit.Get(), 0, s, full);
@@ -636,7 +637,7 @@ int main(int argc, char** argv) {
         gpu.fill(lit.Get(), W, H, 128, {});
         std::vector<uint8_t> px(static_cast<size_t>(W) * H * 4, 128);
         for (UINT c = 0; c < 3; ++c)   // three squares: pure red, pure green, pure blue
-            for (UINT y = 168; y < 192; ++y) for (UINT x = c * 100; x < c * 100 + 24; ++x) { uint8_t* p = &px[(static_cast<size_t>(y) * W + x) * 4]; p[0] = p[1] = p[2] = 0; p[c] = 200; }
+            for (UINT y = H - 24; y < H; ++y) for (UINT x = c * 100; x < c * 100 + 24; ++x) { uint8_t* p = &px[(static_cast<size_t>(y) * W + x) * 4]; p[0] = p[1] = p[2] = 0; p[c] = 200; }
         gpu.ctx->UpdateSubresource(red.Get(), 0, nullptr, px.data(), W * 4, 0);
         for (uint64_t s = 1; s <= 9; ++s) sampleFrame(gpu, s == 5 ? red.Get() : lit.Get(), 0, s, full);
         check(eventLines().empty(), "GPU: squares that are pure red, pure green and pure blue are lit, not black (the largest of R, G, B)");

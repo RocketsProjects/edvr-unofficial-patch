@@ -778,7 +778,7 @@ static void selfTest() {
     }
 
     // The edge-black watch's grid sampler (src/d3d11/edge_black_shader.h, edge_black.cpp): new, held to its own contract -- the symbol, source name, entry,
-    // profile and flags, the text it compiles, the 8 x 8 thread group the watch dispatches 8 x 8 of (4096 points, one thread each), and the three slots
+    // profile and flags, the text it compiles, the 8 x 8 thread group the watch dispatches 16 x 16 of (16384 points, one thread each), and the three slots
     // edge_black.cpp binds: the game's texture at t0, the output buffer at u0 and the 32-byte parameter block at b0.
     {
         auto& shader = coreFixed[coreLegacy.size() + 14];
@@ -795,7 +795,7 @@ static void selfTest() {
             const UINT threads = reflection ? reflection->GetThreadGroupSize(&x, &y, &z) : 0;
             check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) && D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_COMPUTE_SHADER &&
                   D3D11_SHVER_GET_MAJOR(desc.Version) == 5 && threads == 64 && x == 8 && y == 8 && z == 1,
-                  "the edge-black grid sampler reflects as a Shader Model 5 compute shader with 8 x 8 threads a group, the group the watch dispatches 8 x 8 of");
+                  "the edge-black grid sampler reflects as a Shader Model 5 compute shader with 8 x 8 threads a group, the group the watch dispatches 16 x 16 of");
             struct Binding { const char* name; D3D_SHADER_INPUT_TYPE type; UINT slot; };
             const Binding bindings[] = {{"Src", D3D_SIT_TEXTURE, 0}, {"Out", D3D_SIT_UAV_RWSTRUCTURED, 0}, {"P", D3D_SIT_CBUFFER, 0}};
             bool bound = reflection != nullptr && desc.BoundResources == 3;

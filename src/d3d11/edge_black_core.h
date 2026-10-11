@@ -1,5 +1,5 @@
 // The edge-black watch, the pure part (docs\terrain-culling.md, 2026-10-10; TEMPORARY, an always-on instrument of this test build). No device, no log, no
-// clock: the GPU half (edge_black.cpp) hands this one 64 x 64 grid of values per eye per frame, and every line it writes comes back through a sink, so
+// clock: the GPU half (edge_black.cpp) hands this one 128 x 128 grid of values per eye per frame, and every line it writes comes back through a sink, so
 // tools\edge_black_test drives each case and holds tools\edge_black_fixture.log to exactly what this writes.
 //
 // THE QUESTION. Pilots see quick black flashes, square, at the outer corners of an eye over flat planet ground. Is the black IN the image Elite hands
@@ -35,7 +35,7 @@
 namespace edvr {
 namespace edgeblack {
 
-constexpr int kGrid = 64;
+constexpr int kGrid = 128;   // held to edge_black_shader.h's kEdgeBlackGrid by a static_assert in edge_black.cpp
 constexpr int kPoints = kGrid * kGrid;
 constexpr float kBlackBelow = 0.004f;
 constexpr float kLitAbove = 0.03f;
@@ -95,7 +95,7 @@ inline int regionOf(int eye, float cx, float cy) {
     return outward > 0.0f ? row : 3 + row;
 }
 
-// The clusters of set cells in a 64 x 64 flag array (8-neighbourhood). Returns how many have at least `minPoints` cells, and the largest of all of them (the
+// The clusters of set cells in a 128 x 128 flag array (8-neighbourhood). Returns how many have at least `minPoints` cells, and the largest of all of them (the
 // first found on a tie, reading the grid top to bottom, left to right) in *largest. No allocation: the stack is one entry a cell at most.
 inline int findClusters(const uint8_t* flags, int minPoints, Cluster* largest) {
     uint8_t seen[kPoints];
