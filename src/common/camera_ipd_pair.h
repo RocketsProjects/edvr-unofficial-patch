@@ -14,7 +14,7 @@
 // The rule is ahead of the legacy chooser. With no pair the frame holds the previous pose for up to kHoldLimit frames, then the legacy chooser takes
 // over (a real camera change: the galaxy map, the external camera, on foot), and its candidate is checked by the backstop: a jump over 3 cm that does
 // not continue the previous step is rejected, and a jump that persists for kBackstopLimit frames is taken. The rule is parked and off by default
-// (2026-10-11); the legacy chooser's backstop is camera_jump_guard.h, which reuses this header's departs and continuesStep tests.
+// (2026-10-11). The legacy chooser's last step is the nearest write (camera_nearest.h), which reuses this header's samePose and rotation helpers.
 //
 // Pure: no Windows, no globals. The chooser is chooseCameraRows in src\d3d11\temporal_pass.cpp, and the rig is tools\temporal_test.
 

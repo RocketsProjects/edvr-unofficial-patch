@@ -34,7 +34,7 @@
 #include "../common/hmd_camera_tag.h"    // the headset camera tag: the stamp, the chooser's pick and the 30 s line (fix.hmd_camera_tag)
 #include "../common/camera_writes.h"     // the camera writes diagnostic: the per-write ring, TCWR lines and the 20 s line (diag.camera_writes)
 #include "../common/camera_ipd_pair.h"   // the camera IPD pair: the runtime's eye offset, the partner test, the hold and backstop chain (fix.camera_ipd_pair)
-#include "../common/camera_jump_guard.h" // the camera jump guard: a legacy pick's jump is replaced by the next-best candidate that passes (fix.camera_jump_guard)
+#include "../common/camera_nearest.h"   // the nearest write: the continuous candidate nearest the last applied pick, in place of the legacy pick (fix.camera_nearest)
 #include "hmd_camera_tag_hook.h"         // the coordinator hook's state and frame, for the 30 s line
 #include "depth_probe.h"
 #include "luma_probe.h"
@@ -2159,7 +2159,7 @@ enum CameraChoiceFlag : uint32_t {
     kChoiceByTag          = 1u << 10,   // the pick is the headset-stamped write (fix.hmd_camera_tag on, a stamp this frame)
     kChoiceByIpd          = 1u << 11,   // the pick is the IPD pair's reference (fix.camera_ipd_pair on, a pair this frame)
     kChoiceIpdHold        = 1u << 12,   // the IPD pair held the previous frame's rows: no pair this frame (up to 3 frames)
-    kChoiceJumpReplaced   = 1u << 13,   // the camera jump guard replaced the legacy pick with the next-best candidate (fix.camera_jump_guard on)
+    kChoiceNearest        = 1u << 13,   // the nearest-write rule took a write other than the legacy pick (fix.camera_nearest on)
 };
 enum CameraDrawFlag : uint32_t {
     kDrawSeen             = 1u << 0,
@@ -2237,12 +2237,12 @@ bool                 g_ipdOffsetNoted = false;
 ipdpair::Chain       g_ipdChain;
 ipdpair::Stats       g_ipdStats;
 int64_t              g_ipdWindowTicks = 0;
-// The camera jump guard (fix.camera_jump_guard; camera_jump_guard.h): the key (VR; flat reads it off), the guard's state (the applied poses, the
-// replaced run), its 30 s window. It runs on the legacy pick and counts with the key off too.
-bool                 g_jumpKeyOn = false;
-jumpguard::Guard     g_jumpGuard;
-jumpguard::Stats     g_jumpStats;
-int64_t              g_jumpWindowTicks = 0;
+// The nearest-write rule (fix.camera_nearest; camera_nearest.h): the key (VR; flat reads it off), the rule's state (the last applied pick, the
+// legacy pick of the last frame), its 30 s window. It runs on the legacy pick and counts with the key off too.
+bool                 g_nearKeyOn = false;
+camnearest::State    g_nearState;
+camnearest::Stats    g_nearStats;
+int64_t              g_nearWindowTicks = 0;
 struct IpdApplied {
     bool valid = false;
     float rows[12] = {};
@@ -2570,11 +2570,14 @@ void chooseCameraRows() {
     }
     if (v.episodeEnd) Log::get().note("temporal ipd pair: the eye pair is back; the episode ends. key=%s", g_ipdKeyOn ? "on" : "off");
     const ipdpair::Pick applied = ipdpair::applyPick(g_ipdKeyOn, v.pick);
-    // The camera jump guard's alternates: the continuous writes this chooser considered (within 3 deg of the last applied rows), in its own
-    // preference order -- the bound object's first, then the latest. Never the identical-to-previous twin: that is last frame's rows again.
-    const float* jumpAltRows[kRowsRing];
-    int jumpAltRing[kRowsRing];
-    int jumpAltN = 0;
+    // The nearest write (camera_nearest.h): the candidates are the continuous writes this chooser considered (within 3 deg of the last applied
+    // rows), in its own preference order (the bound object's first, then the latest), which breaks ties. Never the identical-to-previous twin:
+    // that is last frame's rows again. The legacy pick's agreement with last frame's is noted every frame that has one.
+    const float* nearRows[kRowsRing];
+    int nearRing[kRowsRing];
+    int nearN = 0;
+    const bool nearLegacyAgreed = legacyRows != nullptr && camnearest::legacyAgrees(g_nearState, legacyRows);
+    if (legacyRows) camnearest::noteLegacy(g_nearState, legacyRows);
     std::sort(contIdx, contIdx + contN, [](int a, int b) {
         const RowsWrite& x = g_rowsRing[a];
         const RowsWrite& y = g_rowsRing[b];
@@ -2584,9 +2587,9 @@ void chooseCameraRows() {
         return x.seq > y.seq;
     });
     for (int k = 0; k < contN; ++k) {
-        jumpAltRing[jumpAltN] = contIdx[k];
-        jumpAltRows[jumpAltN] = g_rowsRing[contIdx[k]].rows;
-        ++jumpAltN;
+        nearRing[nearN] = contIdx[k];
+        nearRows[nearN] = g_rowsRing[contIdx[k]].rows;
+        ++nearN;
     }
     auto applyRing = [&](int idx) {
         g_rowsChoice.flags |= kChoiceValid;
@@ -2632,30 +2635,26 @@ void chooseCameraRows() {
         }
     } else if (pick >= 0) {
         // The rule's reference (applied as Rule), else the legacy pick: with the key off, or with no rule pick, today's chooser's own pick.
-        // The camera jump guard judges the legacy pick (not the rule's): a rejected jump takes the next-best passing candidate, key on only.
-        // Its state follows whatever is applied, so with the key off it tracks the legacy track the flight flew.
+        // The nearest-write veto judges the legacy pick (not the rule's): a legacy pick beyond its threshold gives way to the nearest candidate,
+        // key on only; a cut held two frames is taken. Its state follows whatever is applied, so with the key off it tracks the legacy track.
         int applyIdx = pick;
-        bool replaced = false;
         if (applied == ipdpair::Pick::Legacy) {
-            const jumpguard::Decision jd = jumpguard::decide(g_jumpGuard, g_rowsRing[pick].rows, jumpAltRows, jumpAltN);
-            jumpguard::note(g_jumpStats, jd);
-            const int use = jumpguard::applied(g_jumpKeyOn, jd);
-            // The TCWR marks (diag.camera_writes): the legacy pick the guard rejected, either key, and the write it applied
-            // in its place, key on. A Pause dump then shows the flip the guard masks.
-            if (g_camWritesOn) {
-                std::lock_guard<std::mutex> lock(g_camMutex);
-                if (jd.rejected) camwrites::markRejected(g_camRing, g_rowsFrame, g_rowsRing[pick].observedSeq);
-                if (use >= 0) camwrites::markPick(g_camRing, g_rowsFrame, g_rowsRing[jumpAltRing[use]].observedSeq,
-                                                  camwrites::kPickGuard);
-            }
-            if (use >= 0) {
-                applyIdx = jumpAltRing[use];
-                replaced = true;
-                g_rowsChoice.flags |= kChoiceJumpReplaced;
+            const camnearest::Verdict nv = camnearest::decide(g_nearState, g_rowsRing[pick].rows, nearRows, nearN, nearLegacyAgreed);
+            const bool differs = nv.index >= 0 && nearRing[nv.index] != pick;
+            camnearest::note(g_nearStats, nv, differs);
+            const int use = camnearest::applied(g_nearKeyOn, nv);
+            if (use >= 0 && nearRing[use] != pick) {
+                applyIdx = nearRing[use];
+                g_rowsChoice.flags |= kChoiceNearest;
+                // The TCWR mark (diag.camera_writes): the write the rule applied in place of the legacy pick.
+                if (g_camWritesOn) {
+                    std::lock_guard<std::mutex> lock(g_camMutex);
+                    camwrites::markPick(g_camRing, g_rowsFrame, g_rowsRing[applyIdx].observedSeq, camwrites::kPickNearest);
+                }
             }
         }
         applyRing(applyIdx);
-        jumpguard::commit(g_jumpGuard, g_rowsRing[applyIdx].rows, replaced);
+        camnearest::commit(g_nearState, g_rowsRing[applyIdx].rows);
     }
 }
 
@@ -4703,8 +4702,8 @@ void temporalPassDumpHistory(const char* trigger) {
         "TCAM legend: choice flags 1 valid,2 bound seen,4 bound write observed,8 selected bound,"
         "10 continuous,20 identical-to-previous twin present,40 twin fallback,80 resync,100 refollow,"
         "200 bound rows valid, 400 chosen by the headset tag (fix.hmd_camera_tag), 800 chosen by the IPD pair (fix.camera_ipd_pair), "
-        "1000 held by the IPD pair (no pair this frame; the previous rows kept), 2000 replaced by the camera jump guard (fix.camera_jump_guard: "
-        "the legacy pick's jump rejected, the next-best passing candidate applied). Draw flags 1 eligible draw seen,2 mapped write observed,4 rows valid,"
+        "1000 held by the IPD pair (no pair this frame; the previous rows kept), 2000 chosen by the nearest-write rule (fix.camera_nearest: "
+        "a write other than the legacy pick, the nearest to the last applied pick). Draw flags 1 eligible draw seen,2 mapped write observed,4 rows valid,"
         "8 previous draw rows valid,10 same resource,20 same observed write,40 same rows,80 selection later. "
         "Rows are literal scene rows; their origin is not assumed to be headset centre or eye pose. "
         "Detailed rows follow for the newest %zu of %zu eye calls; %zu older calls retain TEMP only.",
@@ -4867,9 +4866,9 @@ void temporalPassConfigure(Config& cfg) {
     // allow-list does not list it, so flat reads "off" and its chooser is today's.
     // Parked 2026-10-11 (Sean): off is the default; the rule's counts still run, and the applied pick is the legacy chooser's.
     g_ipdKeyOn = cfg.getString("fix.camera_ipd_pair", "off") == "on";
-    // fix.camera_jump_guard (temporary A/B; camera_jump_guard.h): on replaces a legacy pick's jump over 3 cm with the next-best candidate that
-    // continues the previous step. VR only: the flat allow-list does not list it, so flat reads "off" and keeps today's pick.
-    g_jumpKeyOn = cfg.getString("fix.camera_jump_guard", "on") == "on";
+    // fix.camera_nearest (temporary A/B; camera_nearest.h): on takes the continuous write nearest the last applied pick, in place of the legacy
+    // pick; off is the legacy chooser exactly. VR only: the flat allow-list does not list it, so flat reads "off" and keeps today's pick.
+    g_nearKeyOn = cfg.getString("fix.camera_nearest", "on") == "on";
     // diag.camera_writes (camera_writes.h): temporary, default off. VR only: the flat allow-list does not list it, so flat reads "off".
     const bool camOn = cfg.getString("diag.camera_writes", "off") == "on";
     if (camOn != g_camWritesOn) {
@@ -5387,14 +5386,14 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
 void temporalPassHmdTagTick();   // the 30 s line, defined with the census line below
 void temporalPassCamWritesTick(); // the camera writes' 20 s line, defined after it
 void temporalPassIpdPairTick();   // the IPD pair's 30 s line, defined after it
-void temporalPassJumpGuardTick(); // the camera jump guard's 30 s line, defined after it
+void temporalPassNearestTick();   // the nearest-write rule's 30 s line, defined after it
 void temporalPassFrameBoundary() {
     g_eyeFinalClock.boundary(g_eyeFinalRun.armed);
     if (!detail::g_temporalPassWantedFssChrome) return;
     temporalPassHmdTagTick();
     temporalPassCamWritesTick();
     temporalPassIpdPairTick();
-    temporalPassJumpGuardTick();
+    temporalPassNearestTick();
     for (int eye = 0; eye < 2; ++eye) {
         if (g_rigidDraw[eye].seen && g_rigidDraw[eye].frame == g_rowsFrame) {
             g_prevRigidDraw[eye] = g_rigidDraw[eye];
@@ -5834,20 +5833,20 @@ void temporalPassIpdPairTick() {
     ipdpair::resetWindow(g_ipdStats);
 }
 
-// The camera jump guard's 30 s line (camera_jump_guard.h), on a clock of its own, read at the frame boundary. Printed with the key off too: the
-// counts run either way, so the line says what the guard would have done on the flown track.
-void temporalPassJumpGuardTick() {
+// The nearest-write rule's 30 s line (camera_nearest.h), on a clock of its own, read at the frame boundary. Printed with the key off too: the
+// counts run either way, so the line says what the rule would have done on the flown track.
+void temporalPassNearestTick() {
     const int64_t now = qpcNow();
     const int64_t freq = qpcFrequency();
-    if (g_jumpWindowTicks == 0) {
-        g_jumpWindowTicks = now;
+    if (g_nearWindowTicks == 0) {
+        g_nearWindowTicks = now;
         return;
     }
-    if (freq <= 0 || now - g_jumpWindowTicks < 30 * freq) return;
-    g_jumpWindowTicks = now;
+    if (freq <= 0 || now - g_nearWindowTicks < 30 * freq) return;
+    g_nearWindowTicks = now;
     char line[240];
-    if (jumpguard::formatReport(line, sizeof(line), g_jumpStats, g_jumpKeyOn) > 0) Log::get().note("%s", line);
-    jumpguard::resetWindow(g_jumpStats);
+    if (camnearest::formatReport(line, sizeof(line), g_nearStats, g_nearKeyOn) > 0) Log::get().note("%s", line);
+    camnearest::resetWindow(g_nearStats);
 }
 
 bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,

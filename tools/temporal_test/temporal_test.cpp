@@ -21,7 +21,7 @@
 #include "../../src/common/hmd_camera_tag.h"
 #include "../../src/common/camera_writes.h"
 #include "../../src/common/camera_ipd_pair.h"
-#include "../../src/common/camera_jump_guard.h"
+#include "../../src/common/camera_nearest.h"
 #include <chrono>
 #include <stdexcept>
 #include "../../src/common/temporal_mode.h"
@@ -931,26 +931,28 @@ int main() {
                   std::strcmp(p.pick, "-") == 0 && !p.drawn && !p.rot && !p.pair && std::strstr(empty, " stk=- pick=- drawn=0 rot=0 pair=0") != nullptr,
                   "camera writes format: no stack and no pick print as - and parse back");
             check(!cw::parseWrite("TCWR f9 s4 nonsense", p), "camera writes parse: a malformed line is refused");
-            // The jump guard's marks (2026-10-11): pick=guard and rejected=1 format and parse back; a line from before the
-            // rejected field has four fields and reads as not rejected.
-            cw::Write g;
-            g.stkN = 0;
-            g.pick = cw::kPickGuard;
-            g.rejected = true;
-            char guardLine[640] = {};
-            check(cw::formatWrite(guardLine, sizeof(guardLine), 9u, g) > 0 &&
-                  std::strstr(guardLine, " pick=guard drawn=0 rot=0 pair=0 rejected=1") != nullptr &&
-                  cw::parseWrite(guardLine, p) && p.rejected && std::strcmp(p.pick, "guard") == 0,
-                  "camera writes format: the guard's pick and rejected mark format and parse back");
-            check(std::strcmp(cw::pickName(cw::kPickGuard), "guard") == 0, "camera writes pick name: guard");
-            cw::Write old;
-            old.stkN = 0;
-            char oldLine[640] = {};
-            check(cw::formatWrite(oldLine, sizeof(oldLine), 9u, old) > 0, "camera writes format: an unmarked write formats");
-            char* cut = std::strstr(oldLine, " rejected=");
-            if (cut) *cut = '\0';
-            check(cut != nullptr && cw::parseWrite(oldLine, p) && !p.rejected,
-                  "camera writes parse: a line from before the rejected field reads as not rejected");
+            // The nearest-write rule's mark (2026-10-11): pick=nearest formats and parses back. A line from the jump guard's build, with its
+            // rejected= field, still parses (the field is past the four read).
+            cw::Write nw;
+            nw.stkN = 0;
+            nw.pick = cw::kPickNearest;
+            char nearLine[640] = {};
+            check(cw::formatWrite(nearLine, sizeof(nearLine), 9u, nw) > 0 &&
+                  std::strstr(nearLine, " pick=nearest drawn=0 rot=0 pair=0") != nullptr &&
+                  cw::parseWrite(nearLine, p) && std::strcmp(p.pick, "nearest") == 0,
+                  "camera writes format: the nearest rule's pick mark formats and parses back");
+            check(std::strcmp(cw::pickName(cw::kPickNearest), "nearest") == 0, "camera writes pick name: nearest");
+            cw::Write lw;
+            lw.stkN = 0;
+            lw.pick = cw::kPickLegacy;
+            lw.drawn = true;
+            lw.rot = true;
+            char legacyLine[640] = {};
+            char withOldField[704] = {};
+            check(cw::formatWrite(legacyLine, sizeof(legacyLine), 9u, lw) > 0 &&
+                  std::snprintf(withOldField, sizeof(withOldField), "%s rejected=1", legacyLine) > 0 &&
+                  cw::parseWrite(withOldField, p) && std::strcmp(p.pick, "legacy") == 0 && p.drawn && p.rot && !p.pair,
+                  "camera writes parse: a line with the old rejected= field still parses, the field ignored");
             char head[96] = {};
             check(cw::formatFrame(head, sizeof(head), 9u, 256u, 44u) > 0 && std::strcmp(head, "TCWRF f9 writes=256 overflow=44") == 0,
                   "camera writes format: the frame header line");
@@ -1361,11 +1363,12 @@ int main() {
               "ipd pair key: off applies the legacy chooser's pick for every chain pick; on applies the chain's");
         check(ip::samePose(D, D) && !ip::samePose(D, P), "ipd pair: samePose is true for one pose and false for the partner");
     }
-    // K. THE CAMERA JUMP GUARD (camera_jump_guard.h, 2026-10-11): the one-frame excursion is replaced by the view candidate; steady motion and a
-    // constant-velocity flight pass; a jump with nothing passing is taken as a real change; a persisting jump is taken after kReplaceLimit replaced
-    // frames; the alternates in their own order; the applied pose after a replacement is the candidate's; key off leaves the legacy track; the line.
+    // K. THE NEAREST WRITE, AS A VETO (camera_nearest.h, 2026-10-11, flight 6): the legacy pick stands unless it is beyond T = 5 cm + 3 steps, and then the
+    // nearest continuous write takes its place. The 0.55 m flight with decoys at 89.6 m and 125 m stays on track; the 0.19 m / 2.99 deg hangar
+    // excursion is vetoed; 1 deg counts as 5 cm; the threshold after a step; a cut held two frames is taken, also with an old view still written
+    // (the galaxy map); a partner eye 6 cm lateral never overrides a normal pick (no alternation); key off applies the legacy pick; the 30 s line.
     {
-        namespace jg = edvr::jumpguard;
+        namespace cn = edvr::camnearest;
         const float kDeg = 3.14159265f / 180.0f;
         // rigid [R(yaw) | t], row-major 3x4
         auto mkPose = [](float yaw, float x, float y, float z, float out[12]) {
@@ -1373,145 +1376,239 @@ int main() {
             const float r[12] = {c, 0, s, x, 0, 1, 0, y, -s, 0, c, z};
             std::memcpy(out, r, sizeof(r));
         };
-        // the applied history: before, then prev (the last applied pose)
-        auto seed = [](jg::Guard& g, const float before[12], const float prev[12]) {
-            jg::commit(g, before, false);
-            jg::commit(g, prev, false);
-        };
         float V0[12];
         mkPose(0.4f, 0.10f, 1.60f, -0.30f, V0);
-        // A. The excursion: 0.19 m and 2.99 deg from a still view. The view's own write (0.5 mm off) is the replacement.
+        // Two applied picks: the step is measured (0 here), so the veto is live.
+        auto seed = [](cn::State& st, const float p[12]) {
+            cn::commit(st, p);
+            cn::commit(st, p);
+        };
+        // A. The hangar excursion (0.19 m, 2.99 deg) against a still view: the legacy pick is vetoed and the view's own write takes its place.
         {
-            jg::Guard g;
-            seed(g, V0, V0);
+            cn::State s;
+            seed(s, V0);
             float exc[12], view[12];
             mkPose(0.4f + 2.99f * kDeg, 0.29f, 1.60f, -0.30f, exc);
             mkPose(0.4f, 0.1005f, 1.60f, -0.30f, view);
-            const float* alts[1] = {view};
-            const jg::Decision d = jg::decide(g, exc, alts, 1);
-            check(d.rejected && d.alt == 0, "jump guard: the 0.19 m / 2.99 deg excursion is rejected and replaced by the view candidate");
-            checkNear(d.jumpM, 0.19f, 1e-4f, "jump guard: the rejected jump is the 0.19 m translation");
-            check(jg::applied(true, d) == 0 && jg::applied(false, d) == -1,
-                  "jump guard key: on applies the view candidate; off applies the legacy pick");
-            jg::commit(g, view, true);
-            check(std::memcmp(g.chain.pose, view, sizeof(view)) == 0 && g.replaceRun == 1,
-                  "jump guard: the applied pose after a replacement is the candidate's, and the replaced run counts it");
-            float view2[12];
-            mkPose(0.4f, 0.1006f, 1.60f, -0.30f, view2);
-            const jg::Decision next = jg::decide(g, view2, nullptr, 0);
-            check(!next.rejected && next.alt == -1, "jump guard: the view's next frame passes and the run ends");
-            jg::commit(g, view2, false);
-            check(g.replaceRun == 0, "jump guard: a frame applied without a replacement resets the run");
+            const float* cands[2] = {exc, view};
+            const cn::Verdict v = cn::decide(s, exc, cands, 2, false);
+            check(v.vetoed && v.index == 1 && !v.reanchor, "nearest: the 0.19 m / 2.99 deg excursion is vetoed; the view's own write takes its place");
+            checkNear(v.dist, 0.19f + 0.05f * 2.99f, 1e-3f, "nearest: the legacy pick's distance is translation in metres plus 5 cm a degree");
+            const float* order[2] = {view, exc};
+            check(cn::decide(s, exc, order, 2, false).index == 0, "nearest: the order of the offer does not matter; the nearest is taken");
         }
-        // B. Steady head motion passes: 5 mm and 0.2 deg a frame, and a constant-velocity 4 cm a frame.
+        // B. The flight: 0.55 m a frame, the track with 5 cm of jitter. The legacy pick is the track, except on isolated frames where it is the
+        //    89.6 m or the 125 m write, offered every frame. Every applied write is the track's; the veto fires exactly on the decoy frames.
         {
-            jg::Guard g;
-            float b[12], p[12], l[12];
-            mkPose(0.4f, 0.095f, 1.60f, -0.30f, b);
-            mkPose(0.4f + 0.2f * kDeg, 0.10f, 1.60f, -0.30f, p);
-            mkPose(0.4f + 0.4f * kDeg, 0.105f, 1.60f, -0.30f, l);
-            seed(g, b, p);
-            const jg::Decision d = jg::decide(g, l, nullptr, 0);
-            check(!d.rejected && d.alt == -1, "jump guard: steady head motion (5 mm, 0.2 deg a frame) passes untouched");
-            float b2[12], p2[12], l2[12];
-            mkPose(0.4f, 0.02f, 1.60f, -0.30f, b2);
-            mkPose(0.4f, 0.06f, 1.60f, -0.30f, p2);
-            mkPose(0.4f, 0.10f, 1.60f, -0.30f, l2);
-            jg::Guard g2;
-            seed(g2, b2, p2);
-            const jg::Decision d2 = jg::decide(g2, l2, nullptr, 0);
-            check(!d2.rejected, "jump guard: a 4 cm a frame step at constant velocity passes (it continues the step)");
+            cn::State s;
+            uint32_t decoys = 0, vetoes = 0, reanchors = 0;
+            bool onTrack = true;
+            float maxErr = 0.0f;
+            for (int k = 0; k < 80; ++k) {
+                const float x = 0.55f * static_cast<float>(k);
+                const float jit = 0.05f * std::sin(1.7f * static_cast<float>(k));
+                float tr[12], w125[12], w89[12];
+                mkPose(0.4f, x + jit, 1.60f, -0.30f, tr);
+                mkPose(0.4f, x + 125.0f, 1.60f, -0.30f, w125);
+                mkPose(0.4f, x + 89.6f, 1.60f, -0.30f, w89);
+                const float* cands[3] = {w125, tr, w89};
+                const bool is125 = k > 0 && k % 7 == 3;
+                const bool is89 = k > 0 && !is125 && k % 11 == 5;
+                const float* legacy = is125 ? w125 : is89 ? w89 : tr;
+                if (k == 0) {
+                    cn::commit(s, tr);
+                    cn::noteLegacy(s, tr);
+                    continue;
+                }
+                if (is125 || is89) ++decoys;
+                const bool agreed = cn::legacyAgrees(s, legacy);
+                const cn::Verdict v = cn::decide(s, legacy, cands, 3, agreed);
+                cn::noteLegacy(s, legacy);
+                if (v.vetoed) ++vetoes;
+                if (v.reanchor) ++reanchors;
+                const float* applied = v.index >= 0 ? cands[v.index] : legacy;
+                if (v.index < 0 && (is125 || is89)) onTrack = false;
+                if (v.index >= 0 && v.index != 1) onTrack = false;
+                const float err = std::fabs(applied[3] - x);
+                if (err > maxErr) maxErr = err;
+                cn::commit(s, applied);
+            }
+            check(onTrack && reanchors == 0 && vetoes == decoys && decoys > 0 && maxErr <= 0.0501f,
+                  "nearest: 0.55 m a frame with 5 cm of jitter and the 89.6 m / 125 m writes as legacy picks: every frame stays on the track, the veto fires on the decoys only");
         }
-        // C. A 300 m-a-frame flight passes at constant velocity; the same flight with the camera turned 10 deg in a frame is rejected, and the
-        //    view (300 m, still on the flight's track) replaces it.
+        // C. The rotation weight: a legacy pick 10 deg in place is 0.5 m away; the 0.3 m write with the same rotation is nearer and is taken.
         {
-            float x0[12], x1[12], x2[12], x2turn[12], xv[12];
-            mkPose(0.4f, 0.0f, 1.60f, -0.30f, x0);
-            mkPose(0.4f, 300.0f, 1.60f, -0.30f, x1);
-            mkPose(0.4f, 600.0f, 1.60f, -0.30f, x2);
-            mkPose(0.4f + 10.0f * kDeg, 600.0f, 1.60f, -0.30f, x2turn);
-            mkPose(0.4f, 300.0005f, 1.60f, -0.30f, xv);
-            jg::Guard g;
-            seed(g, x0, x1);
-            const jg::Decision flight = jg::decide(g, x2, nullptr, 0);
-            check(!flight.rejected, "jump guard: a 300 m-a-frame flight passes (constant velocity, no replacement)");
-            const float* alts[1] = {xv};
-            const jg::Decision turn = jg::decide(g, x2turn, alts, 1);
-            check(turn.rejected && turn.alt == 0, "jump guard: the same flight with a 10 deg turn in the frame is rejected and the on-track view replaces it");
+            cn::State s;
+            seed(s, V0);
+            float rot10[12], along[12];
+            mkPose(0.4f + 10.0f * kDeg, 0.10f, 1.60f, -0.30f, rot10);
+            mkPose(0.4f, 0.40f, 1.60f, -0.30f, along);
+            const float* cands[2] = {rot10, along};
+            const cn::Verdict v = cn::decide(s, rot10, cands, 2, false);
+            check(v.vetoed && v.index == 1, "nearest: 1 deg counts as 5 cm, so 10 deg (0.5 m) is vetoed and the 0.3 m write is taken");
+            checkNear(v.dist, 0.5f, 1e-3f, "nearest: 10 deg of rotation in place is 0.5 m");
         }
-        // D. A real camera change: 10 m away, no candidate passes (none offered, or only one that also jumps). It is taken, and the next frame
-        //    measures from it.
+        // D. A cut without an old write: a far legacy pick (10 m) is vetoed to the nearest write on the first frame, and taken as a cut once it
+        //    has held two frames.
         {
-            float far[12], farAlt[12];
-            mkPose(0.4f, 10.10f, 1.60f, -0.30f, far);
-            mkPose(0.4f, 10.1005f, 1.60f, -0.30f, farAlt);
-            jg::Guard g;
-            seed(g, V0, V0);
-            const jg::Decision none = jg::decide(g, far, nullptr, 0);
-            check(none.rejected && none.alt == -1, "jump guard: a real change with no candidate is rejected and the legacy pick is taken");
-            checkNear(none.jumpM, 10.0f, 1e-3f, "jump guard: the real change's jump is its 10 m translation");
-            const float* jumpy[1] = {farAlt};
-            const jg::Decision still = jg::decide(g, far, jumpy, 1);
-            check(still.rejected && still.alt == -1 && !jg::passes(farAlt, g.chain),
-                  "jump guard: a candidate that also jumps and does not continue is not a replacement");
-            jg::commit(g, far, false);
-            const jg::Decision after = jg::decide(g, far, nullptr, 0);
-            check(!after.rejected, "jump guard: the next frame measures from the new camera and passes");
+            cn::State s;
+            seed(s, V0);
+            float cut[12];
+            mkPose(0.4f, 10.0f, 1.60f, -0.30f, cut);
+            const float* cands[1] = {cut};
+            const cn::Verdict first = cn::decide(s, cut, cands, 1, cn::legacyAgrees(s, cut));
+            check(first.vetoed && first.index == 0 && !first.reanchor, "nearest: a far legacy pick not yet held is vetoed to the nearest write, not taken");
+            cn::noteLegacy(s, cut);
+            const cn::Verdict held = cn::decide(s, cut, cands, 1, cn::legacyAgrees(s, cut));
+            check(held.reanchor && held.index == -1, "nearest: a far legacy pick held two frames is a cut and is taken");
         }
-        // E. A persisting jump: after kReplaceLimit replaced frames the same excursion is taken as a real change; one short of it is still replaced.
+        // E. The galaxy map: the old view keeps being written at the last applied pose; the legacy pick moves to a new stable pose 10 m away. The
+        //    first frame is vetoed to the old view; the second re-anchors to the new pose, though the old view is still nearer; the third is the
+        //    legacy pick's own.
         {
+            cn::State s;
+            seed(s, V0);
+            float oldView[12], map[12];
+            mkPose(0.4f, 0.1005f, 1.60f, -0.30f, oldView);
+            mkPose(0.4f, 10.10f, 1.60f, -0.30f, map);
+            const float* cands[2] = {oldView, map};
+            const bool a1 = cn::legacyAgrees(s, map);
+            const cn::Verdict f1 = cn::decide(s, map, cands, 2, a1);
+            cn::noteLegacy(s, map);
+            check(f1.vetoed && f1.index == 0, "galaxy map, frame 1: the legacy pick is beyond T, not yet held; the old view takes its place");
+            cn::commit(s, cands[f1.index]);
+            const bool a2 = cn::legacyAgrees(s, map);
+            const cn::Verdict f2 = cn::decide(s, map, cands, 2, a2);
+            cn::noteLegacy(s, map);
+            check(a2 && f2.reanchor && f2.index == -1, "galaxy map, frame 2: the new pose held two frames re-anchors within 2 frames, though the old view is nearer");
+            cn::commit(s, map);
+            const bool a3 = cn::legacyAgrees(s, map);
+            const cn::Verdict f3 = cn::decide(s, map, cands, 2, a3);
+            check(!f3.vetoed && !f3.reanchor && f3.index == -1, "galaxy map, frame 3: the legacy pick stands on the new camera");
+        }
+        // F. The threshold after a 0.55 m step: T = 5 cm + 3 x 0.55 m = 1.70 m. A legacy pick 1.2 m away stands; 2.0 m away is vetoed, and taken as a
+        //    cut when it has held two frames.
+        {
+            cn::State t;
+            cn::commit(t, V0);
+            float step1[12], near1[12], near2[12];
+            mkPose(0.4f, 0.65f, 1.60f, -0.30f, step1);
+            cn::commit(t, step1);
+            checkNear(t.step, 0.55f, 1e-4f, "nearest: the step is the translation between the last two applied poses");
+            mkPose(0.4f, 0.65f + 1.2f, 1.60f, -0.30f, near1);
+            mkPose(0.4f, 0.65f + 2.0f, 1.60f, -0.30f, near2);
+            const float* c1[1] = {near1};
+            const float* c2[1] = {near2};
+            const cn::Verdict in = cn::decide(t, near1, c1, 1, false);
+            check(!in.vetoed && !in.reanchor && in.index == -1, "nearest: 1.2 m after a 0.55 m step is inside the threshold (1.70 m) and stands");
+            const cn::Verdict out = cn::decide(t, near2, c2, 1, false);
+            check(out.vetoed && out.index == 0, "nearest: 2.0 m after a 0.55 m step is beyond the threshold and vetoed to the nearest write");
+            check(cn::decide(t, near2, c2, 1, true).reanchor, "nearest: 2.0 m held two frames after a 0.55 m step is a cut");
+        }
+        // G. The eye pair: the 0.55 m flight, the partner eye 6 cm lateral, both written every frame with the same rotation and ±5 cm of jitter.
+        //    The legacy pick alternates between the eyes on every frame. No pick is beyond T, so the rule never overrides: the applied pick is the
+        //    legacy pick, and the overrides are zero.
+        {
+            cn::State s;
+            uint32_t overrides = 0, reanchors = 0;
+            bool allLegacy = true;
+            for (int k = 0; k < 80; ++k) {
+                const float x = 0.55f * static_cast<float>(k);
+                const float jit = 0.05f * std::sin(1.7f * static_cast<float>(k));
+                float right[12], left[12];
+                mkPose(0.4f, x + jit, 1.60f, -0.30f, right);
+                mkPose(0.4f, x + jit + 0.06f, 1.60f, -0.30f, left);
+                const float* cands[2] = {right, left};
+                const float* legacy = (k % 2 == 0) ? right : left;
+                if (k == 0) {
+                    cn::commit(s, legacy);
+                    cn::noteLegacy(s, legacy);
+                    continue;
+                }
+                const bool agreed = cn::legacyAgrees(s, legacy);
+                const cn::Verdict v = cn::decide(s, legacy, cands, 2, agreed);
+                cn::noteLegacy(s, legacy);
+                if (v.index != -1) allLegacy = false;
+                if (v.vetoed) ++overrides;
+                if (v.reanchor) ++reanchors;
+                cn::commit(s, legacy);
+            }
+            check(allLegacy && overrides == 0 && reanchors == 0,
+                  "nearest: the partner eye 6 cm lateral with ±5 cm jitter, the legacy pick alternating: the applied pick is the legacy pick, zero overrides");
+        }
+        // H. A head turn of 2 deg a frame with the legacy pick on the partner eye: the partner is beyond T by its rotation and offset, so the veto
+        //    takes the chain's own write (the nearer one, with the same rotation).
+        {
+            cn::State s;
+            seed(s, V0);
+            float legit[12], partner[12];
+            mkPose(0.4f + 2.0f * kDeg, 0.10f, 1.60f, -0.30f, legit);
+            mkPose(0.4f + 2.0f * kDeg, 0.16f, 1.60f, -0.30f, partner);
+            const float* cands[2] = {legit, partner};
+            const cn::Verdict v = cn::decide(s, partner, cands, 2, false);
+            check(v.vetoed && v.index == 0, "nearest: a head turn with the partner eye picked is vetoed to the chain's own write");
+        }
+        // I. The key: off applies the legacy pick; the state follows whatever is applied.
+        {
+            cn::State s;
+            seed(s, V0);
             float exc[12], view[12];
             mkPose(0.4f + 2.99f * kDeg, 0.29f, 1.60f, -0.30f, exc);
             mkPose(0.4f, 0.1005f, 1.60f, -0.30f, view);
-            const float* alts[1] = {view};
-            jg::Guard g;
-            seed(g, V0, V0);
-            for (uint32_t i = 0; i + 1 < jg::kReplaceLimit; ++i) jg::commit(g, V0, true);
-            const jg::Decision short1 = jg::decide(g, exc, alts, 1);
-            check(short1.rejected && short1.alt == 0, "jump guard: a jump one frame short of the limit is still replaced");
-            jg::commit(g, V0, true);
-            const jg::Decision taken = jg::decide(g, exc, alts, 1);
-            check(taken.rejected && taken.alt == -1, "jump guard: a jump that persists kReplaceLimit replaced frames is taken as a real change");
+            const float* cands[2] = {exc, view};
+            const cn::Verdict v = cn::decide(s, exc, cands, 2, false);
+            check(cn::applied(true, v) == 1 && cn::applied(false, v) == -1,
+                  "nearest key: on applies the vetoed write; off applies the legacy pick");
+            cn::commit(s, exc);
+            check(std::memcmp(s.prev, exc, sizeof(exc)) == 0 && s.step > 0.18f,
+                  "nearest: the state follows the applied pose, whichever it was");
         }
-        // F. The alternates in the chooser's order: the first that passes; none passing gives the legacy pick.
+        // J. The first frame has no previous pick: the legacy pick is taken.
         {
-            float exc[12], bad[12], good1[12], good2[12];
-            mkPose(0.4f + 2.99f * kDeg, 0.29f, 1.60f, -0.30f, exc);
-            mkPose(0.4f, 0.60f, 1.60f, -0.30f, bad);
-            mkPose(0.4f, 0.1002f, 1.60f, -0.30f, good1);
-            mkPose(0.4f, 0.1001f, 1.60f, -0.30f, good2);
-            jg::Guard g;
-            seed(g, V0, V0);
-            const float* order1[3] = {bad, good1, good2};
-            check(jg::decide(g, exc, order1, 3).alt == 1, "jump guard: the first passing alternate in the chooser's order is taken");
-            const float* order2[2] = {bad, bad};
-            check(jg::decide(g, exc, order2, 2).alt == -1, "jump guard: no passing alternate leaves the legacy pick");
+            cn::State s;
+            float a[12];
+            mkPose(0.4f, 0.1f, 1.60f, -0.30f, a);
+            const float* c[1] = {a};
+            const cn::Verdict v = cn::decide(s, a, c, 1, true);
+            check(v.index == -1 && !v.vetoed && !v.reanchor, "nearest: the first frame has no previous pick and takes the legacy pick");
         }
-        // G. The 30 s line: the counts, passed_through as frames minus replaced, max_jump_m over the rejected jumps, the key, and a small buffer refused.
+        // J2. One applied pick is no step yet: a legacy pick 0.61 m away stands (the veto needs a measured step), and the second pick measures one.
         {
-            jg::Stats s;
-            jg::Decision a;
-            a.rejected = true;
-            a.alt = 0;
-            a.jumpM = 0.19f;
-            jg::Decision b;
-            jg::Decision c;
-            c.rejected = true;
-            c.jumpM = 10.0f;
-            jg::note(s, a);
-            jg::note(s, b);
-            jg::note(s, c);
-            check(s.frames == 3 && s.rejected == 2 && s.replaced == 1, "jump guard 30 s line: frames, rejected and replaced count the verdicts");
-            char rep[240];
-            const int rl = jg::formatReport(rep, sizeof(rep), s, true);
-            check(rl > 0 && std::strcmp(rep, "temporal camera jump guard: frames=3 rejected=2 replaced=1 passed_through=2 key=on "
-                                             "max_jump_m=10.000") == 0,
-                  "jump guard 30 s line: the counts, passed_through, key and max_jump_m, in the logged format");
-            check(jg::formatReport(rep, sizeof(rep), s, false) > 0 && std::strstr(rep, "key=off") != nullptr,
-                  "jump guard 30 s line: key off is printed as key=off");
-            check(jg::formatReport(rep, 30, s, true) == 0, "jump guard 30 s line: a buffer too small is refused, not truncated");
-            jg::resetWindow(s);
-            check(s.frames == 0 && s.rejected == 0 && s.replaced == 0 && s.maxJumpM == 0.0f, "jump guard 30 s line: the window resets");
+            cn::State s;
+            float a[12], far[12];
+            mkPose(0.4f, 0.10f, 1.60f, -0.30f, a);
+            mkPose(0.4f, 0.71f, 1.60f, -0.30f, far);
+            cn::commit(s, a);
+            const float* c[1] = {far};
+            const cn::Verdict v = cn::decide(s, far, c, 1, false);
+            check(v.index == -1 && !v.vetoed && !v.reanchor, "nearest: one applied pick is no step yet, so a 0.61 m legacy pick stands");
+            cn::commit(s, far);
+            checkNear(s.step, 0.61f, 1e-3f, "nearest: the second applied pick measures the step");
+        }
+        // K. The 30 s line: the counts, the largest legacy distance, the key, and a small buffer refused.
+        {
+            cn::Stats st;
+            cn::Verdict chosen;
+            chosen.index = 1;
+            chosen.dist = 0.34f;
+            chosen.vetoed = true;
+            cn::Verdict cutV;
+            cutV.reanchor = true;
+            cutV.dist = 5.0f;
+            cn::Verdict none;
+            cn::note(st, chosen, true);
+            cn::note(st, cutV, false);
+            cn::note(st, none, false);
+            check(st.frames == 3 && st.differs == 1 && st.reanchors == 1, "nearest 30 s line: frames, differs and reanchors count the verdicts");
+            char rep[200];
+            const int rl = cn::formatReport(rep, sizeof(rep), st, true);
+            check(rl > 0 && std::strcmp(rep, "temporal camera nearest: frames=3 differs_from_legacy=1 reanchors=1 max_dist_m=5.000 key=on") == 0,
+                  "nearest 30 s line: the counts, max_dist_m and key, in the logged format");
+            check(cn::formatReport(rep, sizeof(rep), st, false) > 0 && std::strstr(rep, "key=off") != nullptr,
+                  "nearest 30 s line: key off is printed as key=off");
+            check(cn::formatReport(rep, 30, st, true) == 0, "nearest 30 s line: a buffer too small is refused, not truncated");
+            cn::resetWindow(st);
+            check(st.frames == 0 && st.differs == 0 && st.reanchors == 0 && st.maxDistM == 0.0f, "nearest 30 s line: the window resets");
         }
     }
     if (g_fails) {
