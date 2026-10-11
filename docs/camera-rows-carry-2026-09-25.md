@@ -5,6 +5,7 @@
 *Last updated 2026-10-11 (eye pair): the eye-pair rule is built on `claude/vr-camera-ipd-pair` (NOT flown, NOT merged). The continuity
 fix is PARKED on `claude/vr-camera-continuity` (not for merge); the per-write diagnostic `diag.camera_writes` is on `claude/vr-camera-writes`, NOT flown.*
 
+- **2026-10-11 (flight 104619, cause NOT confirmed, no rework):** the decision-time cause is refuted on the 363 dumped frames (M = N in every one: no partner came after the decision). The 10:47 failure has no dump; 207 of its 385 frames had no rotation candidate. Next: Pause in a fallback or no-pick window. Entry at the end.
 - **2026-10-11 (built, NOT flown; `claude/vr-camera-ipd-pair`):** `fix.camera_ipd_pair = on` (temporary, `[fix]`, hidden). An eye camera is a candidate with a partner at its translation plus the runtime eye offset (right eye = reference; logged offset (-0.0606,0,0) m). No pair: hold 3 frames, then the legacy chooser behind a 3 cm backstop. Rig: 42 new checks pass. Entry at the end.
 - **2026-10-11 (REFUTED as built):** `fix.hmd_camera_tag` picks probe faces, not the headset camera: it stamps every write made inside coordinator `0x594B60` (100-200 a frame), and eye dump 085301 has the pick wrong on 10 of 16 frames. The symptom is path-2 static-world pixels (hangar walls, elevator shaft).
 - **2026-10-11 (built, NOT flown):** `diag.camera_writes = on` logs every camera-block write for the Pause dump's TCWR lines (entry at the end; temporary key, removal proposed at close). Next: hangar, `diag.camera_writes = on`, `diag.temporal_draws = off`, `fix.hmd_camera_tag = off`, Pause when the panels reset; then the offline read.
@@ -489,3 +490,41 @@ The `rot=` field is an addition to the spec: T and R are the rows' only when rot
 Refute: if the drawn write's P0 and P5 do not match the TCWRE expectation, the projection is not the eye's signature.
 
 Temporary key: `diag.camera_writes` goes when this arc closes; its removal is proposed here and needs Sean's word before it is made (Scope control).
+
+## 2026-10-11 -- flight 104619: the decision-time cause, tested on the dumps (NOT confirmed; no rework)
+
+Flight `edvr_gfx_20261011_104619` (hangar, VR). Build `v0.19.1-39-gc09b563a` is this branch's base `c09b563a`, so the log is the right build.
+
+**The 30 s counters**
+
+| window | key | frames | paired | held | fallback |
+|---|---|---|---|---|---|
+| 10:47:19 | on | 385 | 56 | 7 | 115 |
+| 10:47:49 | off | 1223 | 474 | 3 | 746 |
+| 10:48:19 | off | 2649 | 2503 | 0 | 146 |
+| 10:49:19 | off | 2612 | 2612 | 0 | 0 |
+| 10:49:49 | on | 2646 | 2646 | 0 | 0 |
+
+The 10:47 windows ran at about 13 fps (LONG FRAME 77.9 ms at 10:46:50); the 10:48 and 10:49 windows at about 88 fps.
+
+**The model, checked.** The TCAM line's `writes=N/M` is M, the observed camera-block writes of the frame at the chooser's first treat. On the 363 dumped frames with a complete write list and an eye-0 TCAM line: the candidate count equals the frame's rotation writes among the first M (363 of 363), and the TCAM selected rows equal the TCWR write's rows (726 of 726; largest difference 5e-6 m in translation, 3e-6 in the matrix). An offline replica of the pair test (offset (-0.06056, 0, 0), 2 mm, 0.3 deg) reproduces the rule's pairing.
+
+**Result: the partner is never late in the dumped frames.** M equals the frame's total writes in all 363 frames, so no write arrived after the decision. Every dumped frame had its pair visible at the decision: 198 of 198 legacy picks (key off, 10:49:00 to 10:49:07) had a pair in the frame, and 165 of 165 rule picks (key on, 10:49:50 to 10:50:09) did too.
+
+**The dumps do not cover the failure.** The Pause dumps (10 clusters, 10:49:00 to 10:50:09) come after the failing windows and hold 131 to 222 camera writes a frame. No dumped frame held or fell back, so "does the pair exist in the full frame on held or fallback frames" cannot be answered from this log.
+
+**What the counters say about 10:47.** The 10:47:19 window's 385 frames are 56 paired, 7 held, 115 legacy fallback and 207 with no pick. The chooser commits no pick only when the frame has no rotation candidate (it takes the best candidate otherwise), so 207 of 385 frames (54%) had none. The diag line for the same span agrees: "618 writes over 256 frames (2.4 a frame)" at 10:46:59, against 131 to 222 a frame in the dumps. The legacy episode ran from 10:47:06 to 10:47:15. The 10:47:49 window (key off) had a candidate in every frame (474 + 3 + 746 = 1223), and 746 of them (61%) had no pair. That class is the one where the late-partner question still applies, and it has no dump.
+
+Coverage follows the key only loosely: key off gave 39% at 10:47:49 and 94% at 10:48:19; key on gave 15% at 10:47:19 and 100% at 10:49:49.
+
+**Ruled out:** the chooser deciding before the partner arrives, for the 10:49 and 10:50 frames, because at the first treat every write of the frame had been observed (M = N in 363 of 363). Not ruled out for the 10:47 frames: no dump.
+
+**Hypotheses, unconfirmed**
+- H-a: a frame with no rotation write leaves the chooser nothing to pair. Its world candidate drops (`g_curValid` false), and the hold path re-commits old rows for up to 3 frames. Test: a dump inside a no-pick run; the signature is zero rotation writes in that frame and its neighbours.
+- H-b: on the 746 candidate-but-no-pair frames of 10:47:49, the partner lands after the decision. Test: a dump inside a fallback window; the signature is a pair member with clock above the decision clock (M < N). Not tested.
+
+**Rework: not done.** The cause is not confirmed, so no option is applied. None of (a) to (c) can change H-a's frames, which have no candidate at all: (a) and (b) need a partner in the frame and (c) only vetoes a candidate. Option (c) matters only if H-b holds.
+
+**Next flight.** Key on, `diag.camera_writes = on`, `diag.temporal_draws = off`, `fix.hmd_camera_tag = off`. Pause when a 30 s window shows fallback or no-pick frames. From each dump: M and N per frame (H-b), and the rotation-write count of frames F-1, F and F+1 for any run of no-pick frames (H-a).
+
+**Proposed, not built:** a 30 s field `no_cand=` (frames with no rotation candidate), so the 207 need no derivation. It is a new instrument and is not in this commit.
