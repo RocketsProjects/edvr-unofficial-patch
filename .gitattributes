@@ -41,4 +41,5 @@ src/d3d11/smaa/** -text
 # an agent file is missing here.
 AGENTS.md export-ignore
 CLAUDE.md export-ignore
+.agents export-ignore
 .agents/** export-ignore
