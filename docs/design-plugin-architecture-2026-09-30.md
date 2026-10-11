@@ -12,7 +12,7 @@
   implementations, generated config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `f9609927` incorporated in this checkpoint.
+- **Current integration:** main `99476a02` incorporated in this checkpoint.
   Sampler startup is `752c7412`; dormant admission is `d9c42281`.
   Performance's startup gates pass full offline validation (169 jobs):
   `build/full-performance-absence-offline-20261010-r2.log` (`57716674`).
@@ -5216,3 +5216,10 @@ strict-admitted positive startup. Allowed callback controls prove the module
 routes, not cross-DLL selected-profile launch order. Actual runtime absence and
 CPU/GPU acceptance remain open. Steam installation remains on hold, and this
 checkpoint does not authorize a feature-to-main merge.
+
+### 2026-10-11 - Main documentation integration after Intro validation
+
+Main `99476a02` updates the Intel planetary-startup evidence and adds a XeSS
+investigation scope. The merge changes documentation only. Intro's full-build
+receipt still matches the source tree; no native rebuild, installation or
+flight is needed for this integration. The feature remains on its own branch.
