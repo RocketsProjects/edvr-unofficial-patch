@@ -45,6 +45,7 @@
 #include "../../src/d3d11/explorer_cam_core.h"
 #include "../../src/d3d11/explorer_cam_follow_core.h"
 #include "../../src/d3d11/explorer_cam_fade_core.h"
+#include "../../src/d3d11/explorer_cam_owner_gate.h"
 #include "../../src/common/comfort_fade.h"
 #include "../../src/plugins/explorer_cam/explorer_cam_lifecycle.h"
 
@@ -2693,6 +2694,83 @@ void testSettingsCacheGlue() {
     for (const char* key : {"fix.explorer_cam_eye_trim_up", "fix.explorer_cam_follow_smoothing_ms", "fix.explorer_cam_eye_trim_forward"}) cfg.set(key, "");
     explorerCamFrameBoundary(13);
     check(t::settingsReads() == 4 && closeTo(t::followTrimUp(), 0.15f) && t::followSmoothingMs() == 0.0f, "keys cleared again: back to the defaults on the next frame");
+    t::reset();
+}
+
+// The callsite owner gate: absence suppresses startup, both frame routes and teardown; presence keeps the real lifecycle glue live.
+void testOwnerAbsence(const Pages& p) {
+    std::printf("glue: Explorer Cam lifecycle ownership and owner absence\n");
+    namespace t = edvr::explorercamtest;
+    Config& cfg = Config::get();
+    const auto& ops = plugins::explorer_cam::explorerCamLifecycleOps();
+    static Game g;
+    g.init();
+    t::reset();
+
+    ExplorerCamTestTargets targets;
+    targets.freeCamera = reinterpret_cast<uintptr_t>(p.freeG);
+    targets.collision = reinterpret_cast<uintptr_t>(p.colG);
+    targets.boxPush = reinterpret_cast<uintptr_t>(p.boxG);
+    targets.cameraUi = reinterpret_cast<uintptr_t>(p.uiG);
+    targets.controller = reinterpret_cast<uintptr_t>(p.ctlG);
+    t::setTargets(targets);
+    const uint8_t* pages[] = {p.freeG, p.colG, p.boxG, p.uiG, p.ctlG};
+    uint8_t before[5][40];
+    for (int i = 0; i < 5; ++i) std::memcpy(before[i], pages[i], sizeof(before[i]));
+
+    // These counters model whether the callsite reached its lifecycle factory/registry calls.
+    // Module evidence below comes from the actual Explorer Cam config reader, hook counters and synthetic target bytes.
+    uint32_t factoryCalls = 0, registrationCalls = 0;
+    bool started = runExplorerCamOwned(false, [&]() {
+        ++factoryCalls;
+        (void)plugins::explorer_cam::explorerCamLifecycleOps();
+        ++registrationCalls;
+    });
+    check(!started && factoryCalls == 0 && registrationCalls == 0,
+          "OWNER ABSENT at startup: the gated lifecycle factory and registration callback were not invoked");
+
+    for (uint32_t frame = 1; frame <= 3; ++frame) {
+        (void)runExplorerCamOwned(false, [&]() { ops.frame(ops.state, frame); });
+        (void)runExplorerCamOwned(false, [&]() { explorerCamFrameBoundary(frame + 10); });
+    }
+    bool untouched = true;
+    for (int i = 0; i < 5; ++i) untouched = untouched && std::memcmp(before[i], pages[i], sizeof(before[i])) == 0;
+    check(t::settingsReads() == 0 && untouched && t::stolenBytes(0) == 0 && t::stolenBytes(1) == 0 &&
+              t::stolenBytes(2) == 0 && t::stolenBytes(3) == 0 && t::stolenBytes(4) == 0 &&
+              t::stolenBytes(5) == 0 && t::stolenBytes(6) == 0 && t::stolenBytes(7) == 0,
+          "OWNER ABSENT module evidence: repeated registered/direct frames read no config, patch no required or optional hooks, and leave all five synthetic targets unchanged");
+
+    // Enabled and legacy-equivalent owner-allowed dispatch both reach the same real lifecycle/module behavior.
+    cfg.set("hotkey.explorer_cam", "F5");
+    started = runExplorerCamOwned(true, [&]() {
+        ++factoryCalls;
+        (void)plugins::explorer_cam::explorerCamLifecycleOps();
+        ++registrationCalls;
+    });
+    check(started && factoryCalls == 1 && registrationCalls == 1,
+          "OWNER PRESENT startup: the lifecycle factory and registration callback each run once");
+    bool registeredFrame = runExplorerCamOwned(true, [&]() { ops.frame(ops.state, 20); });
+    check(registeredFrame && t::settingsReads() == 1 && t::placeActive() && t::stolenBytes(0) != 0 &&
+              t::stolenBytes(1) != 0 && t::stolenBytes(2) != 0 && t::stolenBytes(4) != 0,
+          "OWNER PRESENT registered path: the real lifecycle callback reads config and installs the real Explorer Cam hooks on synthetic targets");
+    cfg.set("fix.explorer_cam_eye_trim_up", "0.37");
+    bool directFrame = runExplorerCamOwned(true, [&]() { explorerCamFrameBoundary(21); });
+    check(directFrame && t::settingsReads() == 2 && closeTo(t::followTrimUp(), 0.37f),
+          "OWNER PRESENT direct path: the real boundary keeps live config reload behavior");
+
+    comfort::publish(0.42f, 1234);
+    uint32_t registeredShutdownCalls = 0, directShutdownCalls = 0;
+    (void)runExplorerCamOwned(false, [&]() { ++registeredShutdownCalls; ops.shutdown(ops.state); });
+    (void)runExplorerCamOwned(false, [&]() { ++directShutdownCalls; explorerCamShutdown(); });
+    check(registeredShutdownCalls == 0 && directShutdownCalls == 0 && closeTo(comfort::read(1234), 0.42f) &&
+              t::stolenBytes(0) != 0 && t::stolenBytes(1) != 0 && t::stolenBytes(2) != 0 && t::stolenBytes(4) != 0,
+          "OWNER ABSENT at shutdown: neither callback runs, the module leaves its published comfort signal intact, and hooks remain installed");
+    bool shutdownRan = runExplorerCamOwned(true, [&]() { ops.shutdown(ops.state); });
+    check(shutdownRan && comfort::read(1234) == 0.0f && t::stolenBytes(0) != 0 && t::stolenBytes(1) != 0 &&
+              t::stolenBytes(2) != 0 && t::stolenBytes(4) != 0,
+          "OWNER PRESENT shutdown: the real lifecycle callback clears its published comfort signal");
+    cfg.set("fix.explorer_cam_eye_trim_up", "");
+    cfg.set("hotkey.explorer_cam", "");
     t::reset();
 }
 
@@ -5923,6 +6001,9 @@ void testGlue() {
     testHotkeyClash(p);
     testSettingsCacheGlue();
     testConfigPath(p);
+    // This fixture sets hotkey.explorer_cam in Config's process-wide map. Run it after the
+    // default-value checks above: Config::set(key, "") keeps an explicit empty value.
+    testOwnerAbsence(p);
     namespace t = edvr::explorercamtest;
     t::reset();
     bool restored = std::memcmp(p.freeG, p.freeGood.data(), 5) == 0 && std::memcmp(p.colG, p.colGood.data(), 5) == 0 && std::memcmp(p.boxG, p.boxGood.data(), 5) == 0 &&

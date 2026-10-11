@@ -42,6 +42,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "fss_res.h"
 #include "journal_watch.h"
 #include "explorer_cam.h"   // Explorer Cam's public API remains stable across module ownership.
+#include "explorer_cam_owner_gate.h"
 #include "plugin_registry.h"
 #include "plugin_admission_transport.h"
 #include "../plugins/comfort/comfort_lifecycle.h"
@@ -376,6 +377,9 @@ struct State {
     uint64_t  mtFrames = 0;          // frames it has been sampled over
     bool      mtSettledNoted = false;  // the standing answer, said once
     bool      recoveryDisabled = false;
+    // Resolved once after the device hook commit; Present only reads this
+    // immutable startup decision and never queries admission per frame.
+    bool      explorerCamOwnerAllowed = false;
 };
 
 // How long the hooks must survive before install is treated as having worked.
@@ -1565,15 +1569,16 @@ void presentFrameBoundary() {
     // on-foot sessions beginning (Disembark).
     tkJournalWatch.run([] { journalWatchTick(); });
     tkCelestialStatus.run(tickCelestialStatus);
-    // Explorer Cam (Phase 1), after the journal's tick it reads (on foot, GuiFocus, gameplay). Unconditional: an EMPTY hotkey.explorer_cam is read here
-    // every frame too, so binding it live arms the feature on the next one.
-    tkExplorerCam.run([] {
-        const uint32_t frameNo = static_cast<uint32_t>(g_state->frameCounter);
-        if (pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)) {
-            pluginRegistryFrameLifecycle(plugins::kPluginExplorerCam, frameNo);
-        } else {
-            explorerCamFrameBoundary(frameNo);
-        }
+    // Explorer Cam (Phase 1), after the journal's tick it reads (on foot, GuiFocus, gameplay).
+    runExplorerCamOwned(g_state->explorerCamOwnerAllowed, [] {
+        tkExplorerCam.run([] {
+            const uint32_t frameNo = static_cast<uint32_t>(g_state->frameCounter);
+            if (pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)) {
+                pluginRegistryFrameLifecycle(plugins::kPluginExplorerCam, frameNo);
+            } else {
+                explorerCamFrameBoundary(frameNo);
+            }
+        });
     });
     tkFssModeLatch.run(tickFssModeLatch);
     // The settings menu (docs/settings-menu.md): its summon key, its
@@ -2619,11 +2624,19 @@ void hookDevice(ID3D11Device* device) {
         return;
     }
     s.device = device;
+    // Cache ownership after the hooks commit and before lifecycle registration
+    // or any swapchain can expose Present. Legacy admission deliberately keeps
+    // the historical profile behavior, including the direct fallback path.
+    s.explorerCamOwnerAllowed =
+        plugin_admission_transport::ownerAllowedForStartup(
+            plugins::kPluginExplorerCam);
     // Explorer Cam ticks on the device-owned Present path, even when vScreen
     // never installs. Publish its immutable record as soon as this device's
     // hooks are valid and before any swapchain can install Present.
-    pluginRegistryRegisterLifecycle(
-        &plugins::explorer_cam::explorerCamLifecycleOps());
+    runExplorerCamOwned(s.explorerCamOwnerAllowed, [] {
+        pluginRegistryRegisterLifecycle(
+            &plugins::explorer_cam::explorerCamLifecycleOps());
+    });
     // SAID, so the format-support log can be read without guessing (format_support_log.h).
     // A session with no "format support (game #N)" lines is either a game that asked
     // nothing or hooks that never went on, and only this line, present or absent, tells
@@ -3109,11 +3122,13 @@ void shutdownDeviceHooks() {
     journalWatchShutdown();
     // Explorer Cam: the avatar dither-fade global goes back to -1 if EDVR still holds it at 0 (explorer_cam.h). The hooks are CodeHooks
     // and come off with their own destructors.
-    if (pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)) {
-        pluginRegistryShutdownLifecycle(plugins::kPluginExplorerCam);
-    } else {
-        explorerCamShutdown();
-    }
+    runExplorerCamOwned(g_state && g_state->explorerCamOwnerAllowed, [] {
+        if (pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)) {
+            pluginRegistryShutdownLifecycle(plugins::kPluginExplorerCam);
+        } else {
+            explorerCamShutdown();
+        }
+    });
     // The probe's reference on the device. Read-only for its whole life, so
     // there is nothing to put back -- only the reference to let go.
     if (g_state && g_state->multithread) {

@@ -735,8 +735,9 @@ int loggedNotesChecks() {
 // in it is the game's crash, not a FEATURE-DISABLED line. The function may hold
 // exactly three such statements, documented there -- the frame counter, the
 // graphics-off test, and whether the config poll is due -- so this reads the
-// function, removes every tick call, and requires that what is left is those three
-// and nothing else. It also requires that every tick declared in the two files that
+// function, proves that Explorer Cam's cached owner gate contains exactly its
+// budgeted tick, then removes every tick call and requires that what is left is
+// those three and nothing else. It also requires that every tick declared in the two files that
 // declare them is run exactly once, that no two share a mark (the mark is the
 // budget's name and the LONG FRAME line's), and that the old shared budgets are gone.
 std::string withoutLineComments(const std::string& src) {
@@ -789,6 +790,19 @@ std::string withoutSpaces(const std::string& t) {
     return out;
 }
 
+// Unwrap only the cached Explorer Cam owner decision whose entire callback is
+// the tick. Anything else in that callback remains outside a fault budget.
+bool unwrapExplorerOwner(std::string& compactBody, const std::string& explorerTick) {
+    const std::string exact =
+        "runExplorerCamOwned(g_state->explorerCamOwnerAllowed,[]{" + explorerTick + "});";
+    const size_t at = compactBody.find("runExplorerCamOwned(");
+    if (at == std::string::npos || compactBody.compare(at, exact.size(), exact) != 0 ||
+        compactBody.find("runExplorerCamOwned(", at + exact.size()) != std::string::npos)
+        return false;
+    compactBody.replace(at, exact.size(), explorerTick);
+    return true;
+}
+
 int boundarySourceChecks(const std::string& root) {
     int bad = 0;
     auto verify = [&](bool ok, const char* what) {
@@ -831,6 +845,28 @@ int boundarySourceChecks(const std::string& root) {
         body = hookText.substr(begin, i - begin);
     }
     const std::string tickBody = body;   // the ticks, before they are taken out below
+    const std::string explorerTick =
+        "tkExplorerCam.run([]{"
+        "constuint32_tframeNo=static_cast<uint32_t>(g_state->frameCounter);"
+        "if(pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)){"
+        "pluginRegistryFrameLifecycle(plugins::kPluginExplorerCam,frameNo);"
+        "}else{explorerCamFrameBoundary(frameNo);}});";
+    body = withoutSpaces(body);
+    verify(unwrapExplorerOwner(body, explorerTick),
+           "the cached Explorer Cam owner decision encloses exactly its budgeted tick");
+    {
+        std::string injected = withoutSpaces(tickBody);
+        const size_t tickAt = injected.find("tkExplorerCam.run(");
+        if (tickAt != std::string::npos) injected.insert(tickAt, "unbudgetedProbe();");
+        std::string broad = withoutSpaces(tickBody);
+        const size_t broadAt = broad.find("tkExplorerCam.run(");
+        if (broadAt != std::string::npos)
+            broad.replace(broadAt, std::strlen("tkExplorerCam.run("), "tkHotkeys.run(");
+        verify(tickAt != std::string::npos && broadAt != std::string::npos &&
+                   !unwrapExplorerOwner(injected, explorerTick) &&
+                   !unwrapExplorerOwner(broad, explorerTick),
+               "the owner-wrapper check rejects in-memory unbudgeted work and an arbitrary tick callback");
+    }
     // Every tick call out, then what is left.
     size_t pos = 0;
     int tickCalls = 0;
@@ -898,12 +934,6 @@ int boundarySourceChecks(const std::string& root) {
     // transport-only, that function never runs, and F5 did nothing -- whatever hotkey.explorer_cam held. Moving it back under vScreen (or behind a condition) makes this fail.
     // (tools\test_openxr_transport.py drives the same minimal config through the real d3d11.dll and asks for the boundary's lines: the behaviour, not just this text.)
     const std::string flatTicks = withoutSpaces(tickBody);
-    const std::string explorerTick =
-        "tkExplorerCam.run([]{"
-        "constuint32_tframeNo=static_cast<uint32_t>(g_state->frameCounter);"
-        "if(pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)){"
-        "pluginRegistryFrameLifecycle(plugins::kPluginExplorerCam,frameNo);"
-        "}else{explorerCamFrameBoundary(frameNo);}});";
     verify(withoutSpaces(hookText).find("EDVR_BOUNDARY_TICK(tkExplorerCam,\"explorer_cam\");") != std::string::npos &&
                flatTicks.find(explorerTick) != std::string::npos,
            "Explorer Cam's device tick forwards the frame counter to the registered lifecycle or exactly one direct fallback");

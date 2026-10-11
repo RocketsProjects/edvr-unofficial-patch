@@ -39,6 +39,8 @@ SLICE_PATHS = {
     "vscreen": ROOT / "src/d3d11/vscreen.cpp",
     "device": ROOT / "src/d3d11/device_hook.cpp",
     "registry": ROOT / "src/d3d11/plugin_registry.cpp",
+    "explorer_owner_gate": ROOT / "src/d3d11/explorer_cam_owner_gate.h",
+    "explorer_fixture": ROOT / "tools/explorer_cam_test/explorer_cam_test.cpp",
 }
 PATHS = (
     ROOT / "src/plugins/comfort/scanners/scanner_lifecycle.h",
@@ -299,6 +301,8 @@ def check_module_slices(sources: dict[str, str]) -> None:
     device = sources["device"]
     registry = sources["registry"]
     build = sources["build"]
+    explorer_owner_gate = sources["explorer_owner_gate"]
+    explorer_fixture = sources["explorer_fixture"]
     flat_proxy = (ROOT / "tools/build_flat_sdk_bench_proxy.py").read_text(encoding="utf-8")
 
     if "const EdvrPluginLifecycleOps& remlokLifecycleOps();" not in rem_h:
@@ -669,6 +673,63 @@ def check_module_slices(sources: dict[str, str]) -> None:
     if "componentIndex != 0 && ops->manifestIndex != plugins::kPluginComfort" not in register:
         raise AssertionError("nonzero lifecycle components must remain restricted to Comfort")
 
+    # Explorer Cam is admitted once after device hooks commit. The cached
+    # decision gates registration, all Present bookkeeping, and both shutdown
+    # routes, while the helper keeps denied callbacks completely cold.
+    hook_device = body(device, "void hookDevice(ID3D11Device* device)")
+    ordered(hook_device, "if (!s.deviceHook.commit())", "s.device = device;",
+            "s.explorerCamOwnerAllowed =\n        plugin_admission_transport::ownerAllowedForStartup(\n            plugins::kPluginExplorerCam);",
+            "runExplorerCamOwned(s.explorerCamOwnerAllowed, [] {",
+            "pluginRegistryRegisterLifecycle(", "explorerCamLifecycleOps());")
+    if hook_device.count("ownerAllowedForStartup(\n            plugins::kPluginExplorerCam)") != 1:
+        raise AssertionError("Explorer admission must be snapshotted once after device-hook commit")
+    if device.count("ownerAllowedForStartup(\n            plugins::kPluginExplorerCam)") != 1:
+        raise AssertionError("Explorer transport admission must not be queried again after startup")
+    if "explorerCamOwnerAllowed = false;" not in device:
+        raise AssertionError("Explorer cached ownership must default to denied before startup")
+    startup_gate = body(hook_device,
+                        "runExplorerCamOwned(s.explorerCamOwnerAllowed, [] {")
+    ordered(startup_gate, "pluginRegistryRegisterLifecycle(",
+            "&plugins::explorer_cam::explorerCamLifecycleOps()")
+    if hook_device.count("pluginRegistryRegisterLifecycle(\n            &plugins::explorer_cam::explorerCamLifecycleOps())") != 1:
+        raise AssertionError("Explorer lifecycle registration must remain inside one owner gate")
+    if "explorerCamLifecycleOps()" in hook_device[:hook_device.find(
+            "runExplorerCamOwned(s.explorerCamOwnerAllowed, [] {")]:
+        raise AssertionError("Explorer lifecycle factory moved ahead of the owner gate")
+
+    present = body(device,
+                   "runExplorerCamOwned(g_state->explorerCamOwnerAllowed, [] {")
+    ordered(present, "tkExplorerCam.run([] {", "pluginRegistryFrameLifecycle(",
+            "explorerCamFrameBoundary(frameNo)")
+    if device.count("tkExplorerCam.run([] {") != 1:
+        raise AssertionError("Explorer boundary tick must have exactly one gated callsite")
+    if present.count("ownerAllowedForStartup"):
+        raise AssertionError("Explorer Present must use the cached startup decision")
+
+    shutdown = body(device, "void shutdownDeviceHooks()")
+    shutdown_gate = body(shutdown,
+                         "runExplorerCamOwned(g_state && g_state->explorerCamOwnerAllowed, [] {")
+    ordered(shutdown_gate,
+            "pluginRegistryShutdownLifecycle(plugins::kPluginExplorerCam)",
+            "explorerCamShutdown();")
+    if shutdown.count("pluginRegistryShutdownLifecycle(plugins::kPluginExplorerCam)") != 1 or \
+            shutdown.count("explorerCamShutdown();") != 1:
+        raise AssertionError("both Explorer shutdown routes must remain inside one owner gate")
+    if shutdown.count("ownerAllowedForStartup"):
+        raise AssertionError("Explorer shutdown must use the cached startup decision")
+
+    if "if (!ownerAllowed) return false;\n    callback();\n    return true;" not in explorer_owner_gate:
+        raise AssertionError("denied Explorer owner gate must return before invoking its callback")
+    owner_fixture = body(explorer_fixture, "void testOwnerAbsence(const Pages& p)")
+    for token in ("runExplorerCamOwned(false", "runExplorerCamOwned(true",
+                  "settingsReads() == 0", "stolenBytes(7) == 0"):
+        if token not in owner_fixture:
+            raise AssertionError(f"Explorer fixture lost cached-owner gate evidence: {token}")
+    if "runExplorerCamOwned" not in owner_fixture:
+        raise AssertionError("Explorer fixture lost cached-owner gate coverage")
+    if body(explorer_fixture, "void testGlue()").count("testOwnerAbsence(p);") != 1:
+        raise AssertionError("Explorer owner absence fixture must run in the glue suite")
+
 
 def expect_slice(label: str, sources: dict[str, str]) -> None:
     try:
@@ -820,6 +881,68 @@ def self_test_slices(sources: dict[str, str]) -> None:
         'if(active)return "observer_busy";')
     expect_slice("relay exact-record idempotence and busy replacement", changed)
 
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "s.explorerCamOwnerAllowed =\n        plugin_admission_transport::ownerAllowedForStartup(\n            plugins::kPluginExplorerCam);",
+        "s.explorerCamOwnerAllowed = true;")
+    expect_slice("Explorer startup snapshots transport ownership", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "runExplorerCamOwned(g_state->explorerCamOwnerAllowed, [] {",
+        "runExplorerCamOwned(true, [] {")
+    expect_slice("Explorer Present uses the cached owner decision", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "runExplorerCamOwned(g_state && g_state->explorerCamOwnerAllowed, [] {",
+        "runExplorerCamOwned(true, [] {")
+    expect_slice("Explorer shutdown uses the cached owner decision", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "runExplorerCamOwned(s.explorerCamOwnerAllowed, [] {",
+        "pluginRegistryRegisterLifecycle(\n            &plugins::explorer_cam::explorerCamLifecycleOps());")
+    expect_slice("denied Explorer startup skips optional lifecycle factory", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "runExplorerCamOwned(s.explorerCamOwnerAllowed, [] {\n"
+        "        pluginRegistryRegisterLifecycle(\n"
+        "            &plugins::explorer_cam::explorerCamLifecycleOps());\n"
+        "    });",
+        "runExplorerCamOwned(s.explorerCamOwnerAllowed, [] {});\n"
+        "    pluginRegistryRegisterLifecycle(\n"
+        "        &plugins::explorer_cam::explorerCamLifecycleOps());")
+    expect_slice("Explorer startup registration moved outside owner gate", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "runExplorerCamOwned(g_state && g_state->explorerCamOwnerAllowed, [] {\n"
+        "        if (pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)) {\n"
+        "            pluginRegistryShutdownLifecycle(plugins::kPluginExplorerCam);\n"
+        "        } else {\n"
+        "            explorerCamShutdown();\n"
+        "        }\n"
+        "    });",
+        "runExplorerCamOwned(g_state && g_state->explorerCamOwnerAllowed, [] {});\n"
+        "    if (pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)) {\n"
+        "        pluginRegistryShutdownLifecycle(plugins::kPluginExplorerCam);\n"
+        "    } else {\n"
+        "        explorerCamShutdown();\n"
+        "    }")
+    expect_slice("Explorer shutdown dispatch moved outside owner gate", changed)
+
+    changed = dict(sources)
+    changed["explorer_owner_gate"] = once(changed["explorer_owner_gate"],
+        "if (!ownerAllowed) return false;", "if (false) return false;")
+    expect_slice("denied Explorer helper does not invoke its callback", changed)
+
+    changed = dict(sources)
+    changed["explorer_fixture"] = once(changed["explorer_fixture"],
+        "testOwnerAbsence(p);", "/* owner absence fixture omitted */")
+    expect_slice("Explorer owner absence fixture coverage", changed)
+
 
 def expect(label: str, sources: tuple[str, ...], changed: tuple[str, ...]) -> None:
     try:
@@ -889,7 +1012,7 @@ def main() -> int:
     if args.self_test:
         self_test(sources)
         self_test_slices(slice_sources)
-        print("PASS: grouped lifecycle wiring and module boundaries (47 mutations)")
+        print("PASS: grouped lifecycle wiring and module boundaries (55 mutations)")
     else:
         print("DRY RUN: grouped lifecycle and module-boundary pins passed; no files written")
     return 0

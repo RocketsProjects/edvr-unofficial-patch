@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State (2026-10-10):** the architecture has a validated development base on
+- **State (2026-10-11):** the architecture has a validated development base on
   `codex/plugin-architecture`. New feature work may branch from it; no
   feature-to-main merge until Sean is ready to ship. Review: section 11.
 - **Goal (Sean):** every fix/performance item belongs to one selectable plugin.
@@ -17,6 +17,8 @@
   Performance's four startup absence gates pass the full 169-job gate:
   `build/full-performance-absence-offline-20261010-r2.log`
   (receipt `57716674`). Legacy kept; availability closed; Steam held.
+  Explorer Cam startup/tick/shutdown gates pass focused and full builds:
+  `build/full-explorer-absence-offline-20261011-r3.log` (receipt `faeff569`).
 - **Module progress:** Performance owns resolution, FOV engine/settings,
   and sampler. Cockpit owns RemLok and TargetSharp policy/state; shared
   VScreen services stay core. Diagnostics owns scheduler. Comfort owns
@@ -55,10 +57,8 @@
   Temporary branch key `advanced.draw_replay` stays off. Its diagnostic pools
   allocate only when enabled, with none allocated when off. Removing this key
   requires Scope control.
-- **Ruled out:** per-draw virtual dispatch into every plugin; folder-scanned
-  DLL loading; a frozen first-party ABI. The NV pilot already has independent
-  legacy replay, 32 composed child cases and pixel coverage; duplicating that
-  pilot does not close the remaining gates.
+- **Ruled out:** per-draw virtual dispatch, folder-scanned DLL loading and a
+  frozen first-party ABI. The NV pilot's evidence remains in the journal.
 
 ## 1. Goals and non-goals
 
@@ -4977,3 +4977,68 @@ frame/shutdown paths. Cockpit's RemLok/TargetSharp and Comfort's direct
 scanner/transition/exposure fallbacks also need explicit owner checks; missing
 lifecycle registration alone cannot mean Disabled. Main's terrain cover follows
 the Comfort owner. Shared hooks, pose transport and config reload stay core.
+
+### 2026-10-11 — Explorer Cam startup and boundary absence gates
+
+Explorer Cam now has one cached owner decision in device state, initially
+false. The host resolves it after a successful device-hook commit and before
+lifecycle registration or Present exposure. The shared callback gate encloses
+the lifecycle factory/registration, the entire Explorer Cam BoundaryTick, and
+both registered and direct shutdown routes. Denied startup cannot fall through
+to direct module callbacks, and the frame path does not query admission again.
+Legacy retains its previous profile and fallback behavior, including live
+hotkey/config changes.
+
+Source validation passes 55 lifecycle/wiring mutations and the unchanged 10
+runtime-admission mutations. Focused Explorer Cam, registry and frame-boundary
+fixtures pass in `build/focused-explorer-absence-offline-20261011-r4.log`. The
+full offline build passes all 169 native jobs, both production DLLs and the
+self-contained installer gates in
+`build/full-explorer-absence-offline-20261011-r3.log`; input receipt
+`faeff569f415171b46d3ec13385bc85929f61d57e5f61a5a91dfa3a4a12e7691`. Compilation
+ran with Elite stopped under the shared build lock. Steam installation remains
+held.
+
+The first focused compile passed the owner checks but failed four existing
+config-default checks: `Config::set(key, "")` retains an explicit empty value,
+and the owner fixture had changed the hotkey before those checks ran. Moving
+the owner fixture after the default checks fixes that isolation failure; the
+complete focused suite passes on rerun. The initial full build also caught a
+Status block two lines over its limit; the summary now passes the repository's
+heading-inclusive count.
+
+The subsequent full run caught the frame-boundary source guard's stale shape:
+it removed the tick call but left the new cached owner wrapper. The guard now
+accepts only the exact owner wrapper whose entire callback is that budgeted
+tick. In-memory mutations add unbudgeted work and substitute an arbitrary tick;
+both must be rejected. The usual residual-body, tick-count, unique-mark and
+registered/direct fallback checks remain, and the focused guard rig passes.
+
+The added native fixture uses the production callback helper and real Explorer
+Cam lifecycle/module code on synthetic hook targets. Denied frame checks
+require zero settings reads, no stolen hook bytes, and unchanged target
+prologues. Allowed registered/direct routes require config reads, hook
+installation and live reload. Startup factory/registration counters model the
+host callbacks because the harness does not link the core registry. Its
+shutdown isolation case applies a denied helper to an already-live synthetic
+state to detect callback work; this does not model a supported change to
+immutable process admission. Real module shutdown clears the comfort signal and
+returns a borrowed fade global, while hook destructors own hook removal.
+
+Selection availability remains zero. No native DLL install, live configuration
+edit, promotion, flight, or feature-to-main merge occurred. Whole-profile
+absence, positive production admission, supported launch order and CPU/GPU
+acceptance remain open.
+
+Follow-on source review found that Cockpit Visuals owns eight feature families,
+not only RemLok and TargetSharp: sun glare, dust, particle billboards,
+witchspace stars, RemLok, wake pulse, target indicator and Night Vision. Its
+registered Ops implements Night Vision only; the other direct configuration,
+draw, capture, frame and shutdown routes also need owner gates. Comfort
+exposure damping consumes `sunglareLastSeenMs`, so the stock glare observer is
+a cross-owner service dependency requiring deliberate ownership treatment;
+blindly gating it with Cockpit would regress Comfort. Intentional owner denial
+must not trigger registry fail-open. Comfort's exposure/context, scanner,
+transition and terrain-cover boundaries need the same separation from shared
+host work. These are read-only findings, not implemented or validated absence
+claims.
