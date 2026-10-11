@@ -7,6 +7,11 @@
 namespace edvr::openxr {
 class NativeFssClient final {
  public:
+  static bool validOwnerAbsentTable(const EdvrNativeFssTable& table) {
+    return table.size==sizeof(table)&&table.version==EDVR_NATIVE_FSS_VERSION_2&&
+      !table.context&&!table.beginFrame&&!table.treatEye&&!table.healPair&&
+      !table.invalidate&&!table.close;
+  }
   HRESULT acquire(HMODULE provider,ID3D11Device* device,uint64_t generation) {
     if(table_.context)return E_PENDING;
     if(!provider||!device||!generation)return E_INVALIDARG;
@@ -15,6 +20,10 @@ class NativeFssClient final {
     EdvrNativeFssRequest request{sizeof(request),EDVR_NATIVE_FSS_VERSION_2,device,generation};
     EdvrNativeFssTable candidate{sizeof(candidate),EDVR_NATIVE_FSS_VERSION_2};
     const auto r=reinterpret_cast<decltype(&edvrAcquireNativeFss)>(entry)(&request,&candidate);
+    if(r==S_FALSE) {
+      if(!validOwnerAbsentTable(candidate))return E_NOINTERFACE;
+      table_={};generation_=0;return S_FALSE;
+    }
     if(r!=S_OK)return FAILED(r)?r:E_NOINTERFACE;
     if(candidate.size!=sizeof(candidate)||candidate.version!=EDVR_NATIVE_FSS_VERSION_2||!candidate.context||
        !owned(provider,candidate.beginFrame)||!owned(provider,candidate.treatEye)||!owned(provider,candidate.healPair)||

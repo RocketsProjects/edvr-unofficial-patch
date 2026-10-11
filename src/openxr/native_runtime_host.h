@@ -2907,9 +2907,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         nativeTracePrintf("native_features,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
       }
       acquired=E_FAIL;
-      if(!graphicsCalls.invoke([&]{acquired=fss.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
+      if(!graphicsCalls.invoke([&]{acquired=fss.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||
+         (acquired!=S_OK&&acquired!=S_FALSE)) {
         nativeTracePrintf("native_fss,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
       }
+      if(acquired==S_FALSE) nativeTracePuts("native_fss,provider_absent=comfort_owner_denied");
+      else nativeTracePuts("native_fss,provider_acquired=1");
       nativeTracePuts("native_features,provider_acquired=1,physical_pose_before_render=1,stereo_transition_replay=1");
       acquired=E_FAIL;
       const bool timingAdmission=graphicsCalls.invoke([&]{acquired=timing.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);});

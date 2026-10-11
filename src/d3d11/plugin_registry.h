@@ -184,6 +184,12 @@ bool pluginRegistryWantsStartupHooks(void* config);
 bool pluginRegistryRegisterLegacyDrawGate(const char* stableName,
                                           EdvrLegacyDrawGateFn predicate,
                                           void* state);
+bool pluginRegistryBeginLegacyDrawGateTest() noexcept;
+void pluginRegistryEndLegacyDrawGateTest() noexcept;
+// Test seam: visits every currently registered legacy predicate exactly once,
+// without the production dispatcher's first-true short circuit. The callbacks
+// themselves remain the registered function pointers and contexts.
+uint32_t pluginRegistryVisitLegacyDrawGatesForTest(void* legacyState) noexcept;
 void pluginRegistrySetDrawGateFailOpen();
 void pluginRegistryConfigure(void* config);
 void pluginRegistryShutdown();

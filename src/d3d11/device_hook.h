@@ -71,6 +71,9 @@ void* systemD3D11Module();
 void logContextTableVariants(void** table, size_t span, const char* who);
 
 void hookDevice(ID3D11Device* device);
+// The Comfort owner decision is sampled once after the device hooks commit.
+// Consumers read this cached value; it never performs an admission query.
+bool comfortOwnerAllowed() noexcept;
 // Manually armed flat producer probe only. Saves exact creation bytes by hash;
 // false is explicitly missing evidence, never permission to infer a shader.
 bool captureFlatProbeShader(char stage, uint64_t hash);

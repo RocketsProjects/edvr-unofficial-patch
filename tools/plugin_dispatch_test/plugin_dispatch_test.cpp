@@ -5,6 +5,7 @@
 #include "../../src/plugins/comfort/exposure/exposure_lifecycle.h"
 #include "../../src/plugins/comfort/scanners/scanner_lifecycle.h"
 #include "../../src/plugins/comfort/comfort_lifecycle.h"
+#include "../../src/d3d11/comfort_owner_gate.h"
 #include "../../src/plugins/explorer_cam/explorer_cam_lifecycle.h"
 #include "../../src/d3d11/fss_panel.h"
 #include "../../src/d3d11/fss_reveal.h"
@@ -1454,6 +1455,61 @@ void scannerComfortLifecycleDispatch() {
     edvr::g_runtimeProfile = savedProfile;
 }
 
+// This exercises the production gate with the real lifecycle registry. Host
+// source pins verify the startup/dispatch call sites use this same gate.
+void comfortOwnerDeniedLifecycleFallbacks() {
+    const auto& comfortOps = edvr::plugins::comfort::comfortLifecycleOps();
+    auto& config = edvr::Config::get();
+    edvr::pluginRegistryShutdownLifecycleComponent(
+        edvr::plugins::kPluginComfort,
+        edvr::kComfortTransitionFlashLifecycleComponent);
+    edvr::lifecycleModuleTrace = {};
+    unsigned registryAttempts = 0;
+    unsigned directFallbackCalls = 0;
+    const bool deniedRegistration = edvr::runComfortOwned(false, [&] {
+        ++registryAttempts;
+        edvr::pluginRegistryRegisterLifecycle(&comfortOps);
+    });
+    const bool deniedFallback = edvr::runComfortOwned(false, [&] {
+        ++directFallbackCalls;
+        edvr::transitionFlashEyeBaseConfigure(config);
+    });
+    check(!deniedRegistration && !deniedFallback && registryAttempts == 0 &&
+              directFallbackCalls == 0 &&
+              !edvr::pluginRegistryHasLifecycleComponent(
+                  edvr::plugins::kPluginComfort,
+                  edvr::kComfortTransitionFlashLifecycleComponent) &&
+              edvr::lifecycleModuleTrace.count == 0,
+          "denied Comfort owner leaves the real lifecycle registry empty and invokes neither module nor direct fallback callback");
+
+    const bool allowedRegistration = edvr::runComfortOwned(true, [&] {
+        ++registryAttempts;
+        edvr::pluginRegistryRegisterLifecycle(&comfortOps);
+    });
+    edvr::lifecycleModuleTrace = {};
+    edvr::pluginRegistryConfigureLifecycleComponent(
+        edvr::plugins::kPluginComfort,
+        edvr::kComfortTransitionFlashLifecycleComponent, &config);
+    const bool allowedFallback = edvr::runComfortOwned(true, [&] {
+        ++directFallbackCalls;
+        edvr::transitionFlashEyeBaseConfigure(config);
+    });
+    check(allowedRegistration && allowedFallback && registryAttempts == 1 &&
+              directFallbackCalls == 1 &&
+              edvr::pluginRegistryHasLifecycleComponent(
+                  edvr::plugins::kPluginComfort,
+                  edvr::kComfortTransitionFlashLifecycleComponent) &&
+              edvr::lifecycleModuleTrace.count == 2 &&
+              edvr::lifecycleModuleTrace.events[0] ==
+                  edvr::kComfortFlashConfigure &&
+              edvr::lifecycleModuleTrace.events[1] ==
+                  edvr::kComfortFlashConfigure,
+          "allowed Comfort owner preserves real registry dispatch and Legacy fallback behavior");
+    edvr::pluginRegistryShutdownLifecycleComponent(
+        edvr::plugins::kPluginComfort,
+        edvr::kComfortTransitionFlashLifecycleComponent);
+}
+
 void pilotAndDiagnosticsLifecycleAdmission() {
     constexpr uint32_t kCockpit = edvr::plugins::kPluginCockpitVisuals;
     constexpr uint32_t kDiagnostics = edvr::plugins::kPluginDiagnostics;
@@ -1581,6 +1637,7 @@ int main(int argc, char** argv) {
     exposureLifecycleRegistryDispatch();
     comfortComponentRegistryDispatch();
     scannerComfortLifecycleDispatch();
+    comfortOwnerDeniedLifecycleFallbacks();
     pilotAndDiagnosticsLifecycleAdmission();
     std::printf("PASS: plugin dispatch (%u checks)\n", checks);
     return 0;

@@ -43,6 +43,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "journal_watch.h"
 #include "explorer_cam.h"   // Explorer Cam's public API remains stable across module ownership.
 #include "explorer_cam_owner_gate.h"
+#include "comfort_owner_gate.h"
 #include "plugin_registry.h"
 #include "plugin_admission_transport.h"
 #include "../plugins/comfort/comfort_lifecycle.h"
@@ -177,6 +178,9 @@ typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSwapChainForHwnd)(
     const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*, IDXGISwapChain1**);
 
 struct State {
+    // Published once after the device hook commit, before Comfort config or
+    // lifecycle work can reach a device or Present callback.
+    bool comfortOwnerAllowed = false;
     VTableHook deviceHook;
     VTableHook swapChainHook;
     VTableHook factoryHook;
@@ -282,6 +286,7 @@ struct State {
     bool fssZoomPressPending = false;
     bool     fssModeLatchWanted = false;
     bool     fssModeLatch = false;
+    bool     comfortStartupInitialized = false;
     bool     fssLatchByKey = false;
     uint64_t fssLatchMs = 0;
     uint64_t fssQuitMs = 0;
@@ -813,7 +818,8 @@ HRESULT STDMETHODCALLTYPE createTexture2DForwarded(ID3D11Device* self,
                                                    const D3D11_TEXTURE2D_DESC* desc,
                                                    const D3D11_SUBRESOURCE_DATA* init,
                                                    ID3D11Texture2D** out) {
-    if (self != g_state->device || !desc || !fssResWantsCreates()) {
+    if (self != g_state->device || !desc ||
+        !g_state->comfortOwnerAllowed || !fssResWantsCreates()) {
         return g_state->realCreateTexture2D(self, desc, init, out);
     }
     D3D11_TEXTURE2D_DESC d = *desc;
@@ -1372,7 +1378,7 @@ void tickFssModeLatch() {
     // word alone ends it. A quit press suppresses the focus engage
     // until the game agrees the mode ended, so stale status cannot
     // re-open a screen the player just closed.
-    if (g_state->fssModeLatchWanted) {
+    if (g_state->comfortOwnerAllowed && g_state->fssModeLatchWanted) {
         xinputWatchTick();
         const bool wasLatched = g_state->fssModeLatch;
         bool byKey = false;
@@ -1580,7 +1586,8 @@ void presentFrameBoundary() {
             }
         });
     });
-    tkFssModeLatch.run(tickFssModeLatch);
+    if (g_state->comfortOwnerAllowed)
+        tkFssModeLatch.run(tickFssModeLatch);
     // The settings menu (docs/settings-menu.md): its summon key, its
     // navigation keys and head-aim, its fade, the keyboard gate that
     // follows its draw, and the upload of a fresh raster. One key poll
@@ -1608,7 +1615,8 @@ void presentFrameBoundary() {
     // guaranteed the next fix would copy one of them wrongly. device_hook
     // owns the frame; it owns this.
     tkBindingBoundary.run([] { bindingFrameBoundary(); });
-    tkExposureBoundary.run([] { exposureFixFrameBoundary(); });
+    if (g_state->comfortOwnerAllowed)
+        tkExposureBoundary.run([] { exposureFixFrameBoundary(); });
     // vScreenFrameBoundary marks its own ticks; this is what is left of it.
     tkVscreenRest.run([] { vScreenFrameBoundary(); });
     // Close after menu, binding, exposure and vScreen have attributed their
@@ -1642,7 +1650,8 @@ void presentFrameBoundary() {
     // These passes vouch NOTHING; see vScreenReclaimTick for why that is
     // the whole safety argument rather than a shortcut.
     tkVscreenReclaimTick.run([] { vScreenReclaimTick(); });
-    tkExposureReclaimTick.run([] { exposureFixReclaimTick(); });
+    if (g_state->comfortOwnerAllowed)
+        tkExposureReclaimTick.run([] { exposureFixReclaimTick(); });
 
     tkMtSample.run(tickMtSample);
 
@@ -1667,10 +1676,11 @@ void presentFrameBoundary() {
             // The vertex-buffer resync's 60 s count and its ten-minute heartbeat: it needs no vScreen State, so it is asked here, after the reload, in both profiles.
             vertexResyncPoll(stampMs());
             // The terrain cull cover's ten-minute heartbeat (written while its hook is live, zero counts included).
-            terrainCullCoverPoll(stampMs());
+            if (g_state->comfortOwnerAllowed)
+                terrainCullCoverPoll(stampMs());
             // The four diagnostic keys follow the file too (the menu's Hotkeys page).
             configureDiagnosticHotkeys();
-            g_state->fssModeLatchWanted =
+            g_state->fssModeLatchWanted = g_state->comfortOwnerAllowed &&
                 eyeSyncFromConfig(Config::get()).any();
             journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
         });
@@ -1712,7 +1722,8 @@ void presentFrameBoundary() {
         // RENDERED SCENE is evidence of bypass.
         tkContextReclaim.run([] {
             const bool sceneRendered = vScreenReclaimHooks();
-            exposureFixReclaimHooks(sceneRendered);
+            if (g_state->comfortOwnerAllowed)
+                exposureFixReclaimHooks(sceneRendered);
         });
         // AND THE PROBE HOOK, which nothing else on this path touches.
         //
@@ -1896,6 +1907,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
 void readoptGameBindings() {
     bool changed = false;
     perfMonitorNoteEvent(kEvBinds);
+    if (g_state->comfortOwnerAllowed) {
     {
         char fb[48];
         const auto enterBefore = g_state->fssEnterKey.key();
@@ -1934,10 +1946,75 @@ void readoptGameBindings() {
             "hotkey: your Elite bindings files changed, but the FSS keys "
             "read the same as before.");
     }
+    }
     // The menu's panel keys follow the same rebind; reached only while
     // hotkey.read_game_bindings is on (the poll above gates on it), and
     // it says "same as before" for itself.
     menuAdoptGameBindings(true, "your Elite bindings changed");
+}
+
+// The first FSS binding and mode-latch adoption must wait until device-hook
+// commit publishes Comfort admission. ensureState() can run earlier while the
+// cache is deliberately false; this one-shot runs immediately after commit.
+bool initializeComfortStartup(State& state) {
+    if (!state.comfortOwnerAllowed || state.comfortStartupInitialized)
+        return false;
+    state.comfortStartupInitialized = true;
+    // The FSS keys come from the GAME's own key configuration, and only from
+    // there. They mirror Elite's behavior even when another window has focus.
+    state.fssEnterKey.setGameMirrored(true);
+    state.fssQuitKey.setGameMirrored(true);
+    if (Config::get().getBool("hotkey.read_game_bindings", true)) {
+        char b[48];
+        if (eliteBindsLookup("ExplorationFSSEnter", b, sizeof(b))) {
+            state.fssEnterKey.setBinding(b);
+            Log::get().note("hotkey: the FSS enter key adopted from "
+                            "your Elite bindings: %s", b);
+        }
+        if (eliteBindsLookup("ExplorationFSSQuit", b, sizeof(b))) {
+            state.fssQuitKey.setBinding(b);
+            Log::get().note("hotkey: the FSS quit key adopted from "
+                            "your Elite bindings: %s", b);
+        }
+        if (eliteBindsLookup("ExplorationFSSMiniZoomIn", b, sizeof(b))) {
+            state.fssZoomStepKey.setBinding(b);
+            Log::get().note("hotkey: the FSS stepped-zoom key adopted "
+                            "from your Elite bindings: %s", b);
+        }
+        if (eliteBindsLookup("ExplorationFSSZoomIn", b, sizeof(b))) {
+            state.fssZoomKey.setBinding(b);
+            Log::get().note("hotkey: the FSS zoom key adopted from "
+                            "your Elite bindings: %s", b);
+        }
+        char pk[40];
+        state.fssEnterPad = XinputBinding{};
+        if (eliteBindsLookupPad("ExplorationFSSEnter", pk, sizeof(pk)) &&
+            xinputTranslate(pk, &state.fssEnterPad)) {
+            Log::get().note("hotkey: the FSS enter key is also on "
+                            "your gamepad: %s.", pk);
+        }
+        state.fssQuitPad = XinputBinding{};
+        if (eliteBindsLookupPad("ExplorationFSSQuit", pk, sizeof(pk)) &&
+            xinputTranslate(pk, &state.fssQuitPad)) {
+            Log::get().note("hotkey: the FSS quit key is also on "
+                            "your gamepad: %s.", pk);
+        }
+        state.fssZoomStepPad = XinputBinding{};
+        if (eliteBindsLookupPad("ExplorationFSSMiniZoomIn", pk, sizeof(pk)) &&
+            xinputTranslate(pk, &state.fssZoomStepPad)) {
+            Log::get().note("hotkey: the FSS stepped zoom is also "
+                            "on your gamepad: %s.", pk);
+        }
+        state.fssZoomPad = XinputBinding{};
+        if (eliteBindsLookupPad("ExplorationFSSZoomIn", pk, sizeof(pk)) &&
+            xinputTranslate(pk, &state.fssZoomPad)) {
+            Log::get().note("hotkey: the FSS zoom is also on your "
+                            "gamepad: %s.", pk);
+        }
+        state.bindsFingerprint = eliteBindsFingerprint();
+    }
+    state.fssModeLatchWanted = eyeSyncFromConfig(Config::get()).any();
+    return true;
 }
 
 // The Instruments page's rows: the same functions the diagnostic hotkeys
@@ -2086,73 +2163,6 @@ State& ensureState() {
                            "The dump_eyes key's job: the treated frame, both eyes, to edvr_logs\\eyes as BMP.",
                            &menuActionDumpEyes, nullptr);
         menuConfigure(Config::get());
-        // The FSS keys come from the GAME's own key configuration, and only
-        // from there. Non-keyboard bindings skip with a log line, and the keys
-        // FOLLOW the game's files: rebind in Elite mid-session and the stat
-        // cadence in the frame path picks it up within seconds.
-        // These mirror the GAME's own keys, so they are not filtered by
-        // which window has focus -- Elite acts on them unfocused, and EDVR
-        // disagreeing with the game is what a swallowed press costs. EDVR's
-        // own keys above (the exposure toggle, the history dump) keep the
-        // focus rule. See hotkey.h.
-        g_state->fssEnterKey.setGameMirrored(true);
-        g_state->fssQuitKey.setGameMirrored(true);
-        if (Config::get().getBool("hotkey.read_game_bindings", true)) {
-            char b[48];
-            if (eliteBindsLookup("ExplorationFSSEnter", b, sizeof(b))) {
-                g_state->fssEnterKey.setBinding(b);
-                Log::get().note("hotkey: the FSS enter key adopted from "
-                                "your Elite bindings: %s", b);
-            }
-            if (eliteBindsLookup("ExplorationFSSQuit", b, sizeof(b))) {
-                g_state->fssQuitKey.setBinding(b);
-                Log::get().note("hotkey: the FSS quit key adopted from "
-                                "your Elite bindings: %s", b);
-            }
-            if (eliteBindsLookup("ExplorationFSSMiniZoomIn", b,
-                                 sizeof(b))) {
-                g_state->fssZoomStepKey.setBinding(b);
-                Log::get().note("hotkey: the FSS stepped-zoom key adopted "
-                                "from your Elite bindings: %s", b);
-            }
-            if (eliteBindsLookup("ExplorationFSSZoomIn", b, sizeof(b))) {
-                g_state->fssZoomKey.setBinding(b);
-                Log::get().note("hotkey: the FSS zoom key adopted from "
-                                "your Elite bindings: %s", b);
-            }
-            {
-                char pk[40];
-                g_state->fssEnterPad = XinputBinding{};
-                if (eliteBindsLookupPad("ExplorationFSSEnter", pk,
-                                        sizeof(pk)) &&
-                    xinputTranslate(pk, &g_state->fssEnterPad)) {
-                    Log::get().note("hotkey: the FSS enter key is also on "
-                                    "your gamepad: %s.", pk);
-                }
-                g_state->fssQuitPad = XinputBinding{};
-                if (eliteBindsLookupPad("ExplorationFSSQuit", pk,
-                                        sizeof(pk)) &&
-                    xinputTranslate(pk, &g_state->fssQuitPad)) {
-                    Log::get().note("hotkey: the FSS quit key is also on "
-                                    "your gamepad: %s.", pk);
-                }
-                g_state->fssZoomStepPad = XinputBinding{};
-                if (eliteBindsLookupPad("ExplorationFSSMiniZoomIn", pk,
-                                        sizeof(pk)) &&
-                    xinputTranslate(pk, &g_state->fssZoomStepPad)) {
-                    Log::get().note("hotkey: the FSS stepped zoom is also "
-                                    "on your gamepad: %s.", pk);
-                }
-                g_state->fssZoomPad = XinputBinding{};
-                if (eliteBindsLookupPad("ExplorationFSSZoomIn", pk,
-                                        sizeof(pk)) &&
-                    xinputTranslate(pk, &g_state->fssZoomPad)) {
-                    Log::get().note("hotkey: the FSS zoom is also on your "
-                                    "gamepad: %s.", pk);
-                }
-            }
-            g_state->bindsFingerprint = eliteBindsFingerprint();
-        }
         // The settings menu's Elite panel keys, after the FSS keys and
         // OUTSIDE the block above: unconditional, so the disabled case logs
         // its own "menu keys:" line too, and a session log with none means
@@ -2160,8 +2170,7 @@ State& ensureState() {
         // key and the menu's own keys, which the rules check against.
         menuAdoptGameBindings(Config::get().getBool("hotkey.read_game_bindings", true), nullptr);
         journalWatchConfigure();
-        g_state->fssModeLatchWanted =
-            eyeSyncFromConfig(Config::get()).any();
+        g_state->fssModeLatchWanted = false;
         // Flat reads the GuiFocus of the open map (temporal AA off on the Galaxy Map, the System Map and the Orrery) from Status.json, at the same 100 ms the FSS latch wants.
         journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
     }
@@ -2169,6 +2178,10 @@ State& ensureState() {
 }
 
 }  // namespace
+
+bool comfortOwnerAllowed() noexcept {
+    return g_state && g_state->comfortOwnerAllowed;
+}
 
 bool captureFlatProbeShader(char stage, uint64_t hash) {
     if (!g_state || !runtimeFlatProfile() || !hash ||
@@ -2612,9 +2625,6 @@ void hookDevice(ID3D11Device* device) {
                          reinterpret_cast<void**>(&s.realCheckFormatSupport));
     s.deviceHook.replace(kDevSlotCheckFeatureSupport, &hookedCheckFeatureSupport,
                          reinterpret_cast<void**>(&s.realCheckFeatureSupport));
-    // Before the first create can arrive: the FSS resolution fix's flag is
-    // read here for install and on vScreen's reload path for live flips.
-    fssResConfigure(sentinelCfg);
     if (!s.deviceHook.commit()) {
         s.deviceHook.uninstall();
         // Nothing was patched, so there is nothing to be protecting against.
@@ -2624,6 +2634,18 @@ void hookDevice(ID3D11Device* device) {
         return;
     }
     s.device = device;
+    // The default-false cache closes the owner path until this one post-commit
+    // decision is published, before any Comfort configuration or callbacks.
+    s.comfortOwnerAllowed =
+        plugin_admission_transport::ownerAllowedForStartup(
+            plugins::kPluginComfort);
+    runComfortOwned(s.comfortOwnerAllowed, [&] {
+        fssResConfigure(sentinelCfg);
+    });
+    runComfortOwned(s.comfortOwnerAllowed, [&] {
+        if (initializeComfortStartup(s))
+            journalWatchSetEagerStatus(s.fssModeLatchWanted || runtimeFlatProfile());
+    });
     // Cache ownership after the hooks commit and before lifecycle registration
     // or any swapchain can expose Present. Legacy admission deliberately keeps
     // the historical profile behavior, including the direct fallback path.
@@ -2809,12 +2831,16 @@ void hookDevice(ID3D11Device* device) {
                     "off, swap or live, so it was IGNORED. Check the spelling.",
                     Config::get().iniName(), probe.c_str());
             }
-            installExposureFix(device, ctxMode);
+            runComfortOwned(s.comfortOwnerAllowed, [&] {
+                installExposureFix(device, ctxMode);
+            });
             // Before the vScreen fixes, which ask it whether it needs the
             // eye-draw count. It installs no hooks of its own -- it is driven
             // from vScreen's Map and Unmap -- so nothing else depends on the
             // order.
-            installGlitchFrameFix();
+            runComfortOwned(s.comfortOwnerAllowed, [] {
+                installGlitchFrameFix();
+            });
             installVScreenFixes(device, ctxMode);
             flatTemporalStart(device);
             // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): a CodeHook on Frontier's input-assembler flush, once, in BOTH profiles -- the stale
@@ -2822,7 +2848,8 @@ void hookDevice(ID3D11Device* device) {
             vertexResyncInstall();
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on, VR only (a flat session says
             // it is inert). A build that is not 332841 is scanned for the call site; anything short of one match is one log line and nothing patched.
-            terrainCullCoverInstall(runtimeFlatProfile());
+            terrainCullCoverInstall(s.comfortOwnerAllowed,
+                                    runtimeFlatProfile());
 
             // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
             // own commit writes two dozen entries of this table in the shared
@@ -2833,9 +2860,11 @@ void hookDevice(ID3D11Device* device) {
             // The exposure hook's table and not vScreen's: it installs first,
             // so its is the runtime's own in every mode. See
             // exposureFixContextTable.
-            size_t span = 0;
-            void** table = exposureFixContextTable(&span);
-            armFlipTimeline(sentinelCfg, table, span, "context");
+            if (s.comfortOwnerAllowed) {
+                size_t span = 0;
+                void** table = exposureFixContextTable(&span);
+                armFlipTimeline(sentinelCfg, table, span, "context");
+            }
         }
     }
 
@@ -3152,18 +3181,20 @@ void shutdownDeviceHooks() {
     uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
     vrSsaaHoldShutdown();    // the Supersampling hold's loader slot, back to the game's
     vertexResyncShutdown();  // the vertex-buffer resync's session line (the hook itself stays; the game's process exit says the line through Log::setExitLine)
-    shutdownGlitchFrameFix();
-    if (pluginRegistryHasLifecycleComponent(
-            plugins::kPluginComfort,
-            edvr::kComfortTransitionFlashLifecycleComponent)) {
-        pluginRegistryShutdownLifecycleComponent(
-            plugins::kPluginComfort,
-            edvr::kComfortTransitionFlashLifecycleComponent);
-    } else {
-        transitionFlashEyeBaseShutdown();
+    if (comfortOwnerAllowed()) {
+        shutdownGlitchFrameFix();
+        if (pluginRegistryHasLifecycleComponent(
+                plugins::kPluginComfort,
+                edvr::kComfortTransitionFlashLifecycleComponent)) {
+            pluginRegistryShutdownLifecycleComponent(
+                plugins::kPluginComfort,
+                edvr::kComfortTransitionFlashLifecycleComponent);
+        } else {
+            transitionFlashEyeBaseShutdown();
+        }
     }
     shutdownVScreenFixes();
-    shutdownExposureFix();
+    if (comfortOwnerAllowed()) shutdownExposureFix();
     // The swap-only or live-only probe's bare table, if that was what ran
     // instead of the two installers above. Restoring the vptr frees nothing
     // anyone dispatches through: the table held no thunks, so nothing chained

@@ -7,6 +7,7 @@
 #include "../common/log.h"
 #include "journal_watch.h"
 #include "native_render_labels.h"
+#include "device_hook.h"
 
 #include <cmath>
 #include <cstdint>
@@ -20,6 +21,7 @@ struct State {
     ID3D11Device* device = nullptr; // borrowed; the host owns its lifetime
     uint64_t generation = 0;
     uint64_t sequenceFloor = 0;
+    bool comfortOwnerAllowed = false;
     bool active = false;
     bool invalidated = false;
     bool began = false;
@@ -265,8 +267,8 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     result.trimNasalDeg = static_cast<float>(trim[2]);
     result.sceneReady = edvr::sceneArrived() &&
                         sameDevice(state->device, edvr::gameDevice()) ? 1u : 0u;
-    result.transitionEnabled = edvr::Config::get().getBool(
-        "fix.transition_flash", true) ? 1u : 0u;
+    result.transitionEnabled = state->comfortOwnerAllowed &&
+        edvr::Config::get().getBool("fix.transition_flash", true) ? 1u : 0u;
     // The key that switched the compositor's re-submit of a withheld frame
     // (advanced.transition_flash_resubmit) is gone; the field stays in the ABI
     // (native_frame.h) and is always on.
@@ -354,8 +356,8 @@ HRESULT WINAPI latchSubmit(void* context, uint64_t sequence,
         sequence != state->sequenceFloor || state->invalidated) return E_INVALIDARG;
 
     if (!state->latched) {
-        const bool marked = edvr::glitchFrameMarked();
-        state->held = edvr::takeSubmitHoldFrame();
+        const bool marked = state->comfortOwnerAllowed && edvr::glitchFrameMarked();
+        state->held = state->comfortOwnerAllowed && edvr::takeSubmitHoldFrame();
         state->cachedDecision = {};
         state->cachedDecision.size = sizeof(state->cachedDecision);
         state->cachedDecision.version = EDVR_NATIVE_FRAME_VERSION_1;
@@ -364,8 +366,10 @@ HRESULT WINAPI latchSubmit(void* context, uint64_t sequence,
         state->cachedDecision.jumpOnly =
             (state->cachedDecision.withhold && marked && !state->held) ? 1u : 0u;
         state->cachedDecision.verdict = edvr::jumpVerdictPacked();
-        edvr::announceGlitchConsumer();
-        state->consumerAnnounced = true;
+        if (state->comfortOwnerAllowed) {
+            edvr::announceGlitchConsumer();
+            state->consumerAnnounced = true;
+        }
         state->latched = true;
     }
     ++state->latchCount;
@@ -462,6 +466,7 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     state = {};
     state.device = request->gameDevice;
     state.generation = request->generation;
+    state.comfortOwnerAllowed = edvr::comfortOwnerAllowed();
     state.active = true;
     g_current = &state;
     table->context = &state;

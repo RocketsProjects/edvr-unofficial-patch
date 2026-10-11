@@ -14,6 +14,8 @@
 
 using Microsoft::WRL::ComPtr;
 static unsigned checks=0, failures=0, healCalls=0;
+static bool comfortOwnerAllowedForTest=true;
+static unsigned fssEyeSyncReads=0;
 static void* seenLeft=nullptr; static void* seenRight=nullptr; static float seenRect[4]{}; static float seenOuter=0,seenInner=0; static int seenMode=0;
 static LONG arrival=0, chrome=0; static float panel[16]{}; static bool panelReady=false;
 static void* published[2]{};
@@ -24,10 +26,11 @@ void require(bool ok,const char* msg){check(ok,msg);if(!ok)throw std::runtime_er
 
 namespace edvr {
 Config& Config::get(){static Config c;return c;}
-std::string Config::getString(const char* key,const char* def) const {return std::strcmp(key,"fix.fss_eye_sync")==0?mode:(def?def:"");}
+std::string Config::getString(const char* key,const char* def) const {if(std::strcmp(key,"fix.fss_eye_sync")==0)++fssEyeSyncReads;return std::strcmp(key,"fix.fss_eye_sync")==0?mode:(def?def:"");}
 Log& Log::get(){static Log l;return l;}
 Log::~Log(){}
 void Log::note(const char*,...){ }
+bool comfortOwnerAllowed() noexcept {return comfortOwnerAllowedForTest;}
 void publishSubmitTexture(int eye,void* texture){if(eye>=0&&eye<2)published[eye]=texture;}
 void fssHealRelease(){}
 LONG fssArrivalStampValue(){return arrival;}
@@ -50,6 +53,34 @@ HRESULT treat(EdvrNativeFssTable& t,uint64_t seq,unsigned eye,ID3D11Texture2D* s
 HRESULT healPair(EdvrNativeFssTable& t,uint64_t seq,uint32_t* eye,ID3D11Texture2D** returned=nullptr){ID3D11Texture2D* out=nullptr;HRESULT h=t.healPair(t.context,seq,eye,&out);if(returned)*returned=out;else if(out)out->Release();return h;}
 void fill(Device& d,ID3D11Texture2D* t,unsigned char value){unsigned char p[32*24*4]{};for(unsigned i=0;i<sizeof(p);i+=4){p[i]=value;p[i+3]=255;}d.c->UpdateSubresource(t,0,nullptr,p,32*4,0);}
 unsigned char firstPixel(Device& d,ID3D11Texture2D* t){D3D11_TEXTURE2D_DESC td{};t->GetDesc(&td);auto st=d.staging(td.Width,td.Height);d.c->CopyResource(st.Get(),t);d.c->Flush();D3D11_MAPPED_SUBRESOURCE m{};require(SUCCEEDED(d.c->Map(st.Get(),0,D3D11_MAP_READ,0,&m)),"map donor");unsigned char v=*static_cast<unsigned char*>(m.pData);d.c->Unmap(st.Get(),0);return v;}
+
+void nativeFssComfortOwnerDenied(){
+  Device d;const bool savedOwner=comfortOwnerAllowedForTest;comfortOwnerAllowedForTest=false;
+  fssEyeSyncReads=0;
+  bool allDenied=true;
+  for(unsigned i=0;i<20;++i){
+    EdvrNativeFssRequest request{sizeof(request),EDVR_NATIVE_FSS_VERSION_2,d.d.Get(),100+i};
+    EdvrNativeFssTable table{};table.size=sizeof(table);table.version=EDVR_NATIVE_FSS_VERSION_2;
+    const HRESULT result=edvrAcquireNativeFss(&request,&table);
+    allDenied=allDenied&&result==S_FALSE&&table.size==sizeof(table)&&
+      table.version==EDVR_NATIVE_FSS_VERSION_2&&!table.context&&!table.beginFrame&&
+      !table.treatEye&&!table.healPair&&!table.invalidate&&!table.close;
+  }
+  check(allDenied,"Comfort-denied FSS acquire returns S_FALSE and a versioned empty table");
+  check(fssEyeSyncReads==0,"Comfort-denied FSS acquire reads no eye-sync configuration across repeated attempts");
+
+  // Repeated absence must not consume the fixed provider pool: after the
+  // cache admits the owner, the same real provider path acquires normally.
+  comfortOwnerAllowedForTest=true;
+  EdvrNativeFssRequest allowedRequest{sizeof(allowedRequest),EDVR_NATIVE_FSS_VERSION_2,d.d.Get(),200};
+  EdvrNativeFssTable allowedTable{sizeof(allowedTable),EDVR_NATIVE_FSS_VERSION_2};
+  const HRESULT allowed=edvrAcquireNativeFss(&allowedRequest,&allowedTable);
+  check(allowed==S_OK&&allowedTable.context&&allowedTable.beginFrame&&allowedTable.close,
+        "owner-present FSS control acquires after repeated absence without pool exhaustion");
+  if(allowed==S_OK) check(allowedTable.close(allowedTable.context)==S_OK,
+                          "owner-present FSS control closes its real provider session");
+  comfortOwnerAllowedForTest=savedOwner;
+}
 
 void run(){
   Device d,foreign;auto left=d.tex(),right=d.tex(),bad=foreign.tex();const float full[4]={0,0,1,1};
@@ -111,4 +142,4 @@ void run(){
   before=healCalls;check(healPair(t,21,&eye)==S_FALSE&&healCalls==before,"disabled repair never heals");
   check(t.close(t.context)==S_OK,"close");check(t.close(t.context)==S_FALSE,"close idempotent");
 }
-int wmain(int argc,wchar_t** argv){SetErrorMode(3);if(argc==2&&!wcscmp(argv[1],L"--dry-run")){std::puts("native_fss_test: dry-run");return 0;}if(argc!=2||wcscmp(argv[1],L"--self-test"))return 2;try{run();}catch(const std::exception& e){std::printf("FAIL: setup aborted: %s\n",e.what());return 1;}std::printf("native_fss_test: %u checks, %u failures\n",checks,failures);return failures?1:0;}
+int wmain(int argc,wchar_t** argv){SetErrorMode(3);if(argc==2&&!wcscmp(argv[1],L"--dry-run")){std::puts("native_fss_test: dry-run");return 0;}if(argc!=2||wcscmp(argv[1],L"--self-test"))return 2;try{nativeFssComfortOwnerDenied();run();}catch(const std::exception& e){std::printf("FAIL: setup aborted: %s\n",e.what());return 1;}std::printf("native_fss_test: %u checks, %u failures\n",checks,failures);return failures?1:0;}

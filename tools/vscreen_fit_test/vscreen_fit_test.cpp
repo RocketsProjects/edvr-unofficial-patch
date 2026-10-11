@@ -1109,14 +1109,18 @@ void caseR12() {
         const std::string gate = functionBody(vs, "bool drawGateSubscribed(State* s) {");
         const std::string ownedGate = functionBody(vs, "#define EDVR_GATE_OWNED(name, expression)");
         const std::string dust = functionBody(vs, "id == SiteId::kSpaceDustSkip");
-        const std::string registration = functionBody(vs, "bool registerLegacyDrawGates(State* state) {");
+        const std::string registration = functionBody(vs, "bool registerLegacyDrawGates(State* state, std::uint32_t* registeredCount = nullptr) {");
         const std::string frameBoundary = functionBody(vs, "void vScreenFrameBoundary() {");
         check(has(vs, "EDVR_GATE_GLOBAL(vscreen_footprint, vscreenFootprintWanted())"),
               "R12g: the footprint adapter exposes its arming predicate as a named gate subscription");
         check(has(vs, "{\"legacy.vscreen-footprint\", &drawGate_vscreen_footprint, false}"),
               "R12g: the registry table includes the footprint adapter under its stable subscription name");
+        check(has(vs, "{\"legacy.transition-flash-eye-count\", &drawGate_transition_flash_eye_count, true, LegacyGateOwner::Comfort}") &&
+                  has(vs, "{\"legacy.remlok\", &drawGate_remlok, true, LegacyGateOwner::CockpitVisuals}") &&
+                  has(vs, "{\"legacy.sun-glare\", &drawGate_sun_glare, true, LegacyGateOwner::CockpitOrComfort}"),
+              "R12g: Comfort, Cockpit and shared-glare legacy rows carry their explicit owner metadata");
         check(has(vs, "EDVR_GATE_OWNED(space_dust, spaceDustHidden())") &&
-                  has(vs, "{\"legacy.space-dust\", &drawGate_space_dust, true}") &&
+                  has(vs, "{\"legacy.space-dust\", &drawGate_space_dust, true, LegacyGateOwner::CockpitVisuals}") &&
                   has(ownedGate, "runCockpitVisualsOwned(s && s->cockpitVisualsOwnerAllowed, [&] {") &&
                   has(ownedGate, "wanted = (expression);") &&
                   has(dust, "if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();") &&
@@ -1125,9 +1129,12 @@ void caseR12() {
                   before(vs, "id == SiteId::kSpaceDustSkip", "id == SiteId::kStateSnapshot") &&
                   has(dust, "drawCensusNoteUnseen('d')"),
               "R12g: main dust uses an owner-scoped named registry gate and declines denied draws before its helper; allowed dust skips before eye-state snapshot with census reason d");
-        check(has(registration, "pluginRegistryRegisterLegacyDrawGate(registration.name") &&
+        check(has(registration, "if (!legacyDrawGateOwnerAllowed(registration, state)) continue;") &&
+                  before(registration, "if (!legacyDrawGateOwnerAllowed(registration, state)) continue;",
+                         "pluginRegistryRegisterLegacyDrawGate(registration.name") &&
+                  has(registration, "pluginRegistryRegisterLegacyDrawGate(registration.name") &&
                   count(vs, "(void)registerLegacyDrawGates(g_state);") == 1,
-              "R12g: vScreen publishes the named subscription table to the registry during installation");
+              "R12g: vScreen filters absent owner rows before publishing the named table during installation");
         check(has(gate, "pluginRegistryWantsDraws(s)") && has(frameBoundary, "drawGateSet(drawGateSubscribed(s));"),
               "R12g: the frame gate consumes the registry aggregate, including registered plugin and legacy subscriptions");
         check(count(vs, "tkVScreenFootprint.run(") == 1 && before(vs, "tkVrCameraCensus.run(", "tkVScreenFootprint.run(") && before(vs, "tkVScreenFootprint.run(", "tkScreenMotion.run(") &&

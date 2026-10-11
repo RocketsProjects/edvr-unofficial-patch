@@ -78,7 +78,10 @@ void uiLayerNoteSubmitted(uint64_t,uint32_t eye,const void* submitted){++uiLayer
 void vrWorldRouteNoteSceneReset(){++worldRouteSceneResets;}}
 // The terrain cull cover (src/d3d11/terrain_cull_cover_hook.cpp, docs/terrain-culling.md), which begin() tells the frusta the game is handed: recorded here, asserted below.
 unsigned coverNotes=0;float coverLast[2][4]{};
-namespace edvr{void terrainCullCoverNoteFrusta(const float f[2][4]){++coverNotes;std::memcpy(coverLast,f,sizeof(coverLast));}}
+bool comfortOwnerAllowedForTemporalFixture=true;
+namespace edvr{
+bool comfortOwnerAllowed() noexcept {return comfortOwnerAllowedForTemporalFixture;}
+void terrainCullCoverNoteFrusta(const float f[2][4]){++coverNotes;std::memcpy(coverLast,f,sizeof(coverLast));}}
 // The served floor's NGX query (dlaa.cpp), shaped the way the flights'
 // modes lines read (edvr_gfx_20260923_153446.log line 435): quality,
 // balanced and performance take half the output up to the output, ultra
@@ -129,6 +132,11 @@ EdvrNativeTemporalFrame frame(uint64_t generation,uint64_t sequence){
 EdvrNativeTemporalTable acquire(Device& d,uint64_t generation,const char* mode="on"){
   edvr::Config::get().set("fix.temporal_aa",mode);EdvrNativeTemporalRequest r{sizeof(r),1,d.device.Get(),generation};EdvrNativeTemporalTable t{sizeof(t),1};
   require(edvrAcquireNativeTemporal(&r,&t)==S_OK,"acquire");return t;
+}
+EdvrNativeTemporalTable acquireComfortOwnerDeniedTemporal(Device& d,uint64_t generation){
+  const bool prior=comfortOwnerAllowedForTemporalFixture;comfortOwnerAllowedForTemporalFixture=false;
+  try{auto t=acquire(d,generation);comfortOwnerAllowedForTemporalFixture=prior;return t;}
+  catch(...){comfortOwnerAllowedForTemporalFixture=prior;throw;}
 }
 EdvrNativeTemporalProjection begin(EdvrNativeTemporalTable& t,const EdvrNativeTemporalFrame& f,bool project=true){
   EdvrNativeTemporalProjection p{sizeof(p),1};HRESULT result=E_FAIL,a=S_OK,b=S_OK;
@@ -270,8 +278,13 @@ void run(){
   // is, false again once it closes.
   ID3D11Device* warmDev=reinterpret_cast<ID3D11Device*>(1);unsigned long warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target before any channel is acquired");
-  Device d;auto source=d.texture();auto t=acquire(d,11);auto f=frame(11,1);auto p=begin(t,f);
-  check(coverNotes>=1&&std::memcmp(coverLast,f.frusta,sizeof(coverLast))==0,"the terrain cull cover is told the frusta the game is handed (the begun frame's, as given)");
+  Device d;auto source=d.texture();auto t=acquireComfortOwnerDeniedTemporal(d,11);
+  auto f=frame(11,1);auto p=begin(t,f);
+  check(coverNotes==0,"owner-denied temporal provider does not publish frusta to Comfort terrain cover");
+  uint32_t deniedRecommendedW=0,deniedRecommendedH=0;
+  check(p.size==sizeof(p)&&p.version==1&&edvr::nativeTemporalRecommended(&deniedRecommendedW,&deniedRecommendedH)&&
+        deniedRecommendedW==480&&deniedRecommendedH==360,
+        "owner-denied provider still begins the real core temporal frame and publishes its 480x360 recommendation");
   warmDev=nullptr;warmThread=0;
   check(edvr::nativeTemporalWarmTarget(&warmDev,&warmThread)&&warmDev==d.device.Get()&&warmThread==GetCurrentThreadId(),
       "warm target names the acquiring thread and device");
@@ -340,7 +353,10 @@ void run(){
   warmDev=reinterpret_cast<ID3D11Device*>(1);warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target once the channel closes");
   {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn)&&!edvr::nativeTemporalAsked(&rw,&rh)&&!edvr::nativeTemporalTrueVerticalTangents(&u,&dn),"no recommendation, frustum, ask or true frustum once the channel closes");}
-  auto fresh=acquire(d,12);f=frame(12,1);begin(fresh,f);check(treat(t,1,0,source.Get())==E_INVALIDARG,"stale table cannot address new generation");
+  auto fresh=acquire(d,12);f=frame(12,1);begin(fresh,f);
+  check(coverNotes==1&&std::memcmp(coverLast,f.frusta,sizeof(coverLast))==0,
+        "owner-admitted temporal provider still publishes begun frusta to Comfort terrain cover");
+  check(treat(t,1,0,source.Get())==E_INVALIDARG,"stale table cannot address new generation");
   // Previous eye yaw 90 degrees, current yaw zero, head translates +X:
   // the translation is +Z in the previous eye and head rotation is zero.
   f.eyeToHead[0][0]=0;f.eyeToHead[0][2]=1;f.eyeToHead[0][8]=-1;f.eyeToHead[0][10]=0;f.sequence=2;

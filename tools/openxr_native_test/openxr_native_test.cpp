@@ -653,8 +653,28 @@ int runWithPresent(const Options& options) {
   std::puts(passed?"native_present: PASS":"native_present: INCOMPLETE_OR_FAILED");
   return passed?0:4;
 }
+static HRESULT WINAPI nonemptyOwnerAbsentTableClose(void*) { return S_OK; }
+
 int selfTest() {
   unsigned checks=0,failures=0;auto check=[&](bool yes,const char* msg){++checks;if(!yes){++failures;std::printf("FAIL: %s\n",msg);}};
+  {
+    NativeFssClient client;
+    EdvrNativeFssTable absent{sizeof(absent),EDVR_NATIVE_FSS_VERSION_2};
+    check(NativeFssClient::validOwnerAbsentTable(absent)&&!client.acquired(),
+      "optional FSS absence validator accepts a versioned empty table; a fresh client has no acquired session");
+    auto malformed=absent;malformed.size--;
+    check(!NativeFssClient::validOwnerAbsentTable(malformed),
+      "optional FSS absence rejects a malformed table size");
+    malformed=absent;malformed.version=1;
+    check(!NativeFssClient::validOwnerAbsentTable(malformed),
+      "optional FSS absence rejects a mismatched table version");
+    malformed=absent;malformed.context=reinterpret_cast<void*>(static_cast<uintptr_t>(1));
+    check(!NativeFssClient::validOwnerAbsentTable(malformed),
+      "optional FSS absence rejects a nonempty context");
+    malformed=absent;malformed.close=&nonemptyOwnerAbsentTableClose;
+    check(!NativeFssClient::validOwnerAbsentTable(malformed),
+      "optional FSS absence rejects a nonempty callback table");
+  }
   edvr::openxr::test::runLaunchCentreCases(check);
   edvr::openxr::test::runFeatureHostCases(check);
   edvr::openxr::test::runTreatmentCases(check);

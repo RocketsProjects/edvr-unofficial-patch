@@ -4,6 +4,7 @@
 #include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
+#include "device_hook.h"
 #include <wrl/client.h>
 #include <algorithm>
 #include <cmath>
@@ -21,7 +22,7 @@ struct Raw {
   void reset(){tex.Reset();desc={};clear();}
 };
 struct State {
-  bool active=false,frameOpen=false,consumed[2]{}; ID3D11Device* device=nullptr;
+  bool active=false,ownerAllowed=false,frameOpen=false,consumed[2]{}; ID3D11Device* device=nullptr;
   ComPtr<ID3D11DeviceContext> ctx; DWORD thread=0; uint64_t generation=0,reference=0,floor=0,sequence=0;
   Raw current[2]; EdvrNativeFssFrame frame{}; edvr::EyeSync sync{};
   bool projectionCompatible=false,healGate=false,submitLatched=false,stampsKnown=false; LONG arrival=0,chrome=0;
@@ -89,7 +90,7 @@ void latch(State& s){
   const uint64_t aa=s.arrivalChanged?s.sequence-s.arrivalChanged:99,cc=s.chromeChanged?s.sequence-s.chromeChanged:99;s.arrivalRecent=aa<=3;s.chromeRecent=cc<=10;s.healGate=s.projectionCompatible&&s.sync.healMode!=0&&s.arrivalRecent&&s.chromeRecent;
 }
 HRESULT WINAPI begin(void* p,const EdvrNativeFssFrame* f){
-  std::lock_guard<std::mutex> lock(mu);State*s=find(p);if(!s||!s->active||s!=live||!f||f->size!=sizeof(*f)||f->version!=EDVR_NATIVE_FSS_VERSION_2||f->generation!=s->generation||!f->referenceGeneration||!f->sequence||f->sequence<=s->floor||!finite(f->frusta[0],8)||!finite(f->eyeToHead[0],24))return E_INVALIDARG;
+  std::lock_guard<std::mutex> lock(mu);State*s=find(p);if(!s||!s->active||!s->ownerAllowed||s!=live||!f||f->size!=sizeof(*f)||f->version!=EDVR_NATIVE_FSS_VERSION_2||f->generation!=s->generation||!f->referenceGeneration||!f->sequence||f->sequence<=s->floor||!finite(f->frusta[0],8)||!finite(f->eyeToHead[0],24))return E_INVALIDARG;
   if(f->referenceGeneration!=s->reference){clearCopies(*s);s->reference=f->referenceGeneration;resetStamps(*s);}
   for(unsigned e=0;e<2;++e)s->current[e].clear();
   s->healDelivered=false;
@@ -126,5 +127,9 @@ HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex>lock(mu);State*s=f
 HRESULT WINAPI close(void* p){std::lock_guard<std::mutex>lock(mu);State*s=find(p);if(!s)return E_INVALIDARG;if(!s->active)return S_FALSE;edvr::Log::get().note("native fss totals: snapshots=%llu, healed=%llu, gated_out=%llu, donor_refusals=%llu.",(unsigned long long)s->snapshots,(unsigned long long)s->healed,(unsigned long long)s->gatedOut,(unsigned long long)s->donorRefusals);clearCopies(*s);edvr::fssHealRelease();s->active=false;s->frameOpen=false;s->ctx.Reset();s->device=nullptr;if(live==s)live=nullptr;return S_OK;}
 }
 extern "C" HRESULT WINAPI edvrAcquireNativeFss(const EdvrNativeFssRequest*r,EdvrNativeFssTable*t){
-  if(!t||t->size!=sizeof(*t)||t->version!=EDVR_NATIVE_FSS_VERSION_2)return E_INVALIDARG;*t={sizeof(*t),EDVR_NATIVE_FSS_VERSION_2};if(!r||r->size!=sizeof(*r)||r->version!=EDVR_NATIVE_FSS_VERSION_2||!r->gameDevice||!r->generation||FAILED(r->gameDevice->GetDeviceRemovedReason()))return E_INVALIDARG;std::lock_guard<std::mutex>lock(mu);if(live||used==kCapacity)return E_PENDING;State&s=pool[used++];s={};s.active=true;s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.device->GetImmediateContext(&s.ctx);if(!s.ctx){s.active=false;return E_FAIL;}live=&s;t->context=&s;t->beginFrame=begin;t->treatEye=treat;t->healPair=healPair;t->invalidate=invalidate;t->close=close;return S_OK;
+  if(!t||t->size!=sizeof(*t)||t->version!=EDVR_NATIVE_FSS_VERSION_2)return E_INVALIDARG;*t={sizeof(*t),EDVR_NATIVE_FSS_VERSION_2};if(!r||r->size!=sizeof(*r)||r->version!=EDVR_NATIVE_FSS_VERSION_2||!r->gameDevice||!r->generation)return E_INVALIDARG;
+  const bool ownerAllowed=edvr::comfortOwnerAllowed();
+  if(!ownerAllowed)return S_FALSE;
+  if(FAILED(r->gameDevice->GetDeviceRemovedReason()))return E_INVALIDARG;
+  std::lock_guard<std::mutex>lock(mu);if(live||used==kCapacity)return E_PENDING;State&s=pool[used++];s={};s.active=true;s.ownerAllowed=ownerAllowed;s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.device->GetImmediateContext(&s.ctx);if(!s.ctx){s.active=false;return E_FAIL;}live=&s;t->context=&s;t->beginFrame=begin;t->treatEye=treat;t->healPair=healPair;t->invalidate=invalidate;t->close=close;return S_OK;
 }

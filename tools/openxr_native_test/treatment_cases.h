@@ -12,6 +12,8 @@ struct State {
   DWORD thread=0;
   bool wrongThread=false, passthrough=false, heal=false;
   char fail=0;
+  enum class FssAcquireMode { admitted, ownerAbsent, malformedAbsent, failure, otherPositive };
+  FssAcquireMode fssAcquireMode=FssAcquireMode::admitted;
   unsigned invalidations=0;
   std::string calls;
   std::vector<ID3D11Texture2D*> inputs;
@@ -72,7 +74,19 @@ inline HRESULT WINAPI publish(void*,const float* head,const float (*)[12],const 
 #pragma comment(linker, "/export:edvrAcquireNativeMenu")
 extern "C" HRESULT WINAPI edvrAcquireNativeFss(const EdvrNativeFssRequest*,EdvrNativeFssTable* table) {
   using namespace edvr::openxr::test::treatment_fixture;
-  *table={sizeof(*table),EDVR_NATIVE_FSS_VERSION_2,&state,beginFss,fss,healPair,invalidate,close};return S_OK;
+  *table={sizeof(*table),EDVR_NATIVE_FSS_VERSION_2,&state,beginFss,fss,healPair,invalidate,close};
+  switch(state.fssAcquireMode) {
+    case State::FssAcquireMode::admitted:return S_OK;
+    case State::FssAcquireMode::ownerAbsent:
+      *table={sizeof(*table),EDVR_NATIVE_FSS_VERSION_2};return S_FALSE;
+    case State::FssAcquireMode::malformedAbsent:
+      *table={sizeof(*table),EDVR_NATIVE_FSS_VERSION_2,&state};return S_FALSE;
+    case State::FssAcquireMode::failure:
+      *table={sizeof(*table),EDVR_NATIVE_FSS_VERSION_2};return E_FAIL;
+    case State::FssAcquireMode::otherPositive:
+      *table={sizeof(*table),EDVR_NATIVE_FSS_VERSION_2};return static_cast<HRESULT>(2);
+  }
+  return E_UNEXPECTED;
 }
 extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(const EdvrNativeTemporalRequest*,EdvrNativeTemporalTable* table) {
   using namespace edvr::openxr::test::treatment_fixture;
@@ -114,7 +128,27 @@ template<class Check> void runTreatmentCases(Check check) {
   h.frameContentViews[0]=h.frameViews[0];h.frameContentViews[1]=h.frameViews[1];
   check(f.initialized&&SUCCEEDED(h.captured.initialize(device.Get())),"host treatment capture initialized");
   const auto provider=GetModuleHandleW(nullptr);
-  check(h.fss.acquire(provider,device.Get(),1)==S_OK&&h.temporal.acquire(provider,device.Get(),1)==S_OK&&
+  {
+    NativeFssClient probe;
+    state.fssAcquireMode=State::FssAcquireMode::ownerAbsent;
+    const HRESULT absent=h.fss.acquire(provider,device.Get(),1);
+    check(absent==S_FALSE&&!h.fss.acquired(),
+          "loaded optional FSS provider returns exact owner-absence S_FALSE and the real client remains unacquired");
+    state.fssAcquireMode=State::FssAcquireMode::malformedAbsent;
+    check(probe.acquire(provider,device.Get(),901)==E_NOINTERFACE&&!probe.acquired(),
+          "the real client rejects nonempty S_FALSE provider tables");
+    state.fssAcquireMode=State::FssAcquireMode::failure;
+    check(probe.acquire(provider,device.Get(),902)==E_FAIL&&!probe.acquired(),
+          "the real client preserves provider failures instead of treating them as optional absence");
+    state.fssAcquireMode=State::FssAcquireMode::otherPositive;
+    check(probe.acquire(provider,device.Get(),903)==E_NOINTERFACE&&!probe.acquired(),
+          "the real client rejects non-S_OK positive provider results");
+    state.fssAcquireMode=State::FssAcquireMode::admitted;
+    check(probe.acquire(provider,device.Get(),904)==S_OK&&probe.acquired(),
+          "the same loaded provider still admits the ordinary S_OK table");
+    check(probe.close()==S_OK&&!probe.acquired(),"the admitted probe releases its isolated provider table");
+  }
+  check(h.temporal.acquire(provider,device.Get(),1)==S_OK&&
     h.sharpen.acquire(provider,device.Get(),1)==S_OK&&h.menu.acquire(provider,device.Get(),1)==S_OK,"host uses validated provider tables");
   check(f.route.bind()&&f.owner.start(),"host treatment rendezvous started");
   const vr::Texture_t texture{source.Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
@@ -127,6 +161,23 @@ template<class Check> void runTreatmentCases(Check check) {
     if(FAILED(context->Map(read.Get(),0,D3D11_MAP_READ,0,&mapped)))return uint32_t(0);
     const auto value=*static_cast<const uint32_t*>(mapped.pData);context->Unmap(read.Get(),0);return value;
   };
+  {
+    state.calls.clear();state.inputs.clear();state.passthrough=false;state.heal=false;state.fail=0;
+    const auto before=h.graphicsCalls.calls;
+    vr::EVRCompositorError result=vr::VRCompositorError_InvalidTexture;
+    check(f.route.invoke([&]{
+      h.activeFrameSequence=99;
+      h.frameTangentShift[0][0]=.02f;h.frameTangentShift[0][1]=-.01f;
+      result=h.capture(vr::Eye_Left,&texture,&bounds,vr::Submit_Default,true);
+    }),"host capture completes with the loaded optional FSS provider explicitly absent");
+    check(result==vr::VRCompositorError_None&&state.calls=="TSPM"&&h.graphicsCalls.calls-before==3,
+          "optional FSS absence skips its treatment while temporal, sharpen, and menu stages continue");
+    check(state.inputs.size()==3&&state.inputs[0]==source.Get()&&state.inputs[1]==state.outputs[1].Get()&&
+          state.inputs[2]==state.outputs[2].Get(),
+          "the real host treatment chain feeds each later stage the prior output with FSS unacquired");
+  }
+  state.fssAcquireMode=State::FssAcquireMode::admitted;
+  check(h.fss.acquire(provider,device.Get(),1)==S_OK,"host admits FSS after the isolated absence capture");
   for(unsigned scenario=0;scenario<8;++scenario) {
     state.calls.clear();state.inputs.clear();state.passthrough=scenario==1;state.heal=scenario==2;
     state.fail=scenario==3?'F':scenario==4?'T':scenario==5?'S':scenario==6?'P':scenario==7?'M':0;

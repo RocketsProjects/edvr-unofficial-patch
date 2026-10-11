@@ -11,6 +11,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+MUTATION_COUNT = 0
 SLICE_PATHS = {
     "build": ROOT / "build.bat",
     "remlok_header": ROOT / "src/plugins/cockpit_visuals/remlok_lifecycle.h",
@@ -31,6 +32,7 @@ SLICE_PATHS = {
     "native_frame_fixture": ROOT / "tools/native_frame_test/native_frame_test.cpp",
     "native_module": ROOT / "src/openxr/native_module.cpp",
     "native_host": ROOT / "src/openxr/native_runtime_host.h",
+    "native_fss_client": ROOT / "src/openxr/native_fss_client.h",
     "native_fov_startup": ROOT / "src/openxr/native_fov_startup.h",
     "fov_facade": ROOT / "src/openxr/native_fov_trim.h",
     "trim_fixture": ROOT / "tools/native_trim_test/native_trim_test.cpp",
@@ -39,11 +41,22 @@ SLICE_PATHS = {
     "vscreen": ROOT / "src/d3d11/vscreen.cpp",
     "device": ROOT / "src/d3d11/device_hook.cpp",
     "registry": ROOT / "src/d3d11/plugin_registry.cpp",
+    "registry_header": ROOT / "src/d3d11/plugin_registry.h",
     "explorer_owner_gate": ROOT / "src/d3d11/explorer_cam_owner_gate.h",
     "explorer_fixture": ROOT / "tools/explorer_cam_test/explorer_cam_test.cpp",
     "cockpit_owner_gate": ROOT / "src/d3d11/cockpit_visuals_owner_gate.h",
+    "comfort_owner_gate": ROOT / "src/d3d11/comfort_owner_gate.h",
     "cockpit_api_fixture": ROOT / "tools/cockpit_api_test/cockpit_api_test.cpp",
     "vscreen_predicate_fixture": ROOT / "tools/vscreen_predicate_test/vscreen_predicate_test.cpp",
+    "native_fss": ROOT / "src/d3d11/native_fss.cpp",
+    "native_fss_fixture": ROOT / "tools/native_fss_test/native_fss_test.cpp",
+    "native_treatment_fixture": ROOT / "tools/openxr_native_test/treatment_cases.h",
+    "native_treatment_runner": ROOT / "tools/openxr_native_test/openxr_native_test.cpp",
+    "native_temporal": ROOT / "src/d3d11/native_temporal.cpp",
+    "native_temporal_fixture": ROOT / "tools/native_temporal_test/native_temporal_test.cpp",
+    "plugin_dispatch_fixture": ROOT / "tools/plugin_dispatch_test/plugin_dispatch_test.cpp",
+    "terrain_cover": ROOT / "src/d3d11/terrain_cull_cover_hook.cpp",
+    "terrain_cover_fixture": ROOT / "tools/terrain_cover_test/terrain_cover_test.cpp",
     "sunglare": ROOT / "src/d3d11/sunglare_fix.cpp",
 }
 PATHS = (
@@ -182,7 +195,11 @@ def check(scanner_h: str, scanner: str, exposure: str, comfort_h: str,
             raise AssertionError(f"{sig} must dispatch exactly two scanner configure stages")
 
     scanner_dispatch = body(vscreen, "void configureScannerLifecycleStage(")
-    ordered(scanner_dispatch,
+    if not scanner_dispatch.lstrip().startswith(
+            "if (!g_state || !g_state->comfortOwnerAllowed) return;"):
+        raise AssertionError("Scanner configure dispatch must stop before registry and direct fallback when Comfort is denied")
+    registry_dispatch = scanner_dispatch[scanner_dispatch.find("if (g_scannerLifecycleRegistered"):]
+    ordered(registry_dispatch,
             "pluginRegistryConfigureLifecycleComponentStage(",
             "edvr::kComfortScannersLifecycleComponent", "return;", "fallback(cfg);")
     if scanner_dispatch.count("fallback(cfg);") != 1:
@@ -190,12 +207,16 @@ def check(scanner_h: str, scanner: str, exposure: str, comfort_h: str,
     for name, accessor in (("ensureScannerLifecycle", "scannerLifecycleOps"),
                            ("ensureComfortLifecycle", "comfortLifecycleOps")):
         ensure = body(vscreen, f"bool {name}()")
-        if "if (!g_state) return false;" not in ensure or "pluginRegistryRegisterLifecycle(" not in ensure or accessor not in ensure:
-            raise AssertionError(f"{name} must reject missing VScreen state and return registry acceptance")
+        if "if (!g_state || !g_state->comfortOwnerAllowed) return false;" not in ensure or "pluginRegistryRegisterLifecycle(" not in ensure or accessor not in ensure:
+            raise AssertionError(f"{name} must reject missing or denied Comfort ownership and return registry acceptance")
         if "pluginRegistryHasLifecycle" in ensure:
             raise AssertionError(f"{name} must use registration result, not a later registry lookup")
     frame_dispatch = body(vscreen, "void frameScannerLifecycleStage(")
-    ordered(frame_dispatch, "pluginRegistryFrameLifecycleComponentStage(",
+    if not frame_dispatch.lstrip().startswith(
+            "if (!g_state || !g_state->comfortOwnerAllowed) return;"):
+        raise AssertionError("Scanner frame dispatch must stop before registry and direct fallback when Comfort is denied")
+    registry_frame_dispatch = frame_dispatch[frame_dispatch.find("if (g_scannerLifecycleRegistered"):]
+    ordered(registry_frame_dispatch, "pluginRegistryFrameLifecycleComponentStage(",
             "edvr::kComfortScannersLifecycleComponent", "return;", "fallback();")
     if frame_dispatch.count("fallback();") != 1:
         raise AssertionError("Scanner frame fallback must occur exactly once")
@@ -209,7 +230,10 @@ def check(scanner_h: str, scanner: str, exposure: str, comfort_h: str,
             "shutdownScannerLifecycle();")
     scanner_final = body(vscreen, "void shutdownScannerLifecycle()")
     ordered(scanner_final, "g_scannerLifecycleRegistered = false;",
-            "pluginRegistryShutdownLifecycleComponent(", "return;", "fssRevealShutdown();")
+            "if (!g_state || !g_state->comfortOwnerAllowed) return;")
+    registered_shutdown = scanner_final[scanner_final.find("if (registered)"):]
+    ordered(registered_shutdown, "pluginRegistryShutdownLifecycleComponent(",
+            "return;", "fssRevealShutdown();")
 
     device_tick = body(device, "tkExplorerCam.run([] {")
     ordered(device_tick, "static_cast<uint32_t>(g_state->frameCounter)",
@@ -304,6 +328,7 @@ def check_module_slices(sources: dict[str, str]) -> None:
     vscreen = sources["vscreen"]
     device = sources["device"]
     registry = sources["registry"]
+    registry_header = sources["registry_header"]
     build = sources["build"]
     explorer_owner_gate = sources["explorer_owner_gate"]
     explorer_fixture = sources["explorer_fixture"]
@@ -311,6 +336,18 @@ def check_module_slices(sources: dict[str, str]) -> None:
     cockpit_api_fixture = sources["cockpit_api_fixture"]
     vscreen_predicate_fixture = sources["vscreen_predicate_fixture"]
     sunglare = sources["sunglare"]
+    comfort_owner_gate = sources["comfort_owner_gate"]
+    native_fss = sources["native_fss"]
+    native_fss_fixture = sources["native_fss_fixture"]
+    native_treatment_fixture = sources["native_treatment_fixture"]
+    native_treatment_runner = sources["native_treatment_runner"]
+    native_temporal = sources["native_temporal"]
+    native_temporal_fixture = sources["native_temporal_fixture"]
+    plugin_dispatch_fixture = sources["plugin_dispatch_fixture"]
+    native_runtime_host = sources["native_host"]
+    native_fss_client = sources["native_fss_client"]
+    terrain_cover = sources["terrain_cover"]
+    terrain_cover_fixture = sources["terrain_cover_fixture"]
     flat_proxy = (ROOT / "tools/build_flat_sdk_bench_proxy.py").read_text(encoding="utf-8")
 
     if "const EdvrPluginLifecycleOps& remlokLifecycleOps();" not in rem_h:
@@ -775,8 +812,8 @@ def check_module_slices(sources: dict[str, str]) -> None:
     if startup.count("cockpitVisualsPluginOps()") != 1 or \
             startup.count("ownerAllowedForStartup(") != 1:
         raise AssertionError("Cockpit startup factory/query must each have one gated callsite")
-    if "(cockpitVisualsOwnerAllowed || !exposureDampingActive())" not in startup:
-        raise AssertionError("Comfort glare-train hook exception must apply only when Cockpit is denied")
+    if "(cockpitVisualsOwnerAllowed ||\n         !(comfortOwnerAllowed && exposureDampingActive()))" not in startup:
+        raise AssertionError("dormant vScreen must preserve Comfort glare observation when Cockpit is denied")
 
     # Both startup and reload configure all module-owned settings from the
     # cached bit. Keep exact call counts to catch a newly added ungated route.
@@ -799,19 +836,20 @@ def check_module_slices(sources: dict[str, str]) -> None:
                           "pluginRegistryConfigure(&cfg);"):
             if any(core_call in gate for gate in gates):
                 raise AssertionError(f"Cockpit gate swallowed shared/core configuration: {core_call}")
-    if "{\"legacy.sun-glare\", &drawGate_sun_glare, true}" not in vscreen:
+    if ("{\"legacy.sun-glare\", &drawGate_sun_glare, true, "
+            "LegacyGateOwner::CockpitOrComfort}" not in vscreen):
         raise AssertionError("shared Comfort glare observation lost its legacy draw-gate subscription")
-    sun_gate_start = vscreen.find("EDVR_GATE_STATE(sun_glare,")
-    sun_gate_end = vscreen.find("EDVR_GATE_OWNED(particles", sun_gate_start)
-    sun_gate = vscreen[sun_gate_start:sun_gate_end] if sun_gate_start >= 0 and sun_gate_end >= 0 else ""
+    sun_gate = body(vscreen, "uint32_t drawGate_sun_glare(void* opaque)")
     if not sun_gate:
         raise AssertionError("sun-glare draw gate must preserve admitted Legacy behavior and use only Comfort damping when denied")
-    ordered(sun_gate, "s->cockpitVisualsOwnerAllowed", "? sunglareWantsDraws()",
+    ordered(sun_gate, "!s->cockpitVisualsOwnerAllowed && !s->comfortOwnerAllowed",
+            "s->cockpitVisualsOwnerAllowed ? sunglareWantsDraws()",
             ": exposureDampingActive()")
     if "drawGateSubscribed(State* s) { return pluginRegistryWantsDraws(s); }" not in vscreen or \
             "(void)registerLegacyDrawGates(g_state);" not in startup:
         raise AssertionError("shared glare observer is not connected to the live VScreen draw boundary")
-    if "{\"legacy.sun-glare\", &drawGate_sun_glare, true}" not in vscreen:
+    if ("{\"legacy.sun-glare\", &drawGate_sun_glare, true, "
+            "LegacyGateOwner::CockpitOrComfort}" not in vscreen):
         raise AssertionError("Comfort glare subscription must be registered as a state-backed legacy gate")
 
     interests = body(vscreen, "static bool configureLegacyDrawInterests(")
@@ -876,7 +914,8 @@ def check_module_slices(sources: dict[str, str]) -> None:
     ordered(glare_observer, "exposureDampingActive()", "sunglareIsGlareTrain(",
             "g_lastSeenMs = nowMs();")
     for forbidden in ("sunglareOnEyeDraw", "sunglareConfigure", "particleOnDraw",
-                      "billboard", "g_sunglareWorld", "g_sunglareMode", "g_mode", "g_keep"):
+                      "billboard", "g_sunglareWorld", "g_sunglareMode",
+                      "g_mode", "g_keep"):
         if forbidden in glare_observer:
             raise AssertionError(f"shared denied-owner glare observer reached Cockpit work: {forbidden}")
 
@@ -959,8 +998,297 @@ def check_module_slices(sources: dict[str, str]) -> None:
     if "owner-denied real TargetSharp visitor ignores stale active state before module facts or WARP candidate queries" not in vscreen_predicate_fixture:
         raise AssertionError("real TargetSharp owner-denied WARP candidate evidence is missing")
 
+    # Comfort absence is published once with the graphics hooks, then copied
+    # into VScreen state. All owner work consumes that immutable decision;
+    # native FSS treats only the explicit S_FALSE provider result as absence.
+    if "bool comfortOwnerAllowed = false;" not in device or \
+            "bool comfortOwnerAllowed = false;" not in vscreen:
+        raise AssertionError("Comfort ownership caches must default to denied")
+    if "if (!ownerAllowed) return false;\n    std::forward<Callback>(callback)();\n    return true;" not in comfort_owner_gate:
+        raise AssertionError("denied Comfort owner helper must return without invoking its callback")
+    hook_startup = body(device, "void hookDevice(ID3D11Device* device)")
+    ordered(hook_startup, "if (!s.deviceHook.commit())", "s.device = device;",
+            "s.comfortOwnerAllowed =\n        plugin_admission_transport::ownerAllowedForStartup(\n            plugins::kPluginComfort);",
+            "runComfortOwned(s.comfortOwnerAllowed, [&] {\n        fssResConfigure(sentinelCfg);")
+    comfort_query = "plugin_admission_transport::ownerAllowedForStartup(\n            plugins::kPluginComfort);"
+    if device.count(comfort_query) != 1 or hook_startup.count(comfort_query) != 1:
+        raise AssertionError("device hook must sample Comfort ownership exactly once after commit")
+    if hook_startup.count("fssResConfigure(sentinelCfg);") != 1 or \
+            "fssResConfigure(sentinelCfg);" not in body(
+                hook_startup, "runComfortOwned(s.comfortOwnerAllowed, [&] {"):
+        raise AssertionError("pre-commit FSS config must be deferred inside the published owner gate")
+    ordered(hook_startup, comfort_query,
+            "runComfortOwned(s.comfortOwnerAllowed, [&] {\n"
+            "        if (initializeComfortStartup(s))")
+    if "initializeComfortStartup(s)" not in body(
+            hook_startup,
+            "runComfortOwned(s.comfortOwnerAllowed, [&] {\n"
+            "        if (initializeComfortStartup(s))"):
+        raise AssertionError("initial FSS bindings/latch must be contained by the published owner gate")
+    if hook_startup.count("initializeComfortStartup(s)") != 1 or \
+            device.count("initializeComfortStartup(") != 2:
+        raise AssertionError("initial Comfort FSS bindings/latch must run once after owner publication")
+    comfort_startup = body(device, "bool initializeComfortStartup(State& state)")
+    ordered(comfort_startup,
+            "if (!state.comfortOwnerAllowed || state.comfortStartupInitialized)",
+            "state.comfortStartupInitialized = true;",
+            "state.fssEnterKey.setGameMirrored(true);",
+            "if (Config::get().getBool(\"hotkey.read_game_bindings\", true))",
+            "state.fssModeLatchWanted = eyeSyncFromConfig(Config::get()).any();")
+    startup_state = body(device, "State& ensureState()")
+    if "fssModeLatchWanted = false;" not in device or \
+            "initializeComfortStartup(" in startup_state or \
+            "state.fssEnterKey.setGameMirrored(true)" in startup_state or \
+            "state.fssModeLatchWanted = eyeSyncFromConfig(Config::get()).any();" in startup_state:
+        raise AssertionError("ensureState must leave owner-dependent FSS setup cold until post-commit publication")
+    if "comfortStartupInitialized = false;" not in device:
+        raise AssertionError("Comfort startup FSS adoption must be a per-State one-shot")
+    if "ownerAllowedForStartup" in body(device, "HRESULT STDMETHODCALLTYPE hookedPresent("):
+        raise AssertionError("Present must consume the cached Comfort decision")
+    for gate_start, call in (
+            ("runComfortOwned(s.comfortOwnerAllowed, [&] {\n                installExposureFix(device, ctxMode);",
+             "installExposureFix(device, ctxMode);"),
+            ("runComfortOwned(s.comfortOwnerAllowed, [] {\n                installGlitchFrameFix();",
+             "installGlitchFrameFix();")):
+        if call not in body(hook_startup, gate_start):
+            raise AssertionError(f"Comfort startup install is outside cached owner admission: {call}")
+    if "terrainCullCoverInstall(s.comfortOwnerAllowed," not in hook_startup:
+        raise AssertionError("terrain startup must receive the published Comfort owner decision")
+    device_shutdown = body(device, "void shutdownDeviceHooks()")
+    comfort_shutdown = body(device_shutdown, "if (comfortOwnerAllowed()) {")
+    if "shutdownGlitchFrameFix();" not in comfort_shutdown or \
+            "plugins::kPluginComfort" not in comfort_shutdown or \
+            "transitionFlashEyeBaseShutdown();" not in comfort_shutdown or \
+            device_shutdown.count("if (comfortOwnerAllowed())") != 2 or \
+            "if (comfortOwnerAllowed()) shutdownExposureFix();" not in device_shutdown:
+        raise AssertionError("device-hook Comfort teardown must skip denied transition and exposure paths")
+
+    vstartup = body(vscreen, "void installVScreenFixes(")
+    if "const bool comfortOwnerAllowed = edvr::comfortOwnerAllowed();" not in vstartup or \
+            "g_state->comfortOwnerAllowed = comfortOwnerAllowed;" not in vstartup:
+        raise AssertionError("VScreen must copy the device-published Comfort decision into State")
+    if "ownerAllowedForStartup(\n            plugins::kPluginComfort)" in vstartup or \
+            "ownerAllowedForStartup(\n            plugins::kPluginComfort)" in vscreen:
+        raise AssertionError("VScreen must not re-query Comfort admission during setup, Present, or shutdown")
+    if "comfortOwnerAllowed" not in body(vscreen, "void vScreenFrameBoundary()"):
+        raise AssertionError("Comfort frame paths must use the cached State bit")
+    if "configureLegacyDrawInterests(g_state->cockpitVisualsOwnerAllowed,\n                                 g_state->comfortOwnerAllowed);" not in vstartup:
+        raise AssertionError("legacy draw-interest configuration must receive both cached owner decisions")
+    interests = body(vscreen, "static bool configureLegacyDrawInterests(")
+    if "runComfortOwned(comfortOwnerAllowed, [&] {\n        enable(InterestId::FssPanel" not in interests or \
+            "runComfortOwned(comfortOwnerAllowed, [&] {\n        filtersFit = filtersFit && append(fssPanelDrawInterestFilters)" not in interests:
+        raise AssertionError("Comfort scanner interests and filters must remain cold when denied")
+    for signature, calls in (
+            ("void vScreenRefreshConfig()", ("fssResConfigure(cfg)", "exposureConfigure(cfg)")),):
+        scope = body(vscreen, signature)
+        comfort_gates = [body(scope[offset:], "runComfortOwned(")
+                         for offset in (i for i in range(len(scope))
+                                        if scope.startswith("runComfortOwned(", i))]
+        for call in calls:
+            if scope.count(call) != 1 or sum(call in gate for gate in comfort_gates) != 1:
+                raise AssertionError(f"{signature} must owner-gate exactly one {call}")
+
+    gates = body(vscreen, "bool registerLegacyDrawGates(State* state,")
+    if "if (!legacyDrawGateOwnerAllowed(registration, state)) continue;" not in gates:
+        raise AssertionError("denied Comfort/Cockpit legacy gates must be omitted before registry dispatch")
+    owner_filter = body(vscreen, "bool legacyDrawGateOwnerAllowed(")
+    for token in ("LegacyGateOwner::Core: return true;",
+                  "case LegacyGateOwner::Comfort:",
+                  "return state && state->comfortOwnerAllowed;",
+                  "case LegacyGateOwner::CockpitOrComfort:",
+                  "state->comfortOwnerAllowed"):
+        if token not in owner_filter:
+            raise AssertionError(f"legacy draw registration owner filter lost {token}")
+    registrations = body(vscreen, "constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] =")
+    for row in ("legacy.transition-flash-eye-count", "legacy.fss-resolution",
+                "legacy.fss-panel", "legacy.fss-reveal", "legacy.sun-glare"):
+        if row not in registrations:
+            raise AssertionError(f"Comfort draw-gate registration missing {row}")
+    for row in ("{\"legacy.transition-flash-eye-count\", &drawGate_transition_flash_eye_count, true, LegacyGateOwner::Comfort}",
+                "{\"legacy.fss-resolution\", &drawGate_fss_resolution, true, LegacyGateOwner::Comfort}",
+                "{\"legacy.fss-panel\", &drawGate_fss_panel, true, LegacyGateOwner::Comfort}",
+                "{\"legacy.fss-reveal\", &drawGate_fss_reveal, true, LegacyGateOwner::Comfort}"):
+        if row not in registrations:
+            raise AssertionError("Comfort draw bridges must carry State for their cached owner checks")
+    if ("{\"legacy.sun-glare\", &drawGate_sun_glare, true, "
+            "LegacyGateOwner::CockpitOrComfort}" not in registrations):
+        raise AssertionError("shared glare gate must remain subscribed for either admitted owner")
+    comfort_gates = body(vscreen, "#define EDVR_GATE_COMFORT(name, expression)")
+    if "if (!s || !s->comfortOwnerAllowed) return 0;" not in comfort_gates:
+        raise AssertionError("owner-only Comfort draw bridges must exit before evaluating module predicates")
+
+    scanner_config = body(vscreen, "void configureScannerLifecycleStage(")
+    scanner_frame = body(vscreen, "void frameScannerLifecycleStage(")
+    scanner_shutdown = body(vscreen, "void shutdownScannerLifecycle()")
+    for scope, guard in ((scanner_config, "if (!g_state || !g_state->comfortOwnerAllowed) return;"),
+                         (scanner_frame, "if (!g_state || !g_state->comfortOwnerAllowed) return;"),
+                         (scanner_shutdown, "if (!g_state || !g_state->comfortOwnerAllowed) return;")):
+        if guard not in scope:
+            raise AssertionError("Scanner registry and direct fallback routes must stop when Comfort is denied")
+    for lifecycle in ("bool ensureScannerLifecycle()", "bool ensureComfortLifecycle()"):
+        scope = body(vscreen, lifecycle)
+        if "if (!g_state || !g_state->comfortOwnerAllowed) return false;" not in scope or \
+                "pluginRegistryRegisterLifecycle(" not in scope:
+            raise AssertionError(f"{lifecycle} must avoid Comfort factory/registration when denied")
+    if "if (!g_state || !g_state->comfortOwnerAllowed) return;" not in \
+            body(vscreen, "void configureComfortLifecycle(Config& cfg)"):
+        raise AssertionError("transition configuration must skip registry and direct fallback when denied")
+
+    fss_provider = body(native_fss, "extern \"C\" HRESULT WINAPI edvrAcquireNativeFss(")
+    ordered(fss_provider, "*t={sizeof(*t),EDVR_NATIVE_FSS_VERSION_2};",
+            "const bool ownerAllowed=edvr::comfortOwnerAllowed();",
+            "if(!ownerAllowed)return S_FALSE;", "std::lock_guard<std::mutex>lock(mu);")
+    if "fssHealAcquire()" in fss_provider[:fss_provider.find("if(!ownerAllowed)return S_FALSE;")]:
+        raise AssertionError("denied native FSS acquire must not allocate module state or acquire healing")
+    if "nativeFssComfortOwnerDenied()" not in native_fss_fixture or \
+            "nativeFssComfortOwnerDenied();" not in native_fss_fixture:
+        raise AssertionError("real denied native FSS acquire fixture is missing or not invoked")
+    absent_table = body(native_fss_client, "static bool validOwnerAbsentTable(")
+    if "!table.context" not in absent_table or "!table.close" not in absent_table:
+        raise AssertionError("FSS client must validate the complete empty versioned absence table")
+    client_acquire = body(native_fss_client, "HRESULT acquire(")
+    if "if(r==S_FALSE)" not in client_acquire or "validOwnerAbsentTable(candidate)" not in client_acquire or \
+            "if(r!=S_OK)" not in client_acquire:
+        raise AssertionError("FSS client must accept only a valid S_FALSE absence response and preserve other errors")
+    host_fss = native_runtime_host
+    fss_acquire = host_fss.find("acquired=fss.acquire(options.graphicsProvider")
+    host_fss_scope = host_fss[fss_acquire:fss_acquire + 900] if fss_acquire >= 0 else ""
+    ordered(host_fss_scope, "acquired=fss.acquire(options.graphicsProvider", "acquired!=S_OK&&acquired!=S_FALSE",
+            "native_fss,provider_absent=comfort_owner_denied")
+    if "if(acquired!=S_OK)return false;" in host_fss_scope:
+        raise AssertionError("native host must continue on explicit Comfort absence but reject actual acquire errors")
+    if "if(fss.acquired())" not in host_fss:
+        raise AssertionError("native FSS frame callbacks must be skipped when the optional provider is absent")
+    if "edvr::openxr::test::runTreatmentCases(check);" not in native_treatment_runner:
+        raise AssertionError("real native host treatment fixture is not invoked")
+    treatment_cases = body(native_treatment_fixture,
+                           "template<class Check> void runTreatmentCases(Check check)")
+    for token in ("state.fssAcquireMode=State::FssAcquireMode::ownerAbsent;",
+                  "const HRESULT absent=h.fss.acquire(provider,device.Get(),1);",
+                  "absent==S_FALSE&&!h.fss.acquired()",
+                  "State::FssAcquireMode::malformedAbsent", "State::FssAcquireMode::failure",
+                  "State::FssAcquireMode::otherPositive", "State::FssAcquireMode::admitted",
+                  "result==vr::VRCompositorError_None&&state.calls==\"TSPM\"&&h.graphicsCalls.calls-before==3",
+                  "the real host treatment chain feeds each later stage the prior output with FSS unacquired"):
+        if token not in treatment_cases:
+            raise AssertionError(f"loaded FSS client/host absence fixture lost evidence: {token}")
+
+    # The first D3D device publishes the owner decision before swapchain or
+    # factory hooks can expose Present. Native runtime startup then waits for
+    # a render callback before invoking the host, whose FSS acquire sees that
+    # already-published provider state.
+    proxy_attach = body(proxy, "void attachToDevice(ID3D11Device* device,")
+    ordered(proxy_attach, "edvr::publishGameDevice(device);", "edvr::hookDevice(device);",
+            "edvr::hookSwapChain(swapChain);", "edvr::hookFactoryForDevice(device);")
+    module_start = body(native_module, "vr::EVRInitError start(")
+    ordered(module_start, "generation->binding.acquire(options_.graphicsProxy",
+            "generation->binding.waitForRender(", "generation->route.bind()",
+            "generation->host->start(token,cancelled,interfaces)")
+    if "plugin_admission_transport::ownerAllowedForStartup(\n            plugins::kPluginComfort)" in module_start:
+        raise AssertionError("OpenXR startup must consume published owner state instead of re-querying admission")
+
+    native_frame_state = body(native_frame, "extern \"C\" HRESULT WINAPI edvrAcquireNativeFrame(")
+    if "state.comfortOwnerAllowed = edvr::comfortOwnerAllowed();" not in native_frame_state:
+        raise AssertionError("native frame provider must snapshot the published Comfort decision")
+    frame_core = body(native_frame, "HRESULT WINAPI beginFrame(")
+    if "state->comfortOwnerAllowed" not in frame_core or "transitionEnabled = state->comfortOwnerAllowed &&" not in native_frame:
+        raise AssertionError("native frame transition output and latch must honor cached owner state")
+
+    # Native temporal projection and treatment remain core operations under
+    # Comfort absence. Only the terrain-cover observer receives cached owner
+    # admission, sampled once when the provider is acquired.
+    temporal_state = body(native_temporal, "struct State {")
+    temporal_acquire = body(native_temporal,
+                            "extern \"C\" HRESULT WINAPI edvrAcquireNativeTemporal(")
+    temporal_begin = body(native_temporal, "HRESULT WINAPI begin(")
+    if "bool comfortOwnerAllowed = false;" not in temporal_state:
+        raise AssertionError("native temporal owner cache must default denied")
+    if temporal_acquire.count("edvr::comfortOwnerAllowed()") != 1 or \
+            "s.comfortOwnerAllowed=edvr::comfortOwnerAllowed();" not in temporal_acquire:
+        raise AssertionError("native temporal provider must snapshot Comfort admission exactly once at Acquire")
+    ordered(temporal_acquire, "s.comfortOwnerAllowed=edvr::comfortOwnerAllowed();",
+            "s.pendingSettings=readConfig();")
+    if "edvr::comfortOwnerAllowed()" in temporal_begin or \
+            "if(s->comfortOwnerAllowed) edvr::terrainCullCoverNoteFrusta(s->frusta);" not in temporal_begin:
+        raise AssertionError("temporal Begin may gate only terrain notification using its cached owner")
+    ordered(temporal_begin, "std::memcpy(s->head,f->head,sizeof(s->head));",
+            "if(s->comfortOwnerAllowed) edvr::terrainCullCoverNoteFrusta(s->frusta);",
+            "std::memset(out,0,sizeof(*out));")
+    denied_temporal_acquire = body(
+        native_temporal_fixture,
+        "EdvrNativeTemporalTable acquireComfortOwnerDeniedTemporal(")
+    temporal_fixture_run = body(native_temporal_fixture, "void run()")
+    for token in ("const bool prior=comfortOwnerAllowedForTemporalFixture;",
+                  "comfortOwnerAllowedForTemporalFixture=false;",
+                  "auto t=acquire(d,generation);",
+                  "comfortOwnerAllowedForTemporalFixture=prior;",
+                  "catch(...){comfortOwnerAllowedForTemporalFixture=prior;throw;}"):
+        if token not in denied_temporal_acquire:
+            raise AssertionError(f"temporal denial fixture must acquire the real provider with owner absent: {token}")
+    if "acquireComfortOwnerDeniedTemporal(d,11)" not in temporal_fixture_run or \
+            "check(coverNotes==0" not in temporal_fixture_run or \
+            "owner-denied provider still begins the real core temporal frame" not in temporal_fixture_run or \
+            "owner-admitted temporal provider still publishes begun frusta" not in temporal_fixture_run:
+        raise AssertionError("real temporal provider denial and admitted control are missing")
+    terrain_install = body(terrain_cover, "void terrainCullCoverInstall(bool ownerAllowed, bool flatProfile)")
+    if "if (!ownerAllowed) return;" not in terrain_install:
+        raise AssertionError("denied Comfort ownership must skip terrain hook installation")
+    for terrain_scope in (body(terrain_cover, "void terrainCullCoverNoteFrusta("),
+                          body(terrain_cover, "void terrainCullCoverPoll(")):
+        if "!g_ownerAllowed.load(std::memory_order_acquire)" not in terrain_scope or \
+                "!g_installed.load(std::memory_order_acquire)" not in terrain_scope:
+            raise AssertionError("terrain NoteFrusta and polling must remain cold when installation was denied")
+    if "terrainCullCoverInstall(false, false)" not in terrain_cover_fixture or \
+            "Comfort owner absence skips terrain scan/install" not in terrain_cover_fixture:
+        raise AssertionError("terrain denial fixture evidence is missing")
+
+    if "comfortOwnerDeniedLifecycleFallbacks()" not in plugin_dispatch_fixture or \
+            "comfortOwnerDeniedLifecycleFallbacks();" not in plugin_dispatch_fixture:
+        raise AssertionError("Comfort denied lifecycle/fallback fixture is missing or not invoked")
+    if "core context census remains live in the real visitor while Comfort ownership is denied" not in vscreen_predicate_fixture:
+        raise AssertionError("core context service must remain live in the denied-owner visitor fixture")
+    for token in ("kFssPanelClaim", "kFssRevealClaim", "true, false, 'N', 6, 1, 5, 6",
+                  "g_getVertexShaderCalls == 0", "owner-present stale FSS panel reaches the real scanner selector"):
+        if token not in vscreen_predicate_fixture:
+            raise AssertionError(f"real denied Scanner visitor fixture lost {token}")
+    if ("fssPanelSite, immediate, immediate, 0, true, true,\n"
+            "                              &deniedScanner, true, false, 'X', 6, 1, 5, 6)" not in
+            vscreen_predicate_fixture):
+        raise AssertionError("FSS panel real visitor must pass Comfort denied to its owner gate")
+    if "testCockpitComfortLegacyGateRegistration()" not in vscreen_predicate_fixture or \
+            "okay &= testCockpitComfortLegacyGateRegistration();" not in vscreen_predicate_fixture:
+        raise AssertionError("actual legacy registry owner-filter fixture is missing or not invoked")
+    gate_fixture = body(vscreen_predicate_fixture, "bool testCockpitComfortLegacyGateRegistration()")
+    for token in ("vScreenLegacyGateRegistrationTest(\n        false, false",
+                  "deniedCount == 19 && deniedCockpit == 0 &&",
+                  "deniedComfort == 0 && deniedShared == 0",
+                  "cockpitCallbacks == 6 && noComfortCallbacks == 0",
+                  "cockpitShared == 1", "vScreenLegacyGateRegistrationTest(\n        false, true",
+                  "comfortCallbacks == 4", "comfortShared == 1",
+                  "bothCockpit == 6 && bothComfort == 4 && bothShared == 1"):
+        if token not in gate_fixture:
+            raise AssertionError(f"real owner-filter registration fixture lost {token}")
+    registry_visit = body(registry, "uint32_t pluginRegistryVisitLegacyDrawGatesForTest(")
+    if "for (uint32_t i = 0; i < g_legacyCount; ++i)" not in registry_visit or \
+            "gate.predicate(gate.state ? gate.state : legacyState)" not in registry_visit:
+        raise AssertionError("draw-gate fixture must invoke the actual stored registry callbacks")
+    if "pluginRegistryVisitLegacyDrawGatesForTest(void* legacyState) noexcept;" not in registry_header:
+        raise AssertionError("stored draw-gate visit seam must be declared for the fixture")
+    if "nativeFrameComfortOwnerDenied" not in native_frame_fixture or \
+            "nativeFrameComfortOwnerDenied();" not in native_frame_fixture or \
+            "deniedComfortOutput.transitionEnabled == 0" not in native_frame_fixture:
+        raise AssertionError("real native-frame denied-owner transition fixture is missing or not invoked")
+    temporal_run = body(native_temporal_fixture, "void run()")
+    ordered(temporal_run, "auto t=acquireComfortOwnerDeniedTemporal(d,11)", "auto p=begin(t,f)",
+            "check(p.tangentShift[0][0]==0&&p.tangentShift[1][1]==0",
+            "check(treat(t,1,1,source.Get())==S_OK")
+    if "comfortOwnerAllowed" in temporal_run or "runComfortOwned" in temporal_run:
+        raise AssertionError("independent native temporal core must not be swallowed by Comfort ownership")
+
 
 def expect_slice(label: str, sources: dict[str, str]) -> None:
+    global MUTATION_COUNT
+    MUTATION_COUNT += 1
     try:
         check_module_slices(sources)
     except (AssertionError, ValueError):
@@ -1243,21 +1571,17 @@ def self_test_slices(sources: dict[str, str]) -> None:
     expect_slice("denied Cockpit glare does only shared Comfort observation", changed)
 
     changed = dict(sources)
-    changed["sunglare"] = replace_body(changed["sunglare"],
-        "void sunglareTrackExposureGlareTrain(",
-        "bool damping = false;",
-        "const auto cockpitMode = g_mode; (void)cockpitMode; bool damping = false;")
-    expect_slice("shared Comfort glare observer avoids Cockpit mode state", changed)
-
-    changed = dict(sources)
     changed["vscreen"] = once(changed["vscreen"],
-        ": exposureDampingActive())", ": sunglareWantsDraws())")
+        ": exposureDampingActive())",
+        ": sunglareWantsDraws())")
     expect_slice("denied sun-glare subscription avoids Cockpit draw state", changed)
 
     changed = dict(sources)
     changed["vscreen"] = once(changed["vscreen"],
-        "(cockpitVisualsOwnerAllowed || !exposureDampingActive())", "true")
-    expect_slice("dormant hook exception is limited to denied Cockpit ownership", changed)
+        "(cockpitVisualsOwnerAllowed ||\n"
+        "         !(comfortOwnerAllowed && exposureDampingActive()))",
+        "(cockpitVisualsOwnerAllowed || true)")
+    expect_slice("dormant hook preserves only active Comfort glare observation", changed)
 
     changed = dict(sources)
     changed["vscreen"] = once(changed["vscreen"],
@@ -1299,8 +1623,205 @@ def self_test_slices(sources: dict[str, str]) -> None:
         "/* Cockpit owner absence fixture omitted */")
     expect_slice("Cockpit real owner absence fixture stays invoked", changed)
 
+    changed = dict(sources)
+    changed["sunglare"] = replace_body(changed["sunglare"],
+        "void sunglareTrackExposureGlareTrain(",
+        "bool damping = false;", "const auto leakedMode = g_mode;\n  bool damping = false;")
+    expect_slice("denied glare observer cannot read Cockpit mode", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "if (!s.deviceHook.commit()) {",
+        "s.comfortOwnerAllowed =\n"
+        "        plugin_admission_transport::ownerAllowedForStartup(\n"
+        "            plugins::kPluginComfort);\n"
+        "    if (!s.deviceHook.commit()) {")
+    expect_slice("Comfort admission is sampled only after successful hook commit", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "plugins::kPluginComfort);\n    runComfortOwned(s.comfortOwnerAllowed, [&] {\n        fssResConfigure(sentinelCfg);",
+        "plugins::kPluginExplorerCam);\n    runComfortOwned(s.comfortOwnerAllowed, [&] {\n        fssResConfigure(sentinelCfg);")
+    expect_slice("device startup snapshots the Comfort owner, not another manifest", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "runComfortOwned(s.comfortOwnerAllowed, [&] {\n        fssResConfigure(sentinelCfg);\n    });",
+        "fssResConfigure(sentinelCfg);")
+    expect_slice("pre-VScreen FSS setup remains behind the owner gate", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "if (initializeComfortStartup(s))\n            journalWatchSetEagerStatus",
+        "if (false)\n            journalWatchSetEagerStatus")
+    expect_slice("one-shot initial FSS bindings and latch remain in the published owner gate", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "if (!state.comfortOwnerAllowed || state.comfortStartupInitialized)",
+        "if (!state.comfortOwnerAllowed)")
+    expect_slice("initial Comfort FSS setup is one-shot per State", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "runComfortOwned(s.comfortOwnerAllowed, [&] {\n                installExposureFix(device, ctxMode);\n            });",
+        "installExposureFix(device, ctxMode);")
+    expect_slice("Comfort exposure hooks remain gated at device startup", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "terrainCullCoverInstall(s.comfortOwnerAllowed,\n                                    runtimeFlatProfile());",
+        "terrainCullCoverInstall(true, runtimeFlatProfile());")
+    expect_slice("terrain install receives the cached owner decision", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "g_state->comfortOwnerAllowed = comfortOwnerAllowed;",
+        "g_state->comfortOwnerAllowed = true;")
+    expect_slice("VScreen keeps the device-published Comfort cache", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "if (!legacyDrawGateOwnerAllowed(registration, state)) continue;",
+        "if (false) continue;")
+    expect_slice("denied-owner draw subscriptions are filtered before registry dispatch", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "{\"legacy.fss-panel\", &drawGate_fss_panel, true, LegacyGateOwner::Comfort}",
+        "{\"legacy.fss-panel\", &drawGate_fss_panel, false, LegacyGateOwner::Comfort}")
+    expect_slice("FSS gate registration carries cached State into its callback", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "if (!s || !s->comfortOwnerAllowed) return 0;",
+        "if (!s) return 0;")
+    expect_slice("denied Comfort draw bridge avoids module predicate work", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "runComfortOwned(s->comfortOwnerAllowed, [&] { fssResConfigure(cfg); });",
+        "fssResConfigure(cfg);")
+    expect_slice("Comfort reload configuration remains owner-gated", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = replace_body(changed["vscreen"],
+        "void frameScannerLifecycleStage(",
+        "if (!g_state || !g_state->comfortOwnerAllowed) return;",
+        "if (!g_state) return;")
+    expect_slice("scanner lifecycle fallback does not run for absent Comfort", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "if (comfortOwnerAllowed()) {\n        shutdownGlitchFrameFix();",
+        "if (true) {\n        shutdownGlitchFrameFix();")
+    expect_slice("device transition shutdown is skipped without Comfort ownership", changed)
+
+    changed = dict(sources)
+    changed["native_fss"] = once(changed["native_fss"],
+        "if(!ownerAllowed)return S_FALSE;", "if(false)return S_FALSE;")
+    expect_slice("denied native FSS acquire exits before pool and healing state", changed)
+
+    changed = dict(sources)
+    changed["native_fss_client"] = once(changed["native_fss_client"],
+        "if(r==S_FALSE) {", "if(false) {")
+    expect_slice("OpenXR FSS client accepts only the validated optional-absence table", changed)
+
+    changed = dict(sources)
+    changed["native_host"] = once(changed["native_host"],
+        "(acquired!=S_OK&&acquired!=S_FALSE)", "(acquired!=S_OK)")
+    expect_slice("OpenXR host continues on optional S_FALSE but keeps other errors fatal", changed)
+
+    changed = dict(sources)
+    changed["native_frame"] = once(changed["native_frame"],
+        "result.transitionEnabled = state->comfortOwnerAllowed &&", "result.transitionEnabled = true &&")
+    expect_slice("native transition output uses the provider's cached Comfort owner", changed)
+
+    changed = dict(sources)
+    changed["terrain_cover"] = once(changed["terrain_cover"],
+        "if (!ownerAllowed) return;", "if (false) return;")
+    expect_slice("terrain hook installation is denied without Comfort ownership", changed)
+
+    changed = dict(sources)
+    changed["terrain_cover"] = replace_body(changed["terrain_cover"],
+        "void terrainCullCoverNoteFrusta(",
+        "!g_ownerAllowed.load(std::memory_order_acquire) ||\n        !g_installed.load(std::memory_order_acquire)",
+        "!g_installed.load(std::memory_order_acquire)")
+    expect_slice("terrain frusta/poll callbacks remain owner-gated after startup", changed)
+
+    changed = dict(sources)
+    changed["native_fss_fixture"] = once(changed["native_fss_fixture"],
+        "nativeFssComfortOwnerDenied();", "/* denied FSS fixture omitted */")
+    expect_slice("native FSS absence fixture is invoked", changed)
+
+    changed = dict(sources)
+    changed["native_treatment_runner"] = once(changed["native_treatment_runner"],
+        "edvr::openxr::test::runTreatmentCases(check);", "/* host absence treatment fixture omitted */")
+    expect_slice("real native FSS optional-absence treatment fixture is invoked", changed)
+
+    changed = dict(sources)
+    changed["native_treatment_fixture"] = once(changed["native_treatment_fixture"],
+        "state.fssAcquireMode=State::FssAcquireMode::ownerAbsent;",
+        "state.fssAcquireMode=State::FssAcquireMode::admitted;")
+    expect_slice("real client and host exercise the actual optional FSS absence result", changed)
+
+    changed = dict(sources)
+    changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],
+        "okay &= testCockpitComfortLegacyGateRegistration();",
+        "/* actual registry fixture omitted */")
+    expect_slice("actual owner-filtered registry callback fixture is invoked", changed)
+
+    changed = dict(sources)
+    changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],
+        "fssPanelSite, immediate, immediate, 0, true, true,\n"
+        "                              &deniedScanner, true, false, 'X', 6, 1, 5, 6)",
+        "fssPanelSite, immediate, immediate, 0, true, true,\n"
+        "                              &deniedScanner, true, true, 'X', 6, 1, 5, 6)")
+    expect_slice("real scanner visitor fixture uses denied Comfort state", changed)
+
+    changed = dict(sources)
+    changed["native_frame_fixture"] = once(changed["native_frame_fixture"],
+        "nativeFrameComfortOwnerDenied();", "/* native-frame absence fixture omitted */")
+    expect_slice("native-frame denied-owner fixture is invoked", changed)
+
+    changed = dict(sources)
+    changed["native_temporal_fixture"] = once(changed["native_temporal_fixture"],
+        "void run(){\n", "void run(){\n  if (!comfortOwnerAllowed) return;\n")
+    expect_slice("native temporal core begin/projection remains independent of Comfort admission", changed)
+
+    changed = dict(sources)
+    changed["native_temporal"] = once(changed["native_temporal"],
+        "s.comfortOwnerAllowed=edvr::comfortOwnerAllowed();",
+        "s.comfortOwnerAllowed=true;")
+    expect_slice("native temporal snapshots published Comfort admission at Acquire", changed)
+
+    changed = dict(sources)
+    changed["native_temporal"] = once(changed["native_temporal"],
+        "if(s->comfortOwnerAllowed) edvr::terrainCullCoverNoteFrusta(s->frusta);",
+        "edvr::terrainCullCoverNoteFrusta(s->frusta);")
+    expect_slice("temporal core remains live while its terrain observer is owner-gated", changed)
+
+    changed = dict(sources)
+    changed["native_temporal"] = once(changed["native_temporal"],
+        "if(s->comfortOwnerAllowed) edvr::terrainCullCoverNoteFrusta(s->frusta);",
+        "if(edvr::comfortOwnerAllowed()) edvr::terrainCullCoverNoteFrusta(s->frusta);")
+    expect_slice("native temporal Begin does not re-query ownership per frame", changed)
+
+    changed = dict(sources)
+    changed["native_temporal_fixture"] = once(changed["native_temporal_fixture"],
+        "acquireComfortOwnerDeniedTemporal(d,11)", "acquire(d,11)")
+    expect_slice("real native temporal denied-owner provider fixture is invoked", changed)
+
+    changed = dict(sources)
+    changed["proxy"] = once(changed["proxy"],
+        "edvr::hookDevice(device);\n        if (swapChain)",
+        "edvr::hookSwapChain(swapChain);\n        if (swapChain)")
+    expect_slice("device owner publication precedes Present-capable swapchain hooks", changed)
+
 
 def expect(label: str, sources: tuple[str, ...], changed: tuple[str, ...]) -> None:
+    global MUTATION_COUNT
+    MUTATION_COUNT += 1
     try:
         check(*changed)
     except (AssertionError, ValueError):
@@ -1317,9 +1838,9 @@ def self_test(s: tuple[str, ...]) -> None:
     expect("Explorer must not configure", s, s[:5] + (once(s[5], "    nullptr,\n    frame,", "    configure,\n    frame,"),) + s[6:])
     expect("vscreen component staged API", s, s[:6] + (replace_body(s[6], "void frameScannerLifecycleStage(", "pluginRegistryFrameLifecycleComponentStage(", "pluginRegistryFrameLifecycleStage("),) + s[7:])
     expect("Scanner refresh config fallback", s, s[:6] + (replace_body(s[6], "void configureScannerLifecycleStage(", "fallback(cfg);", "fallback(cfg);\n    fallback(cfg);"),) + s[7:])
-    expect("Scanner no-state fallback selection", s, s[:6] + (replace_body(s[6], "bool ensureScannerLifecycle()", "if (!g_state) return false;", "if (g_state) return false;"),) + s[7:])
-    expect("Comfort no-state fallback selection", s, s[:6] + (replace_body(s[6], "bool ensureComfortLifecycle()", "if (!g_state) return false;", "if (g_state) return false;"),) + s[7:])
-    expect("Scanner reveal frame boundary scope", s, s[:6] + (replace_body(s[6], "void vScreenFrameBoundary()", "frameScannerLifecycleStage(\n            plugins::scanners::kScannerLifecycleRevealFrame, s->frameNo,\n            fssRevealFrameBoundary);", "fssRevealFrameBoundary();"),) + s[7:])
+    expect("Scanner denied-owner lifecycle selection", s, s[:6] + (replace_body(s[6], "bool ensureScannerLifecycle()", "if (!g_state || !g_state->comfortOwnerAllowed) return false;", "if (g_state && g_state->comfortOwnerAllowed) return false;"),) + s[7:])
+    expect("Comfort denied-owner lifecycle selection", s, s[:6] + (replace_body(s[6], "bool ensureComfortLifecycle()", "if (!g_state || !g_state->comfortOwnerAllowed) return false;", "if (g_state && g_state->comfortOwnerAllowed) return false;"),) + s[7:])
+    expect("Scanner reveal frame boundary scope", s, s[:6] + (replace_body(s[6], "void vScreenFrameBoundary()", "frameScannerLifecycleStage(\n                plugins::scanners::kScannerLifecycleRevealFrame, s->frameNo,\n                fssRevealFrameBoundary);", "fssRevealFrameBoundary();"),) + s[7:])
     expect("Scanner teardown interleave", s, s[:6] + (replace_body(s[6], "void shutdownVScreenFixes()", "fssPanelRectShutdown();\n    shutdownScannerLifecycle();", "shutdownScannerLifecycle();\n    fssPanelRectShutdown();"),) + s[7:])
     expect("Explorer device hook owner", s, s[:7] + (replace_body(s[7], "tkExplorerCam.run([] {", "pluginRegistryHasLifecycle(plugins::kPluginExplorerCam)", "pluginRegistryHasLifecycle(plugins::kPluginComfort)"),) + s[8:])
     expect("Explorer shutdown route", s, s[:7] + (replace_body(s[7], "void shutdownDeviceHooks()", "pluginRegistryShutdownLifecycle(plugins::kPluginExplorerCam)", "pluginRegistryShutdownLifecycle(plugins::kPluginComfort)"),) + s[8:])
@@ -1368,7 +1889,7 @@ def main() -> int:
     if args.self_test:
         self_test(sources)
         self_test_slices(slice_sources)
-        print("PASS: grouped lifecycle wiring and module boundaries (71 mutations)")
+        print(f"PASS: grouped lifecycle wiring and module boundaries ({MUTATION_COUNT} mutations)")
     else:
         print("DRY RUN: grouped lifecycle and module-boundary pins passed; no files written")
     return 0

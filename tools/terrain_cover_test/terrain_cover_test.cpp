@@ -489,13 +489,26 @@ static void caseHook() {
     uint8_t before[16];
     std::memcpy(before, fn, 16);
 
+    terrainCullCoverTestReset();
+    terrainCullCoverTestSetImage(s.base);
+    terrainCullCoverInstall(false, false);
+    terrainCullCoverNoteFrusta(cropped);
+    const auto deniedState = terrainCullCoverTestState();
+    const Seen deniedCall = callBuilder(fn, kCropped.vfov(), kCropped.aspect());
+    check(!deniedState.attempted && !deniedState.installed &&
+              terrainCullCoverTestLineCount() == 0 &&
+              std::memcmp(before, fn, 16) == 0 &&
+              sameBits(deniedCall.a5, kCropped.vfov()) &&
+              sameBits(deniedCall.a6, kCropped.aspect()),
+          "Comfort owner absence skips terrain scan/install and NoteFrusta leaves the real builder untouched");
+
     // a flat session: inert, nothing patched
     terrainCullCoverTestSetImage(s.base);
-    terrainCullCoverInstall(true);
+    terrainCullCoverInstall(true, true);
     check(lines().size() == 1 && lines()[0] == "terrain cull cover: inert: the flat profile has no stereo frustum to cover; nothing was patched" && std::memcmp(before, fn, 16) == 0 &&
               !terrainCullCoverTestState().installed,
           "C5.b a flat session says it is inert in one line and patches nothing");
-    terrainCullCoverInstall(false);
+    terrainCullCoverInstall(true, false);
     check(lines().size() == 1, "C5.c ...and a second install attempt in the same session does nothing (once, ever)");
     terrainCullCoverPoll(1000);
     terrainCullCoverPoll(700000);
@@ -504,7 +517,7 @@ static void caseHook() {
     // the VR session: the hook goes in
     terrainCullCoverTestReset();
     terrainCullCoverTestSetImage(s.base);
-    terrainCullCoverInstall(false);
+    terrainCullCoverInstall(true, false);
     check(lines().size() == 1 && lines()[0] == "terrain cull cover: hook live at exe+0x443E800 (PE stamp 1788384820 and image size 104894464 are build 332841's; the callee's head and the call site at exe+0x4455FDD verified)" &&
               terrainCullCoverTestState().installed && terrainCullCoverTestState().byStamp && std::memcmp(before, fn, 16) != 0 && fn[0] == 0xE9,
           "C5.e the known build: one line, 'hook live at exe+0x443E800', the entry patched with a jump");
@@ -585,7 +598,7 @@ static void caseHook() {
     {
         s.base[0x443E800 + 7] ^= 1;
         terrainCullCoverTestSetImage(s.base);
-        terrainCullCoverInstall(false);
+        terrainCullCoverInstall(true, false);
         check(lines().size() == 1 && lines()[0].rfind("terrain cull cover: inert: the PE stamp 1788384820 and image size 104894464 are build 332841's, but the head at exe+0x443E800 is not", 0) == 0 &&
                   !terrainCullCoverTestState().installed && fn[0] == 0x48,
               "C5.x a head that is not the one read: one 'inert' line naming why, nothing patched");
@@ -603,7 +616,7 @@ static void caseHookScanned() {
     const uint32_t call = putSite(s, 0x5003, 0x9000, std::vector<uint8_t>(3, 0x90), std::vector<uint8_t>(11, 0x90));
     uint8_t* fn = s.base + 0x9000;
     terrainCullCoverTestSetImage(s.base);
-    terrainCullCoverInstall(false);
+    terrainCullCoverInstall(true, false);
     char want[300];
     std::snprintf(want, sizeof(want), "terrain cull cover: hook live at exe+0x9000 (found by signature scan: the one call site at exe+0x%X reaches it; PE stamp 777777 is not build 332841's)", call);
     check(lines().size() == 1 && lines()[0] == want && terrainCullCoverTestState().installed && !terrainCullCoverTestState().byStamp, "C5.y another build with one call site: the hook goes in where the scan found it, and the line says how");
@@ -616,7 +629,7 @@ static void caseHookScanned() {
     // two sites: inert
     putSite(s, 0xB021, 0x9000, kRealGapAB, kRealGapDE);
     terrainCullCoverTestSetImage(s.base);
-    terrainCullCoverInstall(false);
+    terrainCullCoverInstall(true, false);
     check(lines().size() == 1 && lines()[0].find("terrain cull cover: inert: the PE stamp 777777 is not build 332841's and the signature scan") == 0 && lines()[0].find("ambiguous") != std::string::npos &&
               !terrainCullCoverTestState().installed && fn[0] == 0x48,
           "C5.za two call sites: inert, one line, nothing patched");
@@ -645,7 +658,7 @@ static std::string fixtureLog() {
         const std::vector<std::string> v = lines();
         for (; taken < v.size(); ++taken) out += clockPrefix(ms) + v[taken] + "\n";
     };
-    terrainCullCoverInstall(false);
+    terrainCullCoverInstall(true, false);
     drain(2000);
     uint64_t now = 3000;
     terrainCullCoverPoll(now);
@@ -742,13 +755,34 @@ int main(int argc, char** argv) {
         const std::string core = slurp(root + "\\src\\d3d11\\terrain_cull_cover_core.h");
         const std::string build = slurp(root + "\\build.bat");
         const std::string ini = slurp(root + "\\edvr.ini");
-        check(occurrencesLive(device, "terrainCullCoverInstall(runtimeFlatProfile());") == 1 && precedes(device, "vertexResyncInstall();", "terrainCullCoverInstall(runtimeFlatProfile());"),
-              "C7.a device_hook.cpp installs the cover once, with the profile, in the startup block");
-        check(occurrencesLive(device, "terrainCullCoverPoll(stampMs());") == 1 && precedes(device, "vScreenRefreshConfig();", "terrainCullCoverPoll(stampMs());"), "C7.b ...and polls it once a second after the config reload");
-        check(occurrencesLive(temporal, "edvr::terrainCullCoverNoteFrusta(s->frusta);") == 1 &&
-                  precedes(temporal, "std::memcpy(s->frusta,f->frusta,sizeof(s->frusta));", "edvr::terrainCullCoverNoteFrusta(s->frusta);") &&
-                  precedes(temporal, "edvr::terrainCullCoverNoteFrusta(s->frusta);", "g_vertical.store("),
-              "C7.c native_temporal.cpp's begin() tells the cover the frusta right after it takes them");
+        const std::string terrainInstall =
+            "terrainCullCoverInstall(s.comfortOwnerAllowed,\n"
+            "                                    runtimeFlatProfile());";
+        const std::string comfortAdmission =
+            "s.comfortOwnerAllowed =\n"
+            "        plugin_admission_transport::ownerAllowedForStartup(\n"
+            "            plugins::kPluginComfort);";
+        const std::string terrainPoll =
+            "if (g_state->comfortOwnerAllowed)\n"
+            "                terrainCullCoverPoll(stampMs());";
+        const std::string terrainFrusta =
+            "if(s->comfortOwnerAllowed) edvr::terrainCullCoverNoteFrusta(s->frusta);";
+        check(occurrencesLive(device, "terrainCullCoverInstall(") == 1 &&
+                  occurrencesLive(device, terrainInstall) == 1 &&
+                  precedes(device, comfortAdmission, terrainInstall) &&
+                  precedes(device, "vertexResyncInstall();", terrainInstall),
+              "C7.a device_hook.cpp installs the cover once after Comfort admission, with cached owner and profile, in the startup block");
+        check(occurrencesLive(device, "terrainCullCoverPoll(stampMs());") == 1 &&
+                  occurrences(device, "terrainCullCoverPoll(") == 1 &&
+                  has(device, terrainPoll) &&
+                  precedes(device, "vScreenRefreshConfig();", terrainPoll),
+              "C7.b ...and polls under cached Comfort admission after the config reload");
+        check(occurrencesLive(temporal, terrainFrusta) == 1 &&
+                  occurrences(temporal, "edvr::terrainCullCoverNoteFrusta(") == 1 &&
+                  occurrences(temporal, "s.comfortOwnerAllowed=edvr::comfortOwnerAllowed();") == 1 &&
+                  precedes(temporal, "std::memcpy(s->frusta,f->frusta,sizeof(s->frusta));", terrainFrusta) &&
+                  precedes(temporal, terrainFrusta, "g_vertical.store("),
+              "C7.c native_temporal.cpp's begin() notifies the cover after copying frusta only for its cached Comfort owner");
         check(occurrences(hook, "return forward(a, b, c, d, r.vfov, r.aspect);") == 1 && occurrences(hook, "BuilderFn = uintptr_t (__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, float, float);") == 1,
               "C7.d the detour forwards the four register arguments untouched and only the two floats it computed");
         check(!has(hook, "Config::") && !has(hook, "getBool(") && !has(hook, "getString(") && !has(core, "terrain_cull_cover =") && !has(ini, "terrain_cull_cover"),

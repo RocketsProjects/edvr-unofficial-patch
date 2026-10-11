@@ -21,8 +21,9 @@
   `build/full-explorer-absence-offline-20261011-r3.log` (receipt `faeff569`).
   Cockpit's eight-family boundaries pass full offline validation:
   `build/full-cockpit-absence-offline-20261011-r2.log` (receipt `1ba4e55b`).
-- **Module progress:** Performance, Explorer and Cockpit startup gates are
-  validated offline; Comfort's shared glare observer is preserved. Comfort,
+  Comfort's startup and native absence boundaries pass full offline validation:
+  `build/full-comfort-absence-offline-20261011-r4.log` (receipt `bcd91fc6`).
+- **Module progress:** Performance, Explorer, Cockpit and Comfort pass offline.
   Intro, On-foot, Temporal AA and Diagnostics owner gates remain. Selections
   stay unavailable; whole-group runtime absence and launch order remain open.
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
@@ -52,8 +53,7 @@
   remaining lifecycle cost and runtime CPU/GPU acceptance stay open; this
   checkpoint does not claim Phase 1 completion or shipping acceptance.
 - **Upstream retirements:** main-retired features/keys stay retired; the
-  historical entries retain their original grouping. FOV trim keeps its
-  own engine.
+  historical entries retain their original grouping. FOV trim keeps its engine.
   Temporary branch key `advanced.draw_replay` stays off. Its diagnostic pools
   allocate only when enabled, with none allocated when off. Removing this key
   requires Scope control.
@@ -5102,3 +5102,67 @@ admission/launch order and shipping CPU/GPU acceptance remain open. The next
 Comfort boundary includes pre-admission FSS configuration, exposure, scanner
 fallbacks/native providers, transition flash and terrain culling. No install,
 live configuration edit, flight, promotion or feature-to-main merge occurred.
+
+### 2026-10-11 — Comfort startup and native absence boundaries
+
+Comfort's graphics host publishes one default-false ownership cache after the
+device hooks commit. The decision precedes FSS configuration, initial game
+binding adoption, exposure and transition installers, terrain-cover
+installation, and vScreen setup. Initial FSS keyboard/gamepad bindings,
+fingerprint and latch configuration move into a one-shot post-decision helper;
+shared menu and journal initialization remains in its original core path.
+Reload and shutdown honor the same cache. No per-frame admission query or user
+key was added.
+
+The cache gates Comfort's exposure, transition-flash, scanner and terrain-cover
+routes, including legacy lifecycle fallbacks, draw subscriptions and claims,
+Map/Unmap and resource-write observations, frame ticks and native provider
+work. The shared stock-glare observer runs only with Comfort present and
+Cockpit Visuals absent. Native temporal caches Comfort at acquire and skips the
+terrain notification before calling the module, while keeping core geometry and
+temporal treatment live.
+
+Native FSS absence returns exact `S_FALSE` with a valid version-2 empty table,
+before device-health work or pool allocation. The OpenXR client accepts that
+specific response and remains unacquired; malformed absence tables and all
+other acquisition errors remain errors. The runtime host allows this optional
+absence and continues its independent providers.
+
+The real legacy subscription table omits absent owners before registration.
+Forced enumeration of the stored predicates checks exact totals: both absent
+19/0/0/0, Cockpit only 26/6/0/1, Comfort only 24/0/4/1, both present 30/6/4/1
+(total/Cockpit/Comfort/shared glare). This enumeration bypasses the
+dispatcher's normal first-true short circuit for measurement; it does not claim
+a normal dispatch invokes every stored predicate. The test transaction restores
+the original gate table and fail-open state without touching lifecycle
+registrations.
+
+Review corrected three scanner gates that initially registered null State,
+initial FSS bindings hidden behind the pre-decision false cache, and the strict
+Present budget oracle's third owner-wrapped tick. The native temporal fixture
+uses the real provider with a denied cached owner and checks zero terrain
+notifications alongside continuing core geometry; the admitted control retains
+its notification. The FSS fixture repeats denial past the pool capacity, then
+acquires the admitted control. Loaded-provider client and host-treatment
+fixtures exercise optional absence and its rejection cases.
+
+Compiled validation exposed stale fixture assumptions: the native menu trace
+includes its pose publication, the vScreen rig already links the real device
+hook through its production-object response file, and synthetic Legacy States
+must explicitly enable the new Comfort cache. The scanner control now uses the
+actual indexed-instanced selector shape. Source-order fixtures pin the new
+cached-owner calls without weakening their counts or ordering; the native-frame
+config restore passes the saved string through the required C-string API.
+
+Focused validation R4 passes all ten selected rigs. Full validation R4 passes
+both production DLLs, all 169 jobs, the 127-key config contract, the native and
+graphics exports, and the self-contained installer's actual resource check:
+`build/full-comfort-absence-offline-20261011-r4.log`. The full-build receipt's
+source fingerprint is
+`bcd91fc60c0fdbd17b4f202925c9ae12d0b5b63e2baee3b8e95349007a335e7a`. The
+lifecycle source oracle retains 104 mutation checks.
+
+This remains offline development evidence. Actual admitted runtime startup,
+whole-profile absence and CPU/GPU acceptance remain open. Main-to-feature sync
+does not authorize a feature-to-main merge. Steam installation remains on hold;
+no live configuration, install, promotion or flight was performed.

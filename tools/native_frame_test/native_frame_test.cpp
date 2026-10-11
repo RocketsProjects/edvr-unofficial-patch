@@ -25,10 +25,12 @@
 
 // The journal watcher is stubbed so the on-foot signal is the rig's to set.
 static bool g_journalActive = false, g_onFootKnown = false, g_onFoot = false;
+static bool g_comfortOwnerAllowed = true;
 namespace edvr {
 bool journalWatchActive() { return g_journalActive; }
 bool journalOnFootKnown() { return g_onFootKnown; }
 bool journalOnFoot() { return g_onFoot; }
+bool comfortOwnerAllowed() noexcept { return g_comfortOwnerAllowed; }
 }
 
 using Microsoft::WRL::ComPtr;
@@ -763,6 +765,63 @@ int wmain(int argc, wchar_t** argv) {
           "failed allocation has no opaque state to destroy");
     check(nextTable.close(nextTable.context) == S_OK,
           "later provider generation closes cleanly after absence and allocation refusal");
+
+    // The transition key remains enabled in memory while the cached Comfort
+    // owner is absent. The real provider must still answer core frame data,
+    // publish transition disabled, and leave Comfort's submit channels alone.
+    auto nativeFrameComfortOwnerDenied = [&] {
+    const std::string savedTransition =
+        edvr::Config::get().getString("fix.transition_flash", "1");
+    edvr::Config::get().set("fix.transition_flash", "1");
+    g_comfortOwnerAllowed = false;
+    EdvrNativeFrameRequest deniedComfortRequest{
+        sizeof(deniedComfortRequest), EDVR_NATIVE_FRAME_VERSION_1,
+        device.Get(), 43};
+    EdvrNativeFrameTable deniedComfortTable{
+        sizeof(deniedComfortTable), EDVR_NATIVE_FRAME_VERSION_1};
+    const HRESULT deniedComfortAcquire =
+        edvrAcquireNativeFrame(&deniedComfortRequest, &deniedComfortTable);
+    check(deniedComfortAcquire == S_OK && deniedComfortTable.context &&
+              deniedComfortTable.beginFrame && deniedComfortTable.latchSubmit &&
+              deniedComfortTable.close,
+          "Comfort absence keeps the native-frame ABI provider available for core data");
+    if (deniedComfortAcquire == S_OK && deniedComfortTable.context) {
+        edvr::publishGameDevice(device.Get());
+        edvr::announceSceneArrived();
+        EdvrNativeFrameInput deniedComfortInput = input(43, 8, 1);
+        EdvrNativeFrameOutput deniedComfortOutput{
+            sizeof(deniedComfortOutput), EDVR_NATIVE_FRAME_VERSION_5};
+        const HRESULT beginDeniedComfort = deniedComfortTable.beginFrame(
+            deniedComfortTable.context, &deniedComfortInput,
+            &deniedComfortOutput);
+        check(beginDeniedComfort == S_OK && deniedComfortOutput.version ==
+                  EDVR_NATIVE_FRAME_VERSION_5 &&
+                  deniedComfortOutput.size == sizeof(deniedComfortOutput) &&
+                  deniedComfortOutput.sceneReady == 1 &&
+                  deniedComfortOutput.resubmitEnabled == 1 &&
+                  deniedComfortOutput.transitionEnabled == 0,
+              "owner-denied native frame keeps scene/core outputs live and publishes transition disabled despite config on");
+        edvr::clearGlitchFrame();
+        edvr::requestSubmitHold(0);
+        edvr::markGlitchFrame();
+        edvr::requestSubmitHold(1);
+        EdvrNativeFrameDecision deniedComfortDecision{
+            sizeof(deniedComfortDecision), EDVR_NATIVE_FRAME_VERSION_1};
+        check(deniedComfortTable.latchSubmit(
+                  deniedComfortTable.context, 1, &deniedComfortDecision) == S_OK &&
+                  deniedComfortDecision.withhold == 0 &&
+                  !edvr::glitchConsumerPresent() &&
+                  edvr::takeSubmitHoldFrame(),
+              "owner-denied native frame does not consume or publish the Comfort submit channels");
+        edvr::clearGlitchFrame();
+        edvr::requestSubmitHold(0);
+        check(deniedComfortTable.close(deniedComfortTable.context) == S_OK,
+              "owner-denied native-frame session closes cleanly");
+    }
+    g_comfortOwnerAllowed = true;
+    edvr::Config::get().set("fix.transition_flash", savedTransition.c_str());
+    };
+    nativeFrameComfortOwnerDenied();
 
     // advanced.slow_test_ms's end-frame hold (frame_flag.h, v36): d3d11 -> openvr, 0 is no hold, and the
     // runtime never holds a frame for more than five seconds whatever is asked.

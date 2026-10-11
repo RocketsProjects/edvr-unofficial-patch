@@ -83,6 +83,7 @@ bool prepareRelay(void* trampoline, void*) noexcept {
 // --- State and instruments -------------------------------------------------------------------------------------------------------------------------------------
 std::atomic<bool> g_attempted{false};   // install has been tried (once, ever)
 std::atomic<bool> g_installed{false};
+std::atomic<bool> g_ownerAllowed{false};
 std::atomic<bool> g_byStamp{false};
 std::atomic<uint64_t> g_tangents{0};    // tcover::packTangents(T, H), 0 until a frame says
 std::atomic<uint64_t> g_calls{0}, g_widened{0};   // the running heartbeat window's
@@ -154,7 +155,9 @@ void sayInert(const char* why) {
 
 }  // namespace
 
-void terrainCullCoverInstall(bool flatProfile) {
+void terrainCullCoverInstall(bool ownerAllowed, bool flatProfile) {
+    if (!ownerAllowed) return;
+    g_ownerAllowed.store(true, std::memory_order_release);
     bool expected = false;
     if (!g_attempted.compare_exchange_strong(expected, true)) return;   // once, ever: a refusal is final
     if (flatProfile) {
@@ -193,13 +196,16 @@ void terrainCullCoverInstall(bool flatProfile) {
 }
 
 void terrainCullCoverNoteFrusta(const float frusta[2][4]) {
+    if (!g_ownerAllowed.load(std::memory_order_acquire) ||
+        !g_installed.load(std::memory_order_acquire)) return;
     float tanV = 0.0f, tanH = 0.0f;
     if (!frusta || !tcover::frustaTangents(frusta, &tanV, &tanH)) return;
     g_tangents.store(tcover::packTangents(tanV, tanH), std::memory_order_relaxed);
 }
 
 void terrainCullCoverPoll(uint64_t nowMs) {
-    if (!g_installed.load(std::memory_order_acquire)) return;
+    if (!g_ownerAllowed.load(std::memory_order_acquire) ||
+        !g_installed.load(std::memory_order_acquire)) return;
     if (!g_pollStarted) {   // the first tick starts the window
         g_pollStarted = true;
         g_windowStartMs = nowMs;
@@ -230,6 +236,7 @@ void terrainCullCoverTestReset() {
     g_relayGate.store(0);
     g_forward.store(0);
     g_installed.store(false);
+    g_ownerAllowed.store(false);
     g_attempted.store(false);
     g_byStamp.store(false);
     g_tangents.store(0);

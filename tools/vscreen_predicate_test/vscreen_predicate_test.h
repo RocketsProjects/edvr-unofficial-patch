@@ -218,7 +218,23 @@ bool vScreenPredicateTestVisit(std::uint16_t siteId,
                                bool distanceEnabled,
                                bool traceEnabled,
                                VScreenPredicateTestResult* result,
-                               bool ownerAllowed = true) noexcept;
+                               bool ownerAllowed = true,
+                               bool comfortAllowed = true,
+                               char kind = 'N',
+                               std::uint32_t count = 3,
+                               std::uint32_t instances = 1,
+                               std::uint32_t fssBodyFrame = 0,
+                               std::uint32_t frameNo = 0,
+                               std::uint32_t fssJumpFrame = 0) noexcept;
+
+// Serialized registry test. Brackets and clears the global legacy-gate
+// registry while counting successful subscriptions and actual callback calls.
+bool vScreenLegacyGateRegistrationTest(
+    bool cockpitAllowed, bool comfortAllowed,
+    std::uint32_t* registeredCount,
+    std::uint32_t* cockpitCallbacks,
+    std::uint32_t* comfortCallbacks,
+    std::uint32_t* sharedGlareCallbacks) noexcept;
 
 bool vScreenEyeCensusPredicateTestVisit(
     ID3D11DeviceContext* context, char kind, std::uint32_t count,

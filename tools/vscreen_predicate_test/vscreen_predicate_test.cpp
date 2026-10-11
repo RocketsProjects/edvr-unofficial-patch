@@ -31,6 +31,8 @@
 #include "../../src/d3d11/loader_panel.h"
 #include "../../src/d3d11/target_sharp.h"
 #include "../../src/d3d11/target_sharp_policy_test.h"
+#include "../../src/d3d11/fss_panel.h"
+#include "../../src/d3d11/fss_reveal.h"
 #include "../../src/d3d11/cockpit_visuals_owner_gate.h"
 #include "../../src/d3d11/sunglare_fix.h"
 #include "../../src/d3d11/sunglare_nomination_observation.h"
@@ -2740,6 +2742,47 @@ bool testNvPrecedenceSubprocesses() {
     }
     return true;
 }
+
+bool testCockpitComfortLegacyGateRegistration() {
+    std::uint32_t deniedCount = 0, deniedCockpit = 0, deniedComfort = 0,
+                  deniedShared = 0;
+    const bool deniedRegistered = edvr::vScreenLegacyGateRegistrationTest(
+        false, false, &deniedCount, &deniedCockpit, &deniedComfort,
+        &deniedShared);
+    bool okay = true;
+    okay &= check(deniedRegistered && deniedCount == 19 && deniedCockpit == 0 &&
+                      deniedComfort == 0 && deniedShared == 0,
+                  "actual legacy registration omits both absent owners and shared glare");
+
+    std::uint32_t cockpitCount = 0, cockpitCallbacks = 0,
+                  noComfortCallbacks = 0, cockpitShared = 0;
+    const bool cockpitRegistered = edvr::vScreenLegacyGateRegistrationTest(
+        true, false, &cockpitCount, &cockpitCallbacks, &noComfortCallbacks,
+        &cockpitShared);
+    okay &= check(cockpitRegistered && cockpitCount == 26 &&
+                      cockpitCallbacks == 6 && noComfortCallbacks == 0 &&
+                      cockpitShared == 1,
+                  "Cockpit admission restores actual callbacks and shared glare while Comfort stays absent");
+
+    std::uint32_t comfortCount = 0, noCockpitCallbacks = 0,
+                  comfortCallbacks = 0, comfortShared = 0;
+    const bool comfortRegistered = edvr::vScreenLegacyGateRegistrationTest(
+        false, true, &comfortCount, &noCockpitCallbacks, &comfortCallbacks,
+        &comfortShared);
+    okay &= check(comfortRegistered && comfortCount == 24 &&
+                      noCockpitCallbacks == 0 && comfortCallbacks == 4 &&
+                      comfortShared == 1,
+                  "Comfort admission restores actual callbacks and shared glare while Cockpit stays absent");
+
+    std::uint32_t bothCount = 0, bothCockpit = 0, bothComfort = 0,
+                  bothShared = 0;
+    const bool bothRegistered = edvr::vScreenLegacyGateRegistrationTest(
+        true, true, &bothCount, &bothCockpit, &bothComfort, &bothShared);
+    okay &= check(bothRegistered && bothCount == 30 &&
+                      bothCockpit == 6 && bothComfort == 4 && bothShared == 1,
+                  "admitting both owners preserves both actual legacy callback families");
+    return okay;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -3474,6 +3517,16 @@ int main(int argc, char** argv) {
                       "context fact contains actual identities and before/after reset reads");
 
         okay &= check(edvr::vScreenPredicateTestVisit(
+                          contextSite, immediate, immediate, 23, false, true,
+                          &result, true, false) &&
+                          result.siteResult.flow == Flow::Continue &&
+                          result.siteResult.outcome == SiteOutcome::Observed &&
+                          readFact(result, &fact) && fact.siteId == contextSite &&
+                          checkRead(fact.context.contextIdentity,
+                                    reinterpret_cast<std::uintptr_t>(immediate)),
+                      "core context census remains live in the real visitor while Comfort ownership is denied");
+
+        okay &= check(edvr::vScreenPredicateTestVisit(
                           contextSite, deferred, immediate, 19, false, true, &result),
                       "trace-enabled foreign-context site executes actual visitor");
         okay &= check(result.siteResult.flow == Flow::Stop &&
@@ -4020,6 +4073,50 @@ int main(int argc, char** argv) {
             okay &= check(resourceHookReady,
                           "TargetSharp WARP GetResource query counter installs");
 
+            // Seed stale active Comfort scanner module state directly. The
+            // real vScreen visitor must stop on its cached owner field before
+            // invoking either scanner claim; the existing VSGetShader hook is
+            // the connected candidate-query counter. The admitted panel call
+            // is the positive control for that counter.
+            const bool savedFssPanelEnabled = edvr::detail::g_fssPanelEnabled;
+            const bool savedFssRevealSteady = edvr::detail::g_fssRevealSteady;
+            edvr::detail::g_fssPanelEnabled = true;
+            edvr::detail::g_fssRevealSteady = true;
+            constexpr auto fssPanelSite = static_cast<std::uint16_t>(
+                edvr::draw_ladder::SiteId::kFssPanelClaim);
+            constexpr auto fssRevealSite = static_cast<std::uint16_t>(
+                edvr::draw_ladder::SiteId::kFssRevealClaim);
+            edvr::VScreenPredicateTestResult deniedScanner{};
+            if (hookReady) g_getVertexShaderCalls = 0;
+            okay &= check(edvr::vScreenPredicateTestVisit(
+                              fssPanelSite, immediate, immediate, 0, true, true,
+                              &deniedScanner, true, false, 'X', 6, 1, 5, 6) &&
+                              deniedScanner.token.valid() &&
+                              deniedScanner.siteResult.outcome == SiteOutcome::Declined &&
+                              edvr::detail::g_fssPanelEnabled && hookReady &&
+                              g_getVertexShaderCalls == 0,
+                          "owner-denied real FSS panel visitor ignores stale active module state before its connected WARP shader query");
+            if (hookReady) g_getVertexShaderCalls = 0;
+            okay &= check(edvr::vScreenPredicateTestVisit(
+                              fssRevealSite, immediate, immediate, 0, true, true,
+                              &deniedScanner, true, false, 'N', 6, 1, 5, 6) &&
+                              deniedScanner.token.valid() &&
+                              deniedScanner.siteResult.outcome == SiteOutcome::Declined &&
+                              edvr::detail::g_fssRevealSteady && hookReady &&
+                              g_getVertexShaderCalls == 0,
+                          "owner-denied real FSS reveal visitor ignores stale active module state before its connected WARP shader query");
+            if (hookReady) g_getVertexShaderCalls = 0;
+            edvr::VScreenPredicateTestResult allowedScanner{};
+            okay &= check(edvr::vScreenPredicateTestVisit(
+                              fssPanelSite, immediate, immediate, 0, true, true,
+                              &allowedScanner, true, true, 'X', 6, 1, 5, 6) &&
+                              allowedScanner.siteResult.outcome == SiteOutcome::Declined &&
+                              hookReady && g_getVertexShaderCalls == 1,
+                          "owner-present stale FSS panel reaches the real scanner selector and proves the WARP query counter is connected");
+            edvr::detail::g_fssPanelEnabled = savedFssPanelEnabled;
+            edvr::detail::g_fssRevealSteady = savedFssRevealSteady;
+            if (hookReady) g_getVertexShaderCalls = 0;
+
             if (srv) immediate->PSSetShaderResources(0, 1, &srv);
             for (std::uint32_t i = 0; i < 4; ++i)
                 edvr::bindingSet(static_cast<edvr::BindSlot>(
@@ -4364,6 +4461,7 @@ int main(int argc, char** argv) {
 
         okay &= testSunglareNomination(device, immediate);
         okay &= testCockpitOwnerDeniedGlareAndCore(device, immediate);
+        okay &= testCockpitComfortLegacyGateRegistration();
         for (std::uint32_t i = 0; i < 4; ++i)
             edvr::bindingSet(static_cast<edvr::BindSlot>(
                                  static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i), nullptr);

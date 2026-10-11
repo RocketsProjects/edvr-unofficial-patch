@@ -38,6 +38,7 @@
 #include "plugin_registry.h"
 #include "plugin_admission_transport.h"
 #include "cockpit_visuals_owner_gate.h"
+#include "comfort_owner_gate.h"
 #include "intro_lifecycle.h"
 #include "../plugins/comfort/scanners/scanner_lifecycle.h"
 #include "../plugins/comfort/scanners/scanner_claim.h"
@@ -375,6 +376,7 @@ struct State {
     // before any Cockpit Visuals factory/configuration work. Owner callbacks
     // remain absent for this State when the cached decision is false.
     bool cockpitVisualsOwnerAllowed = false;
+    bool comfortOwnerAllowed = false;
     VTableHook hook;
     // Owner-thread classifier settings epoch captured with each replay frame.
     uint32_t classifierConfigEpoch = 0;
@@ -1111,7 +1113,7 @@ void shutdownSchedulerLifecycle() {
 }
 
 bool ensureScannerLifecycle() {
-    if (!g_state) return false;
+    if (!g_state || !g_state->comfortOwnerAllowed) return false;
     return pluginRegistryRegisterLifecycle(
         &plugins::scanners::scannerLifecycleOps());
 }
@@ -1122,6 +1124,7 @@ void selectScannerLifecycle() {
 
 void configureScannerLifecycleStage(uint32_t stage, Config& cfg,
                                     void (*fallback)(Config&)) {
+    if (!g_state || !g_state->comfortOwnerAllowed) return;
     if (g_scannerLifecycleRegistered &&
         pluginRegistryConfigureLifecycleComponentStage(
             kComfortPluginIndex, edvr::kComfortScannersLifecycleComponent,
@@ -1132,6 +1135,7 @@ void configureScannerLifecycleStage(uint32_t stage, Config& cfg,
 
 void frameScannerLifecycleStage(uint32_t stage, uint32_t sceneFrame,
                                 void (*fallback)()) {
+    if (!g_state || !g_state->comfortOwnerAllowed) return;
     if (g_scannerLifecycleRegistered &&
         pluginRegistryFrameLifecycleComponentStage(
             kComfortPluginIndex, edvr::kComfortScannersLifecycleComponent,
@@ -1141,6 +1145,7 @@ void frameScannerLifecycleStage(uint32_t stage, uint32_t sceneFrame,
 }
 
 void shutdownScannerLifecycleStage(uint32_t stage, void (*fallback)()) {
+    if (!g_state || !g_state->comfortOwnerAllowed) return;
     if (g_scannerLifecycleRegistered &&
         pluginRegistryShutdownLifecycleComponentStage(
             kComfortPluginIndex, edvr::kComfortScannersLifecycleComponent,
@@ -1152,6 +1157,7 @@ void shutdownScannerLifecycleStage(uint32_t stage, void (*fallback)()) {
 void shutdownScannerLifecycle() {
     const bool registered = g_scannerLifecycleRegistered;
     g_scannerLifecycleRegistered = false;
+    if (!g_state || !g_state->comfortOwnerAllowed) return;
     if (registered) {
         pluginRegistryShutdownLifecycleComponent(
             kComfortPluginIndex, edvr::kComfortScannersLifecycleComponent);
@@ -1161,7 +1167,7 @@ void shutdownScannerLifecycle() {
 }
 
 bool ensureComfortLifecycle() {
-    if (!g_state) return false;
+    if (!g_state || !g_state->comfortOwnerAllowed) return false;
     return pluginRegistryRegisterLifecycle(
         &plugins::comfort::comfortLifecycleOps());
 }
@@ -1171,6 +1177,7 @@ void selectComfortLifecycle() {
 }
 
 void configureComfortLifecycle(Config& cfg) {
+    if (!g_state || !g_state->comfortOwnerAllowed) return;
     if (g_comfortLifecycleRegistered) {
         pluginRegistryConfigureLifecycleComponent(
             kComfortPluginIndex,
@@ -1182,6 +1189,7 @@ void configureComfortLifecycle(Config& cfg) {
 
 void frameComfortLifecycleStage(uint32_t stage, uint32_t sceneFrame,
                                 void (*fallback)(uint32_t)) {
+    if (!g_state || !g_state->comfortOwnerAllowed) return;
     if (g_comfortLifecycleRegistered &&
         pluginRegistryFrameLifecycleComponentStage(
             kComfortPluginIndex,
@@ -1900,6 +1908,18 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
 // core registry. Night vision registers through its plugin ops independently.
 // Keep each adapter beside this table so no consumer is hidden in an unrelated
 // feature's aggregate predicate.
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+uint32_t g_testCockpitLegacyGateCallbacks = 0;
+uint32_t g_testComfortLegacyGateCallbacks = 0;
+uint32_t g_testSharedGlareLegacyGateCallbacks = 0;
+#define EDVR_TEST_COUNT_COCKPIT_GATE() (++g_testCockpitLegacyGateCallbacks)
+#define EDVR_TEST_COUNT_COMFORT_GATE() (++g_testComfortLegacyGateCallbacks)
+#define EDVR_TEST_COUNT_SHARED_GLARE_GATE() (++g_testSharedGlareLegacyGateCallbacks)
+#else
+#define EDVR_TEST_COUNT_COCKPIT_GATE() ((void)0)
+#define EDVR_TEST_COUNT_COMFORT_GATE() ((void)0)
+#define EDVR_TEST_COUNT_SHARED_GLARE_GATE() ((void)0)
+#endif
 #define EDVR_GATE_STATE(name, expression)                                      \
     uint32_t drawGate_##name(void* opaque) {                                   \
         State* s = static_cast<State*>(opaque);                               \
@@ -1912,6 +1932,7 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
     }
 #define EDVR_GATE_OWNED(name, expression)                                     \
     uint32_t drawGate_##name(void* opaque) {                                  \
+        EDVR_TEST_COUNT_COCKPIT_GATE();                                       \
         State* s = static_cast<State*>(opaque);                              \
         bool wanted = false;                                                 \
         runCockpitVisualsOwned(s && s->cockpitVisualsOwnerAllowed, [&] {     \
@@ -1919,17 +1940,24 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
         });                                                                  \
         return wanted ? 1u : 0u;                                             \
     }
+#define EDVR_GATE_COMFORT(name, expression)                                   \
+    uint32_t drawGate_##name(void* opaque) {                                  \
+        State* s = static_cast<State*>(opaque);                               \
+        if (!s || !s->comfortOwnerAllowed) return 0;                          \
+        EDVR_TEST_COUNT_COMFORT_GATE();                                       \
+        return (expression) ? 1u : 0u;                                        \
+    }
 
 EDVR_GATE_STATE(panel_distance, s->distanceEnabled)
-EDVR_GATE_STATE(transition_flash_eye_count, s->countForFlashFix)
+EDVR_GATE_COMFORT(transition_flash_eye_count, s->countForFlashFix)
 EDVR_GATE_STATE(census_skip_count, s->censusSkipCount != 0)
 EDVR_GATE_STATE(census_skip_ranges, s->censusSkipRangeCount != 0)
 EDVR_GATE_STATE(census_skip_off, s->censusSkipOffCount != 0)
 EDVR_GATE_STATE(census_quad_skip_armed, s->quadSkipArmed)
 EDVR_GATE_STATE(census_auto, s->censusAutoW != 0)
-EDVR_GATE_GLOBAL(fss_resolution, fssResActive())
-EDVR_GATE_GLOBAL(fss_panel, fssPanelWantsDraws())
-EDVR_GATE_GLOBAL(fss_reveal, fssRevealWantsDraws())
+EDVR_GATE_COMFORT(fss_resolution, fssResActive())
+EDVR_GATE_COMFORT(fss_panel, fssPanelWantsDraws())
+EDVR_GATE_COMFORT(fss_reveal, fssRevealWantsDraws())
 EDVR_GATE_OWNED(remlok, remlokWantsDraws())
 EDVR_GATE_GLOBAL(hologram_depth, holoWantsDraws())
 EDVR_GATE_OWNED(target_indicator, targetSharpWantsDraws())
@@ -1937,9 +1965,14 @@ EDVR_GATE_GLOBAL(ui_depth, uiDepthWantsDraws())
 EDVR_GATE_GLOBAL(draw_census, drawCensusArmed())
 EDVR_GATE_GLOBAL(object_probe, objectProbeWantsDraws())
 EDVR_GATE_GLOBAL(panel_curve, panelCurveWants())
-EDVR_GATE_STATE(sun_glare, s->cockpitVisualsOwnerAllowed
-                                ? sunglareWantsDraws()
-                                : exposureDampingActive())
+uint32_t drawGate_sun_glare(void* opaque) {
+    State* s = static_cast<State*>(opaque);
+    if (!s || (!s->cockpitVisualsOwnerAllowed && !s->comfortOwnerAllowed))
+        return 0;
+    EDVR_TEST_COUNT_SHARED_GLARE_GATE();
+    return (s->cockpitVisualsOwnerAllowed ? sunglareWantsDraws()
+        : exposureDampingActive()) ? 1u : 0u;
+}
 EDVR_GATE_OWNED(particles, particleWantsDraws())
 EDVR_GATE_GLOBAL(backdrop, backdropWantsDraws())
 EDVR_GATE_GLOBAL(scrim, scrimWantsDraws())
@@ -1956,48 +1989,72 @@ EDVR_GATE_GLOBAL(intro_curve, introCurveWants())
 #undef EDVR_GATE_STATE
 #undef EDVR_GATE_GLOBAL
 #undef EDVR_GATE_OWNED
+#undef EDVR_GATE_COMFORT
+#undef EDVR_TEST_COUNT_COCKPIT_GATE
+#undef EDVR_TEST_COUNT_COMFORT_GATE
+#undef EDVR_TEST_COUNT_SHARED_GLARE_GATE
 
 struct LegacyDrawGateRegistration {
     const char* name;
     EdvrLegacyDrawGateFn predicate;
     bool needsState;
+    enum class Owner : std::uint8_t { Core, CockpitVisuals, Comfort, CockpitOrComfort };
+    Owner owner = Owner::Core;
 };
+using LegacyGateOwner = LegacyDrawGateRegistration::Owner;
 constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] = {
     {"legacy.panel-distance", &drawGate_panel_distance, true},
-    {"legacy.transition-flash-eye-count", &drawGate_transition_flash_eye_count, true},
+    {"legacy.transition-flash-eye-count", &drawGate_transition_flash_eye_count, true, LegacyGateOwner::Comfort},
     {"legacy.census-skip-count", &drawGate_census_skip_count, true},
     {"legacy.census-skip-ranges", &drawGate_census_skip_ranges, true},
     {"legacy.census-skip-off", &drawGate_census_skip_off, true},
     {"legacy.census-quad-skip-armed", &drawGate_census_quad_skip_armed, true},
     {"legacy.census-auto", &drawGate_census_auto, true},
-    {"legacy.fss-resolution", &drawGate_fss_resolution, false},
-    {"legacy.fss-panel", &drawGate_fss_panel, false},
-    {"legacy.fss-reveal", &drawGate_fss_reveal, false},
-    {"legacy.remlok", &drawGate_remlok, true},
+    {"legacy.fss-resolution", &drawGate_fss_resolution, true, LegacyGateOwner::Comfort},
+    {"legacy.fss-panel", &drawGate_fss_panel, true, LegacyGateOwner::Comfort},
+    {"legacy.fss-reveal", &drawGate_fss_reveal, true, LegacyGateOwner::Comfort},
+    {"legacy.remlok", &drawGate_remlok, true, LegacyGateOwner::CockpitVisuals},
     {"legacy.hologram-depth", &drawGate_hologram_depth, false},
-    {"legacy.target-indicator", &drawGate_target_indicator, true},
+    {"legacy.target-indicator", &drawGate_target_indicator, true, LegacyGateOwner::CockpitVisuals},
     {"legacy.ui-depth", &drawGate_ui_depth, false},
-    {"legacy.sun-glare", &drawGate_sun_glare, true},
+    {"legacy.sun-glare", &drawGate_sun_glare, true, LegacyGateOwner::CockpitOrComfort},
     {"legacy.draw-census", &drawGate_draw_census, false},
     {"legacy.object-probe", &drawGate_object_probe, false},
     {"legacy.panel-curve", &drawGate_panel_curve, false},
-    {"legacy.particles", &drawGate_particles, true},
+    {"legacy.particles", &drawGate_particles, true, LegacyGateOwner::CockpitVisuals},
     {"legacy.backdrop", &drawGate_backdrop, false},
     {"legacy.scrim", &drawGate_scrim, false},
     {"legacy.quad-probe", &drawGate_quad_probe, false},
     {"legacy.loader-panel", &drawGate_loader_panel, false},
     {"legacy.intro-panel", &drawGate_intro_panel, false},
-    {"legacy.wake-pulse", &drawGate_wake_pulse, true},
-    {"legacy.witchspace-stars", &drawGate_witchspace_stars, true},
-    {"legacy.space-dust", &drawGate_space_dust, true},
+    {"legacy.wake-pulse", &drawGate_wake_pulse, true, LegacyGateOwner::CockpitVisuals},
+    {"legacy.witchspace-stars", &drawGate_witchspace_stars, true, LegacyGateOwner::CockpitVisuals},
+    {"legacy.space-dust", &drawGate_space_dust, true, LegacyGateOwner::CockpitVisuals},
     {"legacy.depth-probe", &drawGate_depth_probe, false},
     {"legacy.vscreen-footprint", &drawGate_vscreen_footprint, false},
     {"legacy.intro-curve", &drawGate_intro_curve, false},
 };
 
-bool registerLegacyDrawGates(State* state) {
+bool legacyDrawGateOwnerAllowed(const LegacyDrawGateRegistration& registration,
+                                const State* state) {
+    switch (registration.owner) {
+    case LegacyGateOwner::Core: return true;
+    case LegacyGateOwner::CockpitVisuals:
+        return state && state->cockpitVisualsOwnerAllowed;
+    case LegacyGateOwner::Comfort:
+        return state && state->comfortOwnerAllowed;
+    case LegacyGateOwner::CockpitOrComfort:
+        return state && (state->cockpitVisualsOwnerAllowed ||
+                         state->comfortOwnerAllowed);
+    }
+    return false;
+}
+
+bool registerLegacyDrawGates(State* state, std::uint32_t* registeredCount = nullptr) {
     bool ok = true;
+    if (registeredCount) *registeredCount = 0;
     for (const auto& registration : kLegacyDrawGateRegistrations) {
+        if (!legacyDrawGateOwnerAllowed(registration, state)) continue;
         void* context = registration.needsState ? state : nullptr;
         if (!pluginRegistryRegisterLegacyDrawGate(registration.name,
                                                    registration.predicate,
@@ -2006,6 +2063,8 @@ bool registerLegacyDrawGates(State* state) {
                             registration.name);
             pluginRegistrySetDrawGateFailOpen();
             ok = false;
+        } else if (registeredCount) {
+            ++*registeredCount;
         }
     }
     return ok;
@@ -2243,7 +2302,7 @@ struct VScreenDrawLadderVisitor {
                 fact.legacyInterestMask = legacyInterestMask;
                 const bool interested = draw_interest::contains(
                     legacyInterestMask, SiteType::interestId);
-                if (!interested) {
+                if (s->comfortOwnerAllowed && !interested) {
                     // The frozen helper was staged out. These raw, cheap
                     // inputs can still prove its short-circuit false cases;
                     // no shader query is made when the helper did not run.
@@ -2291,7 +2350,7 @@ struct VScreenDrawLadderVisitor {
             if constexpr (TracePolicy::enabled &&
                           (SiteType::id == draw_ladder::SiteId::kFssPanelClaim ||
                            SiteType::id == draw_ladder::SiteId::kFssRevealClaim)) {
-                if (!interested) {
+                if (s->comfortOwnerAllowed && !interested) {
                     FssObservation fact{};
                     fact.kind = SiteType::id == draw_ladder::SiteId::kFssPanelClaim
                         ? FssTraceFactKind::kPanel : FssTraceFactKind::kReveal;
@@ -2327,6 +2386,7 @@ struct VScreenDrawLadderVisitor {
         constexpr SiteId id = SiteType::id;
 
         if constexpr (id == SiteId::kFssChromeSkip) {
+            if (!s->comfortOwnerAllowed) return SiteResult::observed();
             // Kept before the foreign-context exit: the scanner chrome tracker
             // has always observed the draw at this exact rung.
             using draw_ladder_trace::PredicateFact;
@@ -2753,7 +2813,8 @@ struct VScreenDrawLadderVisitor {
                 return claimed(id, DrawVerdict::kBackdrop);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kOffscreenViewport) {
-            if (fssResActive()) fssResScaleDrawViewport(self, s);
+            if (s->comfortOwnerAllowed && fssResActive())
+                fssResScaleDrawViewport(self, s);
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kOffscreenAutoState) {
             if (s->censusAutoW) {
@@ -2959,7 +3020,8 @@ struct VScreenDrawLadderVisitor {
                 return SiteResult::declined();
             }
         } else if constexpr (id == SiteId::kOffscreenBodyLayerUpdate) {
-            if (fssPanelWantsDraws() || fssRevealWantsDraws()) {
+            if (s->comfortOwnerAllowed &&
+                (fssPanelWantsDraws() || fssRevealWantsDraws())) {
                 if (s->fssBodyLayerGen != rtvGen) {
                     s->fssBodyLayerGen = rtvGen;
                     s->fssBodyLayerBound = false;
@@ -3419,6 +3481,7 @@ struct VScreenDrawLadderVisitor {
                 backdropOnComposite(self, kind, count, instances)) return claimed(id, DrawVerdict::kBackdrop);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kFssPanelClaim) {
+            if (!s->comfortOwnerAllowed) return SiteResult::declined();
             const plugins::comfort::scanners::ScannerClaimHostView host{
                 s->fssBodyFrame, s->frameNo, s->fssJumpFrame, s->frameNo};
             if constexpr (TracePolicy::enabled) {
@@ -3436,6 +3499,7 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kFssRevealClaim) {
+            if (!s->comfortOwnerAllowed) return SiteResult::declined();
             const plugins::comfort::scanners::ScannerClaimHostView host{
                 s->fssBodyFrame, s->frameNo, s->fssJumpFrame, s->frameNo};
             if constexpr (TracePolicy::enabled) {
@@ -3468,7 +3532,8 @@ struct VScreenDrawLadderVisitor {
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kSunglareSkip) {
             if (!s->cockpitVisualsOwnerAllowed) {
-                sunglareTrackExposureGlareTrain(kind, count, instances);
+                if (s->comfortOwnerAllowed)
+                    sunglareTrackExposureGlareTrain(kind, count, instances);
                 return SiteResult::declined();
             }
             if constexpr (TracePolicy::enabled) {
@@ -4433,7 +4498,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
         graphicsBridgeNoteUnknownExecution();
         motionResourceWritten(nullptr);
         if (celestialMotionAnyWatched()) celestialMotionConstantsUnknownWrite(nullptr);
-        glitchFrameInvalidatePool(nullptr);
+        if (s->comfortOwnerAllowed) glitchFrameInvalidatePool(nullptr);
     }
     s->realExecuteCommandList(self, list, restoreContextState);
     // After the call, and only when the context was not restored: with
@@ -4540,7 +4605,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         drawCensusCbNoteMap(res, mapped->pData);
     }
     // The reveal sync's shadow of the scene block, same tee, its own gate.
-    if (mapData && fssRevealWantsDraws()) {
+    if (mapData && s->comfortOwnerAllowed && fssRevealWantsDraws()) {
         fssRevealNoteMap(res, mapped->pData);
     }
     // Planet-patch constants' CPU shadow: remember the mapped pointer so the Unmap tee can copy the game's write
@@ -4600,7 +4665,8 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             mapBufferDesc(res, &mm.byteWidth);   // stays 0 for a texture
         }
         flatRuntimeMapBounceNoteKind(res,mm.byteWidth != 0);
-        if (mm.byteWidth && glitchFrameWantsBuffer(mm.byteWidth)) {
+        if (s->comfortOwnerAllowed && mm.byteWidth &&
+            glitchFrameWantsBuffer(mm.byteWidth)) {
             s->camResource = res;
             s->camData = mapped->pData;
             s->camBytes = mm.byteWidth;
@@ -4609,7 +4675,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // glitchFrameObserving() (glitch_frame.h): glitchFrameWantsPool's own
     // necessary first test is installed-and-observing; with either false it
     // always returns 0.
-    if(mapData0 && res && glitchFrameObserving()){
+    if(s->comfortOwnerAllowed && mapData0 && res && glitchFrameObserving()){
         const uint32_t bytes=glitchFrameWantsPool(res);
         if(bytes){
             // A resource address may be recycled. Verify the current mapping's
@@ -4683,8 +4749,9 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     // (glitch_frame.h) -- unlike glitchFrameWantsPool, it does not also ask
     // State::observing, so glitchFrameObserving() would be the wrong,
     // narrower guard here.
-    if (glitchFrameInstalled()) glitchFrameInvalidatePool(res);
-    if(res==s->scenePoolResource && s->scenePoolData){
+    if (s->comfortOwnerAllowed && glitchFrameInstalled())
+        glitchFrameInvalidatePool(res);
+    if(s->comfortOwnerAllowed && res==s->scenePoolResource && s->scenePoolData){
         guardedBudget(g_glitchPoolBudget,[&]{glitchFrameObservePool(res,s->scenePoolData,s->scenePoolBytes);});
         s->scenePoolResource=nullptr;s->scenePoolData=nullptr;s->scenePoolBytes=0;
     }
@@ -4699,7 +4766,8 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         flatRuntimeUnmap(res);
     }
     if (flatTemporalCapturing()) flatTemporalUnmap(res);
-    if (fssRevealWantsDraws()) fssRevealNoteUnmap(res);
+    if (s->comfortOwnerAllowed && fssRevealWantsDraws())
+        fssRevealNoteUnmap(res);
     // Read before forwarding: after the real Unmap the memory is no longer ours
     // to look at.
     if (res == s->mappedResource && s->mappedData) {
@@ -4718,7 +4786,8 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         // Four readers of one block, each on a budget of its own and each run
         // whatever the ones before it did (g_glitchCameraBudget says why).
         guardedBudget(g_glitchCameraBudget, [&] {
-            glitchFrameObserve(s->camData, s->camBytes, s->camResource);
+            if (s->comfortOwnerAllowed)
+                glitchFrameObserve(s->camData, s->camBytes, s->camResource);
         });
         runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
             guardedBudget(g_sunglareRowsBudget, [&] {
@@ -4900,8 +4969,12 @@ __declspec(noinline) void forwardVerdictBegin(ID3D11DeviceContext* self, DrawVer
     case DrawVerdict::kRemlok:
         runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
                                [&] { remlokScissorBegin(self); }); break;
-    case DrawVerdict::kFssPanel:     fssPanelBegin(self); break;
-    case DrawVerdict::kFssReveal:    fssRevealBegin(self); break;
+    case DrawVerdict::kFssPanel:
+        runComfortOwned(g_state && g_state->comfortOwnerAllowed,
+                        [&] { fssPanelBegin(self); }); break;
+    case DrawVerdict::kFssReveal:
+        runComfortOwned(g_state && g_state->comfortOwnerAllowed,
+                        [&] { fssRevealBegin(self); }); break;
     case DrawVerdict::kHolo:         holoBegin(self); break;
     case DrawVerdict::kTargetSharp:
         runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
@@ -4937,8 +5010,12 @@ __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdi
         runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
                                [&] { pluginRegistryEnd(kPluginClaimNightVision,self); }); break;
     case DrawVerdict::kHolo:         holoEnd(self); break;
-    case DrawVerdict::kFssReveal:    fssRevealEnd(self); break;
-    case DrawVerdict::kFssPanel:     fssPanelEnd(self); break;
+    case DrawVerdict::kFssReveal:
+        runComfortOwned(g_state && g_state->comfortOwnerAllowed,
+                        [&] { fssRevealEnd(self); }); break;
+    case DrawVerdict::kFssPanel:
+        runComfortOwned(g_state && g_state->comfortOwnerAllowed,
+                        [&] { fssPanelEnd(self); }); break;
     case DrawVerdict::kRemlok:
         runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
                                [&] { remlokScissorEnd(self); }); break;
@@ -6003,7 +6080,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     uiAtlasNoteWrite(dst, 2);
     if (g_vrWorldWatchWrites && !foreignContext(self)) vrWorldRouteNoteWrite(dst);   // a write into H after the resolve is the latch's
     if(foreignContext(self))engineVelocityResourceUnknown(dst);
-    if (!foreignContext(self)) {motionResourceWritten(dst);if(celestialMotionAnyWatched())celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
+    if (!foreignContext(self)) {motionResourceWritten(dst);if(celestialMotionAnyWatched())celestialMotionConstantsUnknownWrite(dst);if(g_state->comfortOwnerAllowed)glitchFrameInvalidatePool(dst);if(g_state->comfortOwnerAllowed&&fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyResource,
@@ -6190,7 +6267,7 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
         detail.known=FlatMutationDetails::SourceView|FlatMutationDetails::DstXYZ;
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyStructureCount,detail);
     }
-    if(!foreignContext(self)){motionResourceWritten(dst,off,uint64_t(off)+4);glitchFrameInvalidatePool(dst);}
+    if(!foreignContext(self)){motionResourceWritten(dst,off,uint64_t(off)+4);if(g_state->comfortOwnerAllowed)glitchFrameInvalidatePool(dst);}
     else engineVelocityResourceUnknown(dst);
     if (drawCensusArmed()) {
         drawCensusStructCount(dst, off, src, foreignContext(self));
@@ -6216,8 +6293,9 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
             motionResourceWritten(dst,dstX,uint64_t(dstX)+box->right-box->left);
         else motionResourceWritten(dst);
         if (celestialMotionAnyWatched()) celestialMotionConstantsUnknownWrite(dst);
-        glitchFrameInvalidatePool(dst);
-        if (fssResActive()) fssResNoteCopyMaybeMismatched(dst, src);
+        if (g_state->comfortOwnerAllowed) glitchFrameInvalidatePool(dst);
+        if (g_state->comfortOwnerAllowed && fssResActive())
+            fssResNoteCopyMaybeMismatched(dst, src);
         if (uiLayerWatching()) uiLayerNoteCopy(dst, src);
     }
     if (!foreignContext(self) && flatRuntimeActive()) {
@@ -6258,7 +6336,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
         if(box && box->right>=box->left)motionResourceWritten(dst,box->left,box->right);
         else motionResourceWritten(dst);
         if (celestialMotionAnyWatched()) celestialMotionConstantsWritten(dst, data, box);
-        glitchFrameInvalidatePool(dst);
+        if (g_state->comfortOwnerAllowed) glitchFrameInvalidatePool(dst);
     }
     if (drawCensusArmed()) {
         drawCensusCopy('U', dst, dstSub, box ? box->left : 0, box ? box->top : 0,
@@ -6273,7 +6351,8 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
         // Owner-context only: the watch shadows the owner's buffers.
         if (!foreignContext(self)) drawCensusCbNoteUpdate(dst, data, 0);
     }
-    if (fssRevealWantsDraws() && !foreignContext(self)) {
+    if (g_state->comfortOwnerAllowed && fssRevealWantsDraws() &&
+        !foreignContext(self)) {
         fssRevealNoteUpdate(dst, data);
     }
     if (!foreignContext(self) && flatRuntimeActive()) {
@@ -6304,7 +6383,8 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     noteStaleForward(kSlotResolveSubresource, reinterpret_cast<const void*>(g_state->realResolveSubresource),
                      "ResolveSubresource");
-    if(!foreignContext(self)){if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
+    if(!foreignContext(self)&&g_state->comfortOwnerAllowed&&fssResActive())
+        fssResNoteCopyMaybeMismatched(dst,src);
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kResolve);
         auto detail=FlatMutationDetails::transfer(FlatOverlayMutationOp::Resolve,"ResolveSubresource",src,srcSub,dstSub);
@@ -6356,7 +6436,8 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
     State* s = g_state;
     if (!foreignContext(self) && flatRuntimeActive()) flatRuntimeViewport(n, vps);
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalViewport(n, vps);
-    if (foreignContext(self) || n != 1 || !vps || !fssResActive()) {
+    if (foreignContext(self) || !s->comfortOwnerAllowed || n != 1 || !vps ||
+        !fssResActive()) {
         s->realRSSetViewports(self, n, vps);
         return;
     }
@@ -6416,7 +6497,7 @@ __declspec(noinline) void noteSceneInstancePool(ID3D11DeviceContext* self) {
             D3D11_RESOURCE_DIMENSION kind{};resource->GetType(&kind);
             if(kind==D3D11_RESOURCE_DIMENSION_BUFFER){
                 D3D11_BUFFER_DESC d{};static_cast<ID3D11Buffer*>(resource)->GetDesc(&d);
-                if(d.StructureByteStride==336 && (d.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED))
+                if(g_state->comfortOwnerAllowed && d.StructureByteStride==336 && (d.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED))
                     glitchFrameNoteScenePool(resource,d.ByteWidth);
             }
             resource->Release();
@@ -6747,7 +6828,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
     // before the call.
-    if (g_state->fssHealOn) {
+    if (g_state->comfortOwnerAllowed && g_state->fssHealOn) {
         fssPanelRectDrawArgs(baseVertex, startInstance);
     }
     // The sub-draw probe re-issues this draw from the verdict path, which
@@ -6820,7 +6901,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             const bool eyeGeometry = g_state->rtv0Eye && perInstance && instances;
             const uint64_t sceneVs = eyeGeometry ? bindingShaderHash(BindSlot::Vs) : 0;
             const bool recognisedScene = eyeGeometry && glitchFrameIsSceneDraw(sceneVs);
-            const bool glitchWantsScene = recognisedScene && glitchFrameWantsSceneDraw(sceneVs);
+            const bool glitchWantsScene = g_state->comfortOwnerAllowed &&
+                recognisedScene && glitchFrameWantsSceneDraw(sceneVs);
             int temporalEye = -1;
             if (recognisedScene && (temporalPassWantsRigidDraw(0) ||
                                     temporalPassWantsRigidDraw(1))) {
@@ -6920,6 +7002,10 @@ using VScreenDistanceTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeNoDistanceNone, draw_ladder::SiteKind::Exit>;
 using VScreenSpaceDustTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kSpaceDustSkip, draw_ladder::SiteKind::Claim>;
+using VScreenFssPanelTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kFssPanelClaim, draw_ladder::SiteKind::Claim>;
+using VScreenFssRevealTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kFssRevealClaim, draw_ladder::SiteKind::Claim>;
 using VScreenEyeCensusTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeCensusSkip, draw_ladder::SiteKind::Claim>;
 using VScreenLoaderPanelTestSite = draw_ladder::Site<
@@ -7346,6 +7432,12 @@ draw_ladder::SiteResult vScreenPredicateTestInvoke(
     if (siteId == static_cast<std::uint16_t>(VScreenSpaceDustTestSite::id)) {
         return vScreenPredicateTestInvokeSite<VScreenSpaceDustTestSite>(visitor, trace);
     }
+    if (siteId == static_cast<std::uint16_t>(VScreenFssPanelTestSite::id)) {
+        return vScreenPredicateTestInvokeSite<VScreenFssPanelTestSite>(visitor, trace);
+    }
+    if (siteId == static_cast<std::uint16_t>(VScreenFssRevealTestSite::id)) {
+        return vScreenPredicateTestInvokeSite<VScreenFssRevealTestSite>(visitor, trace);
+    }
     return vScreenPredicateTestInvokeSite<VScreenDistanceTestSite>(visitor, trace);
 }
 
@@ -7367,14 +7459,23 @@ bool vScreenPredicateTestVisit(
     std::uint16_t siteId, ID3D11DeviceContext* context,
     ID3D11DeviceContext* ownerContext, std::uint32_t glareClamp,
     bool distanceEnabled, bool traceEnabled,
-    VScreenPredicateTestResult* result, bool ownerAllowed) noexcept {
+    VScreenPredicateTestResult* result, bool ownerAllowed,
+    bool comfortAllowed, char kind, std::uint32_t count,
+    std::uint32_t instances, std::uint32_t fssBodyFrame,
+    std::uint32_t frameNo, std::uint32_t fssJumpFrame) noexcept {
     if (!result || (siteId != static_cast<std::uint16_t>(VScreenContextTestSite::id) &&
                     siteId != static_cast<std::uint16_t>(VScreenDistanceTestSite::id) &&
-                    siteId != static_cast<std::uint16_t>(VScreenSpaceDustTestSite::id)))
+                    siteId != static_cast<std::uint16_t>(VScreenSpaceDustTestSite::id) &&
+                    siteId != static_cast<std::uint16_t>(VScreenFssPanelTestSite::id) &&
+                    siteId != static_cast<std::uint16_t>(VScreenFssRevealTestSite::id)))
         return false;
 
     static State fixture{};
     fixture.cockpitVisualsOwnerAllowed = ownerAllowed;
+    fixture.comfortOwnerAllowed = comfortAllowed;
+    fixture.fssBodyFrame = fssBodyFrame;
+    fixture.frameNo = frameNo;
+    fixture.fssJumpFrame = fssJumpFrame;
     fixture.ownerCtx = ownerContext;
     fixture.glareClamp = glareClamp;
     fixture.distanceEnabled = distanceEnabled;
@@ -7386,9 +7487,9 @@ bool vScreenPredicateTestVisit(
     g_state = &fixture;
 
     draw_ladder_trace::DrawFacts facts{};
-    facts.kind = 'N';
-    facts.count = 3;
-    facts.instances = 1;
+    facts.kind = kind;
+    facts.count = count;
+    facts.instances = instances;
     result->token = draw_ladder_trace::beginDraw(facts);
     if (!result->token.valid()) {
         g_state = priorState;
@@ -7399,12 +7500,12 @@ bool vScreenPredicateTestVisit(
     if (traceEnabled) {
         auto trace = draw_ladder_trace::makePolicy(result->token);
         VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
-            &fixture, context, 'N', 3, 1, args, trace};
+            &fixture, context, kind, count, instances, args, trace};
         result->siteResult = vScreenPredicateTestInvoke(visitor, siteId, trace);
     } else {
         draw_ladder::NoTrace trace;
         VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
-            &fixture, context, 'N', 3, 1, args, trace};
+            &fixture, context, kind, count, instances, args, trace};
         result->siteResult = vScreenPredicateTestInvoke(visitor, siteId, trace);
     }
     result->glareClampAfter = fixture.glareClamp;
@@ -7412,6 +7513,33 @@ bool vScreenPredicateTestVisit(
     t_compositeThisDraw = priorComposite;
     g_state = priorState;
     return true;
+}
+
+bool vScreenLegacyGateRegistrationTest(
+    bool cockpitAllowed, bool comfortAllowed,
+    std::uint32_t* registeredCount,
+    std::uint32_t* cockpitCallbacks,
+    std::uint32_t* comfortCallbacks,
+    std::uint32_t* sharedGlareCallbacks) noexcept {
+    if (!registeredCount || !cockpitCallbacks || !comfortCallbacks ||
+        !sharedGlareCallbacks) return false;
+
+    // Isolate only the legacy-gate table; lifecycle/plugin registrations and
+    // their state remain untouched and are restored after the temporary visit.
+    if (!pluginRegistryBeginLegacyDrawGateTest()) return false;
+    State fixture{};
+    fixture.cockpitVisualsOwnerAllowed = cockpitAllowed;
+    fixture.comfortOwnerAllowed = comfortAllowed;
+    g_testCockpitLegacyGateCallbacks = 0;
+    g_testComfortLegacyGateCallbacks = 0;
+    g_testSharedGlareLegacyGateCallbacks = 0;
+    const bool registered = registerLegacyDrawGates(&fixture, registeredCount);
+    (void)pluginRegistryVisitLegacyDrawGatesForTest(&fixture);
+    *cockpitCallbacks = g_testCockpitLegacyGateCallbacks;
+    *comfortCallbacks = g_testComfortLegacyGateCallbacks;
+    *sharedGlareCallbacks = g_testSharedGlareLegacyGateCallbacks;
+    pluginRegistryEndLegacyDrawGateTest();
+    return registered;
 }
 
 bool vScreenForwardingPredicateTestVisit(
@@ -7764,6 +7892,8 @@ bool vScreenSunglareSkipPredicateTestVisit(
     State fixture{};
     fixture.ownerCtx = context;
     fixture.cockpitVisualsOwnerAllowed = ownerAllowed;
+    // Keep shared Comfort glare tracking live while Cockpit admission varies.
+    fixture.comfortOwnerAllowed = true;
     State* const priorState = g_state;
     g_state = &fixture;
     draw_ladder_trace::DrawFacts facts{};
@@ -7869,6 +7999,8 @@ bool vScreenPanelDistanceApiTransactionTest(
 
     static State fixture{};
     fixture.cockpitVisualsOwnerAllowed = true;
+    // The literal classifier ledger describes the admitted Legacy path.
+    fixture.comfortOwnerAllowed = true;
     const uint32_t priorEyeW = fixture.eyeW;
     const uint32_t priorEyeH = fixture.eyeH;
     const uint32_t priorEyeDraws = fixture.eyeDrawsThisFrame;
@@ -8710,7 +8842,8 @@ bool vScreenRenderBelowEye(uint32_t* renderW, uint32_t* renderH, uint32_t* eyeW,
     return vrss::unpack(g_renderBelowEye.load(std::memory_order_acquire), renderW, renderH, eyeW, eyeH);
 }
 
-static bool configureLegacyDrawInterests(bool cockpitVisualsOwnerAllowed) {
+static bool configureLegacyDrawInterests(bool cockpitVisualsOwnerAllowed,
+                                         bool comfortOwnerAllowed) {
     using draw_interest::InterestId;
     using draw_interest::ShaderFilter;
     constexpr std::size_t kFilterCapacity = 16;
@@ -8737,8 +8870,10 @@ static bool configureLegacyDrawInterests(bool cockpitVisualsOwnerAllowed) {
         enable(InterestId::WitchspaceStars, witchspaceStarsDrawInterestConfigured());
         enable(InterestId::ParticleSubstitute, particleSubstituteDrawInterestConfigured());
     });
-    enable(InterestId::FssPanel, fssPanelDrawInterestConfigured());
-    enable(InterestId::FssReveal, fssRevealDrawInterestConfigured());
+    runComfortOwned(comfortOwnerAllowed, [&] {
+        enable(InterestId::FssPanel, fssPanelDrawInterestConfigured());
+        enable(InterestId::FssReveal, fssRevealDrawInterestConfigured());
+    });
     enable(InterestId::IntroCurveObserve, introCurveDrawInterestConfigured());
     enable(InterestId::PanelCurveObserve, panelCurveDrawInterestConfigured());
 
@@ -8747,8 +8882,10 @@ static bool configureLegacyDrawInterests(bool cockpitVisualsOwnerAllowed) {
         filtersFit = append(targetSharpDrawInterestFilters) &&
                      append(witchspaceStarsDrawInterestFilters);
     });
-    filtersFit = filtersFit && append(fssPanelDrawInterestFilters) &&
-                 append(fssRevealDrawInterestFilters);
+    runComfortOwned(comfortOwnerAllowed, [&] {
+        filtersFit = filtersFit && append(fssPanelDrawInterestFilters) &&
+                     append(fssRevealDrawInterestFilters);
+    });
     runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {
         filtersFit = filtersFit && append(particleSubstituteDrawInterestFilters);
     });
@@ -8807,10 +8944,10 @@ void vScreenRefreshConfig() {
     s->distanceScale = cfg.getFloat("fix.panel_distance", 1.0f);
     s->distanceEnabled = s->distanceScale != 1.0f;
     s->distanceIndex = readDistanceIndex(cfg);
-    s->countForFlashFix = glitchFrameNeedsEyeDraws();
+    s->countForFlashFix = s->comfortOwnerAllowed && glitchFrameNeedsEyeDraws();
     readEyeRenderSize(cfg, s);
     readCensusSkip(cfg, s);
-    fssResConfigure(cfg);
+    runComfortOwned(s->comfortOwnerAllowed, [&] { fssResConfigure(cfg); });
     runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
         configureRemlokLifecycle(cfg);
     });
@@ -8858,12 +8995,13 @@ void vScreenRefreshConfig() {
     menuConfigure(cfg);
     menuNoteConfigReloaded();
     {
-        s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
+        s->censusFssJump = s->comfortOwnerAllowed &&
+            cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
         // Defaulted to 1 because the key moved to [experimental] and now ships
         // commented out: this default is what everybody runs. Moving a setting out
         // of [fix] is a decision about where it is configured, not a decision to
         // turn the fix off.
-        const int n = eyeSyncFromConfig(cfg).healMode;
+        const int n = s->comfortOwnerAllowed ? eyeSyncFromConfig(cfg).healMode : 0;
         if (s->fssHealOn != n) {
             s->fssHealOn = n;
             Log::get().note(
@@ -8877,12 +9015,13 @@ void vScreenRefreshConfig() {
     runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
         sunglareConfigure(cfg);
     });
-    exposureConfigure(cfg);
+    runComfortOwned(s->comfortOwnerAllowed, [&] { exposureConfigure(cfg); });
     panelCurveConfigure(cfg);
     runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
         particleConfigure(cfg);
     });
-    configureLegacyDrawInterests(s->cockpitVisualsOwnerAllowed);
+    configureLegacyDrawInterests(s->cockpitVisualsOwnerAllowed,
+                                 s->comfortOwnerAllowed);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
     perfMonitorPluginCostConfigure(static_cast<uint8_t>(runtimeVrProfile()
@@ -9185,7 +9324,7 @@ void vScreenFrameBoundary() {
     // window where the left eye's reveal-gated blacks live -- the frames
     // every body-target-triggered census starts too late to see. One
     // census per latch, the standard auto-arm machinery.
-    if (takeWorldJump()) {
+    if (s->comfortOwnerAllowed && takeWorldJump()) {
         // The zoom-start marker, consumed once and shared -- and taken
         // ONLY on the game's own word that the scanner is open (round
         // 48d): world jumps fire on supercruise drops and hyperspace
@@ -9198,7 +9337,7 @@ void vScreenFrameBoundary() {
             drawCensusAutoRequest();
         }
     }
-    if (deviceHookTakeFssZoomPress()) {
+    if (s->comfortOwnerAllowed && deviceHookTakeFssZoomPress()) {
         // Earlier than the jump: the player's own zoom button.
         s->fssJumpFrame = s->frameNo;
         if (s->fssArrivalNotes < 4) {
@@ -9212,7 +9351,7 @@ void vScreenFrameBoundary() {
     // The arrival window's receipt: when it closes, say how many
     // composite recognitions it carried. Zero while squares showed would
     // prove the arriving content flows through a different draw.
-    {
+    if (s->comfortOwnerAllowed) {
         // 600 frames, not 30 (round 48c): the zoom TRANSIT takes ~3
         // seconds and the squares appear at its ARRIVAL -- a 30-frame
         // window covered the departure and expired mid-flight, so every
@@ -9239,11 +9378,13 @@ void vScreenFrameBoundary() {
     // Before this frame's counters are read or reset: a pending census starts
     // here, a running one advances, a spent one writes its tables.
     tkDrawCensusBoundary.run([&] { drawCensusFrameBoundary(s->frameNo); });
-    tkFssReveal.run([&] {
-        frameScannerLifecycleStage(
-            plugins::scanners::kScannerLifecycleRevealFrame, s->frameNo,
-            fssRevealFrameBoundary);
-    });
+    if (s->comfortOwnerAllowed) {
+        tkFssReveal.run([&] {
+            frameScannerLifecycleStage(
+                plugins::scanners::kScannerLifecycleRevealFrame, s->frameNo,
+                fssRevealFrameBoundary);
+        });
+    }
 
     // FSS frame pacing (round 31): the left-only squares are now measured
     // to be runtime-side (both submitted images carry the flicker equally),
@@ -9253,7 +9394,7 @@ void vScreenFrameBoundary() {
     // premise, and this measures it from our own clock: frame-to-frame
     // deltas while the body-frame gate is warm, one summary line when the
     // scanner goes quiet. Log-only, no keys.
-    tkFssPacing.run([&] {
+    if (s->comfortOwnerAllowed) tkFssPacing.run([&] {
         static LARGE_INTEGER lastQpc = {};
         static uint32_t frames = 0, slow = 0;
         static double sumMs = 0.0, maxMs = 0.0;
@@ -9304,7 +9445,8 @@ void vScreenFrameBoundary() {
     // detector gives up on itself, which is not something an ini edit causes --
     // and vScreenRefreshConfig returns early unless the file's write time moved,
     // so asking there would never see it. One bool call a frame.
-    s->countForFlashFix = glitchFrameNeedsEyeDraws();
+    s->countForFlashFix = s->comfortOwnerAllowed &&
+                          glitchFrameNeedsEyeDraws();
 
     // Give up on a learned panel buffer that has stopped being used.
     //
@@ -10012,7 +10154,7 @@ void vScreenFrameBoundary() {
     s->eyeDrawsLastFrame = s->eyeDrawsThisFrame;
     // The flash detector needs the count for the frame that just ended, to tell
     // a rendered scene from a menu. It has to be told before the counter resets.
-    glitchFrameBoundary(sceneDraws);
+    if (s->comfortOwnerAllowed) glitchFrameBoundary(sceneDraws);
     // The engine fix's per-frame service: publishes the frame number its
     // consumer hook reads (that hook can run on a scheduler job thread), logs
     // a held frame, closes its event window, and owes the temporal pass its
@@ -10068,6 +10210,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     const bool cockpitVisualsOwnerAllowed =
         plugin_admission_transport::ownerAllowedForStartup(
             plugins::kPluginCockpitVisuals);
+    const bool comfortOwnerAllowed = edvr::comfortOwnerAllowed();
 
     Config& cfg = Config::get();
     const bool wantVoid = cfg.getBool("fix.black_void", true);
@@ -10101,9 +10244,11 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // both off, with panel_hooks_always = 0, silently took the flash fix with
     // them: armed in the log, then nothing, and not even the give-up notice,
     // because the frame counter it waits on also lives in here.
-    if (!wantVoid && scale == 1.0f && !glitchFrameNeedsEyeDraws() &&
+    if (!wantVoid && scale == 1.0f &&
+        (!comfortOwnerAllowed || !glitchFrameNeedsEyeDraws()) &&
         !pluginRegistryWantsStartupHooks(&cfg) &&
-        (cockpitVisualsOwnerAllowed || !exposureDampingActive()) &&
+        (cockpitVisualsOwnerAllowed ||
+         !(comfortOwnerAllowed && exposureDampingActive())) &&
         !cfg.getBool("advanced.app_gpu_timing", true) &&
         !cfg.getBool("advanced.panel_hooks_always", true)) {
         // The optional fixes are deliberately dormant, but native discovery
@@ -10133,6 +10278,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
 
     g_state = new State();
     g_state->cockpitVisualsOwnerAllowed = cockpitVisualsOwnerAllowed;
+    g_state->comfortOwnerAllowed = comfortOwnerAllowed;
     g_state->classifierConfigEpoch = 1;
     g_state->replayTraceEnabled = cfg.getBool("advanced.draw_replay", false);
     g_state->pluginDispatchEnabled = cockpitVisualsRegistered;
@@ -10185,9 +10331,10 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // The engine fix. See the other call site's comment above.
     configureComfortLifecycle(cfg);
     {
-        g_state->censusFssJump =
+        g_state->censusFssJump = g_state->comfortOwnerAllowed &&
             cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
-        const int n = eyeSyncFromConfig(cfg).healMode;
+        const int n = g_state->comfortOwnerAllowed
+                          ? eyeSyncFromConfig(cfg).healMode : 0;
         if (g_state->fssHealOn != n) {
             g_state->fssHealOn = n;
             Log::get().note(
@@ -10201,17 +10348,20 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
         sunglareConfigure(cfg);
     });
-    exposureConfigure(cfg);
+    runComfortOwned(g_state->comfortOwnerAllowed,
+                    [&] { exposureConfigure(cfg); });
     panelCurveConfigure(cfg);
     runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
         particleConfigure(cfg);
     });
-    configureLegacyDrawInterests(g_state->cockpitVisualsOwnerAllowed);
+    configureLegacyDrawInterests(g_state->cockpitVisualsOwnerAllowed,
+                                 g_state->comfortOwnerAllowed);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
-    g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
+    g_state->countForFlashFix = g_state->comfortOwnerAllowed &&
+                                glitchFrameNeedsEyeDraws();
 
     // The panel size is NOT read from config here.
     //
@@ -10558,7 +10708,7 @@ void shutdownVScreenFixes() {
     shutdownIntroLifecycleStage(kIntroLifecycleBackdrop, backdropShutdown);
     shutdownScannerLifecycleStage(
         plugins::scanners::kScannerLifecycleShutdownPanel, fssPanelShutdown);
-    fssPanelRectShutdown();
+    if (g_state->comfortOwnerAllowed) fssPanelRectShutdown();
     shutdownScannerLifecycle();
     gpuCensusShutdown();
     runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {

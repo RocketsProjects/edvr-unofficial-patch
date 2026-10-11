@@ -16,6 +16,11 @@
 #include "../../src/common/system_d3d11.h"
 using Microsoft::WRL::ComPtr;
 namespace edvr {
+// This isolated shader rig exercises the admitted provider path. The owner
+// denial contract is covered by native_fss_test.cpp; keep this GPU oracle's
+// existing shader sessions on the historical admitted path.
+bool comfortOwnerAllowed() noexcept { return true; }
+
 ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
     ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* shader=nullptr;
     if(FAILED(dev->CreateComputeShader(bytes,size,nullptr,&shader)))return nullptr;return shader;

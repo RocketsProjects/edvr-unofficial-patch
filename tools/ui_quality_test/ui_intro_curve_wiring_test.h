@@ -82,7 +82,7 @@ std::vector<WirePin> wiringPins(const std::string& text, const std::string& ladd
     const std::string fwd = quietBody(text, "void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdict v,");
     const std::string thunk = quietBody(text, "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(");
     const std::string gate = quietBody(text, "bool drawGateSubscribed(State* s) {");
-    const std::string gateRegistration = quietBody(text, "bool registerLegacyDrawGates(State* state) {");
+    const std::string gateRegistration = quietBody(text, "bool registerLegacyDrawGates(State* state, std::uint32_t* registeredCount = nullptr) {");
     const std::string frame = quietBody(text, "void vScreenFrameBoundary() {");
     const std::string shut = quietBody(text, "void shutdownVScreenFixes() {");
     const std::string note = quietBody(text, "void introCurveNoteRetired() {");
@@ -128,6 +128,7 @@ std::vector<WirePin> wiringPins(const std::string& text, const std::string& ladd
     // The arming predicate is adapted to a named subscription, published to the registry, and consumed through its aggregate at the frame gate.
     pins.push_back({"gate",
                     has(all, "EDVR_GATE_GLOBAL(intro_curve,introCurveWants())") &&
+                        has(all, "Ownerowner=Owner::Core;") &&
                         has(all, "{\"legacy.intro-curve\",&drawGate_intro_curve,false}") &&
                         has(gateRegistration, "pluginRegistryRegisterLegacyDrawGate(registration.name") &&
                         has(gate, "pluginRegistryWantsDraws(s)") &&

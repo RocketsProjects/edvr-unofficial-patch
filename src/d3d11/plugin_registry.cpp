@@ -33,6 +33,10 @@ uint32_t g_registeredPluginCount = 0;
 LegacySubscriber g_legacy[kMaxLegacySubscribers]{};
 uint32_t g_legacyCount = 0;
 bool g_drawGateFailOpen = false;
+LegacySubscriber g_testSavedLegacy[kMaxLegacySubscribers]{};
+uint32_t g_testSavedLegacyCount = 0;
+bool g_testSavedDrawGateFailOpen = false;
+bool g_legacyDrawGateTestActive = false;
 bool g_notedShaderCandidate = false;
 bool g_notedCandidateDraw = false;
 bool g_pendingShaderCandidateReport = false;
@@ -393,6 +397,37 @@ bool pluginRegistryRegisterLegacyDrawGate(const char* stableName,
         if (std::strcmp(g_legacy[i].name, stableName) == 0) return false;
     g_legacy[g_legacyCount++] = {stableName, predicate, state};
     return true;
+}
+
+bool pluginRegistryBeginLegacyDrawGateTest() noexcept {
+    if (g_legacyDrawGateTestActive) return false;
+    std::memcpy(g_testSavedLegacy, g_legacy, sizeof(g_legacy));
+    g_testSavedLegacyCount = g_legacyCount;
+    g_testSavedDrawGateFailOpen = g_drawGateFailOpen;
+    g_legacyDrawGateTestActive = true;
+    g_legacyCount = 0;
+    g_drawGateFailOpen = false;
+    return true;
+}
+
+void pluginRegistryEndLegacyDrawGateTest() noexcept {
+    if (!g_legacyDrawGateTestActive) return;
+    std::memcpy(g_legacy, g_testSavedLegacy, sizeof(g_legacy));
+    g_legacyCount = g_testSavedLegacyCount;
+    g_drawGateFailOpen = g_testSavedDrawGateFailOpen;
+    g_legacyDrawGateTestActive = false;
+}
+
+uint32_t pluginRegistryVisitLegacyDrawGatesForTest(void* legacyState) noexcept {
+    uint32_t visited = 0;
+    for (uint32_t i = 0; i < g_legacyCount; ++i) {
+        const LegacySubscriber& gate = g_legacy[i];
+        if (gate.predicate) {
+            (void)gate.predicate(gate.state ? gate.state : legacyState);
+            ++visited;
+        }
+    }
+    return visited;
 }
 
 void pluginRegistrySetDrawGateFailOpen() { g_drawGateFailOpen = true; }

@@ -12,7 +12,7 @@
 namespace edvr {
 
 // Install the hook (once; later calls do nothing). Called from device_hook after the other startup installers. `flatProfile` true: say it is inert and patch nothing.
-void terrainCullCoverInstall(bool flatProfile);
+void terrainCullCoverInstall(bool ownerAllowed, bool flatProfile);
 
 // Once a second from device_hook's config tick: the ten-minute heartbeat, while the hook is live. `nowMs` is a monotonic millisecond clock.
 void terrainCullCoverPoll(uint64_t nowMs);

@@ -803,6 +803,22 @@ bool unwrapExplorerOwner(std::string& compactBody, const std::string& explorerTi
     return true;
 }
 
+// Comfort currently uses a cached admission condition around three already
+// budgeted ticks. Remove only those exact wrappers before checking the
+// presentFrameBoundary residual; the callback text must remain byte-for-byte
+// the known tick body.
+bool unwrapComfortOwnerTick(std::string& compactBody,
+                            const std::string& tickExpression) {
+    const std::string exact =
+        "if(g_state->comfortOwnerAllowed)" + tickExpression;
+    const size_t at = compactBody.find(exact);
+    if (at == std::string::npos ||
+        compactBody.find(exact, at + exact.size()) != std::string::npos)
+        return false;
+    compactBody.replace(at, exact.size(), tickExpression);
+    return true;
+}
+
 int boundarySourceChecks(const std::string& root) {
     int bad = 0;
     auto verify = [&](bool ok, const char* what) {
@@ -854,6 +870,17 @@ int boundarySourceChecks(const std::string& root) {
     body = withoutSpaces(body);
     verify(unwrapExplorerOwner(body, explorerTick),
            "the cached Explorer Cam owner decision encloses exactly its budgeted tick");
+    const std::string comfortBoundaryTick =
+        "tkExposureBoundary.run([]{exposureFixFrameBoundary();});";
+    const std::string comfortReclaimTick =
+        "tkExposureReclaimTick.run([]{exposureFixReclaimTick();});";
+    const std::string comfortFssModeLatchTick =
+        "tkFssModeLatch.run(tickFssModeLatch);";
+    const bool comfortBoundaryOwned = unwrapComfortOwnerTick(body, comfortBoundaryTick);
+    const bool comfortReclaimOwned = unwrapComfortOwnerTick(body, comfortReclaimTick);
+    const bool comfortFssModeLatchOwned = unwrapComfortOwnerTick(body, comfortFssModeLatchTick);
+    verify(comfortBoundaryOwned && comfortReclaimOwned && comfortFssModeLatchOwned,
+           "cached Comfort owner conditions enclose exactly the budgeted exposure boundary, reclaim, and FSS mode-latch ticks");
     {
         std::string injected = withoutSpaces(tickBody);
         const size_t tickAt = injected.find("tkExplorerCam.run(");
@@ -866,6 +893,27 @@ int boundarySourceChecks(const std::string& root) {
                    !unwrapExplorerOwner(injected, explorerTick) &&
                    !unwrapExplorerOwner(broad, explorerTick),
                "the owner-wrapper check rejects in-memory unbudgeted work and an arbitrary tick callback");
+
+        std::string comfortInjected = withoutSpaces(tickBody);
+        const size_t comfortAt = comfortInjected.find(comfortBoundaryTick);
+        if (comfortAt != std::string::npos)
+            comfortInjected.insert(comfortAt, "unbudgetedProbe();");
+        std::string comfortBroad = withoutSpaces(tickBody);
+        const size_t reclaimAt = comfortBroad.find(comfortReclaimTick);
+        if (reclaimAt != std::string::npos)
+            comfortBroad.replace(reclaimAt, comfortReclaimTick.size(),
+                                 "tkHotkeys.run(tickHotkeys);");
+        std::string comfortFssBroad = withoutSpaces(tickBody);
+        const size_t fssLatchAt = comfortFssBroad.find(comfortFssModeLatchTick);
+        if (fssLatchAt != std::string::npos)
+            comfortFssBroad.replace(fssLatchAt, comfortFssModeLatchTick.size(),
+                                    "tkHotkeys.run(tickHotkeys);");
+        verify(comfortAt != std::string::npos && reclaimAt != std::string::npos &&
+                   fssLatchAt != std::string::npos &&
+                   !unwrapComfortOwnerTick(comfortInjected, comfortBoundaryTick) &&
+                   !unwrapComfortOwnerTick(comfortBroad, comfortReclaimTick) &&
+                   !unwrapComfortOwnerTick(comfortFssBroad, comfortFssModeLatchTick),
+               "Comfort owner-wrapper checks reject injected unbudgeted work and arbitrary tick callbacks");
     }
     // Every tick call out, then what is left.
     size_t pos = 0;
