@@ -83,7 +83,10 @@ inline bool viewExact() {
     std::sort(truth.begin(),truth.end());std::sort(seen.begin(),seen.end());return truth==seen;
 }
 // Everything the lock-free exits read equals the state they stand for.
-inline bool published(){return copy::g_claimsLive.load()==(!copy::g_emissions.empty() || !copy::g_mergePlans.empty()) && viewExact();}
+inline bool published() {
+    return copy::g_claimsLive.load()==(!copy::g_emissions.empty() || !copy::g_mergePlans.empty()) &&
+           copy::g_emissionsLive.load()==!copy::g_emissions.empty() && viewExact();
+}
 inline uintptr_t addressOf(const Record& r){return reinterpret_cast<uintptr_t>(&r);}
 inline bool held(uintptr_t address){return copy::g_emissions.count(address)==1;}
 
@@ -251,11 +254,11 @@ inline void runCopier(ID3D11Device* device,Check check) {
     equivalent("a claim that joins",[&]{mapA();mappedA[2]=src[2];claim(src[2],kFrame);},[&](bool r){copyOf(r,baseA,336,addressOf(src[2]),2,1);},false);
     equivalent("a claim with no lease",[&]{claim(src[2],kFrame);},[&](bool r){copyOf(r,baseA,336,addressOf(src[2]),2,1);},false);
     equivalent("a claim elsewhere",[&]{mapA();claim(src[0],kFrame);},[&](bool r){copyOf(r,baseA,336,source,0,1);},false);
-    equivalent("a detached merge plan in flight",[&]{
+    equivalent("a detached merge plan in flight, no emission",[&]{
         static Tree detached(1,1);static Destination dst;
         mapA();detached.item(0,0,0)=record(5);claim(detached.item(0,0,0),kFrame);
         copy::beginMergeOpaque(dst.ptr(),detached.anchor(0),kFrame);   // the claim is staged into the plan: only the plan is live
-    },[&](bool r){copyOf(r,baseA,336,source,0,1);},false);
+    },[&](bool r){copyOf(r,baseA,336,source,0,1);},true);   // the copier never reads a plan; the plan's claims are not in g_emissions
     equivalent("a count over the bound, no claims",[&]{mapA();},[&](bool r){copyOf(r,baseA,336,source,0,copy::kMaxPatches+1);},false);
     equivalent("a count over the bound, a claim",[&]{mapA();claim(src[0],kFrame);},[&](bool r){copyOf(r,baseA,336,source,0,copy::kMaxPatches+1);},false);
     equivalent("a null source",[&]{mapA();},[&](bool r){copyOf(r,baseA,336,0,0,1);},false);
@@ -267,6 +270,16 @@ inline void runCopier(ID3D11Device* device,Check check) {
         copy::copier(baseA,336,source,1,1,kFrame);
         check(copy::stats().invalidated==before+1 && copy::g_pools.at(poolA.Get()).patches.empty() && !copy::g_poolView.patches.load() && published(),
               "copier: a copy over a patched slot still erases the patch and counts it, then the pools are quiet again");
+        copy::reset();
+    }
+    {   // The re-check after the reads: a lease that ends between the reads and the re-check must not count as a lease found.
+        copy::reset();mapA();
+        static ID3D11Buffer* hookPool;hookPool=poolA.Get();
+        copy::g_copierMidRead=+[]() noexcept {copy::endMap(hookPool,1);};
+        copy::copier(baseA,336,source,0,4,kFrame);
+        copy::g_copierMidRead=nullptr;
+        check(copy::g_stats.copies==1 && copy::g_stats.copierNoLease==1 && copy::g_copierSkipped.load()==0 && published(),
+              "copier: a view that moved between the reads and the re-check sends the copy to the mutex, which then finds no lease");
         copy::reset();
     }
     {   // Counters fold: skipped copies are copies, and a skipped copy with no lease is a no-lease copy.
@@ -346,7 +359,103 @@ inline int64_t probing() noexcept {
     mutexHeld.push_back(owned?1:0);return int64_t(mutexHeld.size())*100;
 }
 }
-inline void formatBoth(const copy::LockWindow& w,double perUs,double seconds,char (&lines)[2][copy::kLockLineBytes]){for(unsigned half=0;half<2;++half)copy::formatLockLine(w,half,perUs,seconds,lines[half]);}
+// A plan that holds nothing must not keep the merge and copier paths locked. The chain the review found: one emission sets the
+// flag, an unrelated merge registers a (transfer-less) plan, the emission is consumed, and that plan kept the one flag true, so
+// every merge that began meanwhile registered another plan, every clear walked and every copy took the mutex.
+inline void runPlansHoldingNothing(ID3D11Device* device,Check check) {
+    D3D11_BUFFER_DESC d{};d.ByteWidth=2*336;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.StructureByteStride=336;d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> pool;
+    if(!device || FAILED(device->CreateBuffer(&d,nullptr,&pool))){check(false,"plans: pool fixture");return;}
+    Record e=record(9),mapped[2]={record(1),record(2)},source=record(3);
+    const uintptr_t base=reinterpret_cast<uintptr_t>(mapped);
+    Tree unrelated(1,1),other(1,1);Destination dstU,dstO;
+    unrelated.item(0,0,0)=record(4);other.item(0,0,0)=record(5);
+    auto lockedCalls=[]{return copy::g_stats.mergeCalls+copy::g_stats.clearCalls+copy::g_stats.copies;};
+    copy::reset();
+    copy::beginMap(pool.Get(),mapped,sizeof(mapped),336,D3D11_MAP_WRITE_DISCARD,1,kFrame);
+    claim(e,kFrame);
+    check(copy::g_emissionsLive.load() && copy::g_claimsLive.load() && published(),"plans: one emission sets both flags");
+    void* plan=copy::beginMergeOpaque(dstU.ptr(),unrelated.anchor(0),kFrame);
+    check(plan!=copy::mergeNoClaimsToken() && copy::g_mergePlans.size()==1,"plans: with an emission live, an unrelated merge registers a plan that stages nothing");
+    copy::copier(base,336,addressOf(e),0,1,kFrame);   // consumes the emission, under the lock (an emission is live)
+    check(!copy::g_emissionsLive.load() && copy::g_claimsLive.load() && copy::g_mergePlans.size()==1 && published(),
+          "plans: the emission consumed, the plan alone keeps the clear flag and the emissions flag is false");
+    const auto locked=lockedCalls(),mergeFree=copy::g_mergeSkipped.load(),copyFree=copy::g_copierSkipped.load();
+    void* second=copy::beginMergeOpaque(dstO.ptr(),other.anchor(0),kFrame);
+    copy::copier(base,336,addressOf(source),0,1,kFrame);
+    check(second==copy::mergeNoClaimsToken() && copy::g_mergePlans.size()==1 && lockedCalls()==locked &&
+          copy::g_mergeSkipped.load()==mergeFree+1 && copy::g_copierSkipped.load()==copyFree+1,
+          "plans: while that plan is in flight a new merge and a copy both skip the mutex, and no second plan is registered");
+    copy::endMergeOpaque(second,true);
+    const auto walked=copy::stats().clearNodes;copy::invalidateDictionary(unrelated.ptr());
+    check(copy::stats().clearNodes>walked,"plans: a clear still walks while a plan is in flight (it must be able to mark that plan invalid)");
+    copy::endMergeOpaque(plan,true);
+    check(!copy::g_claimsLive.load() && !copy::g_emissionsLive.load() && copy::g_mergePlans.empty() && published(),"plans: when the plan ends both flags are false");
+    const auto afterPlan=lockedCalls();
+    copy::endMergeOpaque(copy::beginMergeOpaque(dstO.ptr(),other.anchor(0),kFrame),true);
+    copy::invalidateDictionary(other.ptr());copy::copier(base,336,addressOf(source),0,1,kFrame);
+    check(lockedCalls()==afterPlan,"plans: afterwards a merge, a clear and a copy all take the lock-free paths");
+    {   // The flag may be one release behind (stale-true): under the lock the rule is the same, and the release corrects it.
+        copy::reset();copy::g_emissionsLive.store(true);copy::g_claimsLive.store(true);
+        void* token=copy::beginMergeOpaque(dstU.ptr(),unrelated.anchor(0),kFrame);
+        check(token==copy::mergeNoClaimsToken() && copy::g_mergePlans.empty() && copy::g_stats.mergeCalls==1 && copy::g_stats.mergeWithoutClaims==1 && published(),
+              "plans: a merge that finds the emissions flag stale-true gets the token under the lock, and the lock's release corrects the flags");
+        copy::endMergeOpaque(token,true);
+    }
+    {   // The same with a claim-carrying plan in flight and four threads: while it is open, merges and copies stay off the mutex.
+        constexpr unsigned kRounds=3000;
+        copy::reset();copy::beginMap(pool.Get(),mapped,sizeof(mapped),336,D3D11_MAP_WRITE_DISCARD,1,kFrame);
+        Tree heldTree(1,1);Destination dstH;heldTree.item(0,0,0)=record(6);claim(heldTree.item(0,0,0),kFrame);claim(e,kFrame);
+        std::atomic<bool> open{false},release{false};void* heldPlan=nullptr;
+        std::thread holder([&]{
+            heldPlan=copy::beginMergeOpaque(dstH.ptr(),heldTree.anchor(0),kFrame);   // the emission in `held` is staged into this plan
+            open.store(true);while(!release.load())std::this_thread::yield();
+            copy::endMergeOpaque(heldPlan,true);
+        });
+        while(!open.load())std::this_thread::yield();
+        copy::copier(base,336,addressOf(e),0,1,kFrame);   // consumes the last emission: only the plan is live now
+        check(!copy::g_emissionsLive.load() && copy::g_claimsLive.load() && copy::g_mergePlans.size()==1,"plans: four threads: only the held plan is live");
+        const auto mergeCalls=copy::g_stats.mergeCalls,copies=copy::g_stats.copies;
+        std::vector<std::unique_ptr<Tree>> trees;std::vector<std::unique_ptr<Destination>> dsts;
+        for(unsigned t=0;t<2;++t){trees.push_back(std::make_unique<Tree>(1,1));dsts.push_back(std::make_unique<Destination>());}
+        std::vector<std::thread> workers;
+        for(unsigned t=0;t<2;++t)workers.emplace_back([&,t]{for(unsigned i=0;i<kRounds;++i)copy::endMergeOpaque(copy::beginMergeOpaque(dsts[t]->ptr(),trees[t]->anchor(0),kFrame),true);});
+        workers.emplace_back([&]{for(unsigned i=0;i<kRounds;++i)copy::copier(base,336,addressOf(source),0,1,kFrame);});
+        for(auto& w:workers)w.join();
+        check(copy::g_stats.mergeCalls==mergeCalls && copy::g_stats.copies==copies && copy::g_mergePlans.size()==1,
+              "plans: four threads: 6000 merges and 3000 copies beside an open plan took the mutex 0 times and registered no plan");
+        release.store(true);holder.join();
+        check(copy::g_mergePlans.empty() && held(addressOf(heldTree.item(0,0,0))) && copy::g_emissionsLive.load() && published(),
+              "plans: four threads: the plan's end returns the claim it staged, and the flags follow it");
+        copy::invalidateEmission(addressOf(heldTree.item(0,0,0)));
+        check(!copy::g_claimsLive.load() && !copy::g_emissionsLive.load() && published(),"plans: four threads: and when that claim goes everything is quiet");
+    }
+    copy::reset();
+}
+// The exit line: the share of calls that never took the mutex, pinned, and fed by the real paths.
+inline void runExitLine(ID3D11Device* device,Check check) {
+    copy::Stats s;s.clearLockFree=7;s.clearCalls=10;s.mergeLockFree=3;s.mergeCalls=4;s.copiesLockFree=100;s.copies=120;s.copierNoLeaseLockFree=5;
+    char line[copy::kExitLineBytes];copy::formatExitLine(s,line);
+    check(std::string(line)=="engine motion: primary copy lock-free exits cumulative (already counted in the figures above; these calls never took the mutex): "
+                             "clear 7 of 10 calls, merge 3 of 4 calls, copier 100 of 120 calls (5 of those found no active map).","exit line: the text, exactly");
+    copy::Stats big;big.clearLockFree=big.clearCalls=big.mergeLockFree=big.mergeCalls=big.copiesLockFree=big.copies=big.copierNoLeaseLockFree=~0ull;
+    copy::formatExitLine(big,line);
+    check(std::strlen(line)<copy::kExitLineBytes-1,"exit line: at 20-digit counters it fits its buffer whole");
+    D3D11_BUFFER_DESC d{};d.ByteWidth=336;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.StructureByteStride=336;d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> pool;Record mapped[1]={record(1)},source=record(2);
+    if(!device || FAILED(device->CreateBuffer(&d,nullptr,&pool))){check(false,"exit line: pool fixture");return;}
+    Tree tree(1,1);Destination dst;
+    copy::reset();copy::beginMap(pool.Get(),mapped,sizeof(mapped),336,D3D11_MAP_WRITE_DISCARD,1,kFrame);
+    for(unsigned i=0;i<10;++i)copy::invalidateDictionary(tree.ptr());
+    for(unsigned i=0;i<4;++i)copy::endMergeOpaque(copy::beginMergeOpaque(dst.ptr(),tree.anchor(0),kFrame),true);
+    for(unsigned i=0;i<6;++i)copy::copier(reinterpret_cast<uintptr_t>(mapped),336,addressOf(source),0,1,kFrame);
+    for(unsigned i=0;i<3;++i)copy::copier(reinterpret_cast<uintptr_t>(mapped)+4096,336,addressOf(source),0,1,kFrame);   // no lease at that base
+    claim(source,kFrame);copy::invalidateDictionary(tree.ptr());   // one locked clear
+    const auto st=copy::stats();
+    check(st.clearLockFree==10 && st.clearCalls==11 && st.mergeLockFree==4 && st.mergeCalls==4 && st.copiesLockFree==9 && st.copies==9 &&
+          st.copierNoLeaseLockFree==3 && st.copierNoLease==3,"exit line: the lock-free counts come from the real exits and sit inside the totals the other lines print");
+    copy::reset();
+}inline void formatBoth(const copy::LockWindow& w,double perUs,double seconds,char (&lines)[2][copy::kLockLineBytes]){for(unsigned half=0;half<2;++half)copy::formatLockLine(w,half,perUs,seconds,lines[half]);}
 inline void runLock(ID3D11Device* device,Check check) {
     namespace emcpu=edvr::emcpu;
     using Caller=copy::Caller;
@@ -474,6 +583,8 @@ inline void runLock(ID3D11Device* device,Check check) {
     emcpu::g_gate.store(savedGate);emcpu::g_renderThreadId.store(savedRenderTid);drain();
 }
 inline void run(ID3D11Device* device,Check check) {
+    runPlansHoldingNothing(device,check);
+    runExitLine(device,check);
     runLock(device,check);
     runCopier(device,check);
     // --- (d) walk equivalence: the production walk and the pre-change walk leave identical state ---
@@ -845,6 +956,18 @@ inline void run(ID3D11Device* device) {
                 };
                 const double ns=perCall(kIterations/16,cycle)/16;stop.store(true);for(auto& th:emitters)th.join();
                 std::printf("bench: %-58s %9.1f ns/call   (3 other threads calling invalidateEmission flat out; includes 1/16 of a map+unmap)\n","copier, 16 copies per map cycle, no claims",ns);
+            }
+            {   // A plan in flight that holds nothing (the emission it was begun beside has been consumed): the review's chain.
+                copy::reset();   // forgets the earlier lease
+                Tree heldTree(1,1);Destination heldDst,otherDst;Tree other(1,1);Record e=record(9);heldTree.item(0,0,0)=record(4);
+                copy::beginMap(buffer.Get(),mapped.data(),uint32_t(mapped.size()*336),336,D3D11_MAP_WRITE_DISCARD,1,kFrame);
+                claim(e,kFrame);
+                void* plan=copy::beginMergeOpaque(heldDst.ptr(),heldTree.anchor(0),kFrame);       // a plan, registered while an emission is live
+                copy::copier(base,336,reinterpret_cast<uintptr_t>(&e),0,1,kFrame);                // the emission is consumed: the plan holds nothing
+                auto beside=[&]{copy::endMergeOpaque(copy::beginMergeOpaque(otherDst.ptr(),other.anchor(0),kFrame),true);};
+                line("merge begin+end beside an open plan that holds nothing",perCall(kIterations,beside),allocationsPerThousand(beside));
+                line("copier beside an open plan that holds nothing",perCall(kIterations,f1),allocationsPerThousand(f1));
+                copy::endMergeOpaque(plan,true);
             }
         } else std::printf("bench: copier fixture could not open a pool lease\n");
         copy::endMap(buffer.Get(),1);copy::forget(buffer.Get());copy::reset();

@@ -410,8 +410,21 @@ inline int flatCpuTests() {
             for (unsigned p = 0; p < emcpu::kParts; ++p)
                 if (flatcpu::emFolded(p) && emcpu::kInfo[p].clocked) folded += r.emRenderMs[p];
             for (unsigned i = 0; i < flatcpu::kEmNameCount; ++i) listed += r.emRenderMs[flatcpu::kEmNames[i].part];
-            expect(nearly(folded, listed) && std::strncmp(flatcpu::kEmNames[0].name, "engine ", 7) == 0,
-                   "the by-part tokens cover exactly the parts the hooks total folds, and every name carries the 'engine ' they drop");
+            expect(nearly(folded, listed), "the by-part tokens cover exactly the parts the hooks total folds");
+            // Every name carries the "engine " the by-part tokens drop, and every part has its own token, in order, with its own figures
+            // (the other threads' list holds the same names behind "engine ", so each is looked for behind the separator that only this list uses).
+            bool prefixes = true, tokens = true;
+            for (unsigned i = 0; i < flatcpu::kEmNameCount; ++i) {
+                prefixes = prefixes && std::strncmp(flatcpu::kEmNames[i].name, "engine ", 7) == 0;
+                const unsigned p = flatcpu::kEmNames[i].part;
+                char ms[32], calls[32];
+                std::snprintf(ms, sizeof(ms), "%.3f", r.emRenderMs[p] / 20.0);
+                flatcpu::callsText(calls, sizeof(calls), static_cast<double>(r.emRenderCalls[p]) / 20.0);
+                const std::string token = std::string(i ? ", " : "engine motion hooks by part (render thread, per clocked frame): ") +
+                                          (flatcpu::kEmNames[i].name + 7) + " " + ms + " ms (calls " + calls + ")";
+                tokens = tokens && has(text, token);
+            }
+            expect(prefixes && tokens, "all eight by-part tokens are there, in order, each with its own figures");
         }
         expect(has(text, "engine emit 0.030 ms (calls 1.0)") && has(text, "engine copier 0.010 ms (calls 1.0)") &&
                has(text, "engine merge 0.006 ms (calls 1.0)") && has(text, "engine clear 0.004 ms (calls 1.0)"),

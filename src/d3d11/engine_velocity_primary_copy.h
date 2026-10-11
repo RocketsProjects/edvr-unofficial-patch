@@ -41,6 +41,9 @@ inline const char* scatterFailureName(ScatterFailure f) {
 }
 struct Stats { ScatterFailure lastScatterFailure=ScatterFailure::None; uint64_t emissions=0,copies=0,joined=0,declined=0,invalidated=0,overflows=0,scatterBatches=0,scatterRows=0,scatterFailed=0,scatterEmpty=0,sourceResets=0,copierNoLease=0,copierAmbiguous=0,copierInvalidRange=0,mergePlans=0,mergeFailed=0,clearCalls=0,clearedClaims=0,clearFailed=0;
     uint64_t mergeCalls=0,mergeWithoutClaims=0,clearNoClaims=0,mergeNodes=0,clearNodes=0,activeClaims=0,activePlans=0;
+    // The calls that never took the mutex, already inside clearCalls/clearNoClaims, mergeCalls/mergeWithoutClaims and
+    // copies/copierNoLease above (which keep their meaning): the share of calls the lock-free exits handled.
+    uint64_t clearLockFree=0,mergeLockFree=0,copiesLockFree=0,copierNoLeaseLockFree=0;
 };
 struct MergePlan;
 inline std::mutex g_mutex,g_gpuMutex;
@@ -51,11 +54,18 @@ inline Stats g_stats;
 inline uint32_t g_overflowFrame=~0u;
 inline uint32_t g_emissionFrame=~0u;
 inline uint64_t g_emissionEpoch=1;
-// !g_emissions.empty() || !g_mergePlans.empty(), as of the last release of g_mutex by anyone who locks it. The two
-// job-thread observers below (a typed-dictionary clear and a list merge) read it without the mutex: when it is false
-// there is nothing for them to revoke or stage, so they count the call and leave. It sits on its own cache line so
-// readers are not invalidated by the mutex's traffic, and it is written only when its value changes.
+// Two published flags, each as of the last release of g_mutex by anyone who locks it. They sit on their own cache lines
+// so readers are not invalidated by the mutex's traffic, and each is written only when its value changes.
+//   g_claimsLive    = !g_emissions.empty() || !g_mergePlans.empty(). The typed-dictionary clear reads it: with it false
+//                     there is no claim to revoke and no in-flight plan to mark invalid, so the clear counts and leaves.
+//   g_emissionsLive = !g_emissions.empty(). The list merge and the pool copier read it. A merge stages claims from
+//                     g_emissions and from nowhere else, so with it false the plan it would build has no transfers and
+//                     the merge gets a token instead. The copier never reads g_mergePlans. A plan that holds nothing
+//                     must not keep those two paths locked, which a flag including plans did (a chain: one emission, an
+//                     unrelated merge registers an empty plan, the emission is consumed, the plan keeps the flag true,
+//                     every merge that starts meanwhile registers another).
 alignas(64) inline std::atomic<bool> g_claimsLive{false};
+alignas(64) inline std::atomic<bool> g_emissionsLive{false};
 // Calls that took that exit, counted without the mutex and folded into stats() as clearCalls/clearNoClaims and
 // mergeCalls/mergeWithoutClaims, so every counter the log prints keeps its meaning.
 alignas(64) inline std::atomic<uint64_t> g_clearSkipped{0};
@@ -64,10 +74,10 @@ alignas(64) inline std::atomic<uint64_t> g_mergeSkipped{0};
 // lease at their base (stats().copierNoLease).
 alignas(64) inline std::atomic<uint64_t> g_copierSkipped{0};
 inline std::atomic<uint64_t> g_copierNoLeaseSkipped{0};
-// What the copier's lock-free exit needs besides g_claimsLive: whether any pool holds a patch, and the active leases
+// What the copier's lock-free exit needs besides g_emissionsLive: whether any pool holds a patch, and the active leases
 // (base address, slots = bytes / kBytes). A seqlock: the writer holds g_mutex, makes seq odd, rewrites, makes it even;
-// a reader keeps what it read only if seq was even and unchanged on both sides. g_claimsLive is stored inside the
-// same window whenever the window opens, so a reader's (claims, patches, leases) is one published state.
+// a reader keeps what it read only if seq was even and unchanged on both sides. Both flags are stored inside the
+// same window whenever the window opens, so a reader's (emissions, patches, leases) is one published state.
 constexpr uint32_t kLeasesUnknown=~0u;
 struct PoolView {
     std::atomic<uint32_t> seq{0},count{0};
@@ -140,7 +150,8 @@ inline void formatLockLine(const LockWindow& w,unsigned half,double ticksPerUs,d
         }
     }
     out[used]=0;
-}// The only way this header locks g_mutex. The destructor publishes g_claimsLive (and, when pools were touched, the pool
+}
+// The only way this header locks g_mutex. The destructor publishes both flags (and, when pools were touched, the pool
 // view) BEFORE it unlocks, so a lock-free reader that sees "false" is reading a state no later than the last completed
 // critical section: it is ordered before any mutation that is still in flight, which is a legal interleaving of the
 // call it replaces. A caller whose emission was recorded and returned before this call started sees "true": the
@@ -167,9 +178,12 @@ private:
     bool sampled_=false;
     int64_t acquireStart_=0,acquired_=0;
     static void publish() noexcept {
-        const bool claims=!g_emissions.empty() || !g_mergePlans.empty();
-        const bool claimsChanged=g_claimsLive.load(std::memory_order_relaxed)!=claims;
-        if(!g_poolsDirty){if(claimsChanged)g_claimsLive.store(claims,std::memory_order_release);return;}
+        const bool emissions=!g_emissions.empty(),claims=emissions || !g_mergePlans.empty();
+        const bool claimsChanged=g_claimsLive.load(std::memory_order_relaxed)!=claims || g_emissionsLive.load(std::memory_order_relaxed)!=emissions;
+        const auto storeFlags=[&]{
+            g_claimsLive.store(claims,std::memory_order_release);g_emissionsLive.store(emissions,std::memory_order_release);
+        };
+        if(!g_poolsDirty){if(claimsChanged)storeFlags();return;}
         g_poolsDirty=false;
         uint32_t count=0;uintptr_t base[kMaxPools];uint32_t slots[kMaxPools];bool patches=false;
         for(const auto& entry:g_pools) {
@@ -182,7 +196,7 @@ private:
         bool same=patches==g_poolView.patches.load(std::memory_order_relaxed) && count==g_poolView.count.load(std::memory_order_relaxed);
         for(uint32_t i=0;same && i<count && count!=kLeasesUnknown;++i)
             same=base[i]==g_poolView.base[i].load(std::memory_order_relaxed) && slots[i]==g_poolView.slots[i].load(std::memory_order_relaxed);
-        if(same){if(claimsChanged)g_claimsLive.store(claims,std::memory_order_release);return;}
+        if(same){if(claimsChanged)storeFlags();return;}
         const uint32_t sequence=g_poolView.seq.load(std::memory_order_relaxed);
         g_poolView.seq.store(sequence+1,std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
@@ -191,7 +205,7 @@ private:
         for(uint32_t i=0;i<count && count!=kLeasesUnknown;++i) {
             g_poolView.base[i].store(base[i],std::memory_order_relaxed);g_poolView.slots[i].store(slots[i],std::memory_order_relaxed);
         }
-        g_claimsLive.store(claims,std::memory_order_release);
+        storeFlags();
         g_poolView.seq.store(sequence+2,std::memory_order_release);
     }
 };
@@ -286,26 +300,33 @@ inline bool beginMap(ID3D11Buffer* resource,void* base,uint32_t bytes,uint32_t s
         return p.valid;
     } catch(...) {overflow(frame);return false;}
 }
-// The copier's lock-free exit. What the locked copier does with no source claim, no detached plan and no patch in any
-// pool: bump copies; scan the pools for active leases at `base`; with none bump copierNoLease; with one whose size
+// The copier's lock-free exit. What the locked copier does with no source claim and no patch in any pool (a detached merge
+// plan is irrelevant: the copier reads only g_emissions and g_pools, and a plan's staged claims are not in g_emissions):
+// bump copies; scan the pools for active leases at `base`; with none bump copierNoLease; with one whose size
 // covers the range erase its patches in that range (none exist); with two, or a range that does not fit, invalidate
 // the pools; then walk emissions (none), after refusing a count/source it cannot address (which clears the emissions
 // and bumps the epoch even when there are none). This handles exactly the quiet cases that change nothing but a counter:
-// count 0, no lease, and one lease that fits. Everything else, or any doubt (an odd or moved sequence, claims or patches
-// in the published state), returns false and the caller takes the mutex. The published state is a state some completed
+// count 0, no lease, and one lease that fits. Everything else, or any doubt (an odd or moved sequence, source claims or
+// patches in the published state), returns false and the caller takes the mutex. The published state is a state some completed
 // critical section left, so the call is ordered before any mutation still in flight.
+#ifdef EDVR_ENGINE_VELOCITY_RIG
+inline void (*g_copierMidRead)() noexcept=nullptr;   // the rig only: publishes a change between the reads and the re-check
+#endif
 inline bool copierLockFree(uintptr_t base,uint32_t stride,uintptr_t source,uint32_t firstSlot,uint32_t count) noexcept {
     if(!count){g_copierSkipped.fetch_add(1,std::memory_order_relaxed);return true;}
     if(count>kMaxPatches || !source || source>UINTPTR_MAX-uint64_t(count)*kBytes)return false;
     const uint32_t before=g_poolView.seq.load(std::memory_order_acquire);
     if(before&1u)return false;
     const uint32_t leases=g_poolView.count.load(std::memory_order_relaxed);
-    const bool quiet=!g_claimsLive.load(std::memory_order_relaxed) && !g_poolView.patches.load(std::memory_order_relaxed);
+    const bool quiet=!g_emissionsLive.load(std::memory_order_relaxed) && !g_poolView.patches.load(std::memory_order_relaxed);
     if(!quiet || leases>kMaxPools)return false;
     uint32_t matches=0,slots=0;
     for(uint32_t i=0;i<leases;++i)if(g_poolView.base[i].load(std::memory_order_relaxed)==base) {
         ++matches;slots=g_poolView.slots[i].load(std::memory_order_relaxed);
     }
+#ifdef EDVR_ENGINE_VELOCITY_RIG
+    if(g_copierMidRead)g_copierMidRead();
+#endif
     std::atomic_thread_fence(std::memory_order_acquire);
     if(g_poolView.seq.load(std::memory_order_relaxed)!=before)return false;
     if(!matches){g_copierSkipped.fetch_add(1,std::memory_order_relaxed);g_copierNoLeaseSkipped.fetch_add(1,std::memory_order_relaxed);return true;}
@@ -388,7 +409,20 @@ inline Stats stats() {
     result.clearCalls+=clearSkipped;result.clearNoClaims+=clearSkipped;
     result.mergeCalls+=mergeSkipped;result.mergeWithoutClaims+=mergeSkipped;
     result.copies+=g_copierSkipped.load(std::memory_order_relaxed);result.copierNoLease+=g_copierNoLeaseSkipped.load(std::memory_order_relaxed);
+    result.clearLockFree=clearSkipped;result.mergeLockFree=mergeSkipped;
+    result.copiesLockFree=g_copierSkipped.load(std::memory_order_relaxed);result.copierNoLeaseLockFree=g_copierNoLeaseSkipped.load(std::memory_order_relaxed);
     result.activeClaims=g_emissions.size();result.activePlans=g_mergePlans.size();return result;
+}
+constexpr size_t kExitLineBytes=400;
+// The calls the lock-free exits handled, against all calls of the same kind. The totals are the figures the other lines
+// print (clear calls, merge calls, copier spans' native copy ranges), which include these.
+inline void formatExitLine(const Stats& s,char (&out)[kExitLineBytes]) noexcept {
+    std::snprintf(out,kExitLineBytes,"engine motion: primary copy lock-free exits cumulative (already counted in the figures above; these calls never took "
+                  "the mutex): clear %llu of %llu calls, merge %llu of %llu calls, copier %llu of %llu calls (%llu of those found no active map).",
+                  static_cast<unsigned long long>(s.clearLockFree),static_cast<unsigned long long>(s.clearCalls),
+                  static_cast<unsigned long long>(s.mergeLockFree),static_cast<unsigned long long>(s.mergeCalls),
+                  static_cast<unsigned long long>(s.copiesLockFree),static_cast<unsigned long long>(s.copies),
+                  static_cast<unsigned long long>(s.copierNoLeaseLockFree));
 }
 inline void invalidateClaims() {g_emissions.clear();++g_emissionEpoch;++g_stats.declined;++g_stats.mergeFailed;}
 // 36819D0 frees every list node in this typed336 dictionary. Destination
@@ -445,8 +479,10 @@ inline void invalidateDictionary(uintptr_t dictionary) noexcept {invalidateDicti
 // destination tail, then shift any remainder within their original node.
 // Claims are staged before ALL source slots/overwritten destinations clear.
 //
-// With no source claim and no detached plan published there is nothing to stage, so the call is counted and gets the
-// fixed token below: no lock, no walk of the native list, no allocation, no entry in g_mergePlans. A producer may still
+// With no source claim published there is nothing to stage (transfers come from g_emissions and from nowhere else, and a
+// plan another merge holds has already taken its claims out of it), so the call is counted and gets the fixed token
+// below: no lock, no walk of the native list, no allocation, no entry in g_mergePlans. A detached plan in flight does not
+// change that: plans do not read each other, and a plan that holds nothing must not keep the path locked. A producer may still
 // register a claim between this callback and its end, and a native unwind must still drop it, so endMergeOpaque
 // invalidates the claims on an unwind of this token exactly as it does for a full plan. What the token does not keep is
 // an empty plan's other behaviours, all of which act on an empty transfer list: its membership in g_mergePlans (so a
@@ -456,11 +492,11 @@ inline void invalidateDictionary(uintptr_t dictionary) noexcept {invalidateDicti
 // spared: the safe direction, and only on a native unwind).
 inline void* mergeNoClaimsToken() noexcept {return reinterpret_cast<void*>(uintptr_t(1));}
 inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t frame) noexcept {
-    if(!g_claimsLive.load(std::memory_order_acquire)){g_mergeSkipped.fetch_add(1,std::memory_order_relaxed);return mergeNoClaimsToken();}
+    if(!g_emissionsLive.load(std::memory_order_acquire)){g_mergeSkipped.fetch_add(1,std::memory_order_relaxed);return mergeNoClaimsToken();}
     ClaimLock lock(Caller::MergeBegin);
     ++g_stats.mergeCalls;
-    // The flag may be stale-true: the claims were consumed since it was published.
-    if(g_emissions.empty() && g_mergePlans.empty())++g_stats.mergeWithoutClaims;
+    // The flag may be stale-true: the emissions were consumed since it was published. Under the lock the same rule holds.
+    if(g_emissions.empty()){++g_stats.mergeWithoutClaims;return mergeNoClaimsToken();}
     try {
         uintptr_t dstLinks[2]{},srcLinks[2]{};
         if(!destination || !source || destination==source ||
