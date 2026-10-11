@@ -394,20 +394,23 @@ bool targetSharpRemlokAnnotationChecks() {
         {"RSSetViewports", "RemlokRsSetViewportsRestore", "State", 82},
     };
     bool ok = true;
-    ok &= leafApiSourceChecks("src/d3d11/target_sharp.cpp", target,
+    ok &= leafApiSourceChecks("src/plugins/cockpit_visuals/target_sharp_policy.cpp", target,
                               sizeof(target) / sizeof(target[0]),
-                              "TargetSharp source is available for direct API coverage verification");
+                              "TargetSharp module source is available for direct API coverage verification");
     ok &= leafApiSourceChecks("src/plugins/cockpit_visuals/remlok_fix.cpp", remlok,
                               sizeof(remlok) / sizeof(remlok[0]),
                               "RemLok source is available for direct API coverage verification");
 
-    const std::string sharp = readSource("src/d3d11/target_sharp.cpp");
+    const std::string sharp = readSource("src/plugins/cockpit_visuals/target_sharp_policy.cpp");
+    const std::string sharpFacade = readSource("src/d3d11/target_sharp.cpp");
     const std::string rem = readSource("src/plugins/cockpit_visuals/remlok_fix.cpp");
     const std::string probe = functionBody(sharp, "bool targetSharpOnEyeDrawImpl(");
-    const std::string sharpDefault = functionBody(sharp, "bool targetSharpOnEyeDraw(");
-    const std::string sharpObserved = functionBody(sharp, "bool targetSharpOnEyeDrawObserved(");
-    const std::string sharpBegin = functionBody(sharp, "void targetSharpBegin(");
-    const std::string sharpEnd = functionBody(sharp, "void targetSharpEnd(");
+    const std::string matcher = functionBody(sharp, "bool builtinMatches(");
+    const std::string sharpDefault = functionBody(sharpFacade, "bool targetSharpOnEyeDraw(");
+    const std::string sharpObserved = functionBody(sharpFacade, "bool targetSharpOnEyeDrawObserved(");
+    const std::string candidate = functionBody(sharpFacade, "bool candidate(ID3D11DeviceContext* ctx");
+    const std::string sharpBegin = functionBody(sharp, "void builtinBegin(");
+    const std::string sharpEnd = functionBody(sharp, "void builtinEnd(");
     const std::string remBegin = functionBody(rem, "void remlokScissorBegin(");
     const std::string remEnd = functionBody(rem, "void remlokScissorEnd(");
     const std::string clone = functionBody(rem, "ID3D11RasterizerState* cloneWithScissor(");
@@ -425,21 +428,25 @@ bool targetSharpRemlokAnnotationChecks() {
             [](unsigned char c) { return std::isspace(c) != 0; }), body.end());
         return body;
     };
-    const auto wrappersRouteToProbe = [&](const std::string& defaultBody,
-                                          const std::string& observedBody) {
+    const auto wrappersRouteToCandidate = [&](const std::string& defaultBody,
+                                              const std::string& observedBody) {
         return compact(defaultBody) ==
-                   "{returntargetSharpOnEyeDrawImpl<false>(ctx,kind,count,instances,nullptr);}" &&
+                   "{returncandidate<false>(ctx,kind,count,instances,nullptr);}" &&
                compact(observedBody) ==
-                   "{returntargetSharpOnEyeDrawImpl<true>(ctx,kind,count,instances,&observation);}";
+                   "{returncandidate<true>(ctx,kind,count,instances,&observation);}";
     };
-    ok &= check(wrappersRouteToProbe(sharpDefault, sharpObserved),
-                "TargetSharp default and observed entry points both return the shared annotated probe result");
-    ok &= check(!wrappersRouteToProbe(
-                    "{targetSharpOnEyeDrawImpl<false>(ctx,kind,count,instances,nullptr);return false;}",
+    ok &= check(wrappersRouteToCandidate(sharpDefault, sharpObserved) &&
+                candidate.find("wantsDraws<Observe>(observation, true)") <
+                    candidate.find("ops->matches(") &&
+                matcher.find("targetSharpOnEyeDrawImpl<true>") != std::string::npos &&
+                matcher.find("targetSharpOnEyeDrawImpl<false>") != std::string::npos,
+                "TargetSharp entry points route through the fast gate and module-owned annotated predicate");
+    ok &= check(!wrappersRouteToCandidate(
+                    "{candidate<false>(ctx,kind,count,instances,nullptr);return false;}",
                     sharpObserved) &&
-                !wrappersRouteToProbe(sharpDefault, "{return false;}"),
-                "TargetSharp source pin rejects either wrapper bypassing the shared probe result");
-    const std::size_t sharpNoReplacement = sharpBegin.find("if (!ps) return");
+                !wrappersRouteToCandidate(sharpDefault, "{return false;}"),
+                "TargetSharp source pin rejects either facade route bypassing the module predicate");
+    const std::size_t sharpNoReplacement = sharpBegin.find("if (!ps) { publish(state, out); return; }");
     const std::size_t sharpBeginSample = sharpBegin.find("edvrPluginCostApiSampleContext(ctx)");
     const std::size_t sharpGet = sharpBegin.find("ctx->PSGetShader");
     const std::size_t sharpSet = sharpBegin.find("ctx->PSSetShader");
@@ -449,13 +456,15 @@ bool targetSharpRemlokAnnotationChecks() {
                 sharpNoReplacement < sharpBeginSample && sharpBeginSample < sharpGet &&
                 sharpGet < sharpSet,
                 "TargetSharp captures sampling only after replacement succeeds and preserves query-before-set order");
-    const std::size_t sharpSavedSample = sharpEnd.find("const bool costSample = g_costSample;");
-    const std::size_t sharpClearSample = sharpEnd.find("g_costSample = false;", sharpSavedSample);
+    const std::size_t sharpSavedSample = sharpEnd.find("const bool costSample = state.costSample;");
+    const std::size_t sharpClearSample = sharpEnd.find("state.costSample = false;", sharpSavedSample);
+    const std::size_t sharpRestoreNote = sharpEnd.find("Site::TargetPsSetShaderRestore");
     const std::size_t sharpRestore = sharpEnd.find("ctx->PSSetShader");
     ok &= check(sharpSavedSample != std::string::npos && sharpClearSample != std::string::npos &&
-                sharpRestore != std::string::npos &&
-                sharpSavedSample < sharpClearSample && sharpClearSample < sharpRestore,
-                "TargetSharp carries the Begin sample into its matching restore then clears it");
+                sharpRestoreNote != std::string::npos && sharpRestore != std::string::npos &&
+                sharpSavedSample < sharpRestoreNote && sharpRestoreNote < sharpRestore &&
+                sharpRestore < sharpClearSample,
+                "TargetSharp carries the Begin sample through its annotated restore and clears it only after success");
     const std::size_t remSample = remBegin.find("g_costSample = edvrPluginCostApiSampleContext(ctx) != 0;");
     const std::size_t remGetState = remBegin.find("ctx->RSGetState");
     ok &= check(remSample != std::string::npos && remGetState != std::string::npos &&

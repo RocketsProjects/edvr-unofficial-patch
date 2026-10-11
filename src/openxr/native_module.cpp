@@ -7,11 +7,36 @@
 #include "native_local_config.h"
 #include "native_cpu_trace.h"
 #include "init_error.h"
+#include "../common/plugin_selection_snapshot.h"
 #include <new>
 #include <stdexcept>
 
 namespace {
 using namespace edvr::openxr;
+using edvr::plugin_selection::PluginSelectionSnapshotV1;
+using edvr::plugin_selection::copyPluginSelectionSnapshotV1;
+using edvr::plugin_selection::pluginSelectionSnapshotMatchesBuildV1;
+using edvr::plugin_selection::kSelectionBuildMismatch;
+using edvr::plugin_selection::kPluginSelectionSnapshotVersionV1;
+
+using QueryPluginSelectionV1 = HRESULT (WINAPI *)(uint32_t, uint32_t, void*);
+HRESULT queryPluginSelectionSnapshot(HMODULE provider, PluginSelectionSnapshotV1* output) noexcept {
+  if (!provider || !output) return E_INVALIDARG;
+  const auto query = reinterpret_cast<QueryPluginSelectionV1>(
+      GetProcAddress(provider, "edvrQueryPluginSelectionV1"));
+  if (!query) return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+  PluginSelectionSnapshotV1 returned{};
+  HRESULT result = query(kPluginSelectionSnapshotVersionV1, sizeof(returned), &returned);
+  if (result != S_OK) return FAILED(result) ? result : E_UNEXPECTED;
+  PluginSelectionSnapshotV1 copied{};
+  result = copyPluginSelectionSnapshotV1(kPluginSelectionSnapshotVersionV1,
+      sizeof(copied), &returned, &copied);
+  if (FAILED(result)) return result;
+  if (!pluginSelectionSnapshotMatchesBuildV1(copied))
+    copied.validationFlags |= kSelectionBuildMismatch;
+  *output = copied;
+  return S_OK;
+}
 
 class ModuleBackend final : public RuntimeBackend {
  public:
@@ -47,6 +72,10 @@ class ModuleBackend final : public RuntimeBackend {
       nativeTracePrintf("module_startup,graphics_unavailable=%08lx\n",(unsigned long)acquired);
       return vr::VRInitError_Init_HmdNotFound;
     }
+    // Optional transport-only snapshot; a failed query preserves legacy startup.
+    generation->pluginSelectionQueryStatus = queryPluginSelectionSnapshot(
+        generation->binding.provider(), &generation->pluginSelectionSnapshot);
+    generation->hasPluginSelectionSnapshot = SUCCEEDED(generation->pluginSelectionQueryStatus);
     if (!generation->binding.waitForRender(std::chrono::milliseconds(wait_))) {
       nativeTracePuts("module_startup,no_present_before_runtime=1");
       return vr::VRInitError_Init_HmdNotFound;
@@ -180,6 +209,9 @@ class ModuleBackend final : public RuntimeBackend {
     RenderThreadDispatcher render{owner};
     RenderRoute route{render};
     NativeRenderBinding binding;
+    PluginSelectionSnapshotV1 pluginSelectionSnapshot{};
+    HRESULT pluginSelectionQueryStatus=E_PENDING;
+    bool hasPluginSelectionSnapshot=false;
     std::unique_ptr<NativeRuntimeHost> host;
     Generation* previous=nullptr;
     std::atomic<bool> loadingAdmitted{false};

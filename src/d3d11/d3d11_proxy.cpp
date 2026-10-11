@@ -28,6 +28,7 @@
 #include "../common/module_pin.h"
 #include "../common/native_startup.h"
 #include "../common/proxy.h"
+#include "plugin_selection_transport.h"
 #include "device_hook.h"
 #include "flat_wrapper_note.h"
 #include "format_support_log.h"
@@ -276,6 +277,8 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     edvr::Log::get().open(cfg.logDir(), L"gfx");
     edvr::Log::get().note("edvr d3d11 proxy attached; module dir %S",
                           g_moduleDir->c_str());
+    // One bounded, read-only snapshot; transport errors do not change legacy startup.
+    (void)edvr::plugin_selection_transport::captureFromModuleDirectory(*g_moduleDir);
     // NativeRuntimeHost queries CPU-only render settings immediately after
     // its first device create, before vScreen's optional state is configured.
     // First-party selection is still fixed to the supported profile here.

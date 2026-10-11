@@ -12,16 +12,17 @@
   implementations, generated config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `39c2e02c`; full build passed with
-  receipt `03114f60` in
-  `build/full-plugin-performance-policies-offline-20261010-r4.log`. Last
-  measured Steam build: `6ab758d2`; install needs Sean approval.
-- **Module progress:** Performance owns OpenXR resolution, the FOV
-  engine and settings resolver, and sampler; Cockpit owns RemLok;
-  Diagnostics owns scheduler. Comfort owns exposure, scanners,
-  transition flash and terrain pose. On-foot owns footprint sampling;
-  shared sizing stays core; Explorer Cam owns lifecycle. Selections stay
-  unavailable; draw migration and installer/runtime selection stay open.
+- **Current integration:** selection transport and TargetSharp private
+  policy boundary validated at `0ceff96a`; full build
+  `build/full-plugin-selection-targetsharp-offline-20261010-r4.log`
+  passed with receipt `05d898e7`. Selection remains informational and no
+  availability or performance claim is established.
+- **Module progress:** Performance owns resolution, FOV engine/settings,
+  and sampler. Cockpit owns RemLok and TargetSharp policy/state; shared
+  VScreen services stay core. Diagnostics owns scheduler. Comfort owns
+  exposure, scanners, transition flash and terrain pose. On-foot owns
+  footprint sampling; Explorer Cam owns lifecycle. Selections remain
+  unavailable; admission and whole-group absence remain open.
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
   Capture uses consumed values; unarmed paths construct no predicate payload.
@@ -4639,3 +4640,78 @@ and cost budgets are unmeasured. These offline checks do not prove
 runtime selection, whole-plugin uninstalled cost, or CPU/GPU benefit.
 The final matched performance comparison remains deferred to
 rendering-code freeze. No install or flight occurred.
+
+### 2026-10-10 - combined offline validation held
+
+The reviewed selection transport and TargetSharp ownership slice are
+applied as 21 source paths, pending the normal full build. Applied
+source gates pass five selection-transport and nine TargetSharp
+in-memory mutations. These are source checks; the new native/WARP
+assertions have not compiled or run.
+
+Full R1 stopped before production compilation at
+`target_sharp_policy.cpp:17`: extraction incorrectly qualified generated
+`fsr_hlsl_gen.h` as a source-relative include. The scoped repair
+restores its plain generated-header name and the existing `build/gen`
+include path. The actual full-tree plugin boundary scan and TargetSharp
+source gate now pass; no checker was weakened. R1 log:
+`build/full-plugin-selection-targetsharp-offline-20261010-r1.log`.
+
+R2 was held before launch because Elite was running. Next step: when
+Elite exits, run the guarded normal full build into
+`build/full-plugin-selection-targetsharp-offline-20261010-r2.log`. Only
+after the exact receipt and executed fixture evidence pass, apply the
+conditional combined documentation, commit the same source, verify clean
+receipt, and push `codex/plugin-architecture`. The ignored
+`build/run_plugin_selection_targetsharp_checkpoint_20261010.bat` wraps
+the receipt-aware docs/commit helpers. No combined receipt or new commit
+exists yet. Steam/Epic files and live Config were untouched; no install,
+promotion, main merge, or flight was requested.
+
+### 2026-10-10 — selection transport and TargetSharp policy boundary
+
+This checkpoint validates selection transport and TargetSharp ownership
+boundaries while retaining the normal profile behavior. A shared
+installer-record codec produces an 80-byte copied startup snapshot with
+distinct Absent, Opaque, and Supported-empty states. The graphics proxy
+captures the bounded state file after Config/log setup and before
+Performance registration. OpenXR queries after successful graphics
+binding and retains only copied snapshot/status on `Generation` before
+host construction. The mask remains diagnostic; there is no migration,
+enforcement, UI, availability, default, INI-key, or persistence change.
+
+TargetSharp's real candidate predicate and policy state now sit behind
+copied private Ops. Core keeps shared classifier/services, cached gates,
+draw ladder, and census. The WARP fixture checks builtin shader/state
+behavior, EASU/cubic fallback, exact stock PS restoration, failure
+gating, copied callback retry/lifetime, and explicit null-ops coldness
+at TargetSharp-owned sites. VScreen and cost fixtures retain classifier
+and instrumentation checks. These checks do not compare rendered pixels,
+prove whole Cockpit Visuals absence or actual DLL absence, or establish
+CPU/GPU benefit. Catalog selections remain empty; statuses stay
+catalog-only, hookPoints empty, and budgets unmeasured.
+`fix.temporal_aa` remains Temporal-owned.
+
+The combined R1 attempt stopped before production compilation at the
+plugin-boundary source gate: `target_sharp_policy.cpp` included
+`../../d3d11/fsr_hlsl_gen.h` from the wrong directory. The scoped repair
+corrected that moved-source include and audited the other moved
+includes; R1 produced no production or fixture pass evidence. R2 reached
+the VScreen fixture and failed three TargetSharp assertions: the
+facade's unconfigured hash cache was zero, and the null-policy fixture
+restored its initially inactive state before the positive selector
+cases. The repair preserves the immutable production hash before
+configuration and after clearing, and reseeds the intended positive
+cases while retaining final baseline restoration. R3 passed the VScreen
+selector, selection transport and plugin-cost fixtures, then stopped at
+Cockpit fixture compilation: the new assertion used the void
+`runTargetPair` as a boolean. The repair separately asserts the
+configured-but-failed fast gate, runs the next rejected candidate, and
+checks that neither shader compile is retried. The completed R4 log
+reports 32 selection transport fixture checks, 5 selection source
+mutations, 75 Cockpit WARP checks, and 9 TargetSharp source mutations;
+VScreen predicate and plugin-cost fixtures also passed. Receipt
+`05d898e7900b5a9e82327bd62103f101b2680f6e8a8b63df4590d45d59f16b30`
+matches the completed
+`full-plugin-selection-targetsharp-offline-20261010-r4.log` log and the
+exact precommit source inputs. No install or live Config read occurred.

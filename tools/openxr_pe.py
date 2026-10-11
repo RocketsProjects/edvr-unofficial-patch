@@ -32,6 +32,7 @@ GRAPHICS_PROVIDER_EXPORTS = frozenset({
     'edvrAcquireNativeTiming',
     'edvrAcquireGraphicsBridge', 'edvrAcquireRenderBoundary',
     'edvrQueryNativeRenderSettings',
+    'edvrQueryPluginSelectionV1',
     'edvrPublishNativeRenderSizing', 'edvrQueryNativeRenderSizing',
 })
 NATIVE_STARTUP_ROUTING_EXPORT = 'edvrNativeStartupRouting'

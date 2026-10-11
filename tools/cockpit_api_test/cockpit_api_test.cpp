@@ -4,6 +4,7 @@
 #define EDVR_BINDING_SHADOW_EXTERNAL 1
 
 #include "../../src/d3d11/target_sharp.h"
+#include "../../src/d3d11/target_sharp_policy_test.h"
 #include "../../src/d3d11/remlok_fix.h"
 #include "../../src/d3d11/binding_shadow.h"
 #include "../../src/d3d11/cockpit_cost_sites.h"
@@ -21,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 
 using Microsoft::WRL::ComPtr;
@@ -31,6 +33,10 @@ namespace {
 unsigned g_failed = 0;
 unsigned g_checks = 0;
 unsigned g_compileCalls = 0;
+unsigned g_targetConfigReads = 0;
+unsigned g_bindingGetCalls = 0;
+unsigned g_bindingResolveCalls = 0;
+unsigned g_shaderHashCalls = 0;
 unsigned g_observedEyeSizeCalls = 0;
 bool g_compileFails = false;
 bool g_sharp = true;
@@ -42,6 +48,143 @@ ID3D11PixelShader* g_replacement = nullptr;
 ID3D11VertexShader* g_targetVs = nullptr;
 uint32_t g_surfaceWidth = 512;
 uint32_t g_surfaceHeight = 256;
+
+bool check(bool condition, const char* label);
+
+struct FakeTargetSharpOpsState {
+    unsigned configure = 0;
+    unsigned matches = 0;
+    unsigned begin = 0;
+    unsigned end = 0;
+    unsigned shutdown = 0;
+    bool match = true;
+    bool throwBegin = false;
+    bool throwFirstEnd = false;
+};
+
+void fakeTargetSharpConfigure(void* opaque, edvr::Config*,
+                              edvr::TargetSharpFastStateV1* fast) {
+    auto* state = static_cast<FakeTargetSharpOpsState*>(opaque);
+    ++state->configure;
+    *fast = {sizeof(*fast), edvr::kTargetSharpPolicyVersionV1,
+             1, 0, 0, 0, edvr::kTargetSharpVertexShaderHashV1};
+}
+
+bool fakeTargetSharpMatches(void* opaque, ID3D11DeviceContext*, char,
+                            uint32_t, uint32_t,
+                            edvr::TargetSharpObservation*) {
+    auto* state = static_cast<FakeTargetSharpOpsState*>(opaque);
+    ++state->matches;
+    return state->match;
+}
+
+void fakeTargetSharpBegin(void* opaque, ID3D11DeviceContext*,
+                          edvr::TargetSharpFastStateV1*) {
+    auto* state = static_cast<FakeTargetSharpOpsState*>(opaque);
+    ++state->begin;
+    if (state->throwBegin) throw std::runtime_error("fake begin failure");
+}
+
+void fakeTargetSharpEnd(void* opaque, ID3D11DeviceContext*,
+                        edvr::TargetSharpFastStateV1*) {
+    auto* state = static_cast<FakeTargetSharpOpsState*>(opaque);
+    ++state->end;
+    if (state->throwFirstEnd && state->end == 2)
+        throw std::runtime_error("fake end failure");
+}
+
+void fakeTargetSharpShutdown(void* opaque,
+                             edvr::TargetSharpFastStateV1*) {
+    ++static_cast<FakeTargetSharpOpsState*>(opaque)->shutdown;
+}
+
+bool targetSharpOpsSeamChecks(ID3D11DeviceContext* ctx,
+                              ID3D11PixelShader* stock) {
+    bool ok = true;
+    FakeTargetSharpOpsState fake{};
+    edvr::TargetSharpPolicyOpsV1 fakeOps{
+        sizeof(edvr::TargetSharpPolicyOpsV1),
+        edvr::kTargetSharpPolicyVersionV1,
+        &fake,
+        &fakeTargetSharpConfigure,
+        &fakeTargetSharpMatches,
+        &fakeTargetSharpBegin,
+        &fakeTargetSharpEnd,
+        &fakeTargetSharpShutdown,
+    };
+    edvr::Config& cfg = edvr::Config::get();
+    ok &= check(edvr::targetSharpSetPolicyOpsV1ForTest(&fakeOps),
+                "private TargetSharp rig seam accepts a complete copied Ops table");
+    fakeOps.matches = nullptr;
+    edvr::targetSharpConfigure(cfg);
+    ok &= check(fake.configure == 1 && fake.matches == 0,
+                "fake TargetSharp configure is selected once before candidate matching");
+    auto invalidOps = fakeOps;
+    invalidOps.version += 1;
+    ok &= check(!edvr::targetSharpSetPolicyOpsV1ForTest(&invalidOps),
+                "private seam rejects invalid Ops metadata without replacing the active table");
+    edvr::targetSharpConfigure(cfg);
+    ok &= check(fake.configure == 2,
+                "rejected Ops replacement leaves the prior callback context active");
+    const bool matched = edvr::targetSharpOnEyeDraw(ctx, 'X', 6, 1);
+    ok &= check(matched && fake.matches == 1,
+                "selected TargetSharp candidate routes through the private module predicate");
+    if (matched) {
+        edvr::targetSharpBegin(ctx);
+        ok &= check(!edvr::targetSharpSetPolicyOpsV1ForTest(nullptr),
+                    "private seam rejects replacement while the copied begin/end bracket is open");
+        edvr::targetSharpEnd(ctx);
+    }
+    ok &= check(fake.begin == 1 && fake.end == 1,
+                "selected TargetSharp action pair routes through copied Ops");
+    edvr::targetSharpShutdown();
+    ok &= check(fake.shutdown == 1,
+                "TargetSharp shutdown reaches the selected private module exactly once");
+
+    fake.throwBegin = true;
+    fake.throwFirstEnd = true;
+    bool beginThrew = false;
+    try {
+        edvr::targetSharpBegin(ctx);
+    } catch (const std::runtime_error&) {
+        beginThrew = true;
+    }
+    fake.throwBegin = false;
+    // The begin cleanup's first End throws; the caller can retry the saved
+    // context/table and release the bracket without stranding Ops ownership.
+    edvr::targetSharpBegin(ctx);
+    ok &= check(fake.begin == 2 && fake.end == 2,
+                "a second begin cannot overwrite a bracket whose cleanup End is pending");
+    edvr::targetSharpEnd(ctx);
+    ok &= check(beginThrew && fake.begin == 2 && fake.end == 3,
+                "throwing begin/end retains its copied bracket until a successful restore retry");
+
+    ctx->PSSetShader(stock, nullptr, 0);
+    g_targetConfigReads = g_compileCalls = 0;
+    g_bindingGetCalls = g_bindingResolveCalls = g_shaderHashCalls = 0;
+    ok &= check(edvr::targetSharpSetPolicyOpsV1ForTest(nullptr),
+                "private TargetSharp rig seam selects explicit absence");
+    edvr::targetSharpConfigure(cfg);
+    const bool absentMatch = edvr::targetSharpOnEyeDraw(ctx, 'X', 6, 1);
+    edvr::targetSharpBegin(ctx);
+    edvr::targetSharpEnd(ctx);
+    edvr::targetSharpShutdown();
+    ID3D11PixelShader* observed = nullptr;
+    ctx->PSGetShader(&observed, nullptr, nullptr);
+    ok &= check(fake.shutdown == 2,
+                "switching to null Ops shuts down the prior copied owner exactly once");
+    ok &= check(!absentMatch && g_targetConfigReads == 0 && g_compileCalls == 0 &&
+                    g_bindingGetCalls == 0 && g_bindingResolveCalls == 0 &&
+                    g_shaderHashCalls == 0,
+                "absent TargetSharp performs no config, candidate-service, or compiler work");
+    ok &= check(observed == stock,
+                "absent TargetSharp leaves the real WARP stock pixel shader unchanged");
+    if (observed) observed->Release();
+    ok &= check(edvr::targetSharpSetPolicyOpsV1ForTest(
+                    edvr::targetSharpPolicyOpsV1()),
+                "WARP rig restores builtin TargetSharp Ops after absence coverage");
+    return ok;
+}
 
 bool check(bool condition, const char* label) {
     ++g_checks;
@@ -325,6 +468,12 @@ bool targetFailureCheck(ID3D11DeviceContext* ctx, ID3D11VertexShader* vs,
     if (current) current->Release();
     ok &= check(g_compileCalls == 2,
                 "TargetSharp actually attempts its documented EASU then cubic fallback");
+    ok &= check(edvr::targetSharpDrawInterestConfigured() &&
+                    !edvr::targetSharpWantsDraws(),
+                "failed EASU/cubic fallback updates the cached fast gate for later draws");
+    runTargetPair(ctx, false);
+    ok &= check(g_compileCalls == 2,
+                "failed TargetSharp draw does not retry either shader compile");
     closeWindowFrame(101, 1, 1);
     EdvrPluginCostWindowV1 report{};
     bool reported = false;
@@ -364,7 +513,10 @@ float Config::getFloat(const char* key, float def) const {
     return def;
 }
 std::string Config::getString(const char* key, const char* def) const {
-    if (std::strcmp(key, "experimental.target_indicator") == 0) return g_sharp ? "sharp" : "stock";
+    if (std::strcmp(key, "experimental.target_indicator") == 0) {
+        ++g_targetConfigReads;
+        return g_sharp ? "sharp" : "stock";
+    }
     if (std::strcmp(key, "advanced.target_indicator_sharpen") == 0) return "off";
     if (std::strcmp(key, "advanced.target_indicator_vs") == 0) return "";
     if (std::strcmp(key, "fix.remlok_lines") == 0) return g_remlokMode;
@@ -378,9 +530,13 @@ Log& Log::get() { static Log log; return log; }
 Log::~Log() = default;
 void Log::note(const char*, ...) {}
 
-void* bindingGet(BindSlot slot) { return g_slots[static_cast<size_t>(slot)]; }
+void* bindingGet(BindSlot slot) {
+    ++g_bindingGetCalls;
+    return g_slots[static_cast<size_t>(slot)];
+}
 uint32_t bindingGeneration(BindSlot) { return 1; }
 bool bindingResolve(void* view, ResourceInfo* out) {
+    ++g_bindingResolveCalls;
     if (!view || !out) return false;
     *out = {};
     out->isTexture2D = true;
@@ -390,6 +546,7 @@ bool bindingResolve(void* view, ResourceInfo* out) {
 }
 
 uint64_t lookupShaderHash(void* shader) {
+    ++g_shaderHashCalls;
     return shader == g_targetVs ? 0xE508648660A352B2ull : 0;
 }
 bool vScreenIsEyeSized(uint32_t width, uint32_t height) {
@@ -462,7 +619,8 @@ int main(int argc, char** argv) {
     if (g_failed) return 1;
 
     g_replacement = replacement.Get();
-    bool ok = liveLeafAndCollectorChecks(device.Get(), immediate.Get(), deferred.Get(),
+    bool ok = targetSharpOpsSeamChecks(immediate.Get(), stock.Get());
+    ok &= liveLeafAndCollectorChecks(device.Get(), immediate.Get(), deferred.Get(),
                                          vs.Get(), stock.Get(), replacement.Get(),
                                          rasterizer.Get());
     ok &= targetFailureCheck(immediate.Get(), vs.Get(), stock.Get());

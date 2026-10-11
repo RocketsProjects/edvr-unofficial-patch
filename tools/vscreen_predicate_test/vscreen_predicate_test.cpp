@@ -28,6 +28,7 @@
 #include "../../src/d3d11/loader_panel_observation.h"
 #include "../../src/d3d11/loader_panel.h"
 #include "../../src/d3d11/target_sharp.h"
+#include "../../src/d3d11/target_sharp_policy_test.h"
 #include "../../src/d3d11/sunglare_fix.h"
 #include "../../src/d3d11/sunglare_nomination_observation.h"
 #include "../../src/d3d11/plugin_registry.h"
@@ -3896,6 +3897,45 @@ int main(int argc, char** argv) {
             };
             edvr::VScreenPredicateTestResult targetResult{};
             edvr::TargetSharpObservation targetFact{};
+
+            // Explicit null Ops keep the shared classifier/ladders alive but
+            // must make TargetSharp's cached gate/filter cold before the
+            // module matcher or its candidate D3D queries can run.
+            okay &= check(edvr::targetSharpSetPolicyOpsV1ForTest(nullptr),
+                          "VScreen rig selects explicit null TargetSharp Ops");
+            edvr::targetSharpConfigure(edvr::Config::get());
+            edvr::draw_interest::ShaderFilter absentFilter{};
+            okay &= check(!edvr::targetSharpDrawInterestConfigured() &&
+                              edvr::targetSharpDrawInterestFilters(&absentFilter, 1) == 0,
+                          "absent TargetSharp publishes no draw interest or shader filter");
+            edvr::pluginRegistryConfigureDrawInterests(savedSrvMask, nullptr, 0);
+            if (hookReady) g_getVertexShaderCalls = 0;
+            g_resourceAttempts = 0;
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                      &targetResult) &&
+                              targetResult.siteResult.outcome == SiteOutcome::Declined &&
+                              readTargetSharp(targetResult, &targetFact) &&
+                              fwRead(targetFact.outerSharp, false) &&
+                              fwSkipped(targetFact.helperSharp) &&
+                              (!hookReady || g_getVertexShaderCalls == 0) &&
+                              (!resourceHookReady || g_resourceAttempts == 0),
+                          "observed WARP route records absent gate without TargetSharp candidate queries");
+            if (hookReady) g_getVertexShaderCalls = 0;
+            g_resourceAttempts = 0;
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, false,
+                                      &targetResult) &&
+                              targetResult.siteResult.outcome == SiteOutcome::Declined &&
+                              edvr::draw_ladder_trace::targetSharpFactCountForTest(
+                                  targetResult.token) == 0 &&
+                              (!hookReady || g_getVertexShaderCalls == 0) &&
+                              (!resourceHookReady || g_resourceAttempts == 0),
+                          "legacy WARP route exits the absent TargetSharp gate without candidate queries");
+            okay &= check(edvr::targetSharpSetPolicyOpsV1ForTest(
+                              edvr::targetSharpPolicyOpsV1()),
+                          "VScreen rig restores builtin TargetSharp Ops after absence coverage");
+            edvr::targetSharpConfigure(edvr::Config::get());
+            edvr::targetSharpPredicateTestSeed(true, false);
+
             if (hookReady) g_getVertexShaderCalls = 0;
             g_resourceAttempts = 0;
             okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,

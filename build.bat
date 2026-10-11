@@ -331,16 +331,22 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
 python "tools\plugin_lifecycle_wiring_test.py" --dry-run || exit /b 1
 python "tools\plugin_lifecycle_wiring_test.py" --self-test || exit /b 1
 python "tools\performance_sampler_test\source_test.py" --self-test || exit /b 1
+python "tools\plugin_selection_transport_test\source_test.py" --dry-run || exit /b 1
+python "tools\plugin_selection_transport_test\source_test.py" --self-test || exit /b 1
+python "tools\target_sharp_wiring_test.py" --dry-run || exit /b 1
+python "tools\target_sharp_wiring_test.py" --self-test || exit /b 1
 
 if not exist "%OBJ%\plugins\cockpit_visuals" mkdir "%OBJ%\plugins\cockpit_visuals"
 del /q "%OBJ%\plugins\cockpit_visuals\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\cockpit_visuals\\" ^
     "src\plugins\cockpit_visuals\night_vision.cpp" ^
-    "src\plugins\cockpit_visuals\remlok_fix.cpp"
+    "src\plugins\cockpit_visuals\remlok_fix.cpp" ^
+    "src\plugins\cockpit_visuals\target_sharp_policy.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
     "%OBJ%\plugins\cockpit_visuals\night_vision.obj" ^
-    "%OBJ%\plugins\cockpit_visuals\remlok_fix.obj"
+    "%OBJ%\plugins\cockpit_visuals\remlok_fix.obj" ^
+    "%OBJ%\plugins\cockpit_visuals\target_sharp_policy.obj"
 if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\on_foot_panel" mkdir "%OBJ%\plugins\on_foot_panel"
@@ -512,6 +518,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export "edvrNativeStartupRouting DATA" ^
     --extra-export edvrQueryOculusRouting ^
     --extra-export edvrQueryNativeRenderSettings ^
+    --extra-export edvrQueryPluginSelectionV1 ^
     --extra-export edvrPublishNativeRenderSizing ^
     --extra-export edvrQueryNativeRenderSizing ^
     --extra-export edvrGpuFrameEvent
@@ -671,7 +678,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
     "src\common\frame_flag.cpp" ^
-    "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
+    "src\common\iat_hook.cpp" "src\common\iniedit.cpp" "src\common\plugin_selection_snapshot.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
@@ -687,7 +694,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\native_fss.cpp" ^
     "src\d3d11\native_timing.cpp" ^
     "src\d3d11\map_wait.cpp" ^
-    "src\d3d11\native_render_settings.cpp" ^
+    "src\d3d11\native_render_settings.cpp" "src\d3d11\plugin_selection_transport.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\gpu_census.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
@@ -792,7 +799,7 @@ if not exist "%OBJ%\openxr_module" mkdir "%OBJ%\openxr_module"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_CPU_COMPILE% ^
     /I"third_party\openxr\include" /I"%GEN%" /Fo"%OBJ%\openxr_module\\" ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
-    /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" ^
+    /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" "src\common\plugin_selection_snapshot.cpp" "src\common\iniedit.cpp" ^
     "src\plugins\performance\fov_trim_policy.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
@@ -809,7 +816,7 @@ set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
     "src\installer\settings_view.cpp" "src\installer\logbundle.cpp" ^
     "src\installer\app.cpp" "src\installer\plan.cpp" ^
     "src\installer\apply.cpp" "src\installer\detect.cpp" ^
-    "src\installer\probe.cpp" "src\common\iniedit.cpp" ^
+    "src\installer\probe.cpp" "src\common\iniedit.cpp" "src\common\plugin_selection_snapshot.cpp" ^
     "src\installer\state.cpp" "src\installer\mirror.cpp" ^
     "src\installer\payload.cpp"
 set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
@@ -1034,7 +1041,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\menu_panel.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\menu_keys.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
-    "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
+    "src\common\iat_hook.cpp" "src\common\iniedit.cpp" "src\common\plugin_selection_snapshot.cpp" ^
     "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\hotkey.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
     "src\common\guard.cpp" "src\common\frame_flag.cpp" "src\common\proxy.cpp" ^
@@ -1126,6 +1133,18 @@ if errorlevel 1 ( echo [edvr] ERROR: FOV trim settings policy test build failed 
 "%BUILD%\fov_trim_settings_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_plugin_selection_transport_test
+echo [edvr] === plugin_selection_transport_test.exe ===
+if not exist "%OBJ%\plugin_selection_transport" mkdir "%OBJ%\plugin_selection_transport"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\plugin_selection_transport\\" /Fe"%BUILD%\plugin_selection_transport_test.exe" ^
+    "tools\plugin_selection_transport_test\plugin_selection_transport_test.cpp" ^
+    "src\d3d11\plugin_selection_transport.cpp" "src\common\plugin_selection_snapshot.cpp" ^
+    "src\common\iniedit.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: plugin selection transport fixture build failed & exit /b 1 )
+"%BUILD%\plugin_selection_transport_test.exe" --dry-run || exit /b 1
+"%BUILD%\plugin_selection_transport_test.exe" --self-test || exit /b 1
+exit /b 0
 :rig_dlaa_mode_test
 echo [edvr] === dlaa_mode_test.exe ===
 if not exist "%OBJ%\dlaa_mode" mkdir "%OBJ%\dlaa_mode"
@@ -2036,7 +2055,8 @@ if not exist "%OBJ%\cockpitapi" mkdir "%OBJ%\cockpitapi"
 cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DEDVR_BINDING_SHADOW_EXTERNAL /Fo"%OBJ%\cockpitapi\\" ^
     /Fe"%OBJ%\cockpitapi\cockpit_api_test.exe" "tools\cockpit_api_test\cockpit_api_test.cpp" ^
-    "src\d3d11\target_sharp.cpp" "src\plugins\cockpit_visuals\remlok_fix.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\d3d11\target_sharp.cpp" "src\plugins\cockpit_visuals\target_sharp_policy.cpp" ^
+    "src\plugins\cockpit_visuals\remlok_fix.cpp" "src\d3d11\plugin_cost.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: cockpit API WARP rig build failed & exit /b 1 )
 "%OBJ%\cockpitapi\cockpit_api_test.exe" --self-test || (
@@ -3027,7 +3047,8 @@ cl.exe /I"%GEN%" /nologo /c /O2 /Gy /Gw /MT /std:c++17 /EHsc /W4 /GR- ^
     /DEDVR_VSCREEN_PREDICATE_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" %NGXFLAGS% %FSRFLAGS% ^
     /Fo"%OBJ%\vscreenpredicate\\" ^
     "tools\vscreen_predicate_test\vscreen_predicate_test.cpp" ^
-    "src\d3d11\vscreen.cpp" "src\d3d11\ui_layer.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\plugins\intro\loader_panel.cpp" "src\d3d11\target_sharp.cpp" "src\d3d11\sunglare_fix.cpp"
+    "src\d3d11\vscreen.cpp" "src\d3d11\ui_layer.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\plugins\intro\loader_panel.cpp" ^
+    "src\d3d11\target_sharp.cpp" "src\plugins\cockpit_visuals\target_sharp_policy.cpp" "src\d3d11\sunglare_fix.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test compile failed & exit /b 1 )
 > "%OBJ%\vscreenpredicate\production_objects.rsp" (
     for %%F in ("%OBJ%\d3d11\*.obj") do (
@@ -3038,7 +3059,8 @@ link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     /OUT:"%BUILD%\vscreen_predicate_test.exe" ^
     "%OBJ%\vscreenpredicate\vscreen_predicate_test.obj" ^
     "%OBJ%\vscreenpredicate\vscreen.obj" "%OBJ%\vscreenpredicate\ui_layer.obj" "%OBJ%\vscreenpredicate\draw_ladder_trace.obj" ^
-    "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\target_sharp.obj" "%OBJ%\vscreenpredicate\sunglare_fix.obj" ^
+    "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\target_sharp.obj" ^
+    "%OBJ%\vscreenpredicate\target_sharp_policy.obj" "%OBJ%\vscreenpredicate\sunglare_fix.obj" ^
     @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
     "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
     "%OBJ%\plugins\intro\plugin_intro.lib" ^
@@ -3751,7 +3773,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMA
     "tools\installer_test\installer_test.cpp" ^
     "src\installer\plan.cpp" "src\installer\apply.cpp" ^
     "src\installer\detect.cpp" "src\installer\probe.cpp" ^
-    "src\common\iniedit.cpp" "src\installer\state.cpp" ^
+    "src\common\iniedit.cpp" "src\common\plugin_selection_snapshot.cpp" "src\installer\state.cpp" ^
     "src\installer\mirror.cpp" ^
     "src\installer\settings.cpp" "src\installer\logbundle.cpp" ^
     /link /INCREMENTAL:NO %INSTALLER_LIBS%

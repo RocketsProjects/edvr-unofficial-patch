@@ -1,336 +1,71 @@
 #include "target_sharp.h"
 
-#include <windows.h>
+#include <cstdint>
+#include <cstring>
 
-#include <d3d11.h>
-
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <string>
-
-#include "../common/config.h"
-#include "../common/log.h"
-#include "../common/plugin_cost.h"
-#include "binding_shadow.h"
-#include "cockpit_cost_sites.h"
-#include "exposure_fix.h"   // lookupShaderHash
-#include "fsr_hlsl_gen.h"   // AMD's ffx_a.h and ffx_fsr1.h, as string chunks
-#include "shader_swap.h"
-#include "vscreen.h"        // vScreenIsEyeSized
+#include "../plugins/cockpit_visuals/target_sharp_policy.h"
+#include "target_sharp_policy_test.h"
 
 namespace edvr {
-
-// targetSharpWantsDraws reads these from the header with no call: asked
-// per eye draw, and the build has no /GL to fold a cross-TU getter.
 namespace detail {
 bool g_targetSharpSharp = false;
 bool g_targetSharpFailed = false;
 }  // namespace detail
-
 namespace {
+TargetSharpFastStateV1 g_fast{sizeof(TargetSharpFastStateV1),
+                              kTargetSharpPolicyVersionV1, 0, 0, 0, 0,
+                              kTargetSharpVertexShaderHashV1};
+TargetSharpPolicyOpsV1 g_override{};
+bool g_hasOverride = false;
+bool g_overrideAbsent = false;
+TargetSharpPolicyOpsV1 g_bracketOps{};
+bool g_bracketPending = false;
+ID3D11DeviceContext* g_bracketContext = nullptr;
 
-// The composite's shape, from the census A/B that named it.
-constexpr char     kKind = 'X';
-constexpr uint32_t kIndices = 6;
-constexpr uint32_t kInstances = 1;
-
-// vs E508648660A352B2, measured on game build 332753. Matched by hash
-// because the alternative -- matching on shape alone -- would catch every
-// other 6-index quad that samples one non-eye-sized texture.
-constexpr uint64_t kVsHash = 0xE508648660A352B2ull;
-
-// Shared by both resamplers: the bindings, a Catmull-Rom fetch, and the
-// game's own colour maths.
-//
-// The colour maths is ps 63ABD86359B57D01 transcribed from its disassembly:
-//
-//   mul r0.xyz, r0.xyzx, r0.xyzx        <- the square
-//   mul r0.xyz, r0.xyzx, cb2[0].xxxx
-//   mul r0.xyz, r0.xyzx, cb1[84].zzzz
-//   mul r0.xyz, r0.xyzx, cb1[61].yyyy
-//   mul r1.xyz, r0.yyyy, cb1[86].xyzx
-//   mad r0.xyw, r0.xxxx, cb1[85].xyxz, r1.xyxz
-//   mad r0.xyz, r0.zzzz, cb1[87].xyzx, r0.xywx
-//   mul o0.xyz, r0.xyzx, cb1[90].yyyy
-//
-// The two mads are one 3x3 matrix whose COLUMNS are cb1[85], cb1[86] and
-// cb1[87] -- written out as three dot products rather than left as the
-// register shuffle, because a shuffle that is subtly wrong looks like a
-// colour shift and nothing else. The emitted tail was diffed against the
-// game's before this ever shipped.
-const char kPsCommon[] =
-    "cbuffer CB1 : register(b1) { float4 g_cb1[91]; };\n"
-    "cbuffer CB2 : register(b2) { float4 g_cb2[1]; };\n"
-    "Texture2D<float4> g_tex : register(t0);\n"
-    "SamplerState g_smp : register(s0);\n"
-    "\n"
-    "// Catmull-Rom, a = -0.5, stated so it can be checked against a\n"
-    "// reference rather than recognised:\n"
-    "//   w0 = -0.5t +       t^2 - 0.5t^3\n"
-    "//   w1 =  1    - 2.5 * t^2 + 1.5t^3\n"
-    "//   w2 =  0.5t + 2.0 * t^2 - 1.5t^3\n"
-    "//   w3 =       - 0.5 * t^2 + 0.5t^3\n"
-    "float4 fetchCubic(float2 uv)\n"
-    "{\n"
-    "    float2 size;\n"
-    "    g_tex.GetDimensions(size.x, size.y);\n"
-    "    int2 lim = int2(size) - 1;\n"
-    "    float2 pos = uv * size - 0.5;\n"
-    "    float2 base = floor(pos);\n"
-    "    float2 t = pos - base;\n"
-    "    float2 t2 = t * t;\n"
-    "    float2 t3 = t2 * t;\n"
-    "    float2 w0 = -0.5 * t + t2 - 0.5 * t3;\n"
-    "    float2 w1 = 1.0 - 2.5 * t2 + 1.5 * t3;\n"
-    "    float2 w2 = 0.5 * t + 2.0 * t2 - 1.5 * t3;\n"
-    "    float2 w3 = -0.5 * t2 + 0.5 * t3;\n"
-    "    float wx[4] = { w0.x, w1.x, w2.x, w3.x };\n"
-    "    float wy[4] = { w0.y, w1.y, w2.y, w3.y };\n"
-    "    float4 acc = 0.0;\n"
-    "    [unroll] for (int j = 0; j < 4; ++j) {\n"
-    "        [unroll] for (int i = 0; i < 4; ++i) {\n"
-    "            int2 p = clamp(int2(base) + int2(i - 1, j - 1),\n"
-    "                           int2(0, 0), lim);\n"
-    "            acc += g_tex.Load(int3(p, 0)) * (wx[i] * wy[j]);\n"
-    "        }\n"
-    "    }\n"
-    "    return acc;\n"
-    "}\n"
-    "\n"
-    "float4 shade(float3 rgb, float a)\n"
-    "{\n"
-    "    float3 c = rgb * rgb;\n"
-    "    c *= g_cb2[0].x;\n"
-    "    c *= g_cb1[84].z;\n"
-    "    c *= g_cb1[61].y;\n"
-    "    float3 o;\n"
-    "    o.x = c.x * g_cb1[85].x + c.y * g_cb1[86].x + c.z * g_cb1[87].x;\n"
-    "    o.y = c.x * g_cb1[85].y + c.y * g_cb1[86].y + c.z * g_cb1[87].y;\n"
-    "    o.z = c.x * g_cb1[85].z + c.y * g_cb1[86].z + c.z * g_cb1[87].z;\n"
-    "    return float4(o * g_cb1[90].y, a);\n"
-    "}\n"
-    "}\n";
-
-// The fallback, for a rig where EASU will not compile. A cubic is a smaller
-// win than an edge-adaptive kernel on line art and a much larger one than
-// the single bilinear tap the game does.
-const char kPsCubicMain[] =
-    "float4 main(float2 uv : TEXCOORD0) : SV_TARGET\n"
-    "{\n"
-    "    float4 s = fetchCubic(uv);\n"
-    "    // A cubic kernel overshoots. rgb is SQUARED in shade(), so a\n"
-    "    // negative channel would come back as a bright one; alpha gates a\n"
-    "    // discard.\n"
-    "    s.rgb = max(s.rgb, 0.0);\n"
-    "    s.a = saturate(s.a);\n"
-    "    if (s.a - 0.00001 < 0.0) discard;\n"
-    "    return shade(s.rgb, s.a);\n"
-    "}\n";
-
-// EASU, and RCAS over it. Everything the filtering itself does is AMD's;
-// what is here is the callbacks their header asks the calling shader to
-// provide, plus the constants.
-//
-// WHY THE CONSTANTS ARE BUILT PER PIXEL. FsrEasuCon bakes an output-pixel to
-// source-pixel map into con0, which assumes the two grids are related by a
-// fixed scale -- true for a fullscreen upscale, false here: this quad is 3D
-// cockpit geometry, so its UV is perspective-interpolated and not affine in
-// screen space. Zeroing con0.xy drops the integer output position out of
-// FsrEasuF's first line and con0.zw carries the source position directly,
-// which is the same arithmetic it would have done. con1..con3 are
-// FsrEasuCon's own terms with inputSize = the surface, term for term.
-//
-// RCAS reads a five-tap neighbourhood of the UPSCALED image, which does not
-// exist as a texture here -- so FsrRcasLoadF evaluates EASU again at the
-// neighbouring output pixel, reached by stepping the UV along its own screen
-// derivatives. Five EASU evaluations for one output pixel, on one small quad
-// per eye.
-const char kPsEasuMain[] =
-    "static float2 g_size, g_rcp, g_uv, g_dx, g_dy;\n"
-    "\n"
-    "AF4 FsrEasuRF(AF2 p) { return g_tex.GatherRed(g_smp, p); }\n"
-    "AF4 FsrEasuGF(AF2 p) { return g_tex.GatherGreen(g_smp, p); }\n"
-    "AF4 FsrEasuBF(AF2 p) { return g_tex.GatherBlue(g_smp, p); }\n"
-    "\n"
-    "float3 easuAt(float2 uv)\n"
-    "{\n"
-    "    float2 pp = uv * g_size - 0.5;\n"
-    "    AU4 con0 = AU4(0, 0, asuint(pp.x), asuint(pp.y));\n"
-    "    AU4 con1 = AU4(asuint(g_rcp.x), asuint(g_rcp.y),\n"
-    "                   asuint(g_rcp.x), asuint(-g_rcp.y));\n"
-    "    AU4 con2 = AU4(asuint(-g_rcp.x), asuint(2.0 * g_rcp.y),\n"
-    "                   asuint(g_rcp.x), asuint(2.0 * g_rcp.y));\n"
-    "    AU4 con3 = AU4(0, asuint(4.0 * g_rcp.y), 0, 0);\n"
-    "    AF3 c;\n"
-    "    FsrEasuF(c, AU2(0, 0), con0, con1, con2, con3);\n"
-    "    return c;\n"
-    "}\n"
-    "\n"
-    "AF4 FsrRcasLoadF(ASU2 p)\n"
-    "{\n"
-    "    return AF4(easuAt(g_uv + p.x * g_dx + p.y * g_dy), 1.0);\n"
-    "}\n"
-    "void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}\n"
-    "\n"
-    "float4 main(float2 uv : TEXCOORD0) : SV_TARGET\n"
-    "{\n"
-    "    g_tex.GetDimensions(g_size.x, g_size.y);\n"
-    "    g_rcp = 1.0 / g_size;\n"
-    "    g_uv = uv;\n"
-    "    // One output pixel's step in UV, taken BEFORE the discard so the\n"
-    "    // derivative is read while the quad is still whole.\n"
-    "    g_dx = ddx(uv);\n"
-    "    g_dy = ddy(uv);\n"
-    "\n"
-    "    // Alpha is a coverage mask and EASU has no alpha path, so it keeps\n"
-    "    // the cubic. It gates the same discard the game's shader gates.\n"
-    "    float a = saturate(fetchCubic(uv).a);\n"
-    "    if (a - 0.00001 < 0.0) discard;\n"
-    "\n"
-    "    AF3 c;\n"
-    "#if EDVR_RCAS\n"
-    "    FsrRcasF(c.r, c.g, c.b, AU2(0, 0),\n"
-    "             AU4(asuint(float(EDVR_RCAS_SHARP)), 0, 0, 0));\n"
-    "#else\n"
-    "    c = easuAt(uv);\n"
-    "#endif\n"
-    "    return shade(max(c, 0.0), a);\n"
-    "}\n";
-
-const char kGpuPrologue[] =
-    "#define A_GPU 1\n"
-    "#define A_HLSL 1\n";
-
-std::string joinChunks(const char* const* chunks) {
-    std::string out;
-    for (const char* const* c = chunks; *c; ++c) out += *c;
-    return out;
+const TargetSharpPolicyOpsV1* activeOps() noexcept {
+    if (g_hasOverride) return g_overrideAbsent ? nullptr : &g_override;
+    return targetSharpPolicyOpsV1();
 }
 
-enum class Mode { kOff, kCubic, kEasu };
-
-constexpr uint64_t g_vsHash = kVsHash;
-constexpr float g_sharpen = 0.25f;   // RCAS stops (AMD's unit: stops of sharpness reduction, 0 the sharpest)
-Mode     g_running = Mode::kOff;
-
-ID3D11PixelShader* g_ps = nullptr;
-float              g_psSharpen = 0.0f;
-bool               g_psHadRcas = false;
-
-bool               g_engaged = false;
-bool               g_costSample = false;
-ID3D11PixelShader* g_displaced = nullptr;
-uint64_t           g_applied = 0;
-
-ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
-    const bool wantRcas = g_sharpen >= 0.0f;
-    if (g_ps && g_psHadRcas == wantRcas && g_psSharpen == g_sharpen) {
-        return g_ps;
-    }
-    if (detail::g_targetSharpFailed) return nullptr;
-    if (g_ps) {
-        g_ps->Release();
-        g_ps = nullptr;
-    }
-
-    // AMD's own unit is STOPS of sharpness reduction, so 0 is the sharpest
-    // and the linear value the shader wants is exp2(-stops).
-    char sharpBuf[32] = "1.0";
-    if (wantRcas) {
-        _snprintf_s(sharpBuf, sizeof(sharpBuf), _TRUNCATE, "%.8f",
-                    static_cast<double>(powf(2.0f, -g_sharpen)));
-    }
-    const SwapMacro macros[] = {{"EDVR_RCAS", wantRcas ? "1" : "0"},
-                                {"EDVR_RCAS_SHARP", sharpBuf},
-                                {nullptr, nullptr}};
-
-    const std::string easu = std::string(kGpuPrologue) +
-                             joinChunks(kFfxAChunks) +
-                             "#define FSR_EASU_F 1\n" +
-                             "#define FSR_RCAS_F 1\n" +
-                             joinChunks(kFfxFsr1Chunks) + kPsCommon +
-                             kPsEasuMain;
-    g_ps = shaderSwapCompilePs(ctx, easu.c_str(), easu.size(), "main",
-                               "target_indicator_easu", macros,
-                               "target indicator");
-    g_running = g_ps ? Mode::kEasu : Mode::kOff;
-    if (!g_ps) {
-        Log::get().note("target indicator: EASU would not compile; falling "
-                        "back to the bicubic, a smaller win than FSR on line "
-                        "art and a much larger one than the bilinear tap the "
-                        "game does.");
-        const std::string cubic = std::string(kPsCommon) + kPsCubicMain;
-        g_ps = shaderSwapCompilePs(ctx, cubic.c_str(), cubic.size(), "main",
-                                   "target_indicator_cubic", macros,
-                                   "target indicator");
-        g_running = g_ps ? Mode::kCubic : Mode::kOff;
-    }
-    if (!g_ps) {
-        // shaderSwapCompilePs has already said why. One stand-down for the
-        // session: a compile that failed once fails every draw, and a line
-        // per draw would be the log.
-        detail::g_targetSharpFailed = true;
-        Log::get().note("target indicator: no resampler would compile, so the "
-                        "indicator is drawn exactly as the game draws it for "
-                        "the rest of this session.");
-        return nullptr;
-    }
-    g_psHadRcas = wantRcas;
-    g_psSharpen = g_sharpen;
-    Log::get().note(
-        "target indicator: running %s%s.",
-        g_running == Mode::kEasu ? "EASU (AMD's own, vendored)"
-                                 : "the bicubic (Catmull-Rom)",
-        (g_running == Mode::kEasu && wantRcas) ? ", then RCAS-sharpened" : "");
-    return g_ps;
+bool validOps(const TargetSharpPolicyOpsV1* ops) noexcept {
+    return ops && ops->structSize == sizeof(TargetSharpPolicyOpsV1) &&
+           ops->version == kTargetSharpPolicyVersionV1 && ops->context &&
+           ops->configure && ops->matches && ops->begin && ops->end &&
+           ops->shutdown;
 }
 
-}  // namespace
-
-void targetSharpConfigure(Config& cfg) {
-    const bool was = detail::g_targetSharpSharp;
-    const std::string m = cfg.getString("experimental.target_indicator",
-                                        "stock");
-    if (m == "stock") {
-        detail::g_targetSharpSharp = false;
-    } else if (m == "sharp") {
-        detail::g_targetSharpSharp = true;
-    } else {
-        detail::g_targetSharpSharp = false;
-        Log::get().note("target_indicator \"%s\" is not stock or sharp; "
-                        "running stock.", m.c_str());
-    }
-
-    if (was != detail::g_targetSharpSharp) {
-        Log::get().note(
-            "target indicator: %s. The selected target's direction indicator "
-            "is composited into the eye by one quad through a single bilinear "
-            "sample; sharp replaces that pixel shader with the same colour "
-            "maths over an edge-adaptive reconstruction (AMD's EASU), "
-            "sharpening %s. It cannot add detail. Watching for vs %016llX.",
-            detail::g_targetSharpSharp ? "sharp" : "stock",
-            g_sharpen >= 0.0f ? "on" : "off",
-            static_cast<unsigned long long>(g_vsHash));
-    }
+void clearFast() noexcept {
+    g_fast = {sizeof(TargetSharpFastStateV1), kTargetSharpPolicyVersionV1,
+              0, 0, 0, 0, kTargetSharpVertexShaderHashV1};
+    detail::g_targetSharpSharp = false;
+    detail::g_targetSharpFailed = false;
 }
 
-bool targetSharpDrawInterestConfigured() noexcept {
-    return detail::g_targetSharpSharp;
+void clearBracket() noexcept {
+    g_bracketPending = false;
+    g_bracketContext = nullptr;
+    g_bracketOps = {};
 }
 
-std::size_t targetSharpDrawInterestFilters(draw_interest::ShaderFilter* out,
-                                           std::size_t capacity) noexcept {
-    if (!detail::g_targetSharpSharp) return 0;
-    if (out && capacity) {
-        out[0] = {draw_interest::InterestId::TargetSharp,
-                  draw_interest::HashFilter::Vertex, g_vsHash, 0};
+bool validFast(const TargetSharpFastStateV1& state) noexcept {
+    return state.structSize == sizeof(TargetSharpFastStateV1) &&
+           state.version == kTargetSharpPolicyVersionV1 && state.sharp <= 1 &&
+           state.failed <= 1 && state.engaged <= 1 && state.reserved == 0 &&
+           (!state.sharp || state.vertexShaderHash != 0);
+}
+
+void acceptFast(const TargetSharpFastStateV1& state) noexcept {
+    if (!validFast(state)) {
+        clearFast();
+        return;
     }
-    return 1;
+    g_fast = state;
+    detail::g_targetSharpSharp = state.sharp != 0;
+    detail::g_targetSharpFailed = state.failed != 0;
 }
 
 template <bool Observe>
-bool targetSharpWantsDrawsImpl(TargetSharpObservation* observation, bool helper) noexcept {
+bool wantsDraws(TargetSharpObservation* observation, bool helper) noexcept {
     const bool sharp = detail::g_targetSharpSharp;
     if constexpr (Observe) {
         auto& read = helper ? observation->helperSharp : observation->outerSharp;
@@ -344,167 +79,146 @@ bool targetSharpWantsDrawsImpl(TargetSharpObservation* observation, bool helper)
     }
     return !failed;
 }
+}  // namespace
 
-template <bool Observe>
-bool targetSharpOnEyeDrawImpl(ID3D11DeviceContext* ctx, char kind,
-                              uint32_t count, uint32_t instances,
-                              TargetSharpObservation* observation) {
-    if (!targetSharpWantsDrawsImpl<Observe>(observation, true)) return false;
-    if (kind != kKind || count != kIndices || instances != kInstances) {
-        return false;
+void targetSharpConfigure(Config& cfg) {
+    const TargetSharpPolicyOpsV1* ops = activeOps();
+    if (!ops) { clearFast(); return; }
+    TargetSharpFastStateV1 next = g_fast;
+    ops->configure(ops->context, &cfg, &next);
+    acceptFast(next);
+}
+
+bool targetSharpDrawInterestConfigured() noexcept {
+    return detail::g_targetSharpSharp;
+}
+
+std::size_t targetSharpDrawInterestFilters(draw_interest::ShaderFilter* out,
+                                           std::size_t capacity) noexcept {
+    if (!detail::g_targetSharpSharp) return 0;
+    if (out && capacity) {
+        out[0] = {draw_interest::InterestId::TargetSharp,
+                  draw_interest::HashFilter::Vertex,
+                  g_fast.vertexShaderHash, 0};
     }
-    // Slot 0 is the interface surface: a Texture2D that is NOT eye-sized.
-    // Eye-sized by vScreen's answer rather than an equality, the lesson
-    // holo_fix paid for on a rig with a render scale.
-    ResourceInfo surf;
-    void* const srv0 = bindingGet(BindSlot::PsSrv0);
-    if constexpr (Observe)
-        observation->srv0Present = {true, true, srv0 != nullptr};
-    const bool resolved = bindingResolve(srv0, &surf);
-    if constexpr (Observe)
-        observation->srv0Resolved = {true, true, resolved};
-    if (!resolved) return false;
-    if constexpr (Observe)
-        observation->srv0Texture2D = {true, true, surf.isTexture2D};
-    if (!surf.isTexture2D) return false;
-    if constexpr (Observe) {
-        observation->srv0Width = {true, true, surf.a};
-        observation->srv0Height = {true, true, surf.b};
-    }
-    bool eyeSized = false;
-    if constexpr (Observe) {
-        eyeSized = vScreenIsEyeSizedObserved(surf.a, surf.b,
-                                             &observation->eyeSize);
-    } else {
-        eyeSized = vScreenIsEyeSized(surf.a, surf.b);
-    }
-    if (eyeSized) {
-        return false;
-    }
-    // Slots 1-3 unbound. The composite reads one texture and nothing else,
-    // which is most of what separates it from every other textured quad.
-    void* const srv1 = bindingGet(BindSlot::PsSrv1);
-    if constexpr (Observe)
-        observation->aux1Present = {true, true, srv1 != nullptr};
-    if (srv1) return false;
-    void* const srv2 = bindingGet(BindSlot::PsSrv2);
-    if constexpr (Observe)
-        observation->aux2Present = {true, true, srv2 != nullptr};
-    if (srv2) return false;
-    void* const srv3 = bindingGet(BindSlot::PsSrv3);
-    if constexpr (Observe)
-        observation->aux3Present = {true, true, srv3 != nullptr};
-    if (srv3) {
-        return false;
-    }
-    // The clincher, and last because it costs a call: nothing hooks
-    // VSSetShader, so the shader is read off the context the way the census
-    // reads it.
-    ID3D11VertexShader* vs = nullptr;
-    if (edvrPluginCostApiSampleContext(ctx)) {
-        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
-                                  cockpit_cost::id(cockpit_cost::Site::TargetVsGetShader),
-                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
-    }
-    ctx->VSGetShader(&vs, nullptr, nullptr);
-    if constexpr (Observe)
-        observation->vsPresent = {true, true, vs != nullptr};
-    if (!vs) return false;
-    const uint64_t h = lookupShaderHash(vs);
-    vs->Release();
-    const uint64_t configuredHash = g_vsHash;
-    if constexpr (Observe) {
-        observation->queriedShaderHash = {true, true, h};
-        observation->configuredShaderHash = {true, true, configuredHash};
-    }
-    return h == configuredHash;
+    return 1;
 }
 
 bool targetSharpWantsDrawsObserved(TargetSharpObservation& observation,
                                    bool helper) noexcept {
-    return targetSharpWantsDrawsImpl<true>(&observation, helper);
+    return wantsDraws<true>(&observation, helper);
 }
+
+namespace {
+template <bool Observe>
+bool candidate(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                uint32_t instances, TargetSharpObservation* observation) {
+    if (!wantsDraws<Observe>(observation, true)) return false;
+    const TargetSharpPolicyOpsV1* ops = activeOps();
+    if (!ops) return false;
+    return ops->matches(ops->context, ctx, kind, count, instances, observation);
+}
+}  // namespace
 
 bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                           uint32_t instances) {
-    return targetSharpOnEyeDrawImpl<false>(ctx, kind, count, instances, nullptr);
+    return candidate<false>(ctx, kind, count, instances, nullptr);
 }
 
 bool targetSharpOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
                                   uint32_t count, uint32_t instances,
                                   TargetSharpObservation& observation) {
-    return targetSharpOnEyeDrawImpl<true>(ctx, kind, count, instances,
-                                          &observation);
+    return candidate<true>(ctx, kind, count, instances, &observation);
 }
 
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
 void targetSharpPredicateTestSeed(bool sharp, bool failed) noexcept {
+    g_fast.sharp = sharp ? 1u : 0u;
+    g_fast.failed = failed ? 1u : 0u;
+    g_fast.vertexShaderHash = kTargetSharpVertexShaderHashV1;
+    if (!g_hasOverride) targetSharpPolicyPredicateSeedForTest(sharp, failed);
     detail::g_targetSharpSharp = sharp;
     detail::g_targetSharpFailed = failed;
 }
 
 std::uint64_t targetSharpPredicateTestConfiguredHash() noexcept {
-    return g_vsHash;
+    return g_fast.vertexShaderHash;
 }
 #endif
 
 void targetSharpBegin(ID3D11DeviceContext* ctx) {
-    g_costSample = false;
-    g_engaged = false;
-    ID3D11PixelShader* ps = replacement(ctx);
-    if (!ps) return;   // stock behaviour, which the log explained once
-    g_costSample = edvrPluginCostApiSampleContext(ctx) != 0;
-
-    // The game's own pixel shader, off the context: binding_shadow does not
-    // carry shaders, and PSSetShader is not hooked.
-    if (g_costSample) {
-        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
-                                  cockpit_cost::id(cockpit_cost::Site::TargetPsGetShader),
-                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
-    }
-    ctx->PSGetShader(&g_displaced, nullptr, nullptr);
-    if (g_costSample) {
-        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
-                                  cockpit_cost::id(cockpit_cost::Site::TargetPsSetShaderApply),
-                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
-    }
-    ctx->PSSetShader(ps, nullptr, 0);
-    g_engaged = true;
-
-    if (++g_applied == 1) {
-        Log::get().note("target indicator: sharp engaged -- the composite is "
-                        "reconstructed for exactly this draw, and the game's "
-                        "own shader is restored after every one.");
+    if (g_bracketPending) return;  // Never overwrite a PS restoration still owed.
+    if (!detail::g_targetSharpSharp || detail::g_targetSharpFailed) return;
+    const TargetSharpPolicyOpsV1* ops = activeOps();
+    if (!ops) return;
+    g_bracketOps = *ops;
+    g_bracketContext = ctx;
+    g_bracketPending = true;
+    TargetSharpFastStateV1 next = g_fast;
+    try {
+        ops->begin(ops->context, ctx, &next);
+        acceptFast(next);
+    } catch (...) {
+        // Begin may have changed the game's PS before a later operation threw.
+        // Keep the copied table/context until End has definitely restored it.
+        try {
+            TargetSharpFastStateV1 restored = g_fast;
+            g_bracketOps.end(g_bracketOps.context, g_bracketContext, &restored);
+            if (validFast(restored) && !restored.engaged) {
+                acceptFast(restored);
+                clearBracket();
+            }
+        } catch (...) {
+            // An explicit End can retry; replacing the owner here could strand
+            // the original PS or release its context while still engaged.
+        }
+        throw;
     }
 }
 
 void targetSharpEnd(ID3D11DeviceContext* ctx) {
-    if (!g_engaged) { g_costSample = false; return; }
-    g_engaged = false;
-    const bool costSample = g_costSample;
-    g_costSample = false;
-    ID3D11PixelShader* orig = g_displaced;
-    g_displaced = nullptr;
-    // Null restores an unbind, which is also the truth.
-    if (costSample) {
-        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
-                                  cockpit_cost::id(cockpit_cost::Site::TargetPsSetShaderRestore),
-                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
-    }
-    ctx->PSSetShader(orig, nullptr, 0);
-    if (orig) orig->Release();
+    if (!g_bracketPending) return;
+    TargetSharpFastStateV1 next = g_fast;
+    g_bracketOps.end(g_bracketOps.context,
+                     g_bracketContext ? g_bracketContext : ctx, &next);
+    // A callback's valid engaged=0 snapshot promises the original PS is back.
+    // Keep the copied owner/context for retry if that promise was not made.
+    if (!validFast(next) || next.engaged) return;
+    acceptFast(next);
+    clearBracket();
 }
 
 void targetSharpShutdown() {
-    g_costSample = false;
-    if (g_ps) {
-        g_ps->Release();
-        g_ps = nullptr;
+    if (g_bracketPending) return;
+    const TargetSharpPolicyOpsV1* ops = activeOps();
+    if (!ops) { clearFast(); return; }
+    TargetSharpFastStateV1 next = g_fast;
+    ops->shutdown(ops->context, &next);
+    acceptFast(next);
+}
+
+bool targetSharpSetPolicyOpsV1ForTest(const TargetSharpPolicyOpsV1* ops) noexcept {
+    if (g_bracketPending || g_fast.engaged) return false;
+    if (ops && !validOps(ops)) return false;
+    const TargetSharpPolicyOpsV1* old = activeOps();
+    if (old) {
+        TargetSharpFastStateV1 released = g_fast;
+        try {
+            old->shutdown(old->context, &released);
+        } catch (...) {
+            // The old table/context remains selected so teardown can retry.
+            return false;
+        }
     }
-    if (g_displaced) {
-        g_displaced->Release();
-        g_displaced = nullptr;
-    }
+    // The factory pointer resets to the builtin selection. Keeping it as an
+    // override would hide module-owned predicate seeding in the VScreen rig.
+    const bool builtin = ops && ops == targetSharpPolicyOpsV1();
+    g_hasOverride = !builtin;
+    g_overrideAbsent = ops == nullptr;
+    if (ops && !builtin) g_override = *ops;
+    else std::memset(&g_override, 0, sizeof(g_override));
+    clearFast();
+    return true;
 }
 
 }  // namespace edvr

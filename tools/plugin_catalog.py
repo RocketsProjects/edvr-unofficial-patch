@@ -13,6 +13,7 @@ files or directories.
 """
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -578,6 +579,26 @@ def profile_mask(profile_names):
     return sum(1 << PROFILES.index(name) for name in profile_names)
 
 
+def selection_contract_fingerprint(data):
+    """Hash only fields that define stable selection-mask interpretation."""
+    contract = {
+        'catalogSchemaVersion': data['schemaVersion'],
+        'plugins': [{
+            'index': plugin['index'],
+            'id': plugin['id'],
+            'profiles': plugin['profiles'],
+            'selectionAvailableProfiles': plugin['selectionAvailableProfiles'],
+            'dependencies': [{'id': dep['id'], 'kind': dep['kind']}
+                             for dep in plugin['dependencies']],
+            'conflicts': [{'id': conflict['id'], 'kind': conflict['kind']}
+                          for conflict in plugin['conflicts']],
+        } for plugin in data['plugins']],
+    }
+    encoded = json.dumps(contract, sort_keys=True, separators=(',', ':'),
+                         ensure_ascii=True).encode('utf-8')
+    return hashlib.sha256(encoded).digest()
+
+
 def _cpp_string(value):
     return json.dumps(value, ensure_ascii=True)
 
@@ -603,6 +624,7 @@ def render_cpp(data):
         'struct CostReference { const char* measurementId; const char* build; std::uint32_t profileMask; const char* scene; const char* configJson; const char* uncertaintyMethod; std::uint32_t sampleCount; double confidence; const CostMetricUncertainty* metrics; std::uint32_t metricCount; };',
         'struct CostBudget { std::uint32_t state; const CostReference* reference; const CostMetric* metrics; std::uint32_t metricCount; };',
         'struct Dependency { const char* id; std::uint32_t kind; const char* reason; };',
+        'struct Conflict { const char* id; std::uint32_t kind; const char* reason; };',
         'struct ShaderPair { std::uint64_t vertexShaderHash, pixelShaderHash; };',
         'struct DrawShape { std::uint8_t kind; std::uint32_t count, instances; };',
         'struct Claim { const char* id; const char* hook; std::int32_t precedence; const char* precedenceAfter; const char* precedenceBefore; const char* rig; const char* shape; DrawShape drawShape; const ShaderPair* shaderPairs; std::uint32_t shaderPairCount; };',
@@ -618,6 +640,7 @@ def render_cpp(data):
         '    const char* const* hookPoints; std::uint32_t hookPointCount;',
         '    const Claim* claims; std::uint32_t claimCount;',
         '    const Dependency* dependencies; std::uint32_t dependencyCount;',
+        '    const Conflict* conflicts; std::uint32_t conflictCount;',
         '    const char* const* rigs; std::uint32_t rigCount;',
         '    const char* costNote;',
         '    const CostBudget* costBudget;',
@@ -666,6 +689,14 @@ def render_cpp(data):
             lines.append('    {%s, %d, %s},' % (
                 _cpp_string(dep['id']), 1 if dep['kind'] == 'hard' else 2, _cpp_string(dep['reason'])))
         if not plugin['dependencies']:
+            lines.append('    {"", 0, ""},')
+        lines.append('};')
+        lines.append('inline constexpr Conflict k_%s_conflicts[] = {' % pid)
+        for conflict in plugin['conflicts']:
+            kind = {'soft': 2, 'hard': 1}[conflict['kind']]
+            lines.append('    {%s, %d, %s},' % (
+                _cpp_string(conflict['id']), kind, _cpp_string(conflict.get('reason', ''))))
+        if not plugin['conflicts']:
             lines.append('    {"", 0, ""},')
         lines.append('};')
         budget = plugin['costBudget']
@@ -724,14 +755,25 @@ def render_cpp(data):
                      (pid, len(plugin['ownedConfigKeys']), pid, len(plugin['hookPoints'])))
         lines.append('     k_%s_claims, %d, k_%s_dependencies, %d,' %
                      (pid, len(plugin['claims']), pid, len(plugin['dependencies'])))
-        lines.append('     k_%s_rigs, %d, %s, &k_%s_cost_budget},' % (
-            pid, len(plugin['rigs']), _cpp_string(plugin['costNote']), pid))
+        lines.append('     k_%s_conflicts, %d, k_%s_rigs, %d, %s, &k_%s_cost_budget},' % (
+            pid, len(plugin['conflicts']), pid, len(plugin['rigs']),
+            _cpp_string(plugin['costNote']), pid))
     index_names = [plugin['id'].replace('-', '_').title().replace('_', '') for plugin in data['plugins']]
     lines.append('};')
     lines.append('enum PluginIndex : std::uint32_t {')
     lines.extend('    kPlugin%s = %d,' % (index_names[i], i) for i in range(len(index_names)))
     lines.append('    kPluginIndexCount = %d' % len(index_names))
-    lines.extend(['};', 'inline constexpr std::uint32_t kPluginCount = %d;' % len(data['plugins']),
+    lines.extend(['};', 'inline constexpr std::uint32_t kPluginCount = %d;' % len(data['plugins'])])
+    for i, symbol in enumerate(index_names):
+        lines.append('static_assert(kPlugin%s == %d, "plugin index mapping");' % (symbol, i))
+    lines.append('inline constexpr const char* kPluginIdByIndex[] = {')
+    lines.extend('    %s,' % _cpp_string(plugin['id']) for plugin in data['plugins'])
+    lines.append('};')
+    fingerprint = selection_contract_fingerprint(data)
+    lines.append('inline constexpr std::uint32_t kSelectionCatalogSchemaVersion = %d;' % data['schemaVersion'])
+    lines.append('inline constexpr std::uint8_t kSelectionCatalogFingerprint[32] = {%s};' %
+                 ', '.join('0x%02xu' % value for value in fingerprint))
+    lines.extend([
                   'inline constexpr std::uint32_t kVrProfileBit = 0x1u;',
                   'inline constexpr std::uint32_t kFlatProfileBit = 0x2u;',
                   '}}  // namespace edvr::plugins', ''])
@@ -1076,6 +1118,29 @@ def self_test():
                   'k_temporal_aa_cost_budget = {kCostBudgetUnmeasured, nullptr' in content and
                   '"directGpu", kCostMetricUnmeasured' in content and
                   'kCostMetricUnmeasured' in content)
+        fingerprint = selection_contract_fingerprint(original)
+        fingerprint_cpp = ', '.join('0x%02xu' % value for value in fingerprint)
+        check('generated selection contract fingerprint and ordered ID map',
+              'kSelectionCatalogSchemaVersion = 2' in content and
+              'kSelectionCatalogFingerprint[32] = {%s}' % fingerprint_cpp in content and
+              'kPluginIdByIndex[]' in content and
+              all('static_assert(kPlugin%s == %d' % (
+                  pid.replace('-', '_').title().replace('_', ''), index) in content
+                  for index, pid in enumerate(EXPECTED_IDS)))
+        cosmetic = copy.deepcopy(original)
+        cosmetic['plugins'][0]['description'] += ' changed prose'
+        cosmetic['plugins'][0]['rigs'].reverse()
+        cosmetic['plugins'][0]['costNote'] += ' changed note'
+        check('selection fingerprint excludes prose, rigs, and cost notes',
+              selection_contract_fingerprint(cosmetic) == fingerprint)
+        contract_change = copy.deepcopy(original)
+        contract_change['plugins'][0]['selectionAvailableProfiles'] = ['vr']
+        check('selection fingerprint changes when availability changes',
+              selection_contract_fingerprint(contract_change) != fingerprint)
+        contract_change = copy.deepcopy(original)
+        contract_change['plugins'][0]['index'] = 1
+        check('selection fingerprint changes when index mapping changes',
+              selection_contract_fingerprint(contract_change) != fingerprint)
         intro_record = next((line for line in content.splitlines()
                              if '"phase1-lifecycle"' in line), '')
         check('generated intro metadata stays lifecycle-only and non-selectable',
