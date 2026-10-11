@@ -1,7 +1,8 @@
 // The process's CPU, sampled from inside the process (docs/render-thread-cpu-2026-10-10.md, docs/engine-render-performance-2026-09-19.md).
 //
 // Where the threads of the game spend their time, by sampling them: a worker thread picks the threads to read (the render
-// thread that presents, the main thread, and the four others that used the most CPU over a one-second pre-window), then
+// thread that presents, the main thread, the owner (EDVR's OpenXR owner thread: a thread that starts in a module exporting
+// VR_GetGenericInterface), and the four others that used the most CPU over a one-second pre-window), then
 // stops them one at a time, round-robin, at a combined rate for ten seconds. Each stop reads the registers, copies the
 // stack above them, lets the thread go, and walks the copy to the leaf and up to eight return addresses. Afterwards each
 // address is resolved to a module (module+RVA) and to a function (the RUNTIME_FUNCTION of the module's .pdata that holds
@@ -50,7 +51,7 @@ constexpr double kTargetHz = 1200.0;           // the combined rate, round-robin
 constexpr double kMaxStoppedFraction = 0.05;   // the stopped share of the window, all threads together, is at most this
 constexpr unsigned kFrames = 9;                // the leaf (RIP) and up to eight return addresses
 constexpr unsigned kMaxSamples = 14000;        // 10 s at the combined rate is 12000; the rest is slack
-constexpr unsigned kMaxTargets = 6;            // the render thread, the main thread, and up to four others
+constexpr unsigned kMaxTargets = 7;            // the render thread, the main thread, the owner, and up to four others
 constexpr unsigned kMaxOthers = 4;
 constexpr unsigned kMaxThreadsSeen = 256;
 constexpr unsigned kMaxModules = 96;
@@ -460,10 +461,27 @@ inline unsigned listThreads(DWORD pid, DWORD self, ThreadSnap* snap, unsigned ma
     return n;
 }
 
+// The module at `base` exports VR_GetGenericInterface: openvr_api.dll does, and it is EDVR's OpenXR runtime's entry point in
+// this build, so a thread that starts in it is the owner thread (the one that services the runtime's calls).
+inline bool exportsVrGenericInterface(uintptr_t base) noexcept {
+    return base && GetProcAddress(reinterpret_cast<HMODULE>(base), "VR_GetGenericInterface") != nullptr;
+}
+
+// A thread's Win32 start address (the lpStartAddress it was created with), from ThreadQuerySetWin32StartAddress.
+inline bool threadStartAddress(HANDLE h, uintptr_t& start) noexcept {
+    start = 0;
+    const NtQueryThreadFn query = ntQueryThread();
+    if (!query || !h) return false;
+    ULONG len = 0;
+    return query(h, 9 /* ThreadQuerySetWin32StartAddress */, &start, sizeof(start), &len) == 0 && start != 0;
+}
+
 // Chooses the targets from a snapshot: the render thread (given, with its stack registration), the main thread (the
-// earliest created of the process: the loader creates the primary thread first), and up to kMaxOthers others by the CPU
-// they used over the pre-window. Each chosen snapshot's handle moves into its Target (the snapshot's becomes null).
-// `how` gets one line saying what was chosen and why. Returns how many targets were written to `out`.
+// earliest created of the process: the loader creates the primary thread first), the owner (a thread that starts in a
+// module exporting VR_GetGenericInterface; with several, the one with the most CPU over the pre-window), and up to
+// kMaxOthers others by the same CPU. Each chosen snapshot's handle moves into its Target (the snapshot's becomes null).
+// `how` gets one line saying what was chosen and why, every owner candidate included. Returns how many targets were
+// written to `out`.
 inline unsigned chooseTargets(ThreadSnap* snap, unsigned n, DWORD renderTid, uint64_t renderLo, uint64_t renderHi,
                               Target* out, unsigned maxOut, char* how, size_t howCap) noexcept {
     if (howCap) how[0] = 0;
@@ -472,29 +490,29 @@ inline unsigned chooseTargets(ThreadSnap* snap, unsigned n, DWORD renderTid, uin
         if (snap[i].tid == renderTid) render = static_cast<int>(i);
         if (snap[i].created && (main < 0 || snap[i].created < snap[main].created)) main = static_cast<int>(i);
     }
+    auto cpuOf = [&](int i) -> uint64_t { return snap[i].cpu1 >= snap[i].cpu0 ? snap[i].cpu1 - snap[i].cpu0 : 0; };
+    enum Kind { kOther, kRender, kMain, kOwner };
     unsigned k = 0;
-    auto take = [&](int i, bool isRender, bool isMain, uint64_t lo, uint64_t hi) {
+    auto take = [&](int i, Kind kind, uint64_t lo, uint64_t hi) {
         Target& t = out[k++];
         ThreadSnap& s = snap[i];
         t.tid = s.tid;
         t.handle = s.handle;
         s.handle = nullptr;
-        t.render = isRender;
-        t.main = isMain;
-        t.preCpu = s.cpu1 >= s.cpu0 ? s.cpu1 - s.cpu0 : 0;
-        if (isRender) {
+        t.render = kind == kRender;
+        t.main = kind == kMain;
+        t.preCpu = cpuOf(i);
+        if (kind == kRender) std::snprintf(t.label, sizeof(t.label), "render");
+        else if (kind == kMain) std::snprintf(t.label, sizeof(t.label), "main");
+        else if (kind == kOwner) std::snprintf(t.label, sizeof(t.label), "owner");
+        else std::snprintf(t.label, sizeof(t.label), "t%lu", static_cast<unsigned long>(t.tid));
+        std::snprintf(t.role, sizeof(t.role), "%s",
+                      kind == kRender ? "render" : kind == kMain ? "main" : kind == kOwner ? "owner" : "other");
+        if (kind == kRender) {
             t.lo = lo;
             t.hi = hi;
-            std::snprintf(t.label, sizeof(t.label), "render");
-            std::snprintf(t.role, sizeof(t.role), "render");
-        } else if (isMain) {
-            if (!threadStack(t.handle, t.lo, t.hi)) t.lo = t.hi = 0;
-            std::snprintf(t.label, sizeof(t.label), "main");
-            std::snprintf(t.role, sizeof(t.role), "main");
-        } else {
-            if (!threadStack(t.handle, t.lo, t.hi)) t.lo = t.hi = 0;
-            std::snprintf(t.label, sizeof(t.label), "t%lu", static_cast<unsigned long>(t.tid));
-            std::snprintf(t.role, sizeof(t.role), "other");
+        } else if (!threadStack(t.handle, t.lo, t.hi)) {
+            t.lo = t.hi = 0;
         }
         threadStartLabel(t.handle, t.start, sizeof(t.start));
     };
@@ -505,41 +523,71 @@ inline unsigned chooseTargets(ThreadSnap* snap, unsigned n, DWORD renderTid, uin
         if (w > 0) used = std::min(howCap - 1, used + static_cast<size_t>(w));
     };
     if (render >= 0 && k < maxOut) {
-        take(render, true, false, renderLo, renderHi);
-        add("render=render-thread t");
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(renderTid));
+        take(render, kRender, renderLo, renderHi);
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "render=render-thread t%lu", static_cast<unsigned long>(renderTid));
         add(buf);
     } else {
         add("render=not-in-list");
     }
     if (main >= 0 && main != render && k < maxOut) {
-        take(main, false, true, 0, 0);
-        char buf[96];
+        take(main, kMain, 0, 0);
+        char buf[80];
         std::snprintf(buf, sizeof(buf), "; main=earliest-created t%lu", static_cast<unsigned long>(snap[main].tid));
         add(buf);
     } else if (main >= 0 && main == render) {
         add("; main=the render thread");
     }
-    // The others: the highest CPU over the pre-window, excluding the two above.
+    // The owner candidates: threads that start in a module exporting VR_GetGenericInterface, neither render nor main.
+    int cands[kMaxThreadsSeen];
+    unsigned nc = 0;
+    for (unsigned i = 0; i < n && nc < kMaxThreadsSeen; ++i) {
+        if (static_cast<int>(i) == render || static_cast<int>(i) == main || !snap[i].handle) continue;
+        uintptr_t start = 0, base = 0;
+        char name[32] = {};
+        if (!threadStartAddress(snap[i].handle, start) || !moduleOfAddress(start, base, name, sizeof(name)) ||
+            !exportsVrGenericInterface(base))
+            continue;
+        cands[nc++] = static_cast<int>(i);
+    }
+    std::sort(cands, cands + nc, [&](int a, int b) {
+        const uint64_t da = cpuOf(a), db = cpuOf(b);
+        return da != db ? da > db : snap[a].tid < snap[b].tid;
+    });
+    if (!nc) {
+        add("; owner=none (no thread starts in a module that exports VR_GetGenericInterface)");
+    } else {
+        add("; owner candidates:");
+        for (unsigned j = 0; j < nc; ++j) {
+            char buf[48];
+            std::snprintf(buf, sizeof(buf), " t%lu %.1fms", static_cast<unsigned long>(snap[cands[j]].tid), cpuOf(cands[j]) / 10000.0);
+            add(buf);
+        }
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "; owner=t%lu (most pre-window CPU)", static_cast<unsigned long>(snap[cands[0]].tid));
+        add(buf);
+        if (k < maxOut) take(cands[0], kOwner, 0, 0);
+    }
+    // The others: the highest CPU over the pre-window, excluding the three above.
+    const int owner = nc ? cands[0] : -1;
     int order[kMaxThreadsSeen];
     unsigned m = 0;
     for (unsigned i = 0; i < n && m < kMaxThreadsSeen; ++i) {
-        if (snap[i].handle && static_cast<int>(i) != render && static_cast<int>(i) != main) order[m++] = static_cast<int>(i);
+        if (snap[i].handle && static_cast<int>(i) != render && static_cast<int>(i) != main && static_cast<int>(i) != owner)
+            order[m++] = static_cast<int>(i);
     }
     std::sort(order, order + m, [&](int a, int b) {
-        const uint64_t da = snap[a].cpu1 - snap[a].cpu0, db = snap[b].cpu1 - snap[b].cpu0;
+        const uint64_t da = cpuOf(a), db = cpuOf(b);
         return da != db ? da > db : snap[a].tid < snap[b].tid;
     });
     add("; others by pre-window CPU:");
     unsigned others = 0;
     for (unsigned j = 0; j < m && others < kMaxOthers && k < maxOut; ++j) {
         const int i = order[j];
-        const uint64_t d = snap[i].cpu1 >= snap[i].cpu0 ? snap[i].cpu1 - snap[i].cpu0 : 0;
         char buf[64];
-        std::snprintf(buf, sizeof(buf), " t%lu %.1fms", static_cast<unsigned long>(snap[i].tid), d / 10000.0);
+        std::snprintf(buf, sizeof(buf), " t%lu %.1fms", static_cast<unsigned long>(snap[i].tid), cpuOf(i) / 10000.0);
         add(buf);
-        take(i, false, false, 0, 0);
+        take(i, kOther, 0, 0);
         ++others;
     }
     return k;
