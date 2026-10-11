@@ -9,6 +9,8 @@
   and smaller). The census (`diag.temporal_draws`, default off) asks whether a view-pose
   draw exists every frame and whether its VS hash or projection identifies it. Next:
   same hangar, key on, Pause on visible resets (2026-10-11 entry).
+- **2026-10-11 (static, NOT flown):** the headset block's commit is inferred to run inside
+  coordinator `0x594B60` (only direct caller: VR job `0x2868C30`, call at `0x286906E`). See the entry at the end.
 
 - **State:** the 2026-09-25 gate fix (branch `claude/camera-rows-carry`, merged
   to main) is FLOWN and working as designed, and its open hypothesis is now
@@ -46,11 +48,9 @@
   the last accepted rows, and refusing every delta after a drop.
 - **Latest evidence (162120):** scene-row blocks match the selected rows within
   5e-6; stale carry and auxiliary contamination do not explain that run. The
-  substitution defect belongs to the kinematic-motion doc, 2026-09-28. H2 and H3
-  stay open.
-- **Next:** no additional Coriolis flight is planned until a concrete repair is
-  proven. The earlier roll/turn protocol in "Verification" remains the
-  discriminating test for the H2 stand-down once designed.
+  substitution defect is in the kinematic-motion doc (2026-09-28); H2 and H3 open.
+- **Next:** no Coriolis flight until a concrete repair is proven. The roll/turn
+  protocol in "Verification" is the H2 stand-down test once designed.
 - **Environment:** depends on the world path (`fix.temporal_aa`, depth motion)
   and the game's view rows at float 932 of the scene block. It does not depend
   on the VR runtime, headset or DLSS version, since it reads the game's own
@@ -306,3 +306,86 @@ visible resets. The read: is there a draw on every frame, excursion frames
 included, whose rows are the view pose (compare TDRW T and R with the TCAM
 `selected rows` of the same frame)? Does its VS hash, or its projection P, identify
 it deterministically? Also record the census cost from the 30 s line.
+
+## 2026-10-11 -- the headset block's writer, traced statically (build 332841)
+
+Question: which code writes the headset eye camera's rows into the camera block the chooser reads, and what separates that write from the other cameras' writes. Offline only: disassembly of `EliteDangerous64.exe` (PE stamp 1788384820, image size 104894464, so build 332841 by `tools\elite_hotspots.py --pe-info`). No EDVR code changed; helper scripts stay in the scratchpad. RVAs are image RVAs.
+
+### Proven by disassembly
+
+1. **Headset call chain.** Per-frame VR job `0x2868C30` (parts `0x2868C30..0x286938A`):
+   - calls the camera driver `0x28431D0` at `0x2868C8B` (rcx = `[r14+0x1188]`, edx = 2, r8 = `[r14+0x11C0]`);
+   - then calls coordinator `0x594B60` at `0x286906E` with rcx = `[[r14+0x1180]+0x18]` and dl = 1 (`mov dl,1` at `0x2869068`).
+   - `0x594B60` has one direct caller in the image, `0x286906E`.
+2. **Driver output.** The driver copies two composed matrices into objects at +0x20 (`0x59F1A0` called at `0x28435A0` and `0x28435C4`). In the C2 model (`tools\c2_derive_test\c2_derive_model.h`) +0x20 is the Cam source axes, so the eye views are Cam-type objects. That is inferred from the offset; the object's kind is not read here.
+3. **Coordinator `0x594B60`** (`0x594B60..0x594D89`). With C = rbx and cam = `[C+0xE0]`:
+   - push loop (`0x594BFA..0x594C2C`): for each item in the list at `[C+0x108]` (count at +8, array at `[list]`), set item+0x38 = 1, then `call [item+0x60]` at `0x594C1D` with rdx = C+0xE8 and r8 = cam+0x1A0;
+   - commit loop (`0x594C81..0x594CA4`): `call [item+0x88]` at `0x594C92`, rcx = item;
+   - a loop over `[C+0xF8]` calling `0x6BE790` (`0x594CC7`), then `0x5919E0(C+0x1E0)` and `0x5875B0(C)`.
+   - It never calls the refresh `0x5921F0` itself. C+0x248 is a call counter, incremented on each call.
+4. **The refresh `0x5921F0`** (entry; the flat injector's detour site is `0x592200`). Direct callers: `0x594E0E`, `0x594EA6` and `0x594FDC`, all in the view loop `0x594D90` (one caller, `0x58F2EF` in `0x58EF90`), and `0x58DE6E` in wrapper `0x58DE50` (five callers). The view loop pushes items through `+0x70` (`0x594E4E`, rdx = cam) and `+0x78` (`0x594ED2`), not `+0x88`.
+5. **Upload primitive `0x51B640`.** Map (`0x51E190`, which calls `0x50F000`), then memcpy of sizeA * sizeB bytes (sizeA = r9; sizeB = the fifth argument, stored at `[rsp+0x20]` at each call site; `imul` at `0x51B655`), then Unmap (`0x523190`). Twelve direct call sites:
+
+| site | sizeA (r9) | sizeB (stack) | note |
+|---|---|---|---|
+| `0x501A4A` | 1 | word `[r14+4]` | |
+| `0x5DB414` | eax (dynamic) | `0x60` | |
+| `0x27BC487` | 2 | 8 | |
+| `0x280EDCB` | min(ebx, edx) | `0x38` | |
+| `0x287506E` | min(esi, edx) | `0x38` | |
+| `0x28A13EC` | dynamic | dynamic | |
+| `0x28A1433` | dynamic | dynamic | |
+| `0x3849A0C` | esi | `0x1C` | |
+| `0x3C01A5F` | 1 | 8 | |
+| `0x448438B` | ecx | `0xA0` | |
+| `0x4C53126` | `[rdi+rbx*8+8]` | `0x10` | record loop, item 6 |
+| `0x4C83E32` | eax (dynamic) | `0x30` | |
+
+   Only `0x4C53126` has a runtime count times a stride of 16. A 3776-byte (236 x 16) block cannot be picked out of the static code alone.
+6. **Record loop `0x4C52E40`** (body `0x4C52E82..0x4C53164`). For records at `[r14+0x160]` (count `[r14+0x158]`, 40-byte stride, rbx = 5n) it calls `0x51B640` at `0x4C53126` with src = rec+0x10, count = rec+8, ctx = rec+0x18, stride 16. It is slot `+0x10` of the vtable at `0x5A6E0F8`, whose constructors are `0x4C52358` and `0x4C526B8` (`lea rax,[rip+...]`). That table's `+0x60` and `+0x70` hold the stub `0x39F0`, and it has no `+0x88`.
+7. **Pose chain.** `GetEyePose` `0x4E25A0` (render dispatch entry at `0x4E24638`) and the job-thread caller `0x4E3DF0` (entry at `0x4E246B8`) both reach the fetch `0x4E3690`, which calls WaitGetPoses at `0x4E3715`. Direct callers of the fetch: `0x4E2401` (in `0x4E2350`), `0x4E264C` (in `0x4E25A0`), `0x4E3E0E` (in `0x4E3DF0`) and `0x4E59C5` (in `0x4E5900`).
+8. **The commit slot is not an identity.** `call [reg+0x88]` appears 1652 times across 1352 functions.
+
+Call graph:
+
+```
+VR job 0x2868C30
+ +- driver 0x28431D0            (rcx [r14+0x1188], edx 2, r8 [r14+0x11C0]) @0x2868C8B
+ |    +- composer 0x283D4C0 (x2); eye-view copies 0x59F1A0 @0x28435A0/0x28435C4 (+0x20)
+ +- coordinator 0x594B60        (rcx [[r14+0x1180]+0x18], dl 1) @0x286906E
+      +- push: items [C+0x108], item.vt[+0x60](item, C+0xE8, cam+0x1A0), cam=[C+0xE0]
+      +- commit: item.vt[+0x88](item) @0x594C92      <- Map/memcpy/Unmap inferred here
+      +- [C+0xF8] -> 0x6BE790; 0x5919E0(C+0x1E0); 0x5875B0(C)
+refresh 0x5921F0 <- 0x594E0E, 0x594EA6, 0x594FDC (view loop 0x594D90 <- 0x58F2EF in 0x58EF90); 0x58DE6E (wrapper 0x58DE50)
+upload  0x51B640: Map 0x51E190 -> 0x50F000; memcpy sizeA*sizeB; Unmap 0x523190
+record loop 0x4C52E40 -> upload @0x4C53126 (vtable 0x5A6E0F8 +0x10)
+```
+
+### Inferred, not proven
+
+- **The commit writes the headset block.** The commit at `0x594C92` is the headset's commit and is synchronous inside `0x594B60`. The Map, memcpy and Unmap happen inside the item's `+0x88` method, whose class is unresolved. A breadth-first search over direct calls from `0x594B60` (30 functions, depth 4) found no path to `0x51B640` and no `[reg+0x70]` Map call, as expected when the path runs through vtable calls. The transition-flash doc's Ghidra pass names this function as the upload of `cb1[275]`; that agrees with the commit loop but is not re-verified here.
+- **Thread.** The VR job's thread is unknown: its only direct caller, `0x27BB7D0`, lies outside .pdata. The render-thread GetEyePose path fits the CPU profile, but nothing here confirms it.
+- **Which camera `cam = [C+0xE0]` is.** The coordinator never refreshes it, so whether it is the kind-5 eye or another object is open.
+- **Mailbox.** The writer `0x2874B20` (gated by `_stricmp` on two names) and the tick `0x10730A0` come from `docs\design-transition-flash-engine-fix-2026-09-23.md`. Only the writer's pointer at `0x52E89E0` and the tick's caller `0x1030C20` were re-checked here.
+
+### Ruled out
+
+- ruled out: K (vtable `0x5A6E0F8`) as the coordinator's item class, because its `+0x60` and `+0x70` are stubs and it has no `+0x88`.
+- ruled out: `0x5A6E108` as a vtable base, because the real base is `0x5A6E0F8` and the table's later slots are ASCII names.
+- ruled out: the `+0x88` slot as the discriminator, because 1652 call sites share it.
+- inconclusive: the store scan for displacements 0xE90 and 0xC40. The hits in `0x4B5DFD0..0x4B9F7B0` are large SIMD routines, not camera packers.
+
+### Proposed hook (not built, not flown)
+
+- **Site.** CodeHook on `0x594B60` (EXE+0x594B60). Pin the 30 prologue bytes: `48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 54 41 56 41 57 48 83 EC 20`. The relay (as in the flat producer probe on `kimi/camera-producer-probe`) bumps a thread-local depth, calls the trampoline, and drops the depth again.
+- **Gate.** PE stamp 1788384820 and image size 104894464; the prologue match; the call site `0x2869068` reads `B2 01 48 8B 48 18 E8`, and its rel32 resolves to `0x594B60`. Any miss: not installed, and the chooser is unchanged.
+- **Detour.** The depth goes up by one, the detour records C (rcx) and the frame, calls the original, and the depth goes down. C+0x248 is the call counter and can cross-check the frame.
+- **Chooser.** On the Unmap side in `vscreen.cpp` (the `camResource` block near line 3410), a write made while depth > 0 is stamped as the headset's. `chooseCameraRows` takes the latest stamped write of the frame; with none, it keeps today's choice.
+- **Per-frame cost.** One relay call and two thread-local stores per frame (tens of ns). One thread-local read per Unmap (about 1 ns).
+- **Other builds.** Inert; the chooser is unchanged.
+
+### Next flight (what would confirm or refute)
+
+- Log per frame: depth, C, and the number of stamped Unmaps. Expect one stamped set per frame, including a block of 3776 bytes or more. Refute: no stamped block while depth > 0, which means the commit is deferred and the inferred step fails.
+- Compare the stamped block's rows at float 932 with the eye draws' TDRW rows, using the 5e-6 test from 2026-09-28.
+- Static follow-up that would turn the inferred step into a proof: find the vtable of the items in `[C+0x108]` (the constructors that store it into objects added to that list) and read its `+0x88`.
