@@ -9,6 +9,8 @@
 namespace edvr::plugin_selection::admission_v1 {
 
 inline constexpr std::uint32_t kAbiVersion = 1;
+inline constexpr std::uint32_t kQueryVersionV1 = 1;
+enum class QueryKindV1 : std::uint32_t { Contract = 1, Decision = 2 };
 inline constexpr std::uint32_t kCapabilityProfileWideAdmission = 1u << 0;
 inline constexpr std::uint32_t kCapabilityGeneratedSelectionBits = 1u << 1;
 inline constexpr std::uint32_t kCapabilitySnapshotValidation = 1u << 2;

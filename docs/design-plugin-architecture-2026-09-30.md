@@ -13,16 +13,16 @@
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
 - **Current integration:** main `3983bb45` integrated at `b917041e`.
-  Sampler startup is pushed as `752c7412`. Admission foundation passed
-  `build/full-plugin-admission-foundation-offline-20261010-r1.log`
-  (receipt `b9efec6f`). Helpers have no production callers; selections
-  remain informational and availability stays closed.
+  Sampler startup is `752c7412`; admission foundation is `d3e339f0`.
+  Dormant graphics/native commitment now passes the full 168-job gate:
+  `build/full-plugin-admission-protocol-offline-20261010-r3.log`
+  (receipt `5c313093`). Availability stays closed; no install.
 - **Module progress:** Performance owns resolution, FOV engine/settings,
   and sampler. Cockpit owns RemLok and TargetSharp policy/state; shared
   VScreen services stay core. Diagnostics owns scheduler. Comfort owns
   exposure, scanners, transition flash and terrain pose. On-foot owns
   footprint sampling; Explorer Cam owns lifecycle. Selections remain
-  unavailable; admission and whole-group absence remain open.
+  unavailable; whole-group absence and launch order remain open.
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
   Capture uses consumed values; unarmed paths construct no predicate payload.
@@ -4849,3 +4849,68 @@ INIT_ONCE. Immutable peer commitment, real early owner gates,
 whole-group absence and the Flat production route remain open. No Steam
 install, live-settings edit, promotion, flight or feature-to-main merge
 occurred.
+
+### 2026-10-10 — dormant graphics/native admission protocol
+
+Graphics now publishes its immutable admission decision after the bounded
+selection snapshot and before optional registration. Contract query is pure;
+Decision query returns `E_PENDING` until publication. VR candidates qualify the
+exact already-loaded native DLL and append one versioned commitment call. Flat
+takes the graphics-only route. The generated readiness masks remain zero, so
+current launches preserve Legacy behavior and make no native commitment or
+admission peer queries. This is dormant infrastructure, not selectable support.
+
+The fixed 168-byte commitment contains the complete snapshot and candidate.
+Native recomputes it against its own generated catalog, freezes the request and
+callback table, and owns a graphics reference throughout qualification. Failed
+checks release that reference. Preparing callers get `E_PENDING`; equal repeats
+are idempotent and differing repeats cannot erase the first positive
+reservation. Production retains the successful store and reference to OS
+process exit, preserving VR restarts without calling `FreeLibrary` from DLL CRT
+teardown. Allocation failure cannot publish a commitment.
+
+Native graphics acquisition compares the retained provider before admission
+lookup or paired calls. A positive reservation requires an exact published
+Decision; pending, malformed, Legacy or mismatched replies reject startup. An
+unreserved qualified peer must publish a valid Legacy decision before paired
+calls. Accepting `E_PENDING` here could race a later positive graphics
+publication. Missing old admission exports retain Legacy compatibility; the
+current unready build bypasses this new query entirely. Native rejects Flat
+commitments, and ordinal 17 is appended after the unchanged 1–16 exports.
+
+The fixtures reuse production transport, peer qualification and commitment
+rules. They cover held initialization, wrong providers, late responses, zero
+commitment for current unready/invalid selections, retained references, failure
+unwind and concurrent preparation. Fixture reset runs before DLL unload,
+including exceptional exits. Canonical scratch children belong to the validated
+runner directory; dry runs write nothing. The held initializer is the fixture's
+own `INIT_ONCE`, not the proxy's actual callback. Contract purity and
+native-host ordering therefore combine runtime checks with source
+counterexamples; this is not a dynamic positive-commit native-host test.
+
+The focused native run passed both new rigs: common commitment passed and the
+real-DLL integration fixture reported 32 checks with zero failures. Source
+gates reject nine commitment and ten runtime counterexamples. The first full
+run exposed missing peer-helper linkage in the existing Present rig; all client
+consumers were enumerated and the Present and shutdown rig links were
+corrected. The next full run exposed the installer validator's old exact
+16-export list; it now includes the appended commitment, with built-PE
+missing-export and ordinal rejection checks. The complete rerun passed all 168
+jobs, production DLLs, config ownership checks, native exports 1-17, graphics
+exports and the self-contained installer. Evidence:
+`build/full-plugin-admission-protocol-offline-20261010-r3.log`, receipt
+`5c313093dabcd1ab954afbca85f286b1e645ae87438bdce3d61009e9cf94dbe9`. This
+validates the same source tree; no performance or supported launch-order claim
+is inferred from these fixtures.
+
+Whole-group absence gates and intended Pimax launch order remain open. The next
+offline owner slice is Performance across resolution registration, native FOV
+ops and sampler startup. Legacy Flat and Unknown sampler behavior must retain
+its existing unconditional setup; the VR-only catalog's `ownerEnabled()` can be
+applied only after an admitted selection, not as a general replacement for
+Legacy host predicates. Readiness cannot open until every applicable group has
+complete gates. New ready peers starting before graphics publication must
+reject that attempt; supported launch ordering still needs evidence. Existing
+paired graphics-export qualification remains unchanged. Final runtime cost
+belongs at rendering freeze. No Steam/Epic install, live INI edit, promotion,
+flight, or feature-to-main merge occurred at this checkpoint.

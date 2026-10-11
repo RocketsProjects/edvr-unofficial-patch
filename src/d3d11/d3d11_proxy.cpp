@@ -29,6 +29,7 @@
 #include "../common/native_startup.h"
 #include "../common/proxy.h"
 #include "plugin_selection_transport.h"
+#include "plugin_admission_transport.h"
 #include "device_hook.h"
 #include "flat_wrapper_note.h"
 #include "format_support_log.h"
@@ -280,6 +281,16 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
                           g_moduleDir->c_str());
     // One bounded, read-only snapshot; transport errors do not change legacy startup.
     (void)edvr::plugin_selection_transport::captureFromModuleDirectory(*g_moduleDir);
+    // Admission is a profile-wide startup candidate. The exported Contract
+    // query stays pure while this INIT_ONCE body is in progress; peer commit
+    // is attempted only for a ready VR profile and never retries this launch.
+    const auto admissionProfile = edvr::runtimeFlatProfile()
+        ? edvr::plugin_selection::PluginSelectionProfileV1::Flat
+        : edvr::runtimeFeaturesAllowed()
+            ? edvr::plugin_selection::PluginSelectionProfileV1::Vr
+            : edvr::plugin_selection::PluginSelectionProfileV1::Unknown;
+    edvr::plugin_admission_transport::publishCandidate(
+        *g_moduleDir, g_selfModule, admissionProfile);
     // NativeRuntimeHost queries CPU-only render settings immediately after
     // its first device create, before vScreen's optional state is configured.
     // First-party selection is still fixed to the supported profile here.

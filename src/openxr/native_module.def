@@ -16,3 +16,4 @@ EXPORTS
     VR_ShutdownInternal=edvr_module_VR_ShutdownInternal @14
     edvrConfigureNativeRuntime @15
     edvrGetNativeRuntimeStatus @16
+    edvrCommitPluginSelectionAdmissionV1 @17

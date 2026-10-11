@@ -299,7 +299,8 @@ void ordinalTests(const Exports& api) {
       "VR_GetVRInitErrorAsEnglishDescription","VR_GetVRInitErrorAsSymbol",
       "VR_InitInternal","VR_IsHmdPresent","VR_IsInterfaceVersionValid",
       "VR_IsRuntimeInstalled","VR_RuntimePath","VR_ShutdownInternal",
-      "edvrConfigureNativeRuntime","edvrGetNativeRuntimeStatus"};
+      "edvrConfigureNativeRuntime","edvrGetNativeRuntimeStatus",
+      "edvrCommitPluginSelectionAdmissionV1"};
   bool same=true;
   for(unsigned i=0;i<_countof(names);++i) {
     const auto byName=GetProcAddress(api.module,names[i]);

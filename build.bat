@@ -339,6 +339,10 @@ python "tools\plugin_selection_transport_test\source_test.py" --dry-run || exit 
 python "tools\plugin_selection_transport_test\source_test.py" --self-test || exit /b 1
 python "tools\plugin_admission_peer_test\source_test.py" --dry-run || exit /b 1
 python "tools\plugin_admission_peer_test\source_test.py" --self-test || exit /b 1
+python "tools\plugin_admission_commit_test\source_test.py" --dry-run || exit /b 1
+python "tools\plugin_admission_commit_test\source_test.py" --self-test || exit /b 1
+python "tools\plugin_admission_runtime_test\source_test.py" --dry-run || exit /b 1
+python "tools\plugin_admission_runtime_test\source_test.py" --self-test || exit /b 1
 python "tools\target_sharp_wiring_test.py" --dry-run || exit /b 1
 python "tools\target_sharp_wiring_test.py" --self-test || exit /b 1
 
@@ -525,6 +529,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrQueryOculusRouting ^
     --extra-export edvrQueryNativeRenderSettings ^
     --extra-export edvrQueryPluginSelectionV1 ^
+    --extra-export edvrQueryPluginAdmissionV1 ^
     --extra-export edvrPublishNativeRenderSizing ^
     --extra-export edvrQueryNativeRenderSizing ^
     --extra-export edvrGpuFrameEvent
@@ -686,6 +691,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\frame_flag.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" "src\common\plugin_selection_snapshot.cpp" ^
     "src\common\plugin_selection_admission.cpp" "src\common\plugin_admission_peer.cpp" ^
+    "src\common\plugin_admission_commit.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
@@ -702,6 +708,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\native_timing.cpp" ^
     "src\d3d11\map_wait.cpp" ^
     "src\d3d11\native_render_settings.cpp" "src\d3d11\plugin_selection_transport.cpp" ^
+    "src\d3d11\plugin_admission_transport.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\gpu_census.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
@@ -808,7 +815,9 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_
     /I"third_party\openxr\include" /I"%GEN%" /Fo"%OBJ%\openxr_module\\" ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" "src\common\plugin_selection_snapshot.cpp" "src\common\iniedit.cpp" ^
+    "src\openxr\native_plugin_admission.cpp" ^
     "src\common\plugin_selection_admission.cpp" "src\common\plugin_admission_peer.cpp" ^
+    "src\common\plugin_admission_commit.cpp" ^
     "src\plugins\performance\fov_trim_policy.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
@@ -1200,6 +1209,59 @@ if errorlevel 1 ( echo [edvr] ERROR: admission peer fixture build failed & exit 
     "%BUILD%\plugin_admission_peer_fixtures\provider_fixture.dll" ^
     "%BUILD%\plugin_admission_peer_fixtures\old_peer_fixture.dll" ^
     "%BUILD%\plugin_admission_peer_fixtures\forwarder_fixture.dll" || exit /b 1
+exit /b 0
+
+:rig_plugin_admission_commit_test
+echo [edvr] === plugin_admission_commit_test.exe ===
+if not exist "%OBJ%\plugin_admission_commit" mkdir "%OBJ%\plugin_admission_commit"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /DEDVR_SELECTION_ADMISSION_TEST /DEDVR_ADMISSION_COMMIT_TEST /D_CRT_SECURE_NO_WARNINGS ^
+    /I"%GEN%" /I"src\common" /Fo"%OBJ%\plugin_admission_commit\\" ^
+    /Fe"%BUILD%\plugin_admission_commit_test.exe" ^
+    "tools\plugin_admission_commit_test\plugin_admission_commit_test.cpp" ^
+    "src\common\plugin_selection_admission.cpp" "src\common\plugin_admission_commit.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: admission commit fixture build failed & exit /b 1 )
+"%BUILD%\plugin_admission_commit_test.exe" --dry-run || exit /b 1
+"%BUILD%\plugin_admission_commit_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_plugin_admission_runtime_test
+echo [edvr] === plugin_admission_runtime_test.exe ===
+for %%D in (graphics provider peer exe) do if not exist "%OBJ%\plugin_admission_runtime\%%D" mkdir "%OBJ%\plugin_admission_runtime\%%D"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /I"%GEN%" /Fo"%OBJ%\plugin_admission_runtime\graphics\\" ^
+    /Fe"%BUILD%\plugin_admission_runtime_graphics.dll" ^
+    "tools\plugin_admission_runtime_test\runtime_graphics_fixture.cpp" ^
+    "src\d3d11\plugin_admission_transport.cpp" "src\d3d11\plugin_selection_transport.cpp" ^
+    "src\common\plugin_selection_snapshot.cpp" "src\common\plugin_selection_admission.cpp" ^
+    "src\common\plugin_admission_peer.cpp" "src\common\iniedit.cpp" ^
+    /link /INCREMENTAL:NO /DEF:"tools\plugin_admission_runtime_test\runtime_graphics_fixture.def"
+if errorlevel 1 ( echo [edvr] ERROR: admission graphics integration fixture build failed & exit /b 1 )
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /DEDVR_SELECTION_ADMISSION_TEST /I"%GEN%" /Fo"%OBJ%\plugin_admission_runtime\provider\\" ^
+    /Fe"%BUILD%\plugin_admission_runtime_provider.dll" ^
+    "tools\plugin_admission_runtime_test\provider.cpp" "src\common\plugin_selection_admission.cpp" ^
+    /link /INCREMENTAL:NO /DEF:"tools\plugin_admission_runtime_test\provider.def"
+if errorlevel 1 ( echo [edvr] ERROR: admission positive provider fixture build failed & exit /b 1 )
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /DEDVR_SELECTION_ADMISSION_TEST /DEDVR_ADMISSION_COMMIT_TEST /I"%GEN%" ^
+    /Fo"%OBJ%\plugin_admission_runtime\peer\\" /Fe"%BUILD%\plugin_admission_runtime_peer.dll" ^
+    "tools\plugin_admission_runtime_test\native_peer.cpp" "src\common\plugin_admission_commit.cpp" ^
+    "src\common\plugin_selection_admission.cpp" ^
+    /link /INCREMENTAL:NO /DEF:"tools\plugin_admission_runtime_test\native_peer.def"
+if errorlevel 1 ( echo [edvr] ERROR: admission native peer fixture build failed & exit /b 1 )
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /DEDVR_SELECTION_ADMISSION_TEST /I"%GEN%" /Fo"%OBJ%\plugin_admission_runtime\exe\\" ^
+    /Fe"%BUILD%\plugin_admission_runtime_test.exe" ^
+    "tools\plugin_admission_runtime_test\runtime_test.cpp" "src\common\plugin_admission_peer.cpp" ^
+    "src\common\plugin_selection_admission.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: admission runtime fixture build failed & exit /b 1 )
+"%BUILD%\plugin_admission_runtime_test.exe" --dry-run || exit /b 1
+"%BUILD%\plugin_admission_runtime_test.exe" --self-test ^
+    "%BUILD%\plugin_admission_runtime_graphics.dll" ^
+    "%BUILD%\plugin_admission_runtime_peer.dll" ^
+    "%BUILD%\plugin_admission_runtime_provider.dll" || exit /b 1
 exit /b 0
 
 :rig_plugin_selection_transport_test
@@ -3513,6 +3575,7 @@ for %%T in (native stereo) do (
         "src\openxr\openvr_compositor.cpp" "tools\openxr_native_test\compositor_caller.cpp" ^
         "src\openxr\openvr_auxiliary.cpp" "src\openxr\runtime_exports.cpp" ^
         "src\common\frame_flag.cpp" ^
+        "src\common\plugin_admission_peer.cpp" ^
         /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib
     if errorlevel 1 ( echo [edvr] ERROR: OpenXR %%T test build failed & exit /b 1 )
 )
@@ -3628,6 +3691,7 @@ REM Actual owned-swapchain Present hook, foreign Init caller and private work.
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_present_test\\" /Fe"%BUILD%\openxr_present_test.exe" ^
     "tools\openxr_present_test\openxr_present_test.cpp" ^
+    "src\common\plugin_admission_peer.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR Present test build failed & exit /b 1 )
 "%BUILD%\openxr_present_test.exe" --dry-run || exit /b 1
@@ -3643,6 +3707,7 @@ REM Stopped application Present: real graphics callback and native stop coordina
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
     /Fo"%OBJ%\openxr_shutdown_test\\" /Fe"%BUILD%\openxr_shutdown_test.exe" ^
     "tools\openxr_shutdown_test\openxr_shutdown_test.cpp" ^
+    "src\common\plugin_admission_peer.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR stopped-Present shutdown test build failed & exit /b 1 )
 "%BUILD%\openxr_shutdown_test.exe" --dry-run || exit /b 1

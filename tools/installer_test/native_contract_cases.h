@@ -39,9 +39,91 @@ inline void nativeBuiltContractCases(Check check, const std::wstring& root) {
     const auto runtime=bytes(L"edvr_openxr_runtime.dll");
     const auto loader=bytes(L"openxr_loader.dll");
     check(validateNativePayloadBytes(graphics.data(),graphics.size(),NativeImageKind::Graphics),"built native graphics marker/providers accepted");
-    check(validateNativePayloadBytes(runtime.data(),runtime.size(),NativeImageKind::Runtime),"built native runtime exact export contract accepted");
+    const bool runtimeValid=validateNativePayloadBytes(runtime.data(),runtime.size(),NativeImageKind::Runtime);
+    check(runtimeValid,"built native runtime exact export contract accepted");
     check(validateNativePayloadBytes(loader.data(),loader.size(),NativeImageKind::Loader),"bundled x64 Khronos loader accepted");
     check(probeDll(root+L"\\build\\edvr_openxr_runtime.dll").kind==DllKind::Edvr,"native runtime is identified as EDVR, never as an original to preserve");
+    if(runtimeValid) {
+        // Mutate the built PE in memory. Names use an alphabetic table while
+        // the ordinal table establishes the ABI: the new export must be @17.
+        auto old=runtime;
+        auto* oldDos=reinterpret_cast<IMAGE_DOS_HEADER*>(old.data());
+        auto* oldNt=reinterpret_cast<IMAGE_NT_HEADERS64*>(old.data()+oldDos->e_lfanew);
+        auto* oldSections=IMAGE_FIRST_SECTION(oldNt);
+        auto oldOffset=[&](DWORD rva) -> size_t {
+            for(unsigned i=0;i<oldNt->FileHeader.NumberOfSections;++i) {
+                const auto& section=oldSections[i];
+                if(rva>=section.VirtualAddress && rva-section.VirtualAddress<section.SizeOfRawData) {
+                    const size_t off=section.PointerToRawData+rva-section.VirtualAddress;
+                    return off<old.size()?off:old.size();
+                }
+            }
+            return old.size();
+        };
+        const size_t expOff=oldOffset(oldNt->OptionalHeader.DataDirectory[0].VirtualAddress);
+        if(expOff+sizeof(IMAGE_EXPORT_DIRECTORY)>old.size()) {
+            check(false,"built runtime export directory available for mutation tests");
+            return;
+        }
+        auto* exp=reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(old.data()+expOff);
+        const size_t namesOff=oldOffset(exp->AddressOfNames);
+        const size_t ordsOff=oldOffset(exp->AddressOfNameOrdinals);
+        if(exp->NumberOfNames!=17 || exp->NumberOfFunctions!=17 ||
+           namesOff+17*sizeof(DWORD)>old.size() || ordsOff+17*sizeof(WORD)>old.size()) {
+            check(false,"built runtime has 17 named ordinal exports for mutation tests");
+            return;
+        }
+        auto* names=reinterpret_cast<DWORD*>(old.data()+namesOff);
+        auto* ords=reinterpret_cast<WORD*>(old.data()+ordsOff);
+        unsigned admissionIndex=17;
+        size_t admissionName=old.size();
+        for(unsigned i=0;i<17;++i) {
+            const size_t nameOff=oldOffset(names[i]);
+            if(nameOff==old.size()) continue;
+            const char* name=reinterpret_cast<const char*>(old.data()+nameOff);
+            if(memchr(name,0,old.size()-nameOff) &&
+               strcmp(name,"edvrCommitPluginSelectionAdmissionV1")==0) {
+                admissionIndex=i;admissionName=nameOff;break;
+            }
+        }
+        if(admissionIndex==17 || ords[admissionIndex]!=16) {
+            check(false,"built admission export found at ordinal 17 for mutation tests");
+            return;
+        }
+        auto badName=old;
+        badName[admissionName]='x';
+        check(!validateNativePayloadBytes(badName.data(),badName.size(),NativeImageKind::Runtime),
+              "renamed admission export rejected as current native payload");
+        auto badOrdinal=old;
+        *reinterpret_cast<WORD*>(badOrdinal.data()+ordsOff+admissionIndex*sizeof(WORD))=15;
+        check(!validateNativePayloadBytes(badOrdinal.data(),badOrdinal.size(),NativeImageKind::Runtime),
+              "admission export at wrong ordinal rejected as current native payload");
+
+        // Reconstruct the prior exact 16-export ABI from this built PE. It is
+        // still an installed EDVR runtime to preserve, but not a new payload.
+        for(unsigned i=admissionIndex;i+1<17;++i) {names[i]=names[i+1];ords[i]=ords[i+1];}
+        exp->NumberOfNames=16;
+        exp->NumberOfFunctions=16;
+        check(!validateNativePayloadBytes(old.data(),old.size(),NativeImageKind::Runtime),
+              "prior 16-export native runtime is rejected as current payload");
+        const std::wstring oldPath=root+L"\\build\\insttest_prior_native_"+
+            std::to_wstring(GetCurrentProcessId())+L"_"+std::to_wstring(GetTickCount64())+L".dll";
+        HANDLE file=CreateFileW(oldPath.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,
+                                FILE_ATTRIBUTE_NORMAL,nullptr);
+        check(file!=INVALID_HANDLE_VALUE,"create confined prior-runtime probe fixture");
+        if(file!=INVALID_HANDLE_VALUE) {
+            struct DeleteFixture {std::wstring path;~DeleteFixture(){DeleteFileW(path.c_str());}} cleanup{oldPath};
+            DWORD written=0;
+            const BOOL wrote=WriteFile(file,old.data(),static_cast<DWORD>(old.size()),&written,nullptr);
+            CloseHandle(file);
+            check(wrote && written==old.size(),"write prior-runtime probe fixture");
+            if(wrote && written==old.size()) {
+                const auto observed=probeDll(oldPath);
+                check(observed.kind==DllKind::Edvr && observed.nativeRuntimeExports,
+                      "prior 16-export runtime remains recognized as installed EDVR native runtime");
+            }
+        }
+    }
     if(graphics.empty())return;
     // Mutate the actual built PE using the export ordinal table, so a marker
     // with a high/nonalphabetic ordinal is exercised too. Never execute it.

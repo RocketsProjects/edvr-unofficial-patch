@@ -8,6 +8,8 @@
 #include "native_cpu_trace.h"
 #include "init_error.h"
 #include "../common/plugin_selection_snapshot.h"
+#include "../common/plugin_selection_admission.h"
+#include "native_plugin_admission.h"
 #include <new>
 #include <stdexcept>
 
@@ -62,12 +64,21 @@ class ModuleBackend final : public RuntimeBackend {
       s.initAttempts=attempts_; s.initThread=GetCurrentThreadId();
     });
     if (cancelled.load(std::memory_order_acquire)) return vr::VRInitError_Init_ShuttingDown;
+    edvr::plugin_selection::commit_v1::AdmissionCommitRequestV1 admissionReservation{};
+    constexpr uint32_t vrProfileMask =
+        edvr::plugin_selection::kPluginSelectionVrProfileMaskV1;
+    const bool admissionBuildEnabled =
+        (edvr::plugin_selection::admission_v1::contract().supportedProfileMask & vrProfileMask) != 0;
+    const bool hasAdmissionReservation = admissionBuildEnabled &&
+        native_plugin_admission::readCommitted(&admissionReservation);
+    const auto* expectedAdmission = hasAdmissionReservation
+        ? &admissionReservation.decision : nullptr;
     const HRESULT acquired=generation->binding.acquire(options_.graphicsProxy,[generation] {
       if (!generation->loadingAdmitted.load(std::memory_order_acquire)) return;
       if (generation->host->consumeOverlappedPresent()) return;
       if (!generation->route.invoke([generation] { generation->host->loadingBoundary(); }))
         throw std::runtime_error("native loading boundary unavailable");
-    });
+    }, expectedAdmission, admissionBuildEnabled && !hasAdmissionReservation);
     if (acquired!=S_OK) {
       nativeTracePrintf("module_startup,graphics_unavailable=%08lx\n",(unsigned long)acquired);
       return vr::VRInitError_Init_HmdNotFound;

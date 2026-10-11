@@ -32,6 +32,8 @@ bool isPluginSectionName(const std::string& section);
 
 enum class PluginSelectionProfileV1 : std::uint32_t { Unknown = 0, Vr = 1, Flat = 2 };
 inline constexpr std::uint32_t kPluginSelectionSnapshotVersionV1 = 1;
+inline constexpr std::uint32_t kPluginSelectionVrProfileMaskV1 = 0x1u;
+inline constexpr std::uint32_t kPluginSelectionFlatProfileMaskV1 = 0x2u;
 static_assert(static_cast<std::uint32_t>(RecordState::Absent) == 0 &&
               static_cast<std::uint32_t>(RecordState::Supported) == 1 &&
               static_cast<std::uint32_t>(RecordState::Opaque) == 2,

@@ -1,6 +1,9 @@
 #pragma once
 
 #include "../common/native_graphics.h"
+#include "../common/plugin_admission_peer.h"
+#include "../common/plugin_selection_admission.h"
+#include <cstring>
 #include <string>
 #include <utility>
 #include <wrl/client.h>
@@ -18,7 +21,9 @@ class NativeGraphicsClient final {
   NativeGraphicsClient& operator=(const NativeGraphicsClient&) = delete;
   ~NativeGraphicsClient() { reset(); }
 
-  HRESULT acquire(const std::wstring& trustedAbsolutePath) {
+  HRESULT acquire(const std::wstring& trustedAbsolutePath,
+                  const plugin_selection::admission_v1::DecisionV1* expectedAdmission = nullptr,
+                  bool checkUnreservedAdmission = false) {
     if (module_) return E_PENDING;
     std::wstring wanted;
     if (!fullPath(trustedAbsolutePath, wanted)) return E_INVALIDARG;
@@ -35,6 +40,45 @@ class NativeGraphicsClient final {
     if (!length || length >= 32768 || !fullPath(loaded, actual) ||
         CompareStringOrdinal(wanted.c_str(), -1, actual.c_str(), -1, TRUE) != CSTR_EQUAL)
       return E_ACCESSDENIED;
+
+    // A committed admission is checked against this retained module before
+    // any paired graphics export is called. Query is optional for old peers;
+    // the all-unready build never requests it on the legacy path.
+    if (expectedAdmission || checkUnreservedAdmission) {
+      if (expectedAdmission) {
+        const std::uint64_t expectedBase =
+            (static_cast<std::uint64_t>(expectedAdmission->graphicsProviderBaseHigh) << 32) |
+            expectedAdmission->graphicsProviderBaseLow;
+        if (reinterpret_cast<std::uint64_t>(retained) != expectedBase)
+          return E_ACCESSDENIED;
+      }
+      auto qualified = plugin_admission::AdmissionPeer::acquire(
+          wanted, "edvrQueryPluginAdmissionV1");
+      if (!qualified) {
+        if (expectedAdmission) return E_NOINTERFACE;
+      } else if (qualified.module() != retained) {
+        return E_ACCESSDENIED;
+      } else {
+        using QueryAdmission = HRESULT (WINAPI *)(std::uint32_t, std::uint32_t,
+                                                   std::uint32_t, void*);
+        plugin_selection::admission_v1::DecisionV1 decision{};
+        const HRESULT queried = reinterpret_cast<QueryAdmission>(qualified.proc())(
+            plugin_selection::admission_v1::kQueryVersionV1,
+            static_cast<std::uint32_t>(plugin_selection::admission_v1::QueryKindV1::Decision),
+            sizeof(decision), &decision);
+        if (expectedAdmission) {
+          if (queried != S_OK || std::memcmp(&decision, expectedAdmission,
+                                             sizeof(decision)) != 0)
+            return FAILED(queried) ? queried : E_ACCESSDENIED;
+        } else {
+          // A graphics initializer may still be preparing its Decision. A
+          // paired call cannot start on that provisional Legacy assumption:
+          // the peer can publish a positive commit before native host startup.
+          if (queried != S_OK) return FAILED(queried) ? queried : E_ACCESSDENIED;
+          if (!publishedLegacyForProvider(decision, retained)) return E_ACCESSDENIED;
+        }
+      }
+    }
 
     // All paired entry points must live in this module. A forwarded export
     // cannot establish the required provider identity.
@@ -83,6 +127,32 @@ class NativeGraphicsClient final {
   ID3D11DeviceContext* context() const { return context_.Get(); }
 
  private:
+  static bool publishedLegacyForProvider(
+      const plugin_selection::admission_v1::DecisionV1& decision,
+      HMODULE provider) noexcept {
+    using namespace plugin_selection::admission_v1;
+    if (decision.structSize != sizeof(decision) || decision.abiVersion != kAbiVersion ||
+        decision.mode != static_cast<std::uint32_t>(Mode::Legacy) ||
+        decision.activeProfile != static_cast<std::uint32_t>(
+            plugin_selection::PluginSelectionProfileV1::Vr) ||
+        decision.reason < static_cast<std::uint32_t>(Reason::SnapshotUnavailable) ||
+        decision.reason > static_cast<std::uint32_t>(Reason::ProviderRejected))
+      return false;
+    for (const auto word : decision.reserved) if (word != 0) return false;
+    const std::uint64_t base =
+        (static_cast<std::uint64_t>(decision.graphicsProviderBaseHigh) << 32) |
+        decision.graphicsProviderBaseLow;
+    if (decision.reason == static_cast<std::uint32_t>(Reason::ProviderRejected)) {
+      if (base != 0 || decision.captureStatus != S_OK) return false;
+    } else if (base != reinterpret_cast<std::uint64_t>(provider)) {
+      return false;
+    }
+    if (decision.reason == static_cast<std::uint32_t>(Reason::SnapshotUnavailable))
+      return decision.captureStatus != S_OK && decision.recordState == 0 &&
+          decision.validationFlags == 0 && decision.selectedPluginMask == 0;
+    return decision.captureStatus == S_OK;
+  }
+
   static bool fullPath(const std::wstring& input, std::wstring& output) {
     // Match the staged native runner's drive-absolute path contract. Reject
     // embedded NULs so the trusted string and Win32 name cannot disagree.

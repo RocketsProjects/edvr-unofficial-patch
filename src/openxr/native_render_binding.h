@@ -23,11 +23,14 @@ class NativeRenderBinding final {
 
   // Optional frame work runs on the same callback after queued work. Supply
   // it before registration; it and its captures remain alive until release.
-  HRESULT acquire(const std::wstring& trustedAbsolutePath, std::function<void()> frameWork = {}) {
+  HRESULT acquire(const std::wstring& trustedAbsolutePath, std::function<void()> frameWork = {},
+      const plugin_selection::admission_v1::DecisionV1* expectedAdmission = nullptr,
+      bool checkUnreservedAdmission = false) {
     if (attempted_) return E_UNEXPECTED; // a binding owns one queue generation
     attempted_ = true;
     frameWork_ = std::move(frameWork);
-    HRESULT result = graphics_.acquire(trustedAbsolutePath);
+    HRESULT result = graphics_.acquire(trustedAbsolutePath, expectedAdmission,
+                                       checkUnreservedAdmission);
     if (result != S_OK) return result;
     const EdvrRenderBoundaryRequest request{sizeof(request), EDVR_RENDER_BOUNDARY_VERSION_1,
         graphics_.device(), &callback, this};

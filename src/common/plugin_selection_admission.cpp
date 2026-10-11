@@ -5,6 +5,9 @@
 #include <cstring>
 
 namespace edvr::plugin_selection::admission_v1 {
+static_assert(plugins::kVrProfileBit == kPluginSelectionVrProfileMaskV1 &&
+              plugins::kFlatProfileBit == kPluginSelectionFlatProfileMaskV1,
+              "public profile-mask bits must match the generated catalog");
 namespace {
 #ifdef EDVR_SELECTION_ADMISSION_TEST
 using GroupView = test_seam::GroupV1;

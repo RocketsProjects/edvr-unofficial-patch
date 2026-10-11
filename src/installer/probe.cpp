@@ -36,6 +36,7 @@ struct PeFacts {
     bool nativeMarkerValid = false;
     bool nativeGraphicsProviders = false;
     bool nativeRuntimeExports = false;
+    bool nativeRuntimePayloadExports = false;
 };
 
 bool rvaToOffset(const IMAGE_SECTION_HEADER* sections, unsigned count, DWORD rva, DWORD fileSize,
@@ -131,7 +132,8 @@ void parsePe(const unsigned char* base, DWORD size, PeFacts* facts) {
             "VR_GetInitToken","VR_GetStringForHmdError","VR_GetVRInitErrorAsEnglishDescription",
             "VR_GetVRInitErrorAsSymbol","VR_InitInternal","VR_IsHmdPresent",
             "VR_IsInterfaceVersionValid","VR_IsRuntimeInstalled","VR_RuntimePath",
-            "VR_ShutdownInternal","edvrConfigureNativeRuntime","edvrGetNativeRuntimeStatus"};
+            "VR_ShutdownInternal","edvrConfigureNativeRuntime","edvrGetNativeRuntimeStatus",
+            "edvrCommitPluginSelectionAdmissionV1"};
         bool providerFound[_countof(providers)]{},runtimeFound[_countof(runtimeNames)]{};
         for (DWORD i=0;i<nameCount;++i) {
             DWORD off=0;
@@ -171,8 +173,18 @@ void parsePe(const unsigned char* base, DWORD size, PeFacts* facts) {
         }
         facts->nativeGraphicsProviders=true;
         for(bool found:providerFound) if(!found) facts->nativeGraphicsProviders=false;
-        facts->nativeRuntimeExports=exp->Base==1 && functionCount==_countof(runtimeNames) && nameCount==functionCount;
-        for(bool found:runtimeFound) if(!found) facts->nativeRuntimeExports=false;
+        // The previous 16-export runtime is still an installed EDVR runtime
+        // for preservation and conversion planning. Only the current exact
+        // 17-export contract can qualify a new embedded installer payload.
+        bool legacyRuntime=exp->Base==1 && functionCount==16 && nameCount==16;
+        bool currentRuntime=exp->Base==1 && functionCount==_countof(runtimeNames) &&
+                            nameCount==functionCount;
+        for(unsigned j=0;j<_countof(runtimeNames);++j) {
+            if(j<16 && !runtimeFound[j]) legacyRuntime=false;
+            if(!runtimeFound[j]) currentRuntime=false;
+        }
+        facts->nativeRuntimeExports=legacyRuntime || currentRuntime;
+        facts->nativeRuntimePayloadExports=currentRuntime;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // A file that faults while being read is a file we know nothing about,
         // which is exactly what an unparsed PeFacts says.
@@ -391,7 +403,7 @@ bool validateNativePayloadBytes(const void* data, size_t size, NativeImageKind k
     if (kind == NativeImageKind::Graphics)
         return facts.nativeMarkerValid && facts.nativeGraphicsProviders;
     if (kind == NativeImageKind::Runtime)
-        return facts.nativeRuntimeExports;
+        return facts.nativeRuntimePayloadExports;
     return facts.hasXrGetInstanceProcAddr;
 }
 

@@ -1,0 +1,10 @@
+LIBRARY plugin_admission_runtime_graphics
+EXPORTS
+    edvrQueryPluginAdmissionV1
+    edvrAcquireNativeGraphics
+    edvrAcquireGraphicsBridge
+    edvrAcquireRenderBoundary
+    FixtureBeginHeldInit
+    FixtureReleaseHeldInit
+    FixturePairCalls
+    FixturePublishCandidate
