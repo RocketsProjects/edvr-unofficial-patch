@@ -49,6 +49,31 @@ def check(root: Path, mutate: str = "") -> None:
     api_fixture = (root / "tools/cockpit_api_test/cockpit_api_test.cpp").read_text(encoding="utf-8-sig")
     predicate_fixture = (root / "tools/vscreen_predicate_test/vscreen_predicate_test.cpp").read_text(encoding="utf-8-sig")
     cost_fixture = (root / "tools/plugin_cost_test/plugin_cost_test.cpp").read_text(encoding="utf-8-sig")
+    owner_gate = (root / "src/d3d11/cockpit_visuals_owner_gate.h").read_text(encoding="utf-8-sig")
+
+    if mutate == "owner_target_config_gate":
+        vscreen = vscreen.replace(
+            "runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {\n"
+            "        targetSharpConfigure(cfg);\n"
+            "    });",
+            "targetSharpConfigure(cfg);", 1)
+    elif mutate == "owner_target_draw_gate":
+        start = vscreen.find("} else if constexpr (id == SiteId::kTargetSharpClaim)")
+        if start >= 0:
+            end = vscreen.find("} else if constexpr (id == SiteId::", start + 1)
+            if end < 0:
+                end = len(vscreen)
+            branch = vscreen[start:end].replace(
+                "if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();",
+                "/* owner guard removed */", 1)
+            vscreen = vscreen[:start] + branch + vscreen[end:]
+    elif mutate == "owner_gate_helper":
+        owner_gate = owner_gate.replace("if (!ownerAllowed) return false;",
+                                        "if (false) return false;", 1)
+    elif mutate == "owner_fixture_loss":
+        api_fixture = api_fixture.replace(
+            "owner-absent helper skips the active TargetSharp/RemLok callback before config, candidate queries, or compilation",
+            "owner-absence evidence omitted", 1)
 
     if mutate == "configure_absence":
         facade = facade.replace("if (!ops) { clearFast(); return; }", "if (!ops) { return; }", 1)
@@ -161,6 +186,39 @@ def check(root: Path, mutate: str = "") -> None:
             "observed WARP route records absent gate",
             "legacy WARP route exits the absent TargetSharp gate",
             "targetSharpPolicyOpsV1())")
+    owner_config_sites = [body(vscreen, "void vScreenRefreshConfig()"),
+                          body(vscreen, "void installVScreenFixes(")]
+    for site in owner_config_sites:
+        gates = [body(site[offset:], "runCockpitVisualsOwned(")
+                 for offset in (i for i in range(len(site))
+                                if site.startswith("runCockpitVisualsOwned(", i))]
+        if site.count("targetSharpConfigure(cfg);") != 1 or \
+                sum("targetSharpConfigure(cfg);" in gate for gate in gates) != 1:
+            raise AssertionError("TargetSharp startup/reload config must stay inside cached Cockpit ownership")
+    visitor = body(vscreen, "struct VScreenDrawLadderVisitor")
+    target_branch_start = visitor.find("} else if constexpr (id == SiteId::kTargetSharpClaim)")
+    target_branch_end = visitor.find("} else if constexpr (id == SiteId::",
+                                     target_branch_start + 1)
+    if target_branch_start < 0 or target_branch_end < 0:
+        raise AssertionError("TargetSharp draw branch missing from VScreen visitor")
+    target_branch = visitor[target_branch_start:target_branch_end]
+    require(target_branch, "if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();",
+            "targetSharpWantsDrawsObserved", "targetSharpOnEyeDrawObserved",
+            "targetSharpWantsDraws()", "targetSharpOnEyeDraw(self")
+    require(owner_gate, "if (!ownerAllowed) return false;",
+            "std::forward<Callback>(callback)();", "return true;")
+    absence_scope = body(api_fixture, "bool targetSharpOpsSeamChecks(")
+    require(absence_scope,
+            "absent TargetSharp performs no config, candidate-service, or compiler work",
+            "g_targetConfigReads == 0", "g_bindingResolveCalls == 0",
+            "observed == stock")
+    owner_fixture_scope = body(api_fixture, "bool cockpitOwnerBoundaryChecks(")
+    require(owner_fixture_scope,
+            "owner-absent helper skips the active TargetSharp/RemLok callback before config, candidate queries, or compilation",
+            "owner-present helper preserves real TargetSharp config/candidate work and RemLok behavior")
+    require(predicate_fixture,
+            "testCockpitOwnerDeniedGlareAndCore(device, immediate)",
+            "owner-denied real TargetSharp visitor ignores stale active state before module facts or WARP candidate queries")
     require(cost_fixture,
             'leafApiSourceChecks("src/plugins/cockpit_visuals/target_sharp_policy.cpp"',
             'readSource("src/plugins/cockpit_visuals/target_sharp_policy.cpp")',
@@ -174,7 +232,9 @@ def self_test(root: Path) -> None:
     check(root)
     mutations = ("configure_absence", "candidate_gate", "match_hash",
                  "production_source", "absence_fixture", "observed_route",
-                 "setter_teardown", "pending_bracket", "end_retry")
+                 "setter_teardown", "pending_bracket", "end_retry",
+                 "owner_target_config_gate", "owner_target_draw_gate",
+                 "owner_gate_helper", "owner_fixture_loss")
     for mutation in mutations:
         try:
             check(root, mutation)
@@ -194,7 +254,7 @@ def main() -> int:
         check(args.root)
         if args.self_test:
             self_test(args.root)
-            print("target_sharp_wiring_test: PASS (9 in-memory mutations)")
+            print("target_sharp_wiring_test: PASS (13 in-memory mutations)")
         else:
             print("target_sharp_wiring_test: source pins valid; dry-run wrote nothing")
         return 0

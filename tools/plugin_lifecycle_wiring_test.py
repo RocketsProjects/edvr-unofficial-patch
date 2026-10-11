@@ -41,6 +41,10 @@ SLICE_PATHS = {
     "registry": ROOT / "src/d3d11/plugin_registry.cpp",
     "explorer_owner_gate": ROOT / "src/d3d11/explorer_cam_owner_gate.h",
     "explorer_fixture": ROOT / "tools/explorer_cam_test/explorer_cam_test.cpp",
+    "cockpit_owner_gate": ROOT / "src/d3d11/cockpit_visuals_owner_gate.h",
+    "cockpit_api_fixture": ROOT / "tools/cockpit_api_test/cockpit_api_test.cpp",
+    "vscreen_predicate_fixture": ROOT / "tools/vscreen_predicate_test/vscreen_predicate_test.cpp",
+    "sunglare": ROOT / "src/d3d11/sunglare_fix.cpp",
 }
 PATHS = (
     ROOT / "src/plugins/comfort/scanners/scanner_lifecycle.h",
@@ -303,6 +307,10 @@ def check_module_slices(sources: dict[str, str]) -> None:
     build = sources["build"]
     explorer_owner_gate = sources["explorer_owner_gate"]
     explorer_fixture = sources["explorer_fixture"]
+    cockpit_owner_gate = sources["cockpit_owner_gate"]
+    cockpit_api_fixture = sources["cockpit_api_fixture"]
+    vscreen_predicate_fixture = sources["vscreen_predicate_fixture"]
+    sunglare = sources["sunglare"]
     flat_proxy = (ROOT / "tools/build_flat_sdk_bench_proxy.py").read_text(encoding="utf-8")
 
     if "const EdvrPluginLifecycleOps& remlokLifecycleOps();" not in rem_h:
@@ -326,14 +334,20 @@ def check_module_slices(sources: dict[str, str]) -> None:
         if site.count("configureRemlokLifecycle(cfg)") != 1:
             raise AssertionError(f"{sig} must configure RemLok once at its former host position")
     rem_configure_host = body(vscreen, "void configureRemlokLifecycle(Config& cfg)")
-    ordered(rem_configure_host, "pluginRegistryRegisterLifecycle(",
-            "pluginRegistryConfigureLifecycle(", "return;", "remlokConfigure(cfg);")
+    ordered(rem_configure_host,
+            "if (!g_state || !g_state->cockpitVisualsOwnerAllowed) return;",
+            "pluginRegistryRegisterLifecycle(", "pluginRegistryConfigureLifecycle(",
+            "return;\n    }\n    remlokConfigure(cfg);")
     rem_frame_host = body(vscreen, "void frameRemlokLifecycle(uint32_t sceneFrame)")
-    ordered(rem_frame_host, "pluginRegistryHasLifecycle(",
-            "pluginRegistryFrameLifecycle(", "return;", "remlokFrameBoundary();")
+    ordered(rem_frame_host,
+            "if (!g_state || !g_state->cockpitVisualsOwnerAllowed) return;",
+            "pluginRegistryHasLifecycle(", "pluginRegistryFrameLifecycle(",
+            "return;\n    }\n    remlokFrameBoundary();")
     rem_shutdown_host = body(vscreen, "void shutdownRemlokLifecycle()")
-    ordered(rem_shutdown_host, "pluginRegistryHasLifecycle(",
-            "pluginRegistryShutdownLifecycle(", "return;", "remlokShutdown();")
+    ordered(rem_shutdown_host,
+            "if (!g_state || !g_state->cockpitVisualsOwnerAllowed) return;",
+            "pluginRegistryHasLifecycle(", "pluginRegistryShutdownLifecycle(",
+            "return;\n    }\n    remlokShutdown();")
     if body(body(vscreen, "void vScreenFrameBoundary()"), "tkRemlok.run(").count(
             "frameRemlokLifecycle(s->frameNo)") != 1:
         raise AssertionError("RemLok lifecycle frame callback moved off its existing body-frame tick")
@@ -672,6 +686,10 @@ def check_module_slices(sources: dict[str, str]) -> None:
         raise AssertionError("lifecycle registry must accept both lifecycle modules and the Cockpit pilot")
     if "componentIndex != 0 && ops->manifestIndex != plugins::kPluginComfort" not in register:
         raise AssertionError("nonzero lifecycle components must remain restricted to Comfort")
+    registry_draws = body(registry, "bool pluginRegistryWantsDraws(void* legacyState)")
+    ordered(registry_draws, "if (g_drawGateFailOpen) return true;",
+            "for (uint32_t i = 0; i < g_legacyCount; ++i)",
+            "g_legacy[i].predicate(", "for (uint32_t i = 0; i < g_registeredPluginCount; ++i)")
 
     # Explorer Cam is admitted once after device hooks commit. The cached
     # decision gates registration, all Present bookkeeping, and both shutdown
@@ -729,6 +747,217 @@ def check_module_slices(sources: dict[str, str]) -> None:
         raise AssertionError("Explorer fixture lost cached-owner gate coverage")
     if body(explorer_fixture, "void testGlue()").count("testOwnerAbsence(p);") != 1:
         raise AssertionError("Explorer owner absence fixture must run in the glue suite")
+
+    # Cockpit Visuals has one startup admission snapshot. Its cached result
+    # owns every Cockpit setup, dispatch and teardown route; the one shared
+    # Comfort glare-train observation remains available while denied.
+    if "bool cockpitVisualsOwnerAllowed = false;" not in vscreen:
+        raise AssertionError("Cockpit owner cache must default to denied")
+    if "if (!ownerAllowed) return false;\n    std::forward<Callback>(callback)();\n    return true;" not in cockpit_owner_gate:
+        raise AssertionError("denied Cockpit owner helper must return without invoking its callback")
+    if vscreen.count("ownerAllowedForStartup(") != 1:
+        raise AssertionError("Cockpit ownership must be queried once at VScreen startup")
+    if "ownerAllowedForStartup" in body(vscreen, "void vScreenFrameBoundary()") or \
+            "ownerAllowedForStartup" in body(vscreen, "void shutdownVScreenFixes()"):
+        raise AssertionError("Cockpit Present and shutdown must use the cached startup decision")
+    startup = body(vscreen, "void installVScreenFixes(")
+    query_start = startup.find("ownerAllowedForStartup(")
+    query_end = startup.find(");", query_start)
+    query = startup[query_start:query_end + 2] if query_start >= 0 and query_end >= 0 else ""
+    ordered(startup, "ownerAllowedForStartup(",
+            "runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {")
+    if "plugins::kPluginCockpitVisuals" not in query:
+        raise AssertionError("VScreen startup must sample the Cockpit admission decision")
+    startup_gate = body(startup,
+                         "runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {")
+    if "cockpitVisualsPluginOps()" not in startup_gate:
+        raise AssertionError("denied Cockpit ownership must skip its optional factory/registration")
+    if startup.count("cockpitVisualsPluginOps()") != 1 or \
+            startup.count("ownerAllowedForStartup(") != 1:
+        raise AssertionError("Cockpit startup factory/query must each have one gated callsite")
+    if "(cockpitVisualsOwnerAllowed || !exposureDampingActive())" not in startup:
+        raise AssertionError("Comfort glare-train hook exception must apply only when Cockpit is denied")
+
+    # Both startup and reload configure all module-owned settings from the
+    # cached bit. Keep exact call counts to catch a newly added ungated route.
+    for signature in ("void vScreenRefreshConfig()", "void installVScreenFixes("):
+        site = body(vscreen, signature)
+        gates = [body(site[offset:], "runCockpitVisualsOwned(")
+                 for offset in (i for i in range(len(site))
+                                if site.startswith("runCockpitVisualsOwned(", i))]
+        for call in ("configureRemlokLifecycle(cfg);", "targetSharpConfigure(cfg);",
+                     "wakePulseConfigure(cfg);", "sunglareConfigure(cfg);",
+                     "particleConfigure(cfg);"):
+            if site.count(call) != 1 or sum(call in gate for gate in gates) != 1:
+                raise AssertionError(f"{signature} must gate exactly one {call}")
+        owner_arg = ("s->cockpitVisualsOwnerAllowed" if "vScreenRefreshConfig" in signature
+                     else "g_state->cockpitVisualsOwnerAllowed")
+        if site.count(f"runCockpitVisualsOwned({owner_arg}, [&] {{") != 5:
+            raise AssertionError(f"{signature} must use the cached State bit for all five Cockpit config routes")
+        for core_call in ("holoConfigure(cfg);", "uiDepthConfigure(cfg);",
+                          "exposureConfigure(cfg);", "configureComfortLifecycle(cfg);",
+                          "pluginRegistryConfigure(&cfg);"):
+            if any(core_call in gate for gate in gates):
+                raise AssertionError(f"Cockpit gate swallowed shared/core configuration: {core_call}")
+    if "{\"legacy.sun-glare\", &drawGate_sun_glare, true}" not in vscreen:
+        raise AssertionError("shared Comfort glare observation lost its legacy draw-gate subscription")
+    sun_gate_start = vscreen.find("EDVR_GATE_STATE(sun_glare,")
+    sun_gate_end = vscreen.find("EDVR_GATE_OWNED(particles", sun_gate_start)
+    sun_gate = vscreen[sun_gate_start:sun_gate_end] if sun_gate_start >= 0 and sun_gate_end >= 0 else ""
+    if not sun_gate:
+        raise AssertionError("sun-glare draw gate must preserve admitted Legacy behavior and use only Comfort damping when denied")
+    ordered(sun_gate, "s->cockpitVisualsOwnerAllowed", "? sunglareWantsDraws()",
+            ": exposureDampingActive()")
+    if "drawGateSubscribed(State* s) { return pluginRegistryWantsDraws(s); }" not in vscreen or \
+            "(void)registerLegacyDrawGates(g_state);" not in startup:
+        raise AssertionError("shared glare observer is not connected to the live VScreen draw boundary")
+    if "{\"legacy.sun-glare\", &drawGate_sun_glare, true}" not in vscreen:
+        raise AssertionError("Comfort glare subscription must be registered as a state-backed legacy gate")
+
+    interests = body(vscreen, "static bool configureLegacyDrawInterests(")
+    for token in ("runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {",
+                  "enable(InterestId::TargetSharp", "enable(InterestId::WitchspaceStars",
+                  "append(targetSharpDrawInterestFilters)",
+                  "append(witchspaceStarsDrawInterestFilters)"):
+        if token not in interests:
+            raise AssertionError(f"Cockpit legacy draw-interest route is not owner-gated: {token}")
+    interest_gates = [body(interests[offset:], "runCockpitVisualsOwned(")
+                      for offset in (i for i in range(len(interests))
+                                     if interests.startswith("runCockpitVisualsOwned(", i))]
+    for token in ("InterestId::TargetSharp", "InterestId::WitchspaceStars",
+                  "targetSharpDrawInterestFilters", "witchspaceStarsDrawInterestFilters"):
+        if not any(token in gate for gate in interest_gates):
+            raise AssertionError(f"Cockpit draw-interest escaped its owner gate: {token}")
+
+    draw_visitor = body(vscreen, "struct VScreenDrawLadderVisitor")
+    eligible = body(draw_visitor, "__forceinline bool eligible()")
+    ordered(eligible,
+            "SiteType::id == draw_ladder::SiteId::kNightVisionClaim",
+            "if (!s->cockpitVisualsOwnerAllowed) return false;",
+            "if constexpr (SiteType::shaderCandidateGated)")
+
+    def visitor_site(site_id: str) -> str:
+        marker = f"}} else if constexpr (id == SiteId::{site_id}) {{"
+        start = draw_visitor.find(marker)
+        if start < 0:
+            raise AssertionError(f"Cockpit draw visitor lost route {site_id}")
+        end = draw_visitor.find("} else if constexpr (id == SiteId::", start + len(marker))
+        return draw_visitor[start:end if end >= 0 else None]
+
+    for site_id in ("kNightVisionClaim", "kTargetSharpClaim", "kWitchspaceStarsSkip",
+                    "kParticleSubstitute", "kSpaceDustSkip", "kOffscreenWakePulseSkip",
+                    "kRemlokHideSkip", "kRemlokScissorClaim", "kSunglareNomination",
+                    "kSunglareSkip", "kSunglareSteadyClaim", "kGlareClampClaim"):
+        branch = visitor_site(site_id)
+        if "!s->cockpitVisualsOwnerAllowed" not in branch:
+            raise AssertionError(f"Cockpit draw route {site_id} bypasses cached ownership")
+    glare_skip_branch = visitor_site("kSunglareSkip")
+    denied_glare = body(glare_skip_branch,
+                        "if (!s->cockpitVisualsOwnerAllowed)")
+    if "sunglareTrackExposureGlareTrain(kind, count, instances);" not in denied_glare:
+        raise AssertionError("denied Cockpit glare lost the approved shared train observation")
+    if "sunglareOnEyeDrawObserved" in denied_glare or "sunglareOnEyeDraw(" in denied_glare:
+        raise AssertionError("denied Cockpit glare must not reach Cockpit action/billboard paths")
+    for route in ("forwardVerdictBegin", "forwardVerdictEnd"):
+        forward = body(vscreen, f"__declspec(noinline) void {route}(")
+        gates = [body(forward[offset:], "runCockpitVisualsOwned(")
+                 for offset in (i for i in range(len(forward))
+                                if forward.startswith("runCockpitVisualsOwned(", i))]
+        calls = ("remlokScissorBegin(self)", "targetSharpBegin(self)",
+                 "pluginRegistryBegin(kPluginClaimNightVision,self)",
+                 "sunglareBegin(self)", "particleBegin(self)") if route.endswith("Begin") else (
+                 "remlokScissorEnd(self)", "targetSharpEnd(self)",
+                 "pluginRegistryEnd(kPluginClaimNightVision,self)",
+                 "sunglareEnd(self)", "particleEnd(self)")
+        for call in calls:
+            if forward.count(call) != 1 or sum(call in gate for gate in gates) != 1:
+                raise AssertionError(f"Cockpit verdict {route} route escaped owner gate: {call}")
+    glare_observer = body(sunglare, "void sunglareTrackExposureGlareTrain(")
+    ordered(glare_observer, "exposureDampingActive()", "sunglareIsGlareTrain(",
+            "g_lastSeenMs = nowMs();")
+    for forbidden in ("sunglareOnEyeDraw", "sunglareConfigure", "particleOnDraw",
+                      "billboard", "g_sunglareWorld", "g_sunglareMode", "g_mode", "g_keep"):
+        if forbidden in glare_observer:
+            raise AssertionError(f"shared denied-owner glare observer reached Cockpit work: {forbidden}")
+
+    refresh = body(vscreen, "void vScreenRefreshConfig()")
+    if refresh.count("runCockpitVisualsOwned(") < 5:
+        raise AssertionError("Cockpit reload must gate each direct module configuration route")
+    frame = body(vscreen, "void vScreenFrameBoundary()")
+    for tick, owner_arg in (("tkWakePulse.run(", "g_state->cockpitVisualsOwnerAllowed"),
+                            ("tkRemlok.run(", "s->cockpitVisualsOwnerAllowed")):
+        if frame.count(tick) != 1:
+            raise AssertionError(f"Cockpit frame route must preserve one {tick} callsite")
+        tick_start = frame.find(tick)
+        tick_end = frame.find("});", tick_start)
+        if tick_end < 0 or f"runCockpitVisualsOwned({owner_arg}, [&] {{" not in \
+                frame[max(0, tick_start - 180):tick_end + 3]:
+            raise AssertionError(f"Cockpit frame route {tick} must be inside the cached owner gate")
+    for core_tick in ("tkDrawCensusBoundary.run(", "frameComfortLifecycleStage("):
+        if core_tick not in frame:
+            raise AssertionError(f"shared/core frame service disappeared under Cockpit gating: {core_tick}")
+    for at in (i for i in range(len(frame)) if frame.startswith("runCockpitVisualsOwned(", i)):
+        gate_body = body(frame[at:], "runCockpitVisualsOwned(")
+        if any(core_tick in gate_body for core_tick in
+               ("tkDrawCensusBoundary.run(", "frameComfortLifecycleStage(")):
+            raise AssertionError("Cockpit frame gate swallowed a shared/core service")
+    map_hook = body(vscreen, "HRESULT STDMETHODCALLTYPE hookedMap(")
+    for route in ("res == billboardTarget()", "res == particleTarget()",
+                  "res == sunglareSceneCbTarget()"):
+        if f"s->cockpitVisualsOwnerAllowed && mapSub0 && {route}" not in map_hook:
+            raise AssertionError(f"Cockpit Map capture route lacks owner guard: {route}")
+    unmap_hook = body(vscreen, "void STDMETHODCALLTYPE hookedUnmap(")
+    unmap_gates = [body(unmap_hook[offset:], "runCockpitVisualsOwned(")
+                   for offset in (i for i in range(len(unmap_hook))
+                                  if unmap_hook.startswith("runCockpitVisualsOwned(", i))]
+    for route in ("sunglareSceneRows(s->camData, s->camBytes)",
+                  "sunglareSceneRows(s->sceneCbData, s->sceneCbBytes)"):
+        if unmap_hook.count(route) != 1 or sum(route in gate for gate in unmap_gates) != 1:
+            raise AssertionError(f"Cockpit camera/scene capture escaped owner gate: {route}")
+    if unmap_hook.count("runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {") != 2:
+        raise AssertionError("Unmap scene/camera captures must use the cached State owner bit")
+    for route in ("if (s->cockpitVisualsOwnerAllowed && res == s->partResource && s->partData)",
+                  "if (s->cockpitVisualsOwnerAllowed && res == s->bbResource && s->bbData)"):
+        if route not in unmap_hook:
+            raise AssertionError(f"Cockpit Unmap capture route lacks owner guard: {route}")
+    shutdown = body(vscreen, "void shutdownVScreenFixes()")
+    shutdown_gates = [body(shutdown[offset:], "runCockpitVisualsOwned(")
+                      for offset in (i for i in range(len(shutdown))
+                                     if shutdown.startswith("runCockpitVisualsOwned(", i))]
+    for call in ("particleShutdown();", "wakePulseShutdown();", "targetSharpShutdown();",
+                 "billboardShutdown();"):
+        if shutdown.count(call) != 1 or sum(call in gate for gate in shutdown_gates) != 1:
+            raise AssertionError(f"Cockpit teardown route escaped owner gate: {call}")
+    if shutdown.count("runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {") != 4:
+        raise AssertionError("direct Cockpit shutdowns must use the cached State owner bit")
+    if shutdown.count("shutdownRemlokLifecycle();") != 1 or \
+            "if (!g_state || !g_state->cockpitVisualsOwnerAllowed) return;" not in \
+            body(vscreen, "void shutdownRemlokLifecycle()"):
+        raise AssertionError("RemLok lifecycle shutdown must return immediately when Cockpit ownership is denied")
+
+    if "bool cockpitOwnerBoundaryChecks(" not in cockpit_api_fixture or \
+            "ok &= cockpitOwnerBoundaryChecks(immediate, stock, cfg);" not in cockpit_api_fixture:
+        raise AssertionError("real Cockpit owner-absence fixture is not invoked")
+    api_owner_fixture = body(cockpit_api_fixture,
+                             "bool cockpitOwnerBoundaryChecks(")
+    for token in ("runCockpitVisualsOwned(false", "ownerCallbackCalls == 0",
+                  "g_targetConfigReads == 0", "g_bindingResolveCalls == 0",
+                  "ownerDeniedShader == stock", "runCockpitVisualsOwned(true"):
+        if token not in api_owner_fixture:
+            raise AssertionError(f"real Cockpit owner-absence fixture lost evidence: {token}")
+    if "bool testCockpitOwnerDeniedGlareAndCore(" not in vscreen_predicate_fixture or \
+            "okay &= testCockpitOwnerDeniedGlareAndCore(device, immediate);" not in vscreen_predicate_fixture:
+        raise AssertionError("owner-denied glare/core fixture is missing")
+    predicate_owner_fixture = body(vscreen_predicate_fixture,
+                                   "bool testCockpitOwnerDeniedGlareAndCore(")
+    for token in ("vScreenSunglareSkipPredicateTestVisit(",
+                  "shared Comfort tracking stamps the exact glare train",
+                  "owner absent leaves the real core context visitor and trace active",
+                  "sunglarePredicateTestExposureDamping(true)"):
+        if token not in predicate_owner_fixture:
+            raise AssertionError(f"owner-denied VScreen fixture lost evidence: {token}")
+    if "owner-denied real TargetSharp visitor ignores stale active state before module facts or WARP candidate queries" not in vscreen_predicate_fixture:
+        raise AssertionError("real TargetSharp owner-denied WARP candidate evidence is missing")
 
 
 def expect_slice(label: str, sources: dict[str, str]) -> None:
@@ -943,6 +1172,133 @@ def self_test_slices(sources: dict[str, str]) -> None:
         "testOwnerAbsence(p);", "/* owner absence fixture omitted */")
     expect_slice("Explorer owner absence fixture coverage", changed)
 
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "bool cockpitVisualsOwnerAllowed = false;",
+        "bool cockpitVisualsOwnerAllowed = true;")
+    expect_slice("Cockpit owner cache defaults to denied", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "plugin_admission_transport::ownerAllowedForStartup(\n"
+        "            plugins::kPluginCockpitVisuals);",
+        "plugin_admission_transport::ownerAllowedForStartup(\n"
+        "            plugins::kPluginComfort);")
+    expect_slice("Cockpit startup samples its own published owner", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {\n"
+        "        if (pluginRegistryProfileSupports(plugins::kPluginCockpitVisuals)) {\n"
+        "            cockpitVisualsRegistered = pluginRegistryRegister(cockpitVisualsPluginOps());\n"
+        "            if (!cockpitVisualsRegistered) {\n"
+        "                Log::get().note(\"plugin registry: cockpit-visuals registration failed; module dispatch is unavailable\");\n"
+        "                pluginRegistrySetDrawGateFailOpen();\n"
+        "            }\n"
+        "        } else {\n"
+        "            Log::get().note(\"plugin registry: cockpit-visuals skipped for installation profile %s\",\n"
+        "                            runtimeProfileName());\n"
+        "        }\n"
+        "    });",
+        "runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {});\n"
+        "    cockpitVisualsRegistered = pluginRegistryRegister(cockpitVisualsPluginOps());")
+    expect_slice("Cockpit startup registration remains inside owner gate", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = replace_body(changed["vscreen"],
+        "void installVScreenFixes(",
+        "runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {\n"
+        "        targetSharpConfigure(cfg);\n"
+        "    });",
+        "targetSharpConfigure(cfg);")
+    expect_slice("Cockpit startup configuration is owner-gated", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = replace_body(changed["vscreen"],
+        "void vScreenRefreshConfig()",
+        "runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {\n"
+        "        targetSharpConfigure(cfg);\n"
+        "    });",
+        "targetSharpConfigure(cfg);")
+    expect_slice("Cockpit reload configuration is owner-gated", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = replace_body(changed["vscreen"],
+        "struct VScreenDrawLadderVisitor",
+        "} else if constexpr (id == SiteId::kTargetSharpClaim) {\n"
+        "            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();",
+        "} else if constexpr (id == SiteId::kTargetSharpClaim) {")
+    expect_slice("Cockpit draw branch observes cached ownership", changed)
+
+    changed = dict(sources)
+    changed["cockpit_owner_gate"] = once(changed["cockpit_owner_gate"],
+        "if (!ownerAllowed) return false;", "if (false) return false;")
+    expect_slice("denied Cockpit helper does not invoke its callback", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = replace_body(changed["vscreen"],
+        "struct VScreenDrawLadderVisitor",
+        "sunglareTrackExposureGlareTrain(kind, count, instances);",
+        "sunglareOnEyeDraw(kind, count, instances);")
+    expect_slice("denied Cockpit glare does only shared Comfort observation", changed)
+
+    changed = dict(sources)
+    changed["sunglare"] = replace_body(changed["sunglare"],
+        "void sunglareTrackExposureGlareTrain(",
+        "bool damping = false;",
+        "const auto cockpitMode = g_mode; (void)cockpitMode; bool damping = false;")
+    expect_slice("shared Comfort glare observer avoids Cockpit mode state", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        ": exposureDampingActive())", ": sunglareWantsDraws())")
+    expect_slice("denied sun-glare subscription avoids Cockpit draw state", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "(cockpitVisualsOwnerAllowed || !exposureDampingActive())", "true")
+    expect_slice("dormant hook exception is limited to denied Cockpit ownership", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "if (s->cockpitVisualsOwnerAllowed && mapSub0 && res == billboardTarget())",
+        "if (mapSub0 && res == billboardTarget())")
+    expect_slice("Cockpit Map capture is owner-gated", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = replace_body(changed["vscreen"],
+        "void STDMETHODCALLTYPE hookedUnmap(",
+        "runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {\n"
+        "            guardedBudget(g_sunglareRowsBudget, [&] {\n"
+        "                // And the live feed:",
+        "runCockpitVisualsOwned(true, [&] {\n"
+        "            guardedBudget(g_sunglareRowsBudget, [&] {\n"
+        "                // And the live feed:")
+    expect_slice("Cockpit Unmap capture uses cached ownership", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = replace_body(changed["vscreen"],
+        "void vScreenFrameBoundary()",
+        "runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {\n"
+        "            tkWakePulse.run(",
+        "tkWakePulse.run(")
+    expect_slice("Cockpit Present tick is owner-gated", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = replace_body(changed["vscreen"],
+        "void shutdownVScreenFixes()",
+        "runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {\n"
+        "        targetSharpShutdown();\n"
+        "    });",
+        "targetSharpShutdown();")
+    expect_slice("Cockpit direct shutdown is owner-gated", changed)
+
+    changed = dict(sources)
+    changed["cockpit_api_fixture"] = once(changed["cockpit_api_fixture"],
+        "ok &= cockpitOwnerBoundaryChecks(immediate, stock, cfg);",
+        "/* Cockpit owner absence fixture omitted */")
+    expect_slice("Cockpit real owner absence fixture stays invoked", changed)
+
 
 def expect(label: str, sources: tuple[str, ...], changed: tuple[str, ...]) -> None:
     try:
@@ -1012,7 +1368,7 @@ def main() -> int:
     if args.self_test:
         self_test(sources)
         self_test_slices(slice_sources)
-        print("PASS: grouped lifecycle wiring and module boundaries (55 mutations)")
+        print("PASS: grouped lifecycle wiring and module boundaries (71 mutations)")
     else:
         print("DRY RUN: grouped lifecycle and module-boundary pins passed; no files written")
     return 0

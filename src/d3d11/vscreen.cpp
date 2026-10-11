@@ -36,6 +36,8 @@
 #include "screen_motion.h"
 #include "weapon_motion.h"
 #include "plugin_registry.h"
+#include "plugin_admission_transport.h"
+#include "cockpit_visuals_owner_gate.h"
 #include "intro_lifecycle.h"
 #include "../plugins/comfort/scanners/scanner_lifecycle.h"
 #include "../plugins/comfort/scanners/scanner_claim.h"
@@ -369,6 +371,10 @@ typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandList)(ID3D11DeviceContext*,
                                                         ID3D11CommandList*, BOOL);
 
 struct State {
+    // Startup admission is sampled once after the graphics hook commits and
+    // before any Cockpit Visuals factory/configuration work. Owner callbacks
+    // remain absent for this State when the cached decision is false.
+    bool cockpitVisualsOwnerAllowed = false;
     VTableHook hook;
     // Owner-thread classifier settings epoch captured with each replay frame.
     uint32_t classifierConfigEpoch = 0;
@@ -1059,6 +1065,7 @@ void shutdownIntroVideoLifecycle() {
 constexpr uint32_t kComfortPluginIndex = plugins::kPluginComfort;
 
 void configureRemlokLifecycle(Config& cfg) {
+    if (!g_state || !g_state->cockpitVisualsOwnerAllowed) return;
     if (g_state && pluginRegistryRegisterLifecycle(
             &plugins::cockpit_visuals::remlokLifecycleOps())) {
         pluginRegistryConfigureLifecycle(plugins::kPluginCockpitVisuals, &cfg);
@@ -1068,6 +1075,7 @@ void configureRemlokLifecycle(Config& cfg) {
 }
 
 void frameRemlokLifecycle(uint32_t sceneFrame) {
+    if (!g_state || !g_state->cockpitVisualsOwnerAllowed) return;
     if (pluginRegistryHasLifecycle(plugins::kPluginCockpitVisuals)) {
         pluginRegistryFrameLifecycle(plugins::kPluginCockpitVisuals, sceneFrame);
         return;
@@ -1076,6 +1084,7 @@ void frameRemlokLifecycle(uint32_t sceneFrame) {
 }
 
 void shutdownRemlokLifecycle() {
+    if (!g_state || !g_state->cockpitVisualsOwnerAllowed) return;
     if (pluginRegistryHasLifecycle(plugins::kPluginCockpitVisuals)) {
         pluginRegistryShutdownLifecycle(plugins::kPluginCockpitVisuals);
         return;
@@ -1901,6 +1910,15 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
         (void)opaque;                                                         \
         return (expression) ? 1u : 0u;                                        \
     }
+#define EDVR_GATE_OWNED(name, expression)                                     \
+    uint32_t drawGate_##name(void* opaque) {                                  \
+        State* s = static_cast<State*>(opaque);                              \
+        bool wanted = false;                                                 \
+        runCockpitVisualsOwned(s && s->cockpitVisualsOwnerAllowed, [&] {     \
+            wanted = (expression);                                           \
+        });                                                                  \
+        return wanted ? 1u : 0u;                                             \
+    }
 
 EDVR_GATE_STATE(panel_distance, s->distanceEnabled)
 EDVR_GATE_STATE(transition_flash_eye_count, s->countForFlashFix)
@@ -1912,29 +1930,32 @@ EDVR_GATE_STATE(census_auto, s->censusAutoW != 0)
 EDVR_GATE_GLOBAL(fss_resolution, fssResActive())
 EDVR_GATE_GLOBAL(fss_panel, fssPanelWantsDraws())
 EDVR_GATE_GLOBAL(fss_reveal, fssRevealWantsDraws())
-EDVR_GATE_GLOBAL(remlok, remlokWantsDraws())
+EDVR_GATE_OWNED(remlok, remlokWantsDraws())
 EDVR_GATE_GLOBAL(hologram_depth, holoWantsDraws())
-EDVR_GATE_GLOBAL(target_indicator, targetSharpWantsDraws())
+EDVR_GATE_OWNED(target_indicator, targetSharpWantsDraws())
 EDVR_GATE_GLOBAL(ui_depth, uiDepthWantsDraws())
-EDVR_GATE_GLOBAL(sun_glare, sunglareWantsDraws())
 EDVR_GATE_GLOBAL(draw_census, drawCensusArmed())
 EDVR_GATE_GLOBAL(object_probe, objectProbeWantsDraws())
 EDVR_GATE_GLOBAL(panel_curve, panelCurveWants())
-EDVR_GATE_GLOBAL(particles, particleWantsDraws())
+EDVR_GATE_STATE(sun_glare, s->cockpitVisualsOwnerAllowed
+                                ? sunglareWantsDraws()
+                                : exposureDampingActive())
+EDVR_GATE_OWNED(particles, particleWantsDraws())
 EDVR_GATE_GLOBAL(backdrop, backdropWantsDraws())
 EDVR_GATE_GLOBAL(scrim, scrimWantsDraws())
 EDVR_GATE_GLOBAL(quad_probe, quadProbeWants())
 EDVR_GATE_GLOBAL(loader_panel, loaderPanelWants())
 EDVR_GATE_GLOBAL(intro_panel, introPanelWants())
-EDVR_GATE_GLOBAL(wake_pulse, wakePulseWantsDraws())
-EDVR_GATE_GLOBAL(witchspace_stars, witchspaceStarsHidden())
-EDVR_GATE_GLOBAL(space_dust, spaceDustHidden())
+EDVR_GATE_OWNED(wake_pulse, wakePulseWantsDraws())
+EDVR_GATE_OWNED(witchspace_stars, witchspaceStarsHidden())
+EDVR_GATE_OWNED(space_dust, spaceDustHidden())
 EDVR_GATE_GLOBAL(depth_probe, depthProbeWanted())
 EDVR_GATE_GLOBAL(vscreen_footprint, vscreenFootprintWanted())
 EDVR_GATE_GLOBAL(intro_curve, introCurveWants())
 
 #undef EDVR_GATE_STATE
 #undef EDVR_GATE_GLOBAL
+#undef EDVR_GATE_OWNED
 
 struct LegacyDrawGateRegistration {
     const char* name;
@@ -1952,23 +1973,23 @@ constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] = {
     {"legacy.fss-resolution", &drawGate_fss_resolution, false},
     {"legacy.fss-panel", &drawGate_fss_panel, false},
     {"legacy.fss-reveal", &drawGate_fss_reveal, false},
-    {"legacy.remlok", &drawGate_remlok, false},
+    {"legacy.remlok", &drawGate_remlok, true},
     {"legacy.hologram-depth", &drawGate_hologram_depth, false},
-    {"legacy.target-indicator", &drawGate_target_indicator, false},
+    {"legacy.target-indicator", &drawGate_target_indicator, true},
     {"legacy.ui-depth", &drawGate_ui_depth, false},
-    {"legacy.sun-glare", &drawGate_sun_glare, false},
+    {"legacy.sun-glare", &drawGate_sun_glare, true},
     {"legacy.draw-census", &drawGate_draw_census, false},
     {"legacy.object-probe", &drawGate_object_probe, false},
     {"legacy.panel-curve", &drawGate_panel_curve, false},
-    {"legacy.particles", &drawGate_particles, false},
+    {"legacy.particles", &drawGate_particles, true},
     {"legacy.backdrop", &drawGate_backdrop, false},
     {"legacy.scrim", &drawGate_scrim, false},
     {"legacy.quad-probe", &drawGate_quad_probe, false},
     {"legacy.loader-panel", &drawGate_loader_panel, false},
     {"legacy.intro-panel", &drawGate_intro_panel, false},
-    {"legacy.wake-pulse", &drawGate_wake_pulse, false},
-    {"legacy.witchspace-stars", &drawGate_witchspace_stars, false},
-    {"legacy.space-dust", &drawGate_space_dust, false},
+    {"legacy.wake-pulse", &drawGate_wake_pulse, true},
+    {"legacy.witchspace-stars", &drawGate_witchspace_stars, true},
+    {"legacy.space-dust", &drawGate_space_dust, true},
     {"legacy.depth-probe", &drawGate_depth_probe, false},
     {"legacy.vscreen-footprint", &drawGate_vscreen_footprint, false},
     {"legacy.intro-curve", &drawGate_intro_curve, false},
@@ -2149,6 +2170,11 @@ struct VScreenDrawLadderVisitor {
 
     template <class SiteType>
     __forceinline bool eligible() {
+        if constexpr (SiteType::id == draw_ladder::SiteId::kNightVisionClaim ||
+                      SiteType::id == draw_ladder::SiteId::kTargetSharpClaim ||
+                      SiteType::id == draw_ladder::SiteId::kWitchspaceStarsSkip) {
+            if (!s->cockpitVisualsOwnerAllowed) return false;
+        }
         if constexpr (SiteType::shaderCandidateGated) {
             if constexpr (TracePolicy::enabled &&
                           SiteType::id == draw_ladder::SiteId::kNightVisionClaim) {
@@ -2590,6 +2616,7 @@ struct VScreenDrawLadderVisitor {
             if ((++s->bindAuditSeq & 1023u) == 0) bindingAudit(s, self);
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kParticleSubstitute) {
+            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();
             if (particleSteady() &&
                 particleOnDrawMayMatch(kind, count, instances,
                     bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0) &&
@@ -2604,6 +2631,7 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kWitchspaceStarsSkip) {
+            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();
             bool skipped = false;
             if constexpr (TracePolicy::enabled) {
                 WitchspaceStarsObservation observation{};
@@ -2655,6 +2683,7 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kSpaceDustSkip) {
+            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();
             // Both dust controls are independent. Their helper admits exact
             // VS/PS pairs before the eye-size route and before UI redirection.
             if (spaceDustHidden() && spaceDustSkip(self, kind, count, instances)) {
@@ -2748,6 +2777,7 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kOffscreenWakePulseSkip) {
+            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();
             if (wakePulseWantsDraws()) {
                 const ResourceInfo* wp = rtv0Resolved(s);
                 if (wp && wp->isTexture2D && wakePulseSkips(self, kind, count, wp->a, wp->b,
@@ -2980,6 +3010,7 @@ struct VScreenDrawLadderVisitor {
                 s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kSunglareNomination) {
+            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::observed();
             if constexpr (TracePolicy::enabled) {
                 SunglareNominationObservation observed{};
                 const std::int32_t worldMode = detail::g_sunglareWorld;
@@ -3254,6 +3285,7 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kNightVisionClaim) {
+            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();
             uint32_t pluginClaim = kPluginClaimNone;
             if constexpr (TracePolicy::enabled) {
                 draw_ladder_trace::PredicateFact fact{};
@@ -3309,6 +3341,7 @@ struct VScreenDrawLadderVisitor {
             if (pluginClaim == kPluginClaimNightVision) return claimed(id, DrawVerdict::kNightVision);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kRemlokHideSkip) {
+            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();
             if constexpr (TracePolicy::enabled) {
                 remlok_observation::Observation observed{};
                 const auto mode = detail::g_remlokMode;
@@ -3326,6 +3359,7 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kRemlokScissorClaim) {
+            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();
             if (remlokAction == RemlokAction::kScissor) return claimed(id, DrawVerdict::kRemlok);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kHoloClaim) {
@@ -3347,6 +3381,7 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kTargetSharpClaim) {
+            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();
             if constexpr (TracePolicy::enabled) {
                 TargetSharpObservation observed{};
                 observed.handlerInvoked = true;
@@ -3432,6 +3467,10 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kSunglareSkip) {
+            if (!s->cockpitVisualsOwnerAllowed) {
+                sunglareTrackExposureGlareTrain(kind, count, instances);
+                return SiteResult::declined();
+            }
             if constexpr (TracePolicy::enabled) {
                 SunglareObservation fact{};
                 fact.kind = SunglareTraceFactKind::kKind9;
@@ -3465,6 +3504,7 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kSunglareSteadyClaim) {
+            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();
             if constexpr (TracePolicy::enabled) {
                 SunglareObservation fact{};
                 fact.kind = SunglareTraceFactKind::kKind10;
@@ -3499,6 +3539,7 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kGlareClampClaim) {
+            if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();
             if constexpr (TracePolicy::enabled) {
                 SunglareObservation fact{};
                 fact.kind = SunglareTraceFactKind::kKind11;
@@ -4591,7 +4632,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // purpose: the buffer the glare train reads may BE the composite's or
     // the camera's, and must not steal either shadow's slot. Pointer compare
     // only; the resolve happened at learn time.
-    if (mapSub0 && res == billboardTarget()) {
+    if (s->cockpitVisualsOwnerAllowed && mapSub0 && res == billboardTarget()) {
         s->bbResource = res;
         s->bbData = mapped->pData;
         s->bbBytes = 0;
@@ -4599,7 +4640,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     }
     // The particle billboards' constants, same discipline again: the
     // basis vectors cannot be read at the draw, so the write is watched.
-    if (mapSub0 && res == particleTarget()) {
+    if (s->cockpitVisualsOwnerAllowed && mapSub0 && res == particleTarget()) {
         s->partResource = res;
         s->partData = mapped->pData;
         s->partBytes = 0;
@@ -4607,7 +4648,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     }
     // The world shader's true-camera feed: the scene CB vscreen
     // nominated at the last big eye draw, same discipline again.
-    if (mapSub0 && res == sunglareSceneCbTarget()) {
+    if (s->cockpitVisualsOwnerAllowed && mapSub0 && res == sunglareSceneCbTarget()) {
         s->sceneCbResource = res;
         s->sceneCbData = mapped->pData;
         s->sceneCbBytes = 0;
@@ -4679,10 +4720,12 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         guardedBudget(g_glitchCameraBudget, [&] {
             glitchFrameObserve(s->camData, s->camBytes, s->camResource);
         });
-        guardedBudget(g_sunglareRowsBudget, [&] {
-            // And the live feed: the true view matrix at offset 932 of
-            // the same block, named by the two-shot dump.
-            sunglareSceneRows(s->camData, s->camBytes);
+        runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
+            guardedBudget(g_sunglareRowsBudget, [&] {
+                // And the live feed: the true view matrix at offset 932 of
+                // the same block, named by the two-shot dump.
+                sunglareSceneRows(s->camData, s->camBytes);
+            });
         });
         guardedBudget(g_temporalCameraBudget, [&] {
             // The same rows, kept pending for the temporal pass's camera
@@ -4694,21 +4737,23 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->camBytes = 0;
     }
     if (res == s->sceneCbResource && s->sceneCbData) {
-        guardedBudget(g_sunglareRowsBudget, [&] {
-            sunglareSceneRows(s->sceneCbData, s->sceneCbBytes);
+        runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
+            guardedBudget(g_sunglareRowsBudget, [&] {
+                sunglareSceneRows(s->sceneCbData, s->sceneCbBytes);
+            });
         });
         s->sceneCbResource = nullptr;
         s->sceneCbData = nullptr;
         s->sceneCbBytes = 0;
     }
-    if (res == s->partResource && s->partData) {
+    if (s->cockpitVisualsOwnerAllowed && res == s->partResource && s->partData) {
         guardedBudget(g_particleCaptureBudget,
                       [&] { particleCapture(s->partData, s->partBytes); });
         s->partResource = nullptr;
         s->partData = nullptr;
         s->partBytes = 0;
     }
-    if (res == s->bbResource && s->bbData) {
+    if (s->cockpitVisualsOwnerAllowed && res == s->bbResource && s->bbData) {
         guardedBudget(g_billboardCaptureBudget,
                       [&] { billboardCapture(s->bbData, s->bbBytes); });
         s->bbResource = nullptr;
@@ -4852,15 +4897,25 @@ __declspec(noinline) void forwardQuadSkip(TracePolicy& trace,
 // kIntroPanel and kGlareClamp had no rung and have no case.
 __declspec(noinline) void forwardVerdictBegin(ID3D11DeviceContext* self, DrawVerdict v) {
     switch (v) {
-    case DrawVerdict::kRemlok:       remlokScissorBegin(self); break;
+    case DrawVerdict::kRemlok:
+        runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
+                               [&] { remlokScissorBegin(self); }); break;
     case DrawVerdict::kFssPanel:     fssPanelBegin(self); break;
     case DrawVerdict::kFssReveal:    fssRevealBegin(self); break;
     case DrawVerdict::kHolo:         holoBegin(self); break;
-    case DrawVerdict::kTargetSharp:  targetSharpBegin(self); break;
-    case DrawVerdict::kNightVision:  pluginRegistryBegin(kPluginClaimNightVision,self); break;
+    case DrawVerdict::kTargetSharp:
+        runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
+                               [&] { targetSharpBegin(self); }); break;
+    case DrawVerdict::kNightVision:
+        runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
+                               [&] { pluginRegistryBegin(kPluginClaimNightVision,self); }); break;
     case DrawVerdict::kScrim:        scrimBegin(self); break;
-    case DrawVerdict::kGlareSteady:  sunglareBegin(self); break;
-    case DrawVerdict::kParticle:     particleBegin(self); break;
+    case DrawVerdict::kGlareSteady:
+        runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
+                               [&] { sunglareBegin(self); }); break;
+    case DrawVerdict::kParticle:
+        runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
+                               [&] { particleBegin(self); }); break;
     case DrawVerdict::kBackdrop:     backdropBegin(self); break;
     default: break;
     }
@@ -4868,15 +4923,25 @@ __declspec(noinline) void forwardVerdictBegin(ID3D11DeviceContext* self, DrawVer
 
 __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdict v) {
     switch (v) {
-    case DrawVerdict::kParticle:     particleEnd(self); break;
-    case DrawVerdict::kGlareSteady:  sunglareEnd(self); break;
+    case DrawVerdict::kParticle:
+        runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
+                               [&] { particleEnd(self); }); break;
+    case DrawVerdict::kGlareSteady:
+        runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
+                               [&] { sunglareEnd(self); }); break;
     case DrawVerdict::kScrim:        scrimEnd(self); break;
-    case DrawVerdict::kTargetSharp:  targetSharpEnd(self); break;
-    case DrawVerdict::kNightVision:  pluginRegistryEnd(kPluginClaimNightVision,self); break;
+    case DrawVerdict::kTargetSharp:
+        runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
+                               [&] { targetSharpEnd(self); }); break;
+    case DrawVerdict::kNightVision:
+        runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
+                               [&] { pluginRegistryEnd(kPluginClaimNightVision,self); }); break;
     case DrawVerdict::kHolo:         holoEnd(self); break;
     case DrawVerdict::kFssReveal:    fssRevealEnd(self); break;
     case DrawVerdict::kFssPanel:     fssPanelEnd(self); break;
-    case DrawVerdict::kRemlok:       remlokScissorEnd(self); break;
+    case DrawVerdict::kRemlok:
+        runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
+                               [&] { remlokScissorEnd(self); }); break;
     default: break;   // kBackdrop: issued inline, before the splash re-issue
     }
 }
@@ -6862,6 +6927,8 @@ using VScreenLoaderPanelTestSite = draw_ladder::Site<
 using VScreenTargetSharpTestSite = draw_ladder::InterestGated<
     draw_ladder::SiteId::kTargetSharpClaim, draw_ladder::SiteKind::Claim,
     draw_interest::InterestId::TargetSharp>;
+using VScreenSunglareSkipTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kSunglareSkip, draw_ladder::SiteKind::Claim>;
 using VScreenSunglareNominationTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kSunglareNomination, draw_ladder::SiteKind::Observe>;
 using VScreenPanelDistanceApiTestSite = draw_ladder::Site<
@@ -7300,13 +7367,14 @@ bool vScreenPredicateTestVisit(
     std::uint16_t siteId, ID3D11DeviceContext* context,
     ID3D11DeviceContext* ownerContext, std::uint32_t glareClamp,
     bool distanceEnabled, bool traceEnabled,
-    VScreenPredicateTestResult* result) noexcept {
+    VScreenPredicateTestResult* result, bool ownerAllowed) noexcept {
     if (!result || (siteId != static_cast<std::uint16_t>(VScreenContextTestSite::id) &&
                     siteId != static_cast<std::uint16_t>(VScreenDistanceTestSite::id) &&
                     siteId != static_cast<std::uint16_t>(VScreenSpaceDustTestSite::id)))
         return false;
 
     static State fixture{};
+    fixture.cockpitVisualsOwnerAllowed = ownerAllowed;
     fixture.ownerCtx = ownerContext;
     fixture.glareClamp = glareClamp;
     fixture.distanceEnabled = distanceEnabled;
@@ -7355,6 +7423,7 @@ bool vScreenForwardingPredicateTestVisit(
          input.verdictOrdinal != static_cast<std::int16_t>(DrawVerdict::kSkip))) return false;
 
     static State fixture{};
+    fixture.cockpitVisualsOwnerAllowed = true;
     fixture.ownerCtx = context;
     fixture.rtv0Eye = nullptr;
     fixture.curveThisDraw = input.curveThisDraw;
@@ -7502,6 +7571,7 @@ bool vScreenEyeCensusPredicateTestVisit(
         return false;
 
     static State fixture{};
+    fixture.cockpitVisualsOwnerAllowed = true;
     fixture.ownerCtx = context;
     fixture.censusSkipCount = ruleCount;
     fixture.censusSkipped = censusSkippedSeed;
@@ -7588,6 +7658,7 @@ bool vScreenLoaderPanelPredicateTestVisit(
     bool traceEnabled, VScreenPredicateTestResult* result) noexcept {
     if (!result || !context) return false;
     static State fixture{};
+    fixture.cockpitVisualsOwnerAllowed = true;
     fixture.ownerCtx = context;
     fixture.eyeDrawsLastFrame = eyeDrawsLastFrame;
     fixture.qsStartIndex = qsStartIndex;
@@ -7633,7 +7704,7 @@ bool vScreenTargetSharpPredicateTestVisit(
     ID3D11DeviceContext* context, char kind, std::uint32_t count,
     std::uint32_t instances, std::uint32_t eyeW, std::uint32_t eyeH,
     std::uint32_t renderW, std::uint32_t renderH, bool traceEnabled,
-    VScreenPredicateTestResult* result) noexcept {
+    VScreenPredicateTestResult* result, bool ownerAllowed) noexcept {
     if (!result || !context) return false;
     State fixture{};
     fixture.ownerCtx = context;
@@ -7641,6 +7712,7 @@ bool vScreenTargetSharpPredicateTestVisit(
     fixture.eyeH = eyeH;
     fixture.renderW = renderW;
     fixture.renderH = renderH;
+    fixture.cockpitVisualsOwnerAllowed = ownerAllowed;
     State* const priorState = g_state;
     const bool priorUiDepth = t_uiDepthThisDraw;
     const bool priorComposite = t_compositeThisDraw;
@@ -7684,12 +7756,53 @@ bool vScreenTargetSharpPredicateTestVisit(
     return true;
 }
 
+bool vScreenSunglareSkipPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    std::uint32_t instances, bool traceEnabled,
+    VScreenPredicateTestResult* result, bool ownerAllowed) noexcept {
+    if (!result || !context) return false;
+    State fixture{};
+    fixture.ownerCtx = context;
+    fixture.cockpitVisualsOwnerAllowed = ownerAllowed;
+    State* const priorState = g_state;
+    g_state = &fixture;
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = static_cast<std::uint8_t>(kind);
+    facts.count = count;
+    facts.instances = instances;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        g_state = priorState;
+        return false;
+    }
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, kind, count, instances, args, trace};
+        VScreenTestTraceCapture<draw_ladder_trace::TracePolicy> capture{
+            trace, result->siteResult};
+        plugin_cost::NoCpu cpu;
+        draw_ladder::Flow flow = draw_ladder::Flow::Continue;
+        draw_ladder::visitOne<decltype(visitor), VScreenSunglareSkipTestSite>(
+            flow, visitor, visitor, capture, cpu);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, kind, count, instances, args, trace};
+        result->siteResult = visitor.template visit<VScreenSunglareSkipTestSite>();
+    }
+    g_state = priorState;
+    return true;
+}
+
 bool vScreenSunglareNominationPredicateTestVisit(
     ID3D11DeviceContext* context, char kind, std::uint32_t count,
     void* nominatedBefore, bool traceEnabled,
     VScreenPredicateTestResult* result) noexcept {
     if (!result || !context) return false;
     State fixture{};
+    fixture.cockpitVisualsOwnerAllowed = true;
     fixture.ownerCtx = context;
     fixture.sceneCbNominated = nominatedBefore;
     State* const priorState = g_state;
@@ -7755,6 +7868,7 @@ bool vScreenPanelDistanceApiTransactionTest(
     *result = {};
 
     static State fixture{};
+    fixture.cockpitVisualsOwnerAllowed = true;
     const uint32_t priorEyeW = fixture.eyeW;
     const uint32_t priorEyeH = fixture.eyeH;
     const uint32_t priorEyeDraws = fixture.eyeDrawsThisFrame;
@@ -7769,6 +7883,7 @@ bool vScreenPanelDistanceApiTransactionTest(
     const bool priorIntroCurve = fixture.introCurveThisDraw;
     const bool priorCurve = fixture.curveThisDraw;
     fixture.ownerCtx = input.ownerContext;
+    fixture.cockpitVisualsOwnerAllowed = true;
     fixture.pluginDispatchEnabled = input.cockpitPluginDispatch;
     fixture.rtv0Eye = false;
     // Restoring the borrowed binding slot makes its next test generation
@@ -8595,7 +8710,7 @@ bool vScreenRenderBelowEye(uint32_t* renderW, uint32_t* renderH, uint32_t* eyeW,
     return vrss::unpack(g_renderBelowEye.load(std::memory_order_acquire), renderW, renderH, eyeW, eyeH);
 }
 
-static bool configureLegacyDrawInterests() {
+static bool configureLegacyDrawInterests(bool cockpitVisualsOwnerAllowed) {
     using draw_interest::InterestId;
     using draw_interest::ShaderFilter;
     constexpr std::size_t kFilterCapacity = 16;
@@ -8617,20 +8732,26 @@ static bool configureLegacyDrawInterests() {
         return true;
     };
 
-    enable(InterestId::TargetSharp, targetSharpDrawInterestConfigured());
-    enable(InterestId::WitchspaceStars, witchspaceStarsDrawInterestConfigured());
+    runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {
+        enable(InterestId::TargetSharp, targetSharpDrawInterestConfigured());
+        enable(InterestId::WitchspaceStars, witchspaceStarsDrawInterestConfigured());
+        enable(InterestId::ParticleSubstitute, particleSubstituteDrawInterestConfigured());
+    });
     enable(InterestId::FssPanel, fssPanelDrawInterestConfigured());
     enable(InterestId::FssReveal, fssRevealDrawInterestConfigured());
-    enable(InterestId::ParticleSubstitute, particleSubstituteDrawInterestConfigured());
     enable(InterestId::IntroCurveObserve, introCurveDrawInterestConfigured());
     enable(InterestId::PanelCurveObserve, panelCurveDrawInterestConfigured());
 
-    const bool filtersFit =
-        append(targetSharpDrawInterestFilters) &&
-        append(witchspaceStarsDrawInterestFilters) &&
-        append(fssPanelDrawInterestFilters) &&
-        append(fssRevealDrawInterestFilters) &&
-        append(particleSubstituteDrawInterestFilters);
+    bool filtersFit = true;
+    runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {
+        filtersFit = append(targetSharpDrawInterestFilters) &&
+                     append(witchspaceStarsDrawInterestFilters);
+    });
+    filtersFit = filtersFit && append(fssPanelDrawInterestFilters) &&
+                 append(fssRevealDrawInterestFilters);
+    runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {
+        filtersFit = filtersFit && append(particleSubstituteDrawInterestFilters);
+    });
     const bool accepted = pluginRegistryConfigureDrawInterests(
         configured, filtersFit ? filters : nullptr,
         filtersFit ? filterCount : kFilterCapacity + 1);
@@ -8690,10 +8811,16 @@ void vScreenRefreshConfig() {
     readEyeRenderSize(cfg, s);
     readCensusSkip(cfg, s);
     fssResConfigure(cfg);
-    configureRemlokLifecycle(cfg);
+    runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
+        configureRemlokLifecycle(cfg);
+    });
     holoConfigure(cfg);
-    targetSharpConfigure(cfg);
-    wakePulseConfigure(cfg);
+    runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
+        targetSharpConfigure(cfg);
+    });
+    runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
+        wakePulseConfigure(cfg);
+    });
     uiDepthConfigure(cfg);
     uiLayerConfigure(cfg);
     scrimConfigure(cfg);
@@ -8747,11 +8874,15 @@ void vScreenRefreshConfig() {
                   : "fss eye heal: off.");
         }
     }
-    sunglareConfigure(cfg);
+    runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
+        sunglareConfigure(cfg);
+    });
     exposureConfigure(cfg);
     panelCurveConfigure(cfg);
-    particleConfigure(cfg);
-    configureLegacyDrawInterests();
+    runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
+        particleConfigure(cfg);
+    });
+    configureLegacyDrawInterests(s->cockpitVisualsOwnerAllowed);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
     perfMonitorPluginCostConfigure(static_cast<uint8_t>(runtimeVrProfile()
@@ -8943,7 +9074,9 @@ void vScreenFrameBoundary() {
         tkDrawCensusTick.run([&] { drawCensusTick(g_state->ownerCtx); });
         tkObjectProbe.run([&] { objectProbeFrameBoundary(g_state->ownerCtx); });
         tkPixelProbe.run([&] { pixelProbeFrameBoundary(g_state->ownerCtx); });
-        tkWakePulse.run([&] { wakePulseReport(); });
+        runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
+            tkWakePulse.run([&] { wakePulseReport(); });
+        });
         tkUiDepth.run([&] { uiDepthFrameBoundary(g_state->ownerCtx); });
         // fix.ui_quality: the layer's warm compile, the surfaces' five-second
         // cross-check and learning, the key's 30-second totals, and the end
@@ -9157,7 +9290,9 @@ void vScreenFrameBoundary() {
             lastQpc.QuadPart = 0;
         }
     });
-    tkRemlok.run([&] { frameRemlokLifecycle(s->frameNo); });
+    runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
+        tkRemlok.run([&] { frameRemlokLifecycle(s->frameNo); });
+    });
 
     // The per-frame invalidation lives in binding_shadow now, and device_hook
     // calls it once for both fixes. Doing it here as well would be harmless but
@@ -9928,6 +10063,12 @@ void vScreenFrameBoundary() {
 void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     if (!device || g_state || g_transportSelected) return;
 
+    // Sample the published owner decision once, after the graphics hook has
+    // committed and before any Cockpit Visuals factory/configuration work.
+    const bool cockpitVisualsOwnerAllowed =
+        plugin_admission_transport::ownerAllowedForStartup(
+            plugins::kPluginCockpitVisuals);
+
     Config& cfg = Config::get();
     const bool wantVoid = cfg.getBool("fix.black_void", true);
     const float scale = cfg.getFloat("fix.panel_distance", 1.0f);
@@ -9935,16 +10076,18 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // their own config contract can request hooks without core duplicating
     // plugin-owned setting names or defaults.
     bool cockpitVisualsRegistered = false;
-    if (pluginRegistryProfileSupports(plugins::kPluginCockpitVisuals)) {
-        cockpitVisualsRegistered = pluginRegistryRegister(cockpitVisualsPluginOps());
-        if (!cockpitVisualsRegistered) {
-            Log::get().note("plugin registry: cockpit-visuals registration failed; module dispatch is unavailable");
-            pluginRegistrySetDrawGateFailOpen();
+    runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {
+        if (pluginRegistryProfileSupports(plugins::kPluginCockpitVisuals)) {
+            cockpitVisualsRegistered = pluginRegistryRegister(cockpitVisualsPluginOps());
+            if (!cockpitVisualsRegistered) {
+                Log::get().note("plugin registry: cockpit-visuals registration failed; module dispatch is unavailable");
+                pluginRegistrySetDrawGateFailOpen();
+            }
+        } else {
+            Log::get().note("plugin registry: cockpit-visuals skipped for installation profile %s",
+                            runtimeProfileName());
         }
-    } else {
-        Log::get().note("plugin registry: cockpit-visuals skipped for installation profile %s",
-                        runtimeProfileName());
-    }
+    });
     // Install the hooks whenever EITHER fix could be wanted now or later. Both
     // are documented as changeable while the game runs, and a hook that was
     // never installed cannot be switched on by editing a file -- so returning
@@ -9960,6 +10103,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // because the frame counter it waits on also lives in here.
     if (!wantVoid && scale == 1.0f && !glitchFrameNeedsEyeDraws() &&
         !pluginRegistryWantsStartupHooks(&cfg) &&
+        (cockpitVisualsOwnerAllowed || !exposureDampingActive()) &&
         !cfg.getBool("advanced.app_gpu_timing", true) &&
         !cfg.getBool("advanced.panel_hooks_always", true)) {
         // The optional fixes are deliberately dormant, but native discovery
@@ -9988,6 +10132,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     gpuFrameBind(device, ctx, cfg.getBool("advanced.app_gpu_timing", true));
 
     g_state = new State();
+    g_state->cockpitVisualsOwnerAllowed = cockpitVisualsOwnerAllowed;
     g_state->classifierConfigEpoch = 1;
     g_state->replayTraceEnabled = cfg.getBool("advanced.draw_replay", false);
     g_state->pluginDispatchEnabled = cockpitVisualsRegistered;
@@ -9999,10 +10144,16 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     g_state->distanceIndex = readDistanceIndex(cfg);
     readEyeRenderSize(cfg, g_state);
     readCensusSkip(cfg, g_state);
-    configureRemlokLifecycle(cfg);
+    runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
+        configureRemlokLifecycle(cfg);
+    });
     holoConfigure(cfg);
-    targetSharpConfigure(cfg);
-    wakePulseConfigure(cfg);
+    runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
+        targetSharpConfigure(cfg);
+    });
+    runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
+        wakePulseConfigure(cfg);
+    });
     uiDepthConfigure(cfg);
     uiLayerConfigure(cfg);
     scrimConfigure(cfg);
@@ -10047,11 +10198,15 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                   : "fss eye heal: off.");
         }
     }
-    sunglareConfigure(cfg);
+    runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
+        sunglareConfigure(cfg);
+    });
     exposureConfigure(cfg);
     panelCurveConfigure(cfg);
-    particleConfigure(cfg);
-    configureLegacyDrawInterests();
+    runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
+        particleConfigure(cfg);
+    });
+    configureLegacyDrawInterests(g_state->cockpitVisualsOwnerAllowed);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
@@ -10375,7 +10530,9 @@ void shutdownVScreenFixes() {
     g_state->distanceEnabled = false;
     panelCurveShutdown();
     vscreenFootprintShutdown();
-    particleShutdown();
+    runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
+        particleShutdown();
+    });
     objectProbeShutdown();
     pixelProbeShutdown();
     if (g_state->ourCb) {
@@ -10393,7 +10550,9 @@ void shutdownVScreenFixes() {
     celestialMotionShutdown();
     scrimShutdown();
     quadProbeShutdown();
-    wakePulseShutdown();
+    runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
+        wakePulseShutdown();
+    });
     shutdownIntroLifecycleStage(kIntroLifecycleLoader, loaderPanelShutdown);
     shutdownIntroLifecycleStage(kIntroLifecycleSplashDim, splashDimShutdown);
     shutdownIntroLifecycleStage(kIntroLifecycleBackdrop, backdropShutdown);
@@ -10402,7 +10561,9 @@ void shutdownVScreenFixes() {
     fssPanelRectShutdown();
     shutdownScannerLifecycle();
     gpuCensusShutdown();
-    billboardShutdown();
+    runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
+        billboardShutdown();
+    });
     // Both halves of the intro. Neither was on this roll-call, so a session
     // that ended without a rendered scene ever arriving -- quitting from the
     // menu -- freed nothing at all.
@@ -10430,7 +10591,9 @@ void shutdownVScreenFixes() {
     // configure paths; no other module and no shutdown above calls it. So
     // past uninstall nothing can use it again. It releases and nulls what it
     // holds, so a second call finds nothing to release.
-    targetSharpShutdown();
+    runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
+        targetSharpShutdown();
+    });
 }
 
 }  // namespace edvr

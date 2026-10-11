@@ -217,7 +217,8 @@ bool vScreenPredicateTestVisit(std::uint16_t siteId,
                                std::uint32_t glareClamp,
                                bool distanceEnabled,
                                bool traceEnabled,
-                               VScreenPredicateTestResult* result) noexcept;
+                               VScreenPredicateTestResult* result,
+                               bool ownerAllowed = true) noexcept;
 
 bool vScreenEyeCensusPredicateTestVisit(
     ID3D11DeviceContext* context, char kind, std::uint32_t count,
@@ -241,7 +242,12 @@ bool vScreenTargetSharpPredicateTestVisit(
     ID3D11DeviceContext* context, char kind, std::uint32_t count,
     std::uint32_t instances, std::uint32_t eyeW, std::uint32_t eyeH,
     std::uint32_t renderW, std::uint32_t renderH, bool traceEnabled,
-    VScreenPredicateTestResult* result) noexcept;
+    VScreenPredicateTestResult* result, bool ownerAllowed = true) noexcept;
+
+bool vScreenSunglareSkipPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    std::uint32_t instances, bool traceEnabled,
+    VScreenPredicateTestResult* result, bool ownerAllowed = true) noexcept;
 
 bool vScreenSunglareNominationPredicateTestVisit(
     ID3D11DeviceContext* context, char kind, std::uint32_t count,

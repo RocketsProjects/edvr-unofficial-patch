@@ -31,6 +31,7 @@
 #include "../../src/d3d11/loader_panel.h"
 #include "../../src/d3d11/target_sharp.h"
 #include "../../src/d3d11/target_sharp_policy_test.h"
+#include "../../src/d3d11/cockpit_visuals_owner_gate.h"
 #include "../../src/d3d11/sunglare_fix.h"
 #include "../../src/d3d11/sunglare_nomination_observation.h"
 #include "../../src/d3d11/plugin_registry.h"
@@ -607,6 +608,108 @@ bool testSunglareNomination(ID3D11Device* device, ID3D11DeviceContext* context) 
     context->VSSetConstantBuffers(0, 1, &savedActual);
     bindingSet(BindSlot::VsCb0, savedShadow);
     if (savedActual) savedActual->Release();
+    return okay;
+}
+
+bool testCockpitOwnerDeniedGlareAndCore(ID3D11Device* device,
+                                       ID3D11DeviceContext* context) {
+    using namespace edvr;
+    bool okay = true;
+
+    // Core ownership/trace bookkeeping still runs in the fixture's default
+    // owner-absent state; this is real visitor output, separate from Cockpit callbacks.
+    constexpr auto contextSite = static_cast<std::uint16_t>(
+        draw_ladder::SiteId::kForeignContextNone);
+    VScreenPredicateTestResult coreResult{};
+    BasicDrawObservation coreFact{};
+    okay &= check(vScreenPredicateTestVisit(contextSite, context, context,
+                                            23, false, true, &coreResult, false) &&
+                      coreResult.token.valid() &&
+                      coreResult.siteResult.flow == draw_ladder::Flow::Continue &&
+                      coreResult.siteResult.outcome == draw_ladder::SiteOutcome::Observed &&
+                      coreResult.glareClampAfter == 0 && readFact(coreResult, &coreFact) &&
+                      checkRead(coreFact.context.glareClampBefore, 23) &&
+                      checkRead(coreFact.context.glareClampAfter, 0),
+                  "Cockpit owner absent leaves the real core context visitor and trace active, including glare-clamp reset");
+
+    const void* const saved0 = bindingGet(BindSlot::PsSrv0);
+    const void* const saved1 = bindingGet(BindSlot::PsSrv1);
+    ComPtr<ID3D11Texture2D> sheet0, sheet1, wrongSheet;
+    ComPtr<ID3D11ShaderResourceView> sheetView0, sheetView1, wrongView;
+    const auto makeView = [&](UINT width, UINT height,
+                              ComPtr<ID3D11Texture2D>& texture,
+                              ComPtr<ID3D11ShaderResourceView>& view) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_BC7_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture)) &&
+               SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &view));
+    };
+    const bool madeSheets = makeView(2048, 1024, sheet0, sheetView0) &&
+                            makeView(2048, 1024, sheet1, sheetView1) &&
+                            makeView(1024, 512, wrongSheet, wrongView);
+    okay &= check(madeSheets,
+                  "WARP creates the two exact glare sheets and a wrong-size negative");
+    if (madeSheets) {
+        bindingSet(BindSlot::PsSrv0, sheetView0.Get());
+        bindingSet(BindSlot::PsSrv1, sheetView1.Get());
+        // This fixture is the only test-state writer for g_mode; the module
+        // starts in Stock mode and this path restores Stock below.
+        const int savedWorld = detail::g_sunglareWorld;
+        const std::uint64_t savedLastSeen = sunglareLastSeenMs();
+        constexpr std::uint64_t kSeedLastSeen = 77;
+        // Stale Off is deliberately retained as state: the stock-exposure
+        // observer must ignore this Cockpit feature mode when damping owns it.
+        sunglarePredicateTestState(SunglareTraceMode::kOff, false, 1,
+                                   kSeedLastSeen);
+
+        sunglarePredicateTestExposureDamping(false);
+        sunglareTrackExposureGlareTrain('N', 6, 2);
+        okay &= check(sunglareLastSeenMs() == kSeedLastSeen,
+                      "shared glare observer leaves its timestamp alone when exposure damping is off");
+
+        sunglarePredicateTestExposureDamping(true);
+        sunglareTrackExposureGlareTrain('X', 6, 2);
+        sunglareTrackExposureGlareTrain('N', 5, 2);
+        okay &= check(sunglareLastSeenMs() == kSeedLastSeen,
+                      "shared glare observer ignores wrong draw kind and vertex count");
+        bindingSet(BindSlot::PsSrv1, wrongView.Get());
+        sunglareTrackExposureGlareTrain('N', 6, 2);
+        okay &= check(sunglareLastSeenMs() == kSeedLastSeen,
+                      "shared glare observer rejects a nonmatching second sheet despite the exact train shape");
+        bindingSet(BindSlot::PsSrv1, sheetView1.Get());
+
+        VScreenPredicateTestResult deniedGlare{};
+        okay &= check(vScreenSunglareSkipPredicateTestVisit(
+                          context, 'N', 6, 2, true, &deniedGlare, false) &&
+                          deniedGlare.token.valid() &&
+                          deniedGlare.siteResult.outcome == draw_ladder::SiteOutcome::Declined &&
+                          sunglareLastSeenMs() > kSeedLastSeen,
+                      "owner-denied real Sunglare visitor makes no Cockpit claim while shared Comfort tracking stamps the exact glare train, even with stale Off mode");
+
+        sunglarePredicateTestState(SunglareTraceMode::kOff, false, 1,
+                                   kSeedLastSeen);
+        VScreenPredicateTestResult allowedGlare{};
+        okay &= check(vScreenSunglareSkipPredicateTestVisit(
+                          context, 'N', 6, 2, true, &allowedGlare, true) &&
+                          allowedGlare.token.valid() &&
+                          allowedGlare.siteResult.flow == draw_ladder::Flow::Stop &&
+                          allowedGlare.siteResult.outcome == draw_ladder::SiteOutcome::Exited &&
+                          sunglareLastSeenMs() > kSeedLastSeen,
+                      "owner-present Legacy visitor preserves stale Off mode's real skip behavior and trace path");
+
+        sunglarePredicateTestState(SunglareTraceMode::kStock, false,
+                                   savedWorld, savedLastSeen);
+    }
+    sunglarePredicateTestExposureDampingReset();
+    bindingSet(BindSlot::PsSrv0, const_cast<void*>(saved0));
+    bindingSet(BindSlot::PsSrv1, const_cast<void*>(saved1));
     return okay;
 }
 
@@ -3937,10 +4040,11 @@ int main(int argc, char** argv) {
                                    std::uint32_t eyeW, std::uint32_t eyeH,
                                    std::uint32_t renderW, std::uint32_t renderH,
                                    bool traced,
-                                   edvr::VScreenPredicateTestResult* out) {
+                                   edvr::VScreenPredicateTestResult* out,
+                                   bool ownerAllowed = true) {
                 return edvr::vScreenTargetSharpPredicateTestVisit(
                     immediate, kind, count, 1, eyeW, eyeH, renderW, renderH,
-                    traced, out);
+                    traced, out, ownerAllowed);
             };
             edvr::VScreenPredicateTestResult targetResult{};
             edvr::TargetSharpObservation targetFact{};
@@ -3986,6 +4090,19 @@ int main(int argc, char** argv) {
             if (hookReady) g_getVertexShaderCalls = 0;
             g_resourceAttempts = 0;
             okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                      &targetResult, false) &&
+                              targetResult.token.valid() &&
+                              targetResult.siteResult.outcome == SiteOutcome::NotEligible &&
+                              edvr::draw_ladder_trace::targetSharpFactCountForTest(
+                                  targetResult.token) == 0 &&
+                              hookReady && resourceHookReady &&
+                              g_getVertexShaderCalls == 0 &&
+                              g_resourceAttempts == 0,
+                          "owner-denied real TargetSharp visitor ignores stale active state before module facts or WARP candidate queries");
+
+            if (hookReady) g_getVertexShaderCalls = 0;
+            g_resourceAttempts = 0;
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
                                       &targetResult) &&
                               targetResult.siteResult.outcome == SiteOutcome::Claimed &&
                               readTargetSharp(targetResult, &targetFact) &&
@@ -4008,8 +4125,9 @@ int main(int argc, char** argv) {
                               fwRead(targetFact.vsPresent, true) &&
                               fwRead(targetFact.queriedShaderHash, kTargetHash) &&
                               fwRead(targetFact.configuredShaderHash, kTargetHash) &&
-                              (!hookReady || g_getVertexShaderCalls == 1) &&
-                              (!resourceHookReady || g_resourceAttempts == 1),
+                              hookReady && resourceHookReady &&
+                              g_getVertexShaderCalls == 1 &&
+                              g_resourceAttempts == 1,
                           "WARP TargetSharp success records actual SRV, eye, and registered VS inputs");
             if (hookReady) g_getVertexShaderCalls = 0;
             g_resourceAttempts = 0;
@@ -4245,6 +4363,7 @@ int main(int argc, char** argv) {
         }
 
         okay &= testSunglareNomination(device, immediate);
+        okay &= testCockpitOwnerDeniedGlareAndCore(device, immediate);
         for (std::uint32_t i = 0; i < 4; ++i)
             edvr::bindingSet(static_cast<edvr::BindSlot>(
                                  static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i), nullptr);

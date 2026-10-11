@@ -19,12 +19,12 @@
   (receipt `57716674`). Legacy kept; availability closed; Steam held.
   Explorer Cam startup/tick/shutdown gates pass focused and full builds:
   `build/full-explorer-absence-offline-20261011-r3.log` (receipt `faeff569`).
-- **Module progress:** Performance owns resolution, FOV engine/settings,
-  and sampler. Cockpit owns RemLok and TargetSharp policy/state; shared
-  VScreen services stay core. Diagnostics owns scheduler. Comfort owns
-  exposure, scanners, transition flash and terrain pose. On-foot owns
-  footprint sampling; Explorer Cam owns lifecycle. Selections remain
-  unavailable; whole-group absence and launch order remain open.
+  Cockpit's eight-family boundaries pass full offline validation:
+  `build/full-cockpit-absence-offline-20261011-r2.log` (receipt `1ba4e55b`).
+- **Module progress:** Performance, Explorer and Cockpit startup gates are
+  validated offline; Comfort's shared glare observer is preserved. Comfort,
+  Intro, On-foot, Temporal AA and Diagnostics owner gates remain. Selections
+  stay unavailable; whole-group runtime absence and launch order remain open.
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
   Capture uses consumed values; unarmed paths construct no predicate payload.
@@ -5042,3 +5042,63 @@ must not trigger registry fail-open. Comfort's exposure/context, scanner,
 transition and terrain-cover boundaries need the same separation from shared
 host work. These are read-only findings, not implemented or validated absence
 claims.
+
+### 2026-10-11 — Cockpit Visuals owner boundaries
+
+Explorer Cam checkpoint `c77f1910` was committed and pushed with its matching
+clean receipt. A subsequent main fetch found no missing main commits. Three
+Luna agents implemented and independently reviewed Cockpit's eight-family
+boundary, runtime fixtures and source mutation guards; root coordinated review
+and validation. A Sol 6 repair review resolved the compiled fixture failures.
+
+One default-false State bit caches startup admission before Cockpit factories,
+registration and configuration. It controls all eight families across startup,
+reload, draw interests and gates, visitor claims, verdict Begin/End, Map/Unmap
+capture, complete wake/RemLok frame work and teardown. Denial does not invoke
+registry fail-open. Core hooks, tracing and other owners continue; valid Legacy
+and existing profile behavior remain intact.
+
+Comfort `exposurePluginDamp` consumes `sunglareLastSeenMs`. The shared observer
+therefore checks the existing exact glare train and texture identities while
+exposure damping is active, then updates only the timestamp. It reads no
+Cockpit mode/config and performs no shader, world-route or billboard action.
+The state-backed sun-glare subscription keeps this observer reachable when
+Cockpit is denied. The dormant startup exception applies only to denied Cockpit
+ownership with damping active; admitted Legacy behavior is preserved.
+
+The real WARP visitor fixture proves denied TargetSharp is not eligible,
+constructs no candidate fact and makes zero candidate queries despite stale
+active module state. Mandatory installed hooks and the allowed one-query
+control establish counter coverage. Actual denied Sunglare visitors decline
+while Comfort tracks the matching train; wrong shape/sheets and damping off
+leave the timestamp unchanged. Core context tracing still runs. Supplemental
+callback-helper counters exercise real TargetSharp/RemLok modules, but do not
+by themselves prove every production host path. Source guards cover the other
+enumerated routes: 71 lifecycle mutations and 13 TargetSharp mutations pass.
+
+Focused R1 and R3 were held by another checkout's shared lock; no compile ran.
+R2 exposed test-only helper declarations missing from the vScreen rig macro and
+a RemLok fixture priming the rasterizer cache before the fixed cost window. The
+repair exposes the helpers under the existing rig macro and moves the ownership
+check after the collector window, retaining the exact 11-read / 12-state-call
+and source-site-bit oracles. The damping override is reset at fixture exit.
+Production rendering policy was not changed for either failure. R4 passed
+Cockpit API, Sunglare predicate, plugin dispatch and gate rigs. Its vScreen rig
+compiled but the private focused runner omitted the NGX/FSR SDK link variables.
+Full-build validation supplies the normal SDK environment.
+
+Focused evidence: `build/focused-cockpit-absence-offline-20261011-r4.log`. Full
+R1 stopped at the older dust source-layout oracle after 68 jobs. The repair
+pins the owner-scoped state-backed subscription and denied early return while
+retaining the named gate, allowed pre-snapshot skip and census reason `d`. The
+source-only mutation harness self-test also passes (148 mutations).
+
+Full validation: `build/full-cockpit-absence-offline-20261011-r2.log`; all 169
+jobs, production DLLs, rigs and self-contained installer checks pass.
+Full-build receipt: `1ba4e55bf2ff554f3b90236f053c673e667ac51599db10ec10d388faeab6331b`.
+
+Selection availability remains zero; whole-group runtime absence, positive
+admission/launch order and shipping CPU/GPU acceptance remain open. The next
+Comfort boundary includes pre-admission FSS configuration, exposure, scanner
+fallbacks/native providers, transition flash and terrain culling. No install,
+live configuration edit, flight, promotion or feature-to-main merge occurred.

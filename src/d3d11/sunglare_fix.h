@@ -39,14 +39,21 @@ extern int  g_sunglareWorld;
 inline bool sunglareWorldActive() { return detail::g_sunglareWorld != 0; }
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances);
+// Shared Comfort service: track only the stock glare train while exposure
+// damping is active. This never reads Cockpit Visuals mode/config or changes
+// the draw, shader, world route, or billboard state.
+void sunglareTrackExposureGlareTrain(char kind, uint32_t count,
+                                     uint32_t instances);
 // Trace-only twin of the site-61 outer gate and selector. It records each
 // source read as consumed and preserves the production short-circuit order.
 SunglareAction sunglareOnEyeDrawObserved(
     char kind, uint32_t count, uint32_t instances,
     SunglareSelectorObservation& observation);
-#if defined(EDVR_SUNGLARE_PREDICATE_TEST)
+#if defined(EDVR_SUNGLARE_PREDICATE_TEST) || defined(EDVR_VSCREEN_PREDICATE_TEST)
 void sunglarePredicateTestState(SunglareTraceMode mode, bool probe, int world,
                                uint64_t lastSeenMs);
+void sunglarePredicateTestExposureDamping(bool active);
+void sunglarePredicateTestExposureDampingReset();
 #endif
 uint32_t sunglareKeep();
 

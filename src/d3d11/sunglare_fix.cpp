@@ -56,6 +56,10 @@ enum class Mode { kStock, kOff, kRealistic, kVivid };
 Mode     g_mode = Mode::kStock;
 uint32_t g_keep = 0;
 uint64_t g_lastSeenMs = 0;   // when the train last drew
+#if defined(EDVR_SUNGLARE_PREDICATE_TEST) || defined(EDVR_VSCREEN_PREDICATE_TEST)
+bool g_testExposureDampingOverrideSet = false;
+bool g_testExposureDampingActive = false;
+#endif
 
 // The shader swap. Bytecode is compiled by the build; any creation
 // failure logs once and stands
@@ -199,6 +203,21 @@ bool sunglareWantsDraws() {
 
 uint64_t sunglareLastSeenMs() { return g_lastSeenMs; }
 
+void sunglareTrackExposureGlareTrain(char kind, uint32_t count,
+                                     uint32_t instances) {
+    bool damping = false;
+#if defined(EDVR_SUNGLARE_PREDICATE_TEST) || defined(EDVR_VSCREEN_PREDICATE_TEST)
+    if (g_testExposureDampingOverrideSet) {
+        damping = g_testExposureDampingActive;
+    } else
+#endif
+    {
+        damping = exposureDampingActive();
+    }
+    if (!damping || !sunglareIsGlareTrain(kind, count, instances)) return;
+    g_lastSeenMs = nowMs();
+}
+
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances) {
     if (!sunglareWantsDraws() ||
@@ -310,13 +329,23 @@ SunglareAction sunglareOnEyeDrawObserved(
     return action;
 }
 
-#if defined(EDVR_SUNGLARE_PREDICATE_TEST)
+#if defined(EDVR_SUNGLARE_PREDICATE_TEST) || defined(EDVR_VSCREEN_PREDICATE_TEST)
 void sunglarePredicateTestState(SunglareTraceMode mode, bool probe, int world,
                                uint64_t lastSeenMs) {
     g_mode = static_cast<Mode>(mode);
     (void)probe;
     detail::g_sunglareWorld = world;
     g_lastSeenMs = lastSeenMs;
+}
+
+void sunglarePredicateTestExposureDamping(bool active) {
+    g_testExposureDampingOverrideSet = true;
+    g_testExposureDampingActive = active;
+}
+
+void sunglarePredicateTestExposureDampingReset() {
+    g_testExposureDampingOverrideSet = false;
+    g_testExposureDampingActive = false;
 }
 #endif
 

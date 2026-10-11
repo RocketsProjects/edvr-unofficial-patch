@@ -14,6 +14,7 @@
 #include "../../src/common/frame_flag.h"
 #include "../../src/d3d11/shader_swap.h"
 #include "../../src/d3d11/exposure_fix.h"
+#include "../../src/d3d11/cockpit_visuals_owner_gate.h"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -266,6 +267,75 @@ edvr::RemlokAction runRemlokPair(ID3D11DeviceContext* ctx) {
     return action;
 }
 
+bool cockpitOwnerBoundaryChecks(ID3D11DeviceContext* immediate,
+                                ID3D11PixelShader* stock,
+                                edvr::Config& cfg) {
+    bool ok = true;
+    const bool savedSharp = g_sharp;
+    const std::string savedRemlokMode = g_remlokMode;
+    const float savedRemlokScale = g_remlokScale;
+    g_sharp = true;
+    g_remlokMode = "outer";
+    g_remlokScale = 0.75f;
+    edvr::targetSharpConfigure(cfg);
+    edvr::remlokConfigure(cfg);
+    edvr::remlokFrameBoundary();
+    // These counters prove whether the modeled host callback ran; the config,
+    // candidate-query counters, and WARP state below come from real modules.
+    unsigned ownerCallbackCalls = 0;
+    edvr::RemlokAction deniedRemlokAction = edvr::RemlokAction::kNone;
+    g_targetConfigReads = g_compileCalls = 0;
+    g_bindingGetCalls = g_bindingResolveCalls = g_shaderHashCalls = 0;
+    const bool denied = edvr::runCockpitVisualsOwned(false, [&] {
+        ++ownerCallbackCalls;
+        edvr::targetSharpConfigure(cfg);
+        if (edvr::targetSharpOnEyeDraw(immediate, 'X', 6, 1)) {
+            edvr::targetSharpBegin(immediate);
+            edvr::targetSharpEnd(immediate);
+        }
+        edvr::remlokFrameBoundary();
+        deniedRemlokAction = runRemlokPair(immediate);
+    });
+    ID3D11PixelShader* ownerDeniedShader = nullptr;
+    immediate->PSGetShader(&ownerDeniedShader, nullptr, nullptr);
+    ok &= check(!denied && ownerCallbackCalls == 0 && g_targetConfigReads == 0 &&
+                    g_compileCalls == 0 && g_bindingGetCalls == 0 &&
+                    g_bindingResolveCalls == 0 && g_shaderHashCalls == 0 &&
+                    deniedRemlokAction == edvr::RemlokAction::kNone,
+                "owner-absent helper skips the active TargetSharp/RemLok callback before config, candidate queries, or compilation");
+    ok &= check(ownerDeniedShader == stock,
+                "owner-absent callback leaves the real WARP pixel shader unchanged");
+    if (ownerDeniedShader) ownerDeniedShader->Release();
+
+    bool ownerAllowedSharpMatch = false;
+    edvr::RemlokAction ownerAllowedRemlokAction = edvr::RemlokAction::kNone;
+    g_targetConfigReads = g_compileCalls = 0;
+    g_bindingGetCalls = g_bindingResolveCalls = g_shaderHashCalls = 0;
+    const bool ownerAllowed = edvr::runCockpitVisualsOwned(true, [&] {
+        ++ownerCallbackCalls;
+        edvr::targetSharpConfigure(cfg);
+        ownerAllowedSharpMatch = edvr::targetSharpOnEyeDraw(immediate, 'X', 6, 1);
+        if (ownerAllowedSharpMatch) {
+            edvr::targetSharpBegin(immediate);
+            edvr::targetSharpEnd(immediate);
+        }
+        edvr::remlokFrameBoundary();
+        ownerAllowedRemlokAction = runRemlokPair(immediate);
+    });
+    ok &= check(ownerAllowed && ownerCallbackCalls == 1 && ownerAllowedSharpMatch &&
+                    ownerAllowedRemlokAction == edvr::RemlokAction::kScissor &&
+                    g_targetConfigReads != 0 && g_bindingGetCalls != 0 &&
+                    g_bindingResolveCalls != 0 && g_shaderHashCalls != 0,
+                "owner-present helper preserves real TargetSharp config/candidate work and RemLok behavior");
+    g_sharp = savedSharp;
+    g_remlokMode = savedRemlokMode;
+    g_remlokScale = savedRemlokScale;
+    edvr::targetSharpConfigure(cfg);
+    edvr::remlokConfigure(cfg);
+    edvr::remlokFrameBoundary();
+    return ok;
+}
+
 bool liveLeafAndCollectorChecks(ID3D11Device* device,
                                 ID3D11DeviceContext* immediate,
                                 ID3D11DeviceContext* deferred,
@@ -436,6 +506,10 @@ bool liveLeafAndCollectorChecks(ID3D11Device* device,
         ok &= check(!hasSite(owner, 68) && !hasSite(owner, 71) && !hasSite(owner, 83),
                     "unassigned IDs around the leaf ranges remain absent");
     }
+
+    // Run the independent ownership check after the fixed collector window:
+    // its first real RemLok scissor can populate the cached rasterizer clone.
+    ok &= cockpitOwnerBoundaryChecks(immediate, stock, cfg);
 
     edvr::targetSharpShutdown();
     edvr::remlokShutdown();

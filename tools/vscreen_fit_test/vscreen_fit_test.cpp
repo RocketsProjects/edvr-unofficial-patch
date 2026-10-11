@@ -1107,17 +1107,24 @@ void caseR12() {
         check(has(swallowed, "v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f, args.base, args.startInstance"),
               "R12f: and tells it the panel distance the draw's constants carry, with the draw's own base vertex and start instance");
         const std::string gate = functionBody(vs, "bool drawGateSubscribed(State* s) {");
+        const std::string ownedGate = functionBody(vs, "#define EDVR_GATE_OWNED(name, expression)");
+        const std::string dust = functionBody(vs, "id == SiteId::kSpaceDustSkip");
         const std::string registration = functionBody(vs, "bool registerLegacyDrawGates(State* state) {");
         const std::string frameBoundary = functionBody(vs, "void vScreenFrameBoundary() {");
         check(has(vs, "EDVR_GATE_GLOBAL(vscreen_footprint, vscreenFootprintWanted())"),
               "R12g: the footprint adapter exposes its arming predicate as a named gate subscription");
         check(has(vs, "{\"legacy.vscreen-footprint\", &drawGate_vscreen_footprint, false}"),
               "R12g: the registry table includes the footprint adapter under its stable subscription name");
-        check(has(vs, "EDVR_GATE_GLOBAL(space_dust, spaceDustHidden())") &&
-                  has(vs, "{\"legacy.space-dust\", &drawGate_space_dust, false}") &&
+        check(has(vs, "EDVR_GATE_OWNED(space_dust, spaceDustHidden())") &&
+                  has(vs, "{\"legacy.space-dust\", &drawGate_space_dust, true}") &&
+                  has(ownedGate, "runCockpitVisualsOwned(s && s->cockpitVisualsOwnerAllowed, [&] {") &&
+                  has(ownedGate, "wanted = (expression);") &&
+                  has(dust, "if (!s->cockpitVisualsOwnerAllowed) return SiteResult::declined();") &&
+                  before(dust, "if (!s->cockpitVisualsOwnerAllowed)", "spaceDustHidden() && spaceDustSkip(") &&
+                  has(dust, "spaceDustHidden() && spaceDustSkip(self, kind, count, instances)") &&
                   before(vs, "id == SiteId::kSpaceDustSkip", "id == SiteId::kStateSnapshot") &&
-                  has(vs, "drawCensusNoteUnseen('d')"),
-              "main dust compatibility uses a named registry gate and skips before eye-state snapshot with census reason d");
+                  has(dust, "drawCensusNoteUnseen('d')"),
+              "R12g: main dust uses an owner-scoped named registry gate and declines denied draws before its helper; allowed dust skips before eye-state snapshot with census reason d");
         check(has(registration, "pluginRegistryRegisterLegacyDrawGate(registration.name") &&
                   count(vs, "(void)registerLegacyDrawGates(g_state);") == 1,
               "R12g: vScreen publishes the named subscription table to the registry during installation");
