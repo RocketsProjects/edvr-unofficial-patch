@@ -1462,6 +1462,54 @@ void testCaptureLeak() {
     }
 }
 
+// A diagnostic key that is unbound at launch and bound by a live reload (an edit of edvr.ini or the
+// menu's Hotkeys page), gated on focus like EDVR's own keys. A press refused for focus must be
+// reported (Hotkey::takeMissedWhileUnfocused, once per press), and the next focused press must fire.
+// The source pins then hold the two diagnostic keys' calls in tickHotkeys to that report: the
+// occlusion census and the sun-skip key said nothing on the 2026-10-11 flight when their presses
+// were refused, and a key added without its report would fail the same way again.
+void testLiveRebindFocus(const char* root) {
+    printf("live rebind and focus\n");
+    Hotkey live;                        // unbound at launch, as the occlusion and sun-skip keys are
+    live.pressedWith(false, 0, true);   // polled while unbound
+    live.setBinding("F6");              // the live reload
+    check(!live.pressedWith(true, 0, false), "a live-bound key pressed while another window has focus does not fire");
+    check(live.takeMissedWhileUnfocused(), "...and that press is reported as missed");
+    check(!live.takeMissedWhileUnfocused(), "...the report is taken once");
+    check(!live.pressedWith(true, 0, true), "the key still held when focus returns is not a press");
+    check(!live.pressedWith(false, 0, true) && live.pressedWith(true, 0, true),
+          "after a release, the next press with focus fires");
+    check(!live.takeMissedWhileUnfocused(), "...and a focused press reports nothing as missed");
+
+    std::string text;
+    {
+        const std::string path = std::string(root) + "\\src\\d3d11\\device_hook.cpp";
+        FILE* f = fopen(path.c_str(), "rb");
+        if (f) {
+            char buf[65536];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+            fclose(f);
+        }
+    }
+    if (text.empty()) {
+        printf("    (no device_hook.cpp at \"%s\": the tickHotkeys pins are skipped)\n", root);
+        return;
+    }
+    const size_t at = text.find("void tickHotkeys() {");
+    const size_t close = at == std::string::npos ? at : text.find("\n}\n", at);
+    const std::string body = close == std::string::npos ? std::string() : text.substr(at, close - at);
+    for (const char* name : {"occlusionKey", "sunSkipKey"}) {
+        const std::string press = std::string("if (g_state->") + name + ".pressed())";
+        const std::string note = std::string("missedDiagnosticPressNote(g_state->") + name + ",";
+        const size_t p = body.find(press);
+        const size_t q = body.find(note);
+        check(p != std::string::npos && q != std::string::npos && p < q,
+              (std::string("device_hook.cpp: tickHotkeys reports a focus-refused press of ") + name +
+               " after its pressed() call").c_str());
+    }
+}
+
 // The wiring the cells above assume, pinned in the source: the menu lifts the suspension when a
 // capture ends (which is what primes), and decides BEFORE it ends the capture and writes.
 void testCaptureWiringPins(const char* root) {
@@ -1883,6 +1931,7 @@ int main(int argc, char** argv) {
     testChecks();
     testDecide();
     testCaptureLeak();
+    testLiveRebindFocus(argc > 1 ? argv[1] : "");
     testCaptureWiringPins(argc > 1 ? argv[1] : "");
     testEliteBinds(argc > 1 ? argv[1] : "");
     testRows();
