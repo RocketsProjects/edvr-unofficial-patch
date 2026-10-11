@@ -213,6 +213,61 @@ bool ownerEnabledForCatalog(const DecisionV1& decision, std::uint32_t groupIndex
     return false;
 }
 
+bool ownerAllowedAtStartupForCatalog(const DecisionV1& decision,
+                                    std::uint32_t groupIndex,
+                                    CatalogView catalog) noexcept {
+    if (decision.structSize != sizeof(decision) || decision.abiVersion != kAbiVersion ||
+        (decision.mode != static_cast<std::uint32_t>(Mode::Legacy) &&
+         decision.mode != static_cast<std::uint32_t>(Mode::AdmittedSelection)) ||
+        decision.reason > static_cast<std::uint32_t>(Reason::ProviderRejected) ||
+        !validCatalog(catalog) || groupIndex >= catalog.count || groupIndex >= 32)
+        return false;
+    for (std::uint32_t i = 0; i < 5; ++i)
+        if (decision.reserved[i] != 0) return false;
+
+    if (decision.mode == static_cast<std::uint32_t>(Mode::AdmittedSelection))
+        return ownerEnabledForCatalog(decision, groupIndex, catalog);
+
+    // Legacy InvalidSnapshot deliberately ignores recordState,
+    // validationFlags, and selectedPluginMask: those facts came from the
+    // rejected source record and are not authority. The reason-specific
+    // envelope still has to match a decision this producer can emit.
+    switch (static_cast<Reason>(decision.reason)) {
+    case Reason::SnapshotUnavailable:
+        // The source pointer is not carried on the wire: decide() also emits
+        // this reason for S_OK plus a null snapshot, so only the zeroed facts
+        // distinguish a valid unavailable envelope from malformed data.
+        return decision.recordState == 0 &&
+            decision.validationFlags == 0 && decision.selectedPluginMask == 0;
+    case Reason::InvalidSnapshot:
+        return decision.captureStatus == S_OK;
+    case Reason::ProfileNotReady:
+    case Reason::ProviderRejected: {
+        if (decision.captureStatus != S_OK ||
+            decision.recordState != static_cast<std::uint32_t>(
+                PluginSelectionSnapshotStateV1::Supported) || decision.validationFlags != 0 ||
+            (decision.selectedPluginMask & ~((1u << catalog.count) - 1u)) != 0)
+            return false;
+        const auto profile = static_cast<PluginSelectionProfileV1>(decision.activeProfile);
+        const std::uint32_t bit = profileBit(profile);
+        if (!bit) return false;
+        for (std::uint32_t i = 0; i < catalog.count; ++i) {
+            if ((decision.selectedPluginMask & (1u << i)) &&
+                (!(catalog.groups[i].profileMask & bit) ||
+                 !(catalog.groups[i].readyMask & bit))) return false;
+        }
+        const bool profileReady = allProfileGroupsReady(profile, catalog);
+        if (decision.reason == static_cast<std::uint32_t>(Reason::ProfileNotReady))
+            return !profileReady;
+        return profileReady && decision.graphicsProviderBaseLow == 0 &&
+            decision.graphicsProviderBaseHigh == 0;
+    }
+    case Reason::None:
+        return false;
+    }
+    return false;
+}
+
 } // namespace
 
 GraphicsContractV1 contract() noexcept { return makeContract(generatedCatalog()); }
@@ -230,6 +285,12 @@ bool selected(const DecisionV1& decision, std::uint32_t generatedGroupIndex) noe
 
 bool ownerEnabled(const DecisionV1& decision, std::uint32_t generatedGroupIndex) noexcept {
     return ownerEnabledForCatalog(decision, generatedGroupIndex, generatedCatalog());
+}
+
+bool ownerAllowedForStartup(const DecisionV1& decision,
+                            std::uint32_t generatedGroupIndex) noexcept {
+    return ownerAllowedAtStartupForCatalog(decision, generatedGroupIndex,
+                                           generatedCatalog());
 }
 
 #ifdef EDVR_SELECTION_ADMISSION_TEST
@@ -251,6 +312,11 @@ bool selectedWithCatalog(const DecisionV1& decision, std::uint32_t groupIndex,
 bool ownerEnabledWithCatalog(const DecisionV1& decision, std::uint32_t groupIndex,
                              CatalogViewV1 catalog) noexcept {
     return ownerEnabledForCatalog(decision, groupIndex, catalog);
+}
+bool ownerAllowedForStartupWithCatalog(const DecisionV1& decision,
+                                       std::uint32_t groupIndex,
+                                       CatalogViewV1 catalog) noexcept {
+    return ownerAllowedAtStartupForCatalog(decision, groupIndex, catalog);
 }
 } // namespace test_seam
 #endif

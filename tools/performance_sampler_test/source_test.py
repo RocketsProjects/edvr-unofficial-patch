@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 HOST_PATH = ROOT / "src/d3d11/device_hook.cpp"
 HOOK_PATH = ROOT / "src/d3d11/sampler_create_hook.inl"
 STARTUP_PATH = ROOT / "src/d3d11/sampler_startup.h"
+ADMISSION_PATH = ROOT / "src/d3d11/plugin_admission_transport.h"
+TRANSPORT_PATH = ROOT / "src/d3d11/plugin_admission_transport.cpp"
 POLICY_PATH = ROOT / "src/plugins/performance/texture_sampler_policy.cpp"
 HEADER_PATH = ROOT / "src/plugins/performance/texture_sampler_policy.h"
 RIG_PATH = ROOT / "tools/performance_sampler_test/texture_sampler_policy_test.cpp"
@@ -70,7 +72,8 @@ def code_only(source):
 
 
 def function_body(source, name):
-    match = re.search(r"\b" + re.escape(name) + r"\s*\([^;{}]*\)\s*\{", source)
+    match = re.search(r"\b" + re.escape(name) +
+                      r"\s*\([^;{}]*\)\s*(?:noexcept\s*)?\{", source)
     if not match:
         raise AssertionError("missing function " + name)
     opening = source.find("{", match.start(), match.end())
@@ -109,11 +112,15 @@ def ordered(source, *patterns):
 
 def inspect(host_text=None, policy_text=None, header_text=None,
             hook_text=None, hook_rig_text=None, startup_text=None,
-            startup_rig_text=None):
+            startup_rig_text=None, admission_text=None, transport_text=None):
     host_raw = HOST_PATH.read_text(encoding="utf-8") if host_text is None else host_text
     hook_raw = HOOK_PATH.read_text(encoding="utf-8") if hook_text is None else hook_text
     startup_raw = (STARTUP_PATH.read_text(encoding="utf-8")
                    if startup_text is None else startup_text)
+    admission_raw = (ADMISSION_PATH.read_text(encoding="utf-8")
+                    if admission_text is None else admission_text)
+    transport_raw = (TRANSPORT_PATH.read_text(encoding="utf-8")
+                     if transport_text is None else transport_text)
     policy_raw = POLICY_PATH.read_text(encoding="utf-8") if policy_text is None else policy_text
     header_raw = HEADER_PATH.read_text(encoding="utf-8") if header_text is None else header_text
     rig_raw = RIG_PATH.read_text(encoding="utf-8")
@@ -123,6 +130,8 @@ def inspect(host_text=None, policy_text=None, header_text=None,
     host = code_only(host_raw)
     hook_source = code_only(hook_raw)
     startup_source = code_only(startup_raw)
+    admission = code_only(admission_raw)
+    transport = code_only(transport_raw)
     policy = code_only(policy_raw)
     header = code_only(header_raw)
     policy_compact = re.sub(r"\s+", " ", policy_raw)
@@ -166,6 +175,8 @@ def inspect(host_text=None, policy_text=None, header_text=None,
             "host and fixture include the same production startup boundary")
     try:
         startup = function_body(startup_source, "samplerStartupConfigure")
+        owner_startup = function_body(startup_source,
+                                      "samplerStartupConfigureForOwner")
     except AssertionError as exc:
         return [str(exc)]
     require(ordered(startup,
@@ -178,7 +189,16 @@ def inspect(host_text=None, policy_text=None, header_text=None,
                     r"ops->configure\s*\(",
                     r"return settingsOut->biasAutoRequested && !settingsOut->autoSourceAvailable"),
             "startup clears absent state, validates Ops, then configures and returns the historical warning condition")
-    require("samplerStartupConfigure(" in host and
+    require(ordered(owner_startup,
+                    r"\*policyOut\s*=\s*nullptr",
+                    r"memset\s*\(settingsOut,\s*0",
+                    r"if\s*\(!ownerAllowed\)\s*return false",
+                    r"return samplerStartupConfigure\s*\("),
+            "owner startup clears stale output before blocking all optional policy work")
+    require("ownerAllowedForStartup" in admission and
+            "samplerOwnerAllowed" in host and
+            "plugins::kPluginPerformance" in host and
+            "samplerStartupConfigureForOwner(" in host and
             "&plugins::performance::textureSamplerPolicyOpsV1" in host and
             "&samplerReadEliteHmdMultiplier" in host and
             "if (warnAutoSourceUnavailable)" in host and
@@ -188,10 +208,24 @@ def inspect(host_text=None, policy_text=None, header_text=None,
             "advanced.texture_lod_bias = auto, but Elite's graphics" in host_raw,
             "configuration moved behind the helper and startup warning text remains literal")
     require(ordered(host,
-                    r"samplerStartupConfigure\s*\(",
+                    r"ownerAllowedForStartup\s*\(\s*plugins::kPluginPerformance\s*\)",
+                    r"samplerStartupConfigureForOwner\s*\(",
                     r"s\.deviceHook\.replace\(kDevCreateSamplerState,\s*&hookedCreateSamplerState"),
-            "settings must resolve before the hook can receive sampler creates")
+            "the production transport predicate must gate startup before sampler hook installation")
+    try:
+        transport_gate = function_body(transport, "ownerAllowedForStartup")
+    except AssertionError as exc:
+        return [str(exc)]
+    require(ordered(transport_gate,
+                    r"edvrQueryPluginAdmissionV1\s*\(",
+                    r"if\s*\(status\s*!=\s*S_OK\)\s*return false",
+                    r"return plugin_selection::admission_v1::ownerAllowedForStartup\s*\("),
+            "transport startup predicate requires a published decision and delegates ownership")
     require("testSamplerStartupBoundary();" in startup_rig and
+            "testOwnerAdmissionStartupGate();" in startup_rig and
+            "Deferred owner clears stale policy" in startup_rig and
+            'runAllowed("Enabled owner preserves sampler startup")' in startup_rig and
+            'runAllowed("Legacy-equivalent allowed owner preserves old sampler setup")' in startup_rig and
             "absent factory clears stale enabled state" in startup_rig and
             "valid installed policy configures the current default-off settings" in startup_rig and
             "invalid Ops is absent-safe" in startup_rig and
@@ -209,7 +243,7 @@ def inspect(host_text=None, policy_text=None, header_text=None,
             "samplerStartupConfigure(" not in independent_gates,
             "independent null-Ops hook gate must retain stale enabled state")
     require(ordered(absent_through_hook,
-                    r"samplerStartupConfigure\s*\(",
+                    r"samplerStartupConfigureForOwner\s*\(\s*false",
                     r"hookedCreateSamplerState\s*\(") and
             "g_startup.factoryCalls == 0" in absent_through_hook and
             "g_startup.configureCalls == 0" in absent_through_hook and
@@ -328,6 +362,15 @@ def self_test():
     mutated = startup.replace("std::memset(settingsOut, 0, sizeof(*settingsOut));", "", 1)
     if mutated == startup or not inspect(startup_text=mutated):
         raise AssertionError("negative mutation escaped the stale-settings reset pin")
+    mutated = startup.replace("if (!ownerAllowed) return false;",
+                              "if (!ownerAllowed) return true;", 1)
+    if mutated == startup or not inspect(startup_text=mutated):
+        raise AssertionError("negative mutation escaped the owner startup gate pin")
+    transport = TRANSPORT_PATH.read_text(encoding="utf-8")
+    mutated = transport.replace("if (status != S_OK) return false;",
+                                "if (status != S_OK) return true;", 1)
+    if mutated == transport or not inspect(transport_text=mutated):
+        raise AssertionError("negative mutation escaped the unpublished-decision pin")
     mutated = hook_rig.replace(
         '#include "../../src/d3d11/sampler_startup.h"', "", 1)
     if mutated == hook_rig or not inspect(startup_rig_text=mutated):
@@ -346,7 +389,7 @@ def self_test():
     mutated = hook_rig.replace("testAbsentStartupForwardsThroughHook();", "", 1)
     if mutated == hook_rig or not inspect(startup_rig_text=mutated):
         raise AssertionError("negative mutation escaped the absent-through-hook fixture pin")
-    return 10
+    return 12
 
 
 def main():

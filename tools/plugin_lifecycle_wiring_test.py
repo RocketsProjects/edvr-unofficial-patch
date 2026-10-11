@@ -29,6 +29,9 @@ SLICE_PATHS = {
     "native_frame": ROOT / "src/d3d11/native_frame.cpp",
     "fov_settings_fixture": ROOT / "tools/fov_trim_settings_test/fov_trim_settings_test.cpp",
     "native_frame_fixture": ROOT / "tools/native_frame_test/native_frame_test.cpp",
+    "native_module": ROOT / "src/openxr/native_module.cpp",
+    "native_host": ROOT / "src/openxr/native_runtime_host.h",
+    "native_fov_startup": ROOT / "src/openxr/native_fov_startup.h",
     "fov_facade": ROOT / "src/openxr/native_fov_trim.h",
     "trim_fixture": ROOT / "tools/native_trim_test/native_trim_test.cpp",
     "relay_header": ROOT / "src/d3d11/scheduler_relay.h",
@@ -285,6 +288,9 @@ def check_module_slices(sources: dict[str, str]) -> None:
     native_frame = sources["native_frame"]
     fov_settings_fixture = sources["fov_settings_fixture"]
     native_frame_fixture = sources["native_frame_fixture"]
+    native_module = sources["native_module"]
+    native_host = sources["native_host"]
+    native_fov_startup = sources["native_fov_startup"]
     fov_facade = sources["fov_facade"]
     trim_fixture = sources["trim_fixture"]
     relay_h = sources["relay_header"]
@@ -500,6 +506,53 @@ def check_module_slices(sources: dict[str, str]) -> None:
                   "absent.treatedFor(eye).height==3914"):
         if token not in trim_fixture:
             raise AssertionError(f"native trim fixture lost absent-policy rounding coverage: {token}")
+    native_start = body(native_module, "vr::EVRInitError start(uint32_t token,")
+    ordered(native_start, "const bool hasAdmissionReservation =",
+            "std::make_unique<NativeRuntimeHost>")
+    startup_selection = native_start[native_start.find("const auto* fovTrimOps ="):
+                                     native_start.find("generation->host=std::make_unique<NativeRuntimeHost>")]
+    ordered(startup_selection, "selectOps(", "hasAdmissionReservation",
+            "admissionReservation.decision", "edvr::plugins::kPluginPerformance",
+            "ownerAllowedForStartup", "nativeFovTrimOpsV1()")
+    if "generation->binding.device(),fovTrimOps" not in native_start:
+        raise AssertionError("native host startup must pass its selected FOV ops explicitly")
+    if "fovTrimOps=\n          edvr::plugins::performance::nativeFovTrimOpsV1()" not in native_host:
+        raise AssertionError("native host default FOV factory changed unexpectedly; startup must still override it explicitly")
+    ordered(native_fov_startup, "if (hasAdmissionReservation && !ownerAllowed(decision, generatedGroupIndex))",
+            "return nullptr;", "return factory();")
+    ordered(native_frame_fov_adapter,
+            "inline bool applyNativeFrameFovTrimStartupAdmissionV1(",
+            "if (ownerAllowed) return true;",
+            "setNativeFrameFovTrimSettingsPolicyOpsV1(nullptr)")
+    native_init = body(proxy, "BOOL CALLBACK initOnceCallback(")
+    ordered(native_init, "publishCandidate(",
+            "ownerAllowedForStartup(", "edvr::plugins::kPluginPerformance)",
+            "applyNativeFrameFovTrimStartupAdmissionV1(",
+            "pinGraphicsModuleOnce(")
+    render_gate = native_init[native_init.find("if (edvr::native_render_policy::resolutionPolicyStartupAllowed("):]
+    ordered(render_gate, "resolutionPolicyStartupAllowed(",
+            "edvr::runtimeFeaturesAllowed()",
+            "pluginRegistryProfileSupports(edvr::plugins::kPluginPerformance)",
+            "performanceOwnerAllowed))", "registerPolicy(&policy)")
+    for token in ("disabledStartupOps == nullptr", "startupCounts.factoryCalls == 0",
+                  "startupCounts.creates == 0", "legacy native startup preserves default FOV policy"):
+        if token not in native_frame_fixture:
+            raise AssertionError(f"native startup FOV fixture lost absence/legacy coverage: {token}")
+    for token in ("applyNativeFrameFovTrimStartupAdmissionV1(true)",
+                  "applyNativeFrameFovTrimStartupAdmissionV1(false)",
+                  "g_trimPolicyCounts.creates == 0 &&",
+                  "g_trimPolicyCounts.resolves == 0 &&",
+                  "g_trimPolicyCounts.notes == 0"):
+        if token not in native_frame_fixture:
+            raise AssertionError(f"native-frame startup FOV fixture lost lazy/absence coverage: {token}")
+    startup_fixture_start = native_frame_fixture.find(
+        "setNativeFrameFovTrimSettingsPolicyOpsV1(&copiedTrimOps)")
+    startup_fixture_end = native_frame_fixture.find("uint32_t absentTrimAccessor", startup_fixture_start)
+    startup_fixture = native_frame_fixture[startup_fixture_start:startup_fixture_end]
+    ordered(startup_fixture, "setNativeFrameFovTrimSettingsPolicyOpsV1(&copiedTrimOps)",
+            "applyNativeFrameFovTrimStartupAdmissionV1(true)",
+            "applyNativeFrameFovTrimStartupAdmissionV1(false)",
+            "table.beginFrame(table.context, &absentTrimFrame")
     if "static_assert(edvr::native_render_policy::kPerformanceManifestIndex ==" not in proxy or \
             "edvr::plugins::kPluginPerformance," not in proxy:
         raise AssertionError("proxy policy bootstrap must stay tied to the generated Performance manifest index")
@@ -683,6 +736,34 @@ def self_test_slices(sources: dict[str, str]) -> None:
     expect_slice("CRT teardown does not wait on the native-frame mutex", changed)
 
     changed = dict(sources)
+    changed["native_fov_startup"] = once(changed["native_fov_startup"],
+        "if (hasAdmissionReservation && !ownerAllowed(decision, generatedGroupIndex))",
+        "if (false)")
+    expect_slice("denied native reservation skips the Performance FOV factory", changed)
+
+    changed = dict(sources)
+    changed["native_module"] = once(changed["native_module"],
+        "generation->binding.device(),fovTrimOps",
+        "generation->binding.device()")
+    expect_slice("native host receives the explicitly selected FOV ops", changed)
+
+    changed = dict(sources)
+    changed["native_frame_fov_adapter"] = once(changed["native_frame_fov_adapter"],
+        "return setNativeFrameFovTrimSettingsPolicyOpsV1(nullptr);", "return true;")
+    expect_slice("denied graphics reservation installs absent FOV settings", changed)
+
+    changed = dict(sources)
+    changed["native_frame_fov_adapter"] = once(changed["native_frame_fov_adapter"],
+        "if (ownerAllowed) return true;",
+        "if (ownerAllowed) return setNativeFrameFovTrimSettingsPolicyOpsV1(\n        edvr::plugins::performance::fovTrimSettingsPolicyOpsV1());")
+    expect_slice("allowed graphics startup keeps the settings policy lazy", changed)
+
+    changed = dict(sources)
+    changed["proxy"] = once(changed["proxy"],
+        "            performanceOwnerAllowed))", "            true))")
+    expect_slice("resolution startup gate receives admitted Performance ownership", changed)
+
+    changed = dict(sources)
     changed["fov_facade"] = once(changed["fov_facade"],
         "out.recommended = gameDims;", "out.recommended = dims[eye];")
     expect_slice("absent FOV fallback preserves game-facing size rounding", changed)
@@ -808,7 +889,7 @@ def main() -> int:
     if args.self_test:
         self_test(sources)
         self_test_slices(slice_sources)
-        print("PASS: grouped lifecycle wiring and module boundaries (42 mutations)")
+        print("PASS: grouped lifecycle wiring and module boundaries (47 mutations)")
     else:
         print("DRY RUN: grouped lifecycle and module-boundary pins passed; no files written")
     return 0

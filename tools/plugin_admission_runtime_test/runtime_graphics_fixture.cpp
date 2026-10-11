@@ -44,6 +44,11 @@ extern "C" __declspec(dllexport) void WINAPI FixtureReleaseHeldInit() noexcept {
 extern "C" __declspec(dllexport) unsigned WINAPI FixturePairCalls() noexcept {
     return pairCalls.load();
 }
+extern "C" __declspec(dllexport) BOOL WINAPI FixtureOwnerAllowedForStartup(
+    std::uint32_t generatedGroupIndex) noexcept {
+    return edvr::plugin_admission_transport::ownerAllowedForStartup(
+        generatedGroupIndex) ? TRUE : FALSE;
+}
 extern "C" __declspec(dllexport) HRESULT WINAPI FixturePublishCandidate(
     const wchar_t* moduleDirectory, HMODULE graphics) noexcept {
     if (!moduleDirectory) return E_INVALIDARG;

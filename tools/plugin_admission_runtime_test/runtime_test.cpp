@@ -112,6 +112,7 @@ using FixtureBegin = BOOL (WINAPI *)();
 using FixtureRelease = void (WINAPI *)();
 using FixtureCount = unsigned (WINAPI *)();
 using FixturePublish = HRESULT (WINAPI *)(const wchar_t*, HMODULE);
+using FixtureOwnerAllowed = BOOL (WINAPI *)(std::uint32_t);
 
 class ScopedModule final {
 public:
@@ -211,8 +212,15 @@ void generatedLegacy(const std::wstring& graphicsPath, const std::wstring& peerP
                 auto count = reinterpret_cast<FixtureCount>(GetProcAddress(peerModule.get(), "FixtureCommitCalls"));
                 auto publish = reinterpret_cast<FixturePublish>(GetProcAddress(graphicsModule.get(), "FixturePublishCandidate"));
                 auto query = reinterpret_cast<QueryAdmission>(GetProcAddress(graphicsModule.get(), "edvrQueryPluginAdmissionV1"));
-                check(count && publish && query, "actual runtime admission exports are present");
-                if (count && publish && query) {
+                auto pairCalls = reinterpret_cast<FixtureCount>(GetProcAddress(graphicsModule.get(), "FixturePairCalls"));
+                auto ownerAllowed = reinterpret_cast<FixtureOwnerAllowed>(
+                    GetProcAddress(graphicsModule.get(), "FixtureOwnerAllowedForStartup"));
+                check(count && publish && query && pairCalls && ownerAllowed,
+                      "actual runtime admission and startup-owner exports are present");
+                if (count && publish && query && pairCalls && ownerAllowed) {
+                    constexpr std::uint32_t kPerformancePluginIndex = 6;
+                    check(!ownerAllowed(kPerformancePluginIndex),
+                          "unpublished Deferred decision blocks Performance startup");
                     const std::wstring directory = root.wstring();
                     check(publish(directory.c_str(), graphicsModule.get()) == S_OK,
                           "capture temporary source snapshot and publish actual production candidate");
@@ -221,6 +229,12 @@ void generatedLegacy(const std::wstring& graphicsPath, const std::wstring& peerP
                           "published Decision is available to a late native reader");
                     check(decision.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
                           decision.reason == static_cast<std::uint32_t>(expectedReason), label);
+                    check(ownerAllowed(kPerformancePluginIndex),
+                          "published current-generated Legacy permits Performance startup");
+                    check(!ownerAllowed(0xffffffffu),
+                          "published Legacy rejects an unknown out-of-range startup owner");
+                    check(pairCalls() == 0,
+                          "startup-owner queries do not call optional paired graphics exports");
                     check(count() == 0, "all-unready or invalid snapshot never calls native peer commit");
                 }
             }

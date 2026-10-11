@@ -30,6 +30,8 @@
 #include "../common/proxy.h"
 #include "plugin_selection_transport.h"
 #include "plugin_admission_transport.h"
+#include "native_render_policy_startup.h"
+#include "native_frame_fov_trim_policy.h"
 #include "device_hook.h"
 #include "flat_wrapper_note.h"
 #include "format_support_log.h"
@@ -291,11 +293,17 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
             : edvr::plugin_selection::PluginSelectionProfileV1::Unknown;
     edvr::plugin_admission_transport::publishCandidate(
         *g_moduleDir, g_selfModule, admissionProfile);
+    const bool performanceOwnerAllowed =
+        edvr::plugin_admission_transport::ownerAllowedForStartup(
+            edvr::plugins::kPluginPerformance);
+    (void)applyNativeFrameFovTrimStartupAdmissionV1(performanceOwnerAllowed);
     // NativeRuntimeHost queries CPU-only render settings immediately after
     // its first device create, before vScreen's optional state is configured.
     // First-party selection is still fixed to the supported profile here.
-    if (edvr::runtimeFeaturesAllowed() &&
-        edvr::pluginRegistryProfileSupports(edvr::plugins::kPluginPerformance)) {
+    if (edvr::native_render_policy::resolutionPolicyStartupAllowed(
+            edvr::runtimeFeaturesAllowed(),
+            edvr::pluginRegistryProfileSupports(edvr::plugins::kPluginPerformance),
+            performanceOwnerAllowed)) {
         static_assert(edvr::native_render_policy::kPerformanceManifestIndex ==
                           edvr::plugins::kPluginPerformance,
                       "private resolution policy must match the generated owner");

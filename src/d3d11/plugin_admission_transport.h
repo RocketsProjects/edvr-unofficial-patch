@@ -17,6 +17,10 @@ using QueryKindV1 = plugin_selection::admission_v1::QueryKindV1;
 void publishCandidate(const std::wstring& moduleDirectory, HMODULE graphicsModule,
                       plugin_selection::PluginSelectionProfileV1 activeProfile) noexcept;
 
+// Reads only the published decision. It never enters graphics initialization,
+// captures a snapshot, or contacts the native peer.
+bool ownerAllowedForStartup(std::uint32_t generatedGroupIndex) noexcept;
+
 } // namespace edvr::plugin_admission_transport
 
 extern "C" __declspec(dllexport) HRESULT WINAPI edvrQueryPluginAdmissionV1(

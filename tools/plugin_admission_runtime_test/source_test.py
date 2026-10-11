@@ -20,6 +20,7 @@ def load(root):
         "ordinal_fixture": root / "tools/openxr_module_test/openxr_module_test.cpp",
         "runtime_fixture": root / "tools/plugin_admission_runtime_test/runtime_test.cpp",
         "graphics_fixture": root / "tools/plugin_admission_runtime_test/runtime_graphics_fixture.cpp",
+        "graphics_fixture_def": root / "tools/plugin_admission_runtime_test/runtime_graphics_fixture.def",
         "peer_fixture": root / "tools/plugin_admission_runtime_test/native_peer.cpp",
         "provider_fixture": root / "tools/plugin_admission_runtime_test/provider.cpp",
     }
@@ -120,6 +121,10 @@ def check(sources):
         "matching late Decision passes the guard and reaches the paired export",
         "current all-unready generated profile stays Legacy",
         "invalid selected snapshot stays Legacy",
+        "unpublished Deferred decision blocks Performance startup",
+        "published current-generated Legacy permits Performance startup",
+        "published Legacy rejects an unknown out-of-range startup owner",
+        "startup-owner queries do not call optional paired graphics exports",
         "exact loaded fake DLL commits a validated immutable reservation",
         "committed peer reference keeps the graphics provider mapped",
         "explicit fixture reset releases the retained graphics reference outside DLL teardown",
@@ -156,6 +161,16 @@ def check(sources):
     if "FixturePublishCandidate" not in sources["graphics_fixture"] or \
        "publishCandidate(directory, graphics" not in sources["graphics_fixture"]:
         raise AssertionError("generated readiness case must call production publishCandidate")
+    if "FixtureOwnerAllowedForStartup" not in sources["graphics_fixture_def"] or \
+       "FixtureOwnerAllowedForStartup" not in sources["graphics_fixture"] or \
+       "plugin_admission_transport::ownerAllowedForStartup" not in sources["graphics_fixture"]:
+        raise AssertionError("runtime fixture must export the actual graphics transport startup predicate")
+    owner_case = body(fixture, "void generatedLegacy(")
+    ordered(owner_case, "FixtureOwnerAllowedForStartup",
+            "check(!ownerAllowed(kPerformancePluginIndex)", "publish(directory.c_str()",
+            "check(ownerAllowed(kPerformancePluginIndex)",
+            "check(!ownerAllowed(0xffffffffu)",
+            "pairCalls() == 0", "count() == 0")
     if "store.commitWithCatalogForTest" not in sources["peer_fixture"]:
         raise AssertionError("positive DLL fixture must call the actual commit store through its test catalog seam")
     if "FixtureResetCommit" not in sources["peer_fixture"]:

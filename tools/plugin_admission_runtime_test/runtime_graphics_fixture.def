@@ -7,4 +7,5 @@ EXPORTS
     FixtureBeginHeldInit
     FixtureReleaseHeldInit
     FixturePairCalls
+    FixtureOwnerAllowedForStartup
     FixturePublishCandidate

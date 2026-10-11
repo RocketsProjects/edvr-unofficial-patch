@@ -744,6 +744,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
+    "src\d3d11\terrain_cull_cover_hook.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\dlss_runtime_info.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
@@ -2977,6 +2978,26 @@ if errorlevel 1 ( echo [edvr] ERROR: ui_holo_pass_test build failed & exit /b 1 
 )
 exit /b 0
 
+:rig_terrain_cover_test
+echo [edvr] === terrain cull cover: the rule, the signature scan, the module gate, the hook on a synthetic builder ===
+REM Build gate for the terrain cull cover (src\d3d11\terrain_cull_cover_core.h and terrain_cull_cover_hook.cpp, EDVR_TERRAIN_COVER_TEST; docs\terrain-culling.md): the game builds its
+REM terrain cull planes from a CENTRED frustum (vFOV/2 vertically, atan(aspect * tan) horizontally), so an eye with an asymmetric frustum is under-covered on its wide sides. The rule
+REM widens arguments 5 and 6 of that builder to the largest tangents handed to the game (the three rigs' predicted values, a symmetric headset, an input already wider, bad input).
+REM The production hook is compiled in with the real CodeHook and patches a synthetic builder of the same six-argument shape inside synthetic modules (the known build's stamp and
+REM layout, and another build's for the signature scan): only arguments 5 and 6 change; the first call and the ten-minute heartbeat are what the log says; tools\terrain_cover_fixture.log
+REM is held byte for byte; device_hook.cpp's and native_temporal.cpp's wiring are read as text.
+if not exist "%OBJ%\terraincover" mkdir "%OBJ%\terraincover"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_TERRAIN_COVER_TEST /I"src\d3d11" /I"src\common" ^
+    /Fo"%OBJ%\terraincover"\ /Fe"%OBJ%\terraincover\terrain_cover_test.exe" ^
+    "tools\terrain_cover_test\terrain_cover_test.cpp" "src\d3d11\terrain_cull_cover_hook.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: terrain_cover_test build failed & exit /b 1 )
+"%OBJ%\terraincover\terrain_cover_test.exe" --dry-run || exit /b 1
+"%OBJ%\terraincover\terrain_cover_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
 :rig_luma_probe_test
 echo [edvr] === compact luminance diagnostic regression ===
 if not exist "%OBJ%\lumaprobetest" mkdir "%OBJ%\lumaprobetest"
@@ -4804,12 +4825,14 @@ exit /b 0
 :rig_vr_ssaa_hold_test
 echo [edvr] === vr_ssaa_hold_test.exe ===
 REM The VR Supersampling hold's pure decision (src\d3d11\vr_ssaa_hold_math.h, docs\vr-supersampling-gate-2026-10-10.md): the Settings.xml
-REM mode parse, the held value by profile and mode, the toast. The DLL calls the same functions; the hooks are not in this rig.
+REM mode parse, the held value by profile and mode, the toast, and the game's mode-request window rewrite by profile (the production
+REM requestReplacement and installOne, vr_window_trampolines.cpp included whole; the DLL state is stubbed, nothing is hooked).
 if not exist "%OBJ%\vrssaahold" mkdir "%OBJ%\vrssaahold"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /utf-8 ^
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\vrssaahold\\" /Fe"%OBJ%\vrssaahold\vr_ssaa_hold_test.exe" ^
     "tools\vr_ssaa_hold_test\vr_ssaa_hold_test.cpp" ^
-    /link /INCREMENTAL:NO
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: vr_ssaa_hold_test build failed & exit /b 1 )
 "%OBJ%\vrssaahold\vr_ssaa_hold_test.exe" --dry-run || exit /b 1
 "%OBJ%\vrssaahold\vr_ssaa_hold_test.exe" --self-test || exit /b 1

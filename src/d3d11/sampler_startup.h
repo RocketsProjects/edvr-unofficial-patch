@@ -37,5 +37,24 @@ inline bool samplerStartupConfigure(
     return settingsOut->biasAutoRequested && !settingsOut->autoSourceAvailable;
 }
 
+// Owner admission is resolved before any private policy factory, module
+// config read, or host-side Elite settings lookup. A deferred/error decision
+// therefore leaves no stale policy state and performs no optional startup
+// work. The legacy path passes true to preserve its historical setup.
+inline bool samplerStartupConfigureForOwner(
+    bool ownerAllowed, SamplerPolicyFactoryV1 factory, void* hostContext,
+    plugins::performance::ReadEliteHmdMultiplierV1 readMultiplier,
+    const plugins::performance::TextureSamplerPolicyOpsV1** policyOut,
+    plugins::performance::TextureSamplerSettingsV1* settingsOut) {
+    if (!policyOut || !settingsOut) return false;
+
+    *policyOut = nullptr;
+    std::memset(settingsOut, 0, sizeof(*settingsOut));
+    if (!ownerAllowed) return false;
+
+    return samplerStartupConfigure(factory, hostContext, readMultiplier,
+                                   policyOut, settingsOut);
+}
+
 }  // namespace
 }  // namespace edvr

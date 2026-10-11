@@ -6,9 +6,11 @@
 #include "native_bootstrap.h"
 #include "native_local_config.h"
 #include "native_cpu_trace.h"
+#include "native_fov_startup.h"
 #include "init_error.h"
 #include "../common/plugin_selection_snapshot.h"
 #include "../common/plugin_selection_admission.h"
+#include "plugin_manifest.inc"
 #include "native_plugin_admission.h"
 #include <new>
 #include <stdexcept>
@@ -104,8 +106,15 @@ class ModuleBackend final : public RuntimeBackend {
     auto error=vr::VRInitError_Init_Internal;
     RenderRoute::Park park;
     const bool started=generation->route.invoke([&] {
+      const auto* fovTrimOps = native_fov_startup::selectOps(
+          hasAdmissionReservation, admissionReservation.decision,
+          edvr::plugins::kPluginPerformance,
+          edvr::plugin_selection::admission_v1::ownerAllowedForStartup,
+          []() noexcept {
+            return edvr::plugins::performance::nativeFovTrimOpsV1();
+          });
       generation->host=std::make_unique<NativeRuntimeHost>(generation->owner,
-          generation->render,generation->route,generation->binding.device());
+          generation->render,generation->route,generation->binding.device(),fovTrimOps);
       auto options=options_; options.graphicsProvider=generation->binding.provider();
       generation->host->startupOptions=std::move(options);
       error=generation->host->start(token,cancelled,interfaces);

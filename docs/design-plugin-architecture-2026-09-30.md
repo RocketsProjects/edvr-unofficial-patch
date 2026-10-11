@@ -12,11 +12,11 @@
   implementations, generated config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `3983bb45` integrated at `b917041e`.
-  Sampler startup is `752c7412`; admission foundation is `d3e339f0`.
-  Dormant graphics/native commitment now passes the full 168-job gate:
-  `build/full-plugin-admission-protocol-offline-20261010-r3.log`
-  (receipt `5c313093`). Availability stays closed; no install.
+- **Current integration:** main `d78d9d85` incorporated in this checkpoint.
+  Sampler startup is `752c7412`; dormant admission is `d9c42281`.
+  Performance's four startup absence gates pass the full 169-job gate:
+  `build/full-performance-absence-offline-20261010-r2.log`
+  (receipt `57716674`). Legacy kept; availability closed; Steam held.
 - **Module progress:** Performance owns resolution, FOV engine/settings,
   and sampler. Cockpit owns RemLok and TargetSharp policy/state; shared
   VScreen services stay core. Diagnostics owns scheduler. Comfort owns
@@ -4914,3 +4914,66 @@ reject that attempt; supported launch ordering still needs evidence. Existing
 paired graphics-export qualification remains unchanged. Final runtime cost
 belongs at rendering freeze. No Steam/Epic install, live INI edit, promotion,
 flight, or feature-to-main merge occurred at this checkpoint.
+
+### 2026-10-10 — Performance startup absence gates
+
+Performance's four optional startup boundaries now consume the immutable owner
+decision: graphics resolution registration, sampler configuration, native FOV
+engine selection, and graphics FOV settings selection. The graphics transport
+adapter queries only the published Decision; pending/error queries deny
+optional startup without entering graphics initialization or contacting a peer.
+The native selector reads the validated committed reservation before
+constructing its host.
+
+Legacy preserves each caller's previous behavior. Resolution still requires its
+existing runtime and profile guards. Sampler setup remains historically
+unconditional in Legacy, including Flat and Unknown; adding a profile guard
+here would change existing behavior. Native Legacy retains its default FOV
+engine. Graphics Legacy leaves FOV settings lazy. The common adapter accepts
+the valid producer's `S_OK` plus null-snapshot Legacy envelope and ignores
+rejected source facts when the reason is InvalidSnapshot.
+
+Admitted-disabled startup skips resolution registration, clears sampler policy
+and settings before its factory/configuration/Elite reader, selects explicit
+null native FOV ops before host construction, and installs null graphics FOV
+settings before provider frames. Mandatory 100% eye sizing, dimension rounding,
+sampler forwarding and native-frame transport stay available. The existing
+core/diagnostic SSAA startup report remains outside this optional sampler gate.
+
+Offline fixtures separate the guarantees. A loaded fake graphics DLL calls the
+actual transport adapter before and after production Legacy publication and
+sees no paired-export or native-commit calls. Synthetic catalog tests prove
+admitted selected/unselected decisions. The production sampler startup helper
+and real sampler hook prove zero factory/configuration/Elite-reader work when
+denied. Native FOV selector tests count the injected factory and real
+NativeFovTrim construction. Graphics FOV tests use the real setter/provider
+with counted callbacks. Resolution tests combine the shared startup predicate
+with real registration/query and keep mandatory dimensions usable when absent.
+Source mutations pin host ordering; they do not replace runtime startup
+evidence.
+
+Focused validation passed all five rigs in
+`build/focused-performance-absence-offline-20261010-r2.log`: resolution 254,
+native-frame 102 and loaded-DLL admission 40 checks. The full absolute build
+then passed 169 jobs, both production DLLs, Python/source gates and the
+self-contained installer in
+`build/full-performance-absence-offline-20261010-r2.log`. Receipt:
+`577166748ce54a209cd3038a29dce281b05c16a752194ec1b3281eba78cc639d`. The source
+guards include 47 lifecycle, 12 sampler and 10 runtime-admission mutations.
+Initial validation caught a mismatched-catalog fixture and a generated-header
+include path; both were corrected before the successful run. The main merge
+includes terrain cover, projection notices, input/window fixes and SMAA lookup
+cleanup; semantic review found no collisions.
+
+Availability remains zero for every group. This does not demonstrate a
+production positive admitted NativeRuntimeHost, intended Pimax launch order, or
+whole-profile absence. Other owners still need startup gates and dynamic
+fixtures. No Steam installation, live configuration edit, flight or
+feature-to-main merge occurred. Runtime CPU/GPU acceptance remains reserved for
+rendering-code freeze.
+
+Next offline slice: Explorer Cam's lifecycle registration and direct fallback
+frame/shutdown paths. Cockpit's RemLok/TargetSharp and Comfort's direct
+scanner/transition/exposure fallbacks also need explicit owner checks; missing
+lifecycle registration alone cannot mean Disabled. Main's terrain cover follows
+the Comfort owner. Shared hooks, pose transport and config reload stay core.

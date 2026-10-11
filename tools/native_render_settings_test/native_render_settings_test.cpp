@@ -2,6 +2,7 @@
 #include "../../src/common/openxr_resolution_entries.h"
 #include "../../src/d3d11/native_render_labels.h"
 #include "../../src/d3d11/native_render_policy.h"
+#include "../../src/d3d11/native_render_policy_startup.h"
 #include "../../src/plugins/performance/openxr_resolution_policy.h"
 #include "../../src/common/config.h"
 
@@ -221,6 +222,17 @@ int wmain(int argc,wchar_t** argv) {
     using namespace edvr::native_render_policy;
     OpsV1 policyOps{sizeof(OpsV1),kVersion,kPerformanceManifestIndex,0,nullptr,
                     edvr::plugins::performance::resolveOpenxrResolution};
+    check(!resolutionPolicyStartupAllowed(true,true,false),
+          "Disabled owner decision skips optional resolution registration");
+    if (resolutionPolicyStartupAllowed(true,true,false))
+        check(registerPolicy(&policyOps)==TRUE,
+              "unreachable Disabled registration branch");
+    setValue("oculus/meta-quest-3:3283");
+    const auto disabledAnswer=query(kQ3Oculus);
+    check(disabledAnswer.openxrRenderScale==1.f && disabledAnswer.matchedEntry==0 &&
+          disabledAnswer.entryCount==0 && active(kQ3Oculus,disabledAnswer).w==kQ3Oculus.w &&
+          active(kQ3Oculus,disabledAnswer).h==kQ3Oculus.h,
+          "Disabled core query returns 100% with usable mandatory eye dimensions");
     OpsV1 badOps=policyOps;
     badOps.structSize--;
     check(registerPolicy(&badOps)==FALSE,"registration rejects a short ops record");
@@ -233,7 +245,9 @@ int wmain(int argc,wchar_t** argv) {
     badOps=policyOps; badOps.resolve=nullptr;
     check(registerPolicy(&badOps)==FALSE,"registration rejects a null callback");
     OpsV1 registeredOps=policyOps;
-    check(registerPolicy(&registeredOps)==TRUE,"the real policy registers");
+    check(resolutionPolicyStartupAllowed(true,true,true) &&
+          registerPolicy(&registeredOps)==TRUE,
+          "Legacy owner decision preserves the real resolution policy registration");
     registeredOps.resolve=failedPolicy;
     check(registerPolicy(&policyOps)==TRUE,
           "registration copied the ops and accepts an exact repeat");

@@ -65,6 +65,12 @@ DecisionV1 decide(HRESULT captureStatus,
 bool selected(const DecisionV1& decision, std::uint32_t generatedGroupIndex) noexcept;
 // Legacy keeps each applicable group enabled. Unknown profiles are fail-closed.
 bool ownerEnabled(const DecisionV1& decision, std::uint32_t generatedGroupIndex) noexcept;
+// Startup admission preserves Legacy call-site profile guards. In Legacy, a
+// structurally valid decision allows the owner path to run; the host's
+// existing profile checks decide whether it applies. AdmittedSelection uses
+// the generated catalog and the recorded selection mask.
+bool ownerAllowedForStartup(const DecisionV1& decision,
+                            std::uint32_t generatedGroupIndex) noexcept;
 
 #ifdef EDVR_SELECTION_ADMISSION_TEST
 // Synthetic catalogs exist only in the isolated fixture build.
@@ -85,6 +91,9 @@ bool selectedWithCatalog(const DecisionV1& decision, std::uint32_t groupIndex,
                          CatalogViewV1 catalog) noexcept;
 bool ownerEnabledWithCatalog(const DecisionV1& decision, std::uint32_t groupIndex,
                              CatalogViewV1 catalog) noexcept;
+bool ownerAllowedForStartupWithCatalog(const DecisionV1& decision,
+                                       std::uint32_t groupIndex,
+                                       CatalogViewV1 catalog) noexcept;
 }
 #endif
 

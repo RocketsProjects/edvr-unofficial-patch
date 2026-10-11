@@ -108,12 +108,72 @@ void wireAndGeneratedCatalog() {
     check(!ownerEnabled(dormant, 32) &&
           !ownerEnabled(dormant, (std::numeric_limits<std::uint32_t>::max)()),
           "out-of-range Legacy owner indices are disabled");
+    check(ownerAllowedForStartup(dormant, edvr::plugins::kPluginPerformance),
+          "a valid Legacy VR decision allows the startup owner path");
+
+    auto flatSource = snapshot(PluginSelectionProfileV1::Flat);
+    const auto flatLegacy = decideWithCatalog(S_OK, &flatSource,
+        PluginSelectionProfileV1::Flat, 0, readyCatalog);
+    check(flatLegacy.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
+          !ownerEnabledWithCatalog(flatLegacy, 0, readyCatalog) &&
+          ownerAllowedForStartupWithCatalog(flatLegacy, 0, readyCatalog),
+          "Legacy Flat preserves the existing VR-only startup call-site guard");
+    const auto unknownLegacy = decideWithCatalog(S_OK, &flatSource,
+        static_cast<PluginSelectionProfileV1>(99), 0, readyCatalog);
+    check(unknownLegacy.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
+          !ownerEnabledWithCatalog(unknownLegacy, 0, readyCatalog) &&
+          ownerAllowedForStartupWithCatalog(unknownLegacy, 0, readyCatalog),
+          "Legacy Unknown preserves the existing VR-only startup call-site guard");
+
+    auto badWire = dormant;
+    badWire.structSize--;
+    check(!ownerAllowedForStartup(badWire, edvr::plugins::kPluginPerformance),
+          "startup owner adapter rejects malformed decision wire size");
+    badWire = dormant;
+    badWire.reason = static_cast<std::uint32_t>(Reason::None);
+    check(!ownerAllowedForStartup(badWire, edvr::plugins::kPluginPerformance),
+          "startup owner adapter rejects a Legacy reason the producer never emits");
+    badWire = dormant;
+    badWire.abiVersion++;
+    check(!ownerAllowedForStartup(badWire, edvr::plugins::kPluginPerformance),
+          "startup owner adapter rejects an unknown decision ABI");
+    badWire = dormant;
+    badWire.reserved[4] = 1;
+    check(!ownerAllowedForStartup(badWire, edvr::plugins::kPluginPerformance),
+          "startup owner adapter rejects nonzero reserved decision data");
+    badWire = dormant;
+    badWire.mode = 99;
+    check(!ownerAllowedForStartup(badWire, edvr::plugins::kPluginPerformance),
+          "startup owner adapter rejects an unknown decision mode");
+    check(!ownerAllowedForStartup(dormant, edvr::plugins::kPluginCount) &&
+          !ownerAllowedForStartup(dormant, 32),
+          "startup owner adapter rejects unknown and out-of-range group indices");
 
     const auto unavailable = decide(E_FAIL, &current, PluginSelectionProfileV1::Vr, 0);
     check(unavailable.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
           unavailable.reason == static_cast<std::uint32_t>(Reason::SnapshotUnavailable) &&
-          ownerEnabled(unavailable, 0),
+          ownerEnabled(unavailable, 0) &&
+          ownerAllowedForStartup(unavailable, edvr::plugins::kPluginPerformance),
           "capture failure preserves Legacy behavior for applicable owners");
+    const auto nullSource = decideWithCatalog(S_OK, nullptr,
+        PluginSelectionProfileV1::Vr, 0x12345000, readyCatalog);
+    check(nullSource.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
+          nullSource.reason == static_cast<std::uint32_t>(Reason::SnapshotUnavailable) &&
+          ownerAllowedForStartupWithCatalog(nullSource, 0, readyCatalog),
+          "S_OK with a null snapshot preserves the producer's unavailable envelope");
+    auto malformedUnavailable = nullSource;
+    malformedUnavailable.recordState = 1;
+    const bool stateRejected =
+        !ownerAllowedForStartupWithCatalog(malformedUnavailable, 0, readyCatalog);
+    malformedUnavailable = nullSource;
+    malformedUnavailable.validationFlags = 1;
+    const bool flagsRejected =
+        !ownerAllowedForStartupWithCatalog(malformedUnavailable, 0, readyCatalog);
+    malformedUnavailable = nullSource;
+    malformedUnavailable.selectedPluginMask = 1;
+    check(stateRejected && flagsRejected &&
+          !ownerAllowedForStartupWithCatalog(malformedUnavailable, 0, readyCatalog),
+          "startup owner adapter rejects nonzero unavailable source facts");
 }
 
 void readinessAndSelection() {
@@ -161,6 +221,9 @@ void readinessAndSelection() {
           ownerEnabledWithCatalog(selectedDecision, 1, readyCatalog) &&
           !ownerEnabledWithCatalog(selectedDecision, 0, readyCatalog),
           "admitted mask enables only its selected generated group");
+    check(ownerAllowedForStartupWithCatalog(selectedDecision, 1, readyCatalog) &&
+          !ownerAllowedForStartupWithCatalog(selectedDecision, 0, readyCatalog),
+          "startup owner adapter uses the admitted selection mask");
     check(!selectedWithCatalog(selectedDecision, 3, readyCatalog) &&
           !selectedWithCatalog(selectedDecision, 8, readyCatalog) &&
           !selectedWithCatalog(selectedDecision, 31, readyCatalog) &&
@@ -177,7 +240,8 @@ void readinessAndSelection() {
     check(notReady.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
           notReady.reason == static_cast<std::uint32_t>(Reason::ProfileNotReady) &&
           ownerEnabledWithCatalog(notReady, 0, readyCatalog) &&
-          ownerEnabledWithCatalog(notReady, 1, readyCatalog),
+          ownerEnabledWithCatalog(notReady, 1, readyCatalog) &&
+          ownerAllowedForStartupWithCatalog(notReady, 1, readyCatalog),
           "one unready applicable group keeps the whole profile Legacy");
     readyGroups[1].readyMask = 1;
 
@@ -185,7 +249,8 @@ void readinessAndSelection() {
                                                    0, readyCatalog);
     check(providerMissing.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
           providerMissing.reason == static_cast<std::uint32_t>(Reason::ProviderRejected) &&
-          ownerEnabledWithCatalog(providerMissing, 0, readyCatalog),
+          ownerEnabledWithCatalog(providerMissing, 0, readyCatalog) &&
+          ownerAllowedForStartupWithCatalog(providerMissing, 0, readyCatalog),
           "zero graphics provider cannot create unusable admission or suppress Legacy owner");
 
     readyGroups[1].index = 0;
@@ -266,6 +331,12 @@ void snapshotValidation() {
           ownerEnabledWithCatalog(malformedLegacy, 1, readyCatalog) &&
           !ownerEnabledWithCatalog(malformedLegacy, 2, readyCatalog),
           "malformed synthetic snapshot keeps all and only applicable Legacy owners");
+    auto rawMalformed = malformedLegacy;
+    rawMalformed.recordState = 0xffffffffu;
+    rawMalformed.validationFlags = 0xffffffffu;
+    rawMalformed.selectedPluginMask = 0xffffffffu;
+    check(ownerAllowedForStartupWithCatalog(rawMalformed, 0, readyCatalog),
+          "InvalidSnapshot Legacy ignores malformed source facts when validating startup");
     const auto unknown = decideWithCatalog(S_OK, &source,
         static_cast<PluginSelectionProfileV1>(99), 0x12345000, readyCatalog);
     check(unknown.mode == static_cast<std::uint32_t>(Mode::Legacy) &&

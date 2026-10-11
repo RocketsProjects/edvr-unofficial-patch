@@ -233,6 +233,48 @@ void testSamplerStartupBoundary() {
     }
 }
 
+void testOwnerAdmissionStartupGate() {
+    const int hostContextValue = 19;
+    void* const hostContext = const_cast<int*>(&hostContextValue);
+    const auto runAllowed = [&](const char* scenario) {
+        g_startup = {};
+        g_startup.factoryResult = &g_ops;
+        g_startup.rewriteEnabled = true;
+        const TextureSamplerPolicyOpsV1* policy = nullptr;
+        TextureSamplerSettingsV1 settings{};
+
+        const bool warning = edvr::samplerStartupConfigureForOwner(
+            true, &startupFactory, hostContext, &startupReader, &policy, &settings);
+        checkCase(!warning && policy == &g_ops && settings.rewriteEnabled &&
+                      g_startup.factoryCalls == 1 && g_startup.configureCalls == 1 &&
+                      g_startup.readerCalls == 1 &&
+                      g_startup.readerContext == hostContext,
+                  scenario,
+                  "allowed production owner configures its policy and reads Elite settings");
+    };
+
+    g_startup = {};
+    g_startup.factoryResult = &g_ops;
+    const TextureSamplerPolicyOpsV1* policy = &g_ops;
+    TextureSamplerSettingsV1 settings{};
+    settings.rewriteEnabled = 1;
+    settings.biasAutoRequested = 1;
+    settings.anisotropy = 12;
+    settings.bias = 1.25f;
+    settings.autoMultiplier = 1.5f;
+    const bool deferredWarning = edvr::samplerStartupConfigureForOwner(
+        false, &startupFactory, hostContext, &startupReader, &policy, &settings);
+    check(!deferredWarning && policy == nullptr && !settings.rewriteEnabled &&
+              !settings.biasAutoRequested && settings.anisotropy == 0 &&
+              settings.bias == 0.0f && settings.autoMultiplier == 0.0f &&
+              g_startup.factoryCalls == 0 &&
+              g_startup.configureCalls == 0 && g_startup.readerCalls == 0,
+          "Deferred owner clears stale policy and settings without optional startup calls");
+
+    runAllowed("Enabled owner preserves sampler startup");
+    runAllowed("Legacy-equivalent allowed owner preserves old sampler setup");
+}
+
 D3D11_SAMPLER_DESC sampleDesc() {
     D3D11_SAMPLER_DESC d{};
     d.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -331,8 +373,8 @@ void testAbsentStartupForwardsThroughHook() {
     state.samplerFirstMs = GetTickCount64() - 10001;
     g_startup = {};
 
-    const bool warning = edvr::samplerStartupConfigure(
-        nullptr, nullptr, &startupReader, &state.samplerPolicy,
+    const bool warning = edvr::samplerStartupConfigureForOwner(
+        false, &startupFactory, nullptr, &startupReader, &state.samplerPolicy,
         &state.samplerSettings);
     check(!warning && state.samplerPolicy == nullptr &&
               !state.samplerSettings.rewriteEnabled &&
@@ -450,6 +492,7 @@ void testEarlyOriginalForwarding() {
 
 int selfTest() {
     testSamplerStartupBoundary();
+    testOwnerAdmissionStartupGate();
     testIndependentNoRewriteGates();
     testAbsentStartupForwardsThroughHook();
     testEnabledPolicyRewritesOnlyOwnedFieldsAndForwardsOnce();

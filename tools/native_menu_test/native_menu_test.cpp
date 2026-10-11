@@ -1,5 +1,6 @@
 #include "../../src/common/native_menu.h"
 #include "../../src/common/frame_flag.h"
+#include "../../src/common/parallel_projection_notice.h"
 #include "../../src/d3d11/menu_panel.h"
 #include "../../src/openxr/native_menu_client.h"
 #include "../../src/openxr/eye_capture.h"
@@ -128,6 +129,9 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeMenuRequest request{sizeof(request), EDVR_NATIVE_MENU_VERSION_1, device.Get(), 17};
     EdvrNativeMenuTable table{sizeof(table), EDVR_NATIVE_MENU_VERSION_1};
     check(edvrAcquireNativeMenu(&request, &table) == S_OK && table.context && nativeMenuActive() && !nativeMenuAvailable(), "provider acquire; session active before pose");
+    // The eye poses the Status-page notice for parallel projection reads (nativeMenuEyePoses): none before a pose, and the caller's array is left alone.
+    float heldEyes[2][12]; std::memset(heldEyes, 0x7f, sizeof(heldEyes)); float untouched[2][12]; std::memcpy(untouched, heldEyes, sizeof(untouched));
+    check(!nativeMenuEyePoses(heldEyes) && std::memcmp(heldEyes, untouched, sizeof(heldEyes)) == 0 && !nativeMenuEyePoses(nullptr), "eye poses: none before the first publish, the array untouched");
     float head[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};
     float eyes[2][12] = {{1,0,0,-.03f,0,1,0,0,0,0,1,0}, {1,0,0,.03f,0,1,0,0,0,0,1,0}};
     float frusta[2][4] = {{-.9f,1.1f,-1.2f,.8f}, {-1.1f,.9f,-.8f,1.2f}};
@@ -140,6 +144,7 @@ int wmain(int argc, wchar_t** argv) {
     for (unsigned ms = 0; ms < 3000 && !ready; ms += 5) { ready = edvr::menuPanelWorkerReadyForTest(); if (!ready) Sleep(5); }
     check(ready, "bounded raster worker ready"); edvr::menuPanelTick(device.Get());
     check(table.publishPose(table.context, head, eyes, frusta, 17, 3) == S_OK && nativeMenuAvailable() && nativeMenuActive(), "publish valid pose; session active");
+    check(nativeMenuEyePoses(heldEyes) && std::memcmp(heldEyes, eyes, sizeof(heldEyes)) == 0, "eye poses: the published pair, both 3x4 rows intact");
 
     ComPtr<ID3D11Texture2D> source; check(makeSource(device.Get(), context.Get(), source, 0xff202020u), "source texture");
     ComPtr<ID3D11ShaderResourceView> sentinelSrv;
@@ -258,13 +263,18 @@ int wmain(int argc, wchar_t** argv) {
     check(table.treatEye(table.context, 0, foreignSource.Get(), normal, &rejected, rejectBounds) == E_INVALIDARG && !rejected, "foreign device rejected");
     float badBounds[4] = {-.1f,0,1,1}; check(table.treatEye(table.context, 0, source.Get(), badBounds, &rejected, rejectBounds) == E_INVALIDARG && !rejected, "bad bounds rejected");
     check(table.publishPose(table.context, nullptr, nullptr, nullptr, 17, 0) == S_OK && !nativeMenuAvailable() && nativeMenuActive(), "CPU invalidation keeps session active");
+    std::memcpy(heldEyes, untouched, sizeof(heldEyes));
+    check(!nativeMenuEyePoses(heldEyes) && std::memcmp(heldEyes, untouched, sizeof(heldEyes)) == 0, "eye poses: none after a CPU invalidation");
     check(table.close(table.context) == S_OK && !nativeMenuAvailable() && !nativeMenuActive(), "CPU close retires session");
+    check(!nativeMenuEyePoses(heldEyes), "eye poses: none after the close");
     EdvrNativeMenuTable second{sizeof(second), EDVR_NATIVE_MENU_VERSION_1}; EdvrNativeMenuRequest secondRequest{sizeof(secondRequest), EDVR_NATIVE_MENU_VERSION_1, device.Get(), 29};
     check(edvrAcquireNativeMenu(&secondRequest, &second) == S_OK && second.context && nativeMenuActive(), "reacquire after close; session active");
     check(second.publishPose(second.context, head, eyes, frusta, 29, 4) == S_OK && nativeMenuAvailable(), "second publish");
+    check(nativeMenuEyePoses(heldEyes) && std::memcmp(heldEyes, eyes, sizeof(heldEyes)) == 0, "eye poses: the second session's pair");
     check(table.publishPose(table.context, nullptr, nullptr, nullptr, 17, 0) == E_INVALIDARG && nativeMenuAvailable() && nativeMenuActive(), "stale context cannot invalidate active generation");
     check(table.close(table.context) == S_FALSE && nativeMenuActive(), "stale context cannot retire active generation");
     check(second.close(second.context) == S_OK && !nativeMenuAvailable() && !nativeMenuActive(), "second close");
+    check(!nativeMenuEyePoses(heldEyes), "eye poses: none once the last session closed");
     edvr::openxr::NativeMenuClient client;
     check(client.acquire(GetModuleHandleW(nullptr), device.Get(), 31) == S_OK && nativeMenuActive(), "client acquire; session active");
     edvr::openxr::GeometryInput gi{}; gi.generation = 31; gi.sequence = 1;
@@ -297,6 +307,74 @@ int wmain(int argc, wchar_t** argv) {
     check(consumerLeft == expectedLeft && consumerRight == expectedRight, "shared pixels exact");
     check(capture.shutdownShared() == S_OK, "shared capture shutdown"); capture.shutdown();
     check(client.close() == S_OK, "client close");
+
+    // Parallel-projection latch across menu sessions (parallel_projection_notice.h, SessionLatch), driven by the same session identity and
+    // held poses the graphics tick uses. Four cycles, each an acquire, its poses and a close. A checked or suppressed state must not reach
+    // the next session, a notice must not outlive its session, and a close followed by the same verdict says it again.
+    {
+        namespace ppn = edvr::ppn;
+        const char* pimax8kx = "Pimax Vision 8K X";
+        const char* pimaxXr = "PimaxXR (Unofficial)";
+        const char* pimaxPlay = "Pimax OpenXR";
+        const float c10 = std::cos(10.f * 3.14159265f / 180.f), s10 = std::sin(10.f * 3.14159265f / 180.f);
+        const float parallelPair[2][12] = {{1,0,0,-.03f, 0,1,0,0, 0,0,1,0}, {1,0,0,.03f, 0,1,0,0, 0,0,1,0}};
+        const float cantedPair[2][12] = {{1,0,0,-.03f, 0,1,0,0, 0,0,1,0}, {c10,0,s10,.03f, 0,1,0,0, -s10,0,c10,0}};
+        float lcHead[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};
+        float lcFrusta[2][4] = {{-.9f,1.1f,-1.2f,.8f}, {-1.1f,.9f,-.8f,1.2f}};
+        ppn::SessionLatch latch;   // the graphics tick's latch, one for the rig
+        // One graphics tick as menu.cpp runs it: the identity first, then the held poses.
+        auto lcTick = [&](const char* system, const char* runtime) {
+            const uint64_t id = nativeMenuSessionId();
+            float held[2][12]{};
+            const bool poseHeld = nativeMenuEyePoses(held);
+            return ppn::latchTick(latch, id, poseHeld ? held : nullptr, system, runtime);
+        };
+        EdvrNativeMenuTable lcTable{};
+        auto lcAcquire = [&](uint64_t gen) {
+            EdvrNativeMenuRequest r{sizeof(r), EDVR_NATIVE_MENU_VERSION_1, device.Get(), gen};
+            lcTable = EdvrNativeMenuTable{sizeof(EdvrNativeMenuTable), EDVR_NATIVE_MENU_VERSION_1};
+            return edvrAcquireNativeMenu(&r, &lcTable) == S_OK && lcTable.context && nativeMenuActive() && !nativeMenuAvailable();
+        };
+        auto lcPublish = [&](const float (*eyes)[12], uint64_t gen) {
+            return lcTable.publishPose(lcTable.context, lcHead, eyes, lcFrusta, gen, 5) == S_OK && nativeMenuAvailable();
+        };
+        auto lcClose = [&]() { return lcTable.close(lcTable.context) == S_OK && !nativeMenuActive() && !nativeMenuAvailable(); };
+
+        // Cycle 1: canted views on a canted Pimax, ProjectionOff. Decided, nothing raised: the suppressed state cycle 2 must not inherit.
+        const uint64_t id0 = nativeMenuSessionId();
+        check(lcAcquire(201) && nativeMenuSessionId() != id0, "latch 1: acquire changes the session identity");
+        check(lcPublish(cantedPair, 201), "latch 1: publish canted views");
+        check(!lcTick(pimax8kx, pimaxXr) && latch.checked && !latch.notice, "latch 1: canted views decided, no notice");
+        check(!lcTick(pimax8kx, pimaxXr) && latch.checked && !latch.notice, "latch 1: the same session does not decide again");
+        const uint64_t id1 = nativeMenuSessionId();
+        check(lcClose() && nativeMenuSessionId() != id1, "latch 1: close; the close changes the session identity");
+        check(!lcTick(pimax8kx, pimaxXr) && !latch.checked && !latch.notice, "latch 1: the close clears the verdict");
+
+        // Cycle 2: parallel views, PimaxXR. The notice must show here, not be suppressed by cycle 1's checked state.
+        check(lcAcquire(202) && lcPublish(parallelPair, 202), "latch 2: acquire and publish parallel views");
+        check(lcTick(pimax8kx, pimaxXr) && latch.checked && latch.notice, "latch 2: its own notice is raised after the canted cycle");
+        check(!lcTick(pimax8kx, pimaxXr) && latch.notice, "latch 2: a second tick of the session does not say it again");
+        // A CPU invalidation and a re-publish inside the session are not a new session: the one notice stays, no second toast.
+        const uint64_t id2 = nativeMenuSessionId();
+        check(lcTable.publishPose(lcTable.context, nullptr, nullptr, nullptr, 202, 0) == S_OK && !nativeMenuAvailable() &&
+              nativeMenuSessionId() == id2, "latch 2: CPU invalidation keeps the session identity");
+        check(!lcTick(pimax8kx, pimaxXr) && latch.notice, "latch 2: invalidated, the notice stays for the session");
+        check(lcPublish(parallelPair, 202) && !lcTick(pimax8kx, pimaxXr) && latch.notice && nativeMenuSessionId() == id2,
+              "latch 2: re-publish inside the session says nothing new");
+        check(lcClose() && nativeMenuSessionId() != id2, "latch 2: close");
+        check(!lcTick(pimax8kx, pimaxXr) && !latch.checked && !latch.notice, "latch 2: the close clears the notice");
+
+        // Cycle 3: a close followed by a publish of the same verdict. A new session, so the notice is said again.
+        check(lcAcquire(203) && lcPublish(parallelPair, 203), "latch 3: acquire and publish the same parallel views");
+        check(lcTick(pimax8kx, pimaxXr) && latch.notice, "latch 3: the same verdict after a close is said again, as a new session");
+        check(lcClose(), "latch 3: close");
+
+        // Cycle 4: parallel views on a runtime not known to apply the toggle: LogOnly. Decided, no notice, and nothing carried from cycle 3.
+        check(lcAcquire(204) && lcPublish(parallelPair, 204), "latch 4: acquire and publish parallel views on Pimax OpenXR");
+        check(!lcTick(pimax8kx, pimaxPlay) && latch.checked && !latch.notice, "latch 4: log-only runtime decided, no notice");
+        float lcNone[2][12]{};
+        check(lcClose() && !nativeMenuActive() && !nativeMenuEyePoses(lcNone), "latch 4: close leaves no session and no poses");
+    }
 
     // Exercise the desktop Present compositor against a backbuffer-shaped
     // render target. With no SRV bind it must take the source-copy path.

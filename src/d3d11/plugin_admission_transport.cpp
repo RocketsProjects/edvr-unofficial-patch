@@ -89,6 +89,16 @@ void publishCandidate(const std::wstring& moduleDirectory, HMODULE graphicsModul
     g_decisionReady.store(true, std::memory_order_release);
 }
 
+bool ownerAllowedForStartup(std::uint32_t generatedGroupIndex) noexcept {
+    DecisionV1 decision{};
+    const HRESULT status = edvrQueryPluginAdmissionV1(
+        kQueryVersionV1, static_cast<std::uint32_t>(QueryKindV1::Decision),
+        sizeof(decision), &decision);
+    if (status != S_OK) return false;
+    return plugin_selection::admission_v1::ownerAllowedForStartup(
+        decision, generatedGroupIndex);
+}
+
 } // namespace edvr::plugin_admission_transport
 
 extern "C" HRESULT WINAPI edvrQueryPluginAdmissionV1(

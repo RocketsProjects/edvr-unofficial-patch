@@ -9,6 +9,8 @@
 #include "../../src/plugins/performance/fov_trim_settings_policy.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/journal_watch.h"
+#include "../../src/openxr/native_fov_trim.h"
+#include "../../src/openxr/native_fov_startup.h"
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -124,6 +126,35 @@ static uint32_t countTrimNotes(const TrimPolicyCounts& counts) {
     return counts.notes;
 }
 
+struct NativeFovStartupCounts {
+    unsigned allowedCalls = 0, factoryCalls = 0, creates = 0, destroys = 0;
+    bool allowed = false;
+};
+constexpr uint32_t kStartupTestPerformanceGroupIndex = 6; // generated Performance index from plugin_manifest.json
+
+static void* nativeFovStartupCreate(void* context) noexcept {
+    ++static_cast<NativeFovStartupCounts*>(context)->creates;
+    return context;
+}
+
+static void nativeFovStartupDestroy(void* context, void*) noexcept {
+    ++static_cast<NativeFovStartupCounts*>(context)->destroys;
+}
+
+static uint32_t nativeFovStartupBeginFrame(
+    void*, void*, const edvr::plugins::performance::NativeFovTrimInputV1*,
+    edvr::plugins::performance::NativeFovTrimSnapshotV1*) noexcept {
+    return 0;
+}
+
+static uint32_t nativeFovStartupSubmit(
+    void*, void*, uint32_t, uint32_t, uint32_t,
+    edvr::plugins::performance::NativeFovTrimSnapshotV1*) noexcept {
+    return 0;
+}
+
+static void nativeFovStartupStandDown(void*, void*) noexcept {}
+
 int wmain(int argc, wchar_t** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
                  SEM_NOOPENFILEERRORBOX);
@@ -143,6 +174,57 @@ int wmain(int argc, wchar_t** argv) {
             std::printf("FAIL: %s\n", name);
         }
     };
+
+    // Exercise the same selector used immediately before NativeRuntimeHost
+    // construction. A disabled reservation must avoid both the Performance
+    // factory and NativeFovTrim's create callback; legacy startup still asks
+    // the factory for its historical default.
+    NativeFovStartupCounts startupCounts{};
+    const edvr::plugins::performance::NativeFovTrimOpsV1 startupOps = {
+        sizeof(edvr::plugins::performance::NativeFovTrimOpsV1),
+        edvr::plugins::performance::kNativeFovTrimApiVersion,
+        &startupCounts, &nativeFovStartupCreate, &nativeFovStartupDestroy,
+        &nativeFovStartupBeginFrame, &nativeFovStartupSubmit,
+        &nativeFovStartupStandDown};
+    edvr::plugin_selection::admission_v1::DecisionV1 startupDecision{};
+    const auto startupOwnerAllowed = [&](const auto&, uint32_t groupIndex) noexcept {
+        ++startupCounts.allowedCalls;
+        return startupCounts.allowed && groupIndex == kStartupTestPerformanceGroupIndex;
+    };
+    const auto startupFactory = [&]() noexcept {
+        ++startupCounts.factoryCalls;
+        return &startupOps;
+    };
+    startupCounts.allowed = false;
+    const auto* disabledStartupOps = edvr::openxr::native_fov_startup::selectOps(
+        true, startupDecision, kStartupTestPerformanceGroupIndex,
+        startupOwnerAllowed, startupFactory);
+    edvr::openxr::NativeFovTrim disabledStartupTrim(disabledStartupOps);
+    check(disabledStartupOps == nullptr && !disabledStartupTrim.requested() &&
+          startupCounts.allowedCalls == 1 && startupCounts.factoryCalls == 0 &&
+          startupCounts.creates == 0,
+          "disabled native startup reservation skips FOV factory and policy callbacks");
+    startupCounts.allowed = true;
+    const auto* enabledStartupOps = edvr::openxr::native_fov_startup::selectOps(
+        true, startupDecision, kStartupTestPerformanceGroupIndex,
+        startupOwnerAllowed, startupFactory);
+    {
+        edvr::openxr::NativeFovTrim enabledStartupTrim(enabledStartupOps);
+        check(enabledStartupOps == &startupOps && enabledStartupTrim.requested() &&
+              startupCounts.factoryCalls == 1 && startupCounts.creates == 1,
+              "enabled native startup reservation constructs Performance FOV policy");
+    }
+    const auto allowedCallsBeforeLegacy = startupCounts.allowedCalls;
+    const auto* legacyStartupOps = edvr::openxr::native_fov_startup::selectOps(
+        false, startupDecision, kStartupTestPerformanceGroupIndex,
+        startupOwnerAllowed, startupFactory);
+    {
+        edvr::openxr::NativeFovTrim legacyStartupTrim(legacyStartupOps);
+        check(legacyStartupOps == &startupOps && legacyStartupTrim.requested() &&
+              startupCounts.allowedCalls == allowedCallsBeforeLegacy &&
+              startupCounts.factoryCalls == 2 && startupCounts.creates == 2,
+              "legacy native startup preserves default FOV policy");
+    }
 
     // System32's d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
     const auto createDevice = edvr::systemD3D11CreateDevice();
@@ -257,8 +339,20 @@ int wmain(int argc, wchar_t** argv) {
     edvr::publishGameDevice(device.Get());
     edvr::announceSceneArrived();
 
-    check(setNativeFrameFovTrimSettingsPolicyOpsV1(nullptr),
-          "install the absent Performance policy state");
+    auto copiedTrimOps = countedTrimOps;
+    check(setNativeFrameFovTrimSettingsPolicyOpsV1(&copiedTrimOps),
+          "install a counted valid FOV policy before startup-admission fixture");
+    copiedTrimOps = {};
+    check(applyNativeFrameFovTrimStartupAdmissionV1(true) &&
+              g_trimPolicyCounts.creates == 0 && g_trimPolicyCounts.resolves == 0 &&
+              g_trimPolicyCounts.notes == 0,
+          "Legacy owner result preserves the selected policy lazily");
+    check(applyNativeFrameFovTrimStartupAdmissionV1(true) &&
+              g_trimPolicyCounts.creates == 0 && g_trimPolicyCounts.resolves == 0 &&
+              g_trimPolicyCounts.notes == 0,
+          "enabled owner result preserves the selected policy lazily");
+    check(applyNativeFrameFovTrimStartupAdmissionV1(false),
+          "disabled reservation installs absent FOV settings before provider frames");
     EdvrNativeFrameOutput absentTrimOutput{sizeof(absentTrimOutput),
                                            EDVR_NATIVE_FRAME_VERSION_5};
     EdvrNativeFrameInput absentTrimFrame = input(41, 7, 1);
@@ -273,7 +367,7 @@ int wmain(int argc, wchar_t** argv) {
               absentTrimAccessor[2] == 0 && g_trimPolicyCounts.creates == 0 &&
               g_trimPolicyCounts.resolves == 0 && g_trimPolicyCounts.notes == 0,
           "absent selection skips Performance create/resolve/note callbacks and keeps the in-DLL accessor zero");
-    auto copiedTrimOps = countedTrimOps;
+    copiedTrimOps = countedTrimOps;
     check(setNativeFrameFovTrimSettingsPolicyOpsV1(&copiedTrimOps),
           "copy a valid selected Performance policy table into the provider");
     copiedTrimOps = {};

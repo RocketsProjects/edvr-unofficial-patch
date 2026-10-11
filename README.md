@@ -47,6 +47,15 @@ that runtime is available and your headset connected. EDVR needs no SteamVR
 loader; do not install OpenComposite or a vendor OpenXR loader to make it work.
 Then launch Elite as you normally would.
 
+Canted Pimax headsets (Vision 8K X, 8K Plus, 8K, 5K Super, 5K Plus, 5K XR and
+Artisan) should turn "Enable Parallel Projection" off in Pimax Play and restart
+the game. EDVR renders canted displays correctly without it. With it on, the
+headset renders much larger frames (8268x3948 instead of 5016x3160 per eye on
+an 8K X at FOV Wide), and turning it off cut GPU time by up to about 30% in
+testing. This works with PimaxXR as the OpenXR runtime; with Pimax Play's own
+OpenXR runtime the toggle may have no effect. When EDVR sees the setting on
+with PimaxXR, it shows a notice in the headset.
+
 ## Install
 
 **Download `edvr-installer-<version>.zip` from the release, unzip it, and run
@@ -162,7 +171,11 @@ instead of standing in the world, or sized for a screen you are not looking at.
 - Over planets, Elite culled terrain with a head pose about 42 ms older than
   the one it drew with, so squares of ground at the edges of view went undrawn
   when you moved your head. EDVR answers the game's request for the head pose
-  "now" at the instant of the frame being drawn. There is no setting.
+  "now" at the instant of the frame being drawn. On a headset whose eyes see
+  further out than the centred frustum Elite culls terrain against (a Quest 3,
+  a cropped Pimax), EDVR also widens that frustum to what each eye shows, which
+  stopped the black flashes at the outer corners over flat ground. There is no
+  setting.
 - On foot, the grey surround is made properly black, the screen is moved, bent
   and raised above its forced 1920x1080, and Explorer Cam gives you a real
   stereo view from your commander's head in the free camera.
