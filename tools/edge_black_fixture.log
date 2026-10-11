@@ -1,0 +1,68 @@
+[00:00:00.000] edge black: watching stage game (the texture Elite submits, before any EDVR pass): a 64x64 grid per eye each frame, the largest of R, G, B at each point through a plain view of R8G8B8A8_TYPELESS (code / 255, the texture's own encoding); black below 0.004, lit above 0.03; an event is 3 or more touching transient-black points (lit, black, lit; or lit, black, black, lit); readback 4 frames deep; the first 60 events are listed, a summary every 60 s.
+[00:00:00.000] edge black: event eye=0 frame=301 t=10:00:07.211 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=40 deg/s
+[00:00:00.000] edge black: event eye=1 frame=601 t=10:00:10.511 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=70 deg/s
+[00:00:00.000] edge black: event eye=1 frame=602 t=10:00:10.522 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=71 deg/s
+[00:00:00.000] edge black: event eye=0 frame=701 t=10:00:11.611 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=80 deg/s
+[00:00:00.000] edge black: event eye=0 frame=1101 t=10:00:16.011 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=30 deg/s
+[00:00:00.000] edge black: event eye=0 frame=1501 t=10:00:20.411 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=70 deg/s
+[00:00:00.000] edge black: event eye=1 frame=1598 t=10:00:21.478 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=77 deg/s
+[00:00:00.000] edge black: event eye=1 frame=1599 t=10:00:21.489 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=78 deg/s
+[00:00:00.000] edge black: event eye=0 frame=1901 t=10:00:24.811 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=unknown (no head pose known to the graphics half)
+[00:00:00.000] edge black: event eye=0 frame=2301 t=10:00:29.211 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=60 deg/s
+[00:00:00.000] edge black: event eye=1 frame=2595 t=10:00:32.445 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=84 deg/s
+[00:00:00.000] edge black: event eye=1 frame=2596 t=10:00:32.456 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=85 deg/s
+[00:00:00.000] edge black: event eye=0 frame=2701 t=10:00:33.611 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=100 deg/s
+[00:00:00.000] edge black: event eye=0 frame=3101 t=10:00:38.011 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=50 deg/s
+[00:00:00.000] edge black: event eye=0 frame=3501 t=10:00:42.411 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=90 deg/s
+[00:00:00.000] edge black: event eye=1 frame=3592 t=10:00:43.412 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=91 deg/s
+[00:00:00.000] edge black: event eye=1 frame=3593 t=10:00:43.423 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=92 deg/s
+[00:00:00.000] edge black: event eye=0 frame=3901 t=10:00:46.811 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=40 deg/s
+[00:00:00.000] edge black: event eye=0 frame=4301 t=10:00:51.211 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=80 deg/s
+[00:00:00.000] edge black: event eye=1 frame=4589 t=10:00:54.379 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=98 deg/s
+[00:00:00.000] edge black: event eye=1 frame=4590 t=10:00:54.390 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=99 deg/s
+[00:00:00.000] edge black: event eye=0 frame=4701 t=10:00:55.611 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=30 deg/s
+[00:00:00.000] edge black: event eye=0 frame=5101 t=10:01:00.011 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=70 deg/s
+[00:00:00.000] edge black: event eye=0 frame=5501 t=10:01:04.411 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=unknown (no head pose known to the graphics half)
+[00:00:00.000] edge black: 60 s: frames 5456 eyes-sampled 10911 events 24 (outer-bottom 14, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top 10, centre 0) largest 30 points; transient points total 760; black-start points (black now, lit before, still black) 0; samples lost 0
+[00:00:00.000] edge black: event eye=1 frame=5586 t=10:01:05.346 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=105 deg/s
+[00:00:00.000] edge black: event eye=1 frame=5587 t=10:01:05.357 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=106 deg/s
+[00:00:00.000] edge black: event eye=0 frame=5901 t=10:01:08.811 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=60 deg/s
+[00:00:00.000] edge black: event eye=0 frame=6301 t=10:01:13.211 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=100 deg/s
+[00:00:00.000] edge black: event eye=1 frame=6583 t=10:01:16.313 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=22 deg/s
+[00:00:00.000] edge black: event eye=1 frame=6584 t=10:01:16.324 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=23 deg/s
+[00:00:00.000] edge black: event eye=0 frame=6701 t=10:01:17.611 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=50 deg/s
+[00:00:00.000] edge black: event eye=0 frame=7101 t=10:01:22.011 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=90 deg/s
+[00:00:00.000] edge black: event eye=0 frame=7501 t=10:01:26.411 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=40 deg/s
+[00:00:00.000] edge black: event eye=1 frame=7580 t=10:01:27.280 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=29 deg/s
+[00:00:00.000] edge black: event eye=1 frame=7581 t=10:01:27.291 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=30 deg/s
+[00:00:00.000] edge black: event eye=0 frame=7901 t=10:01:30.811 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=80 deg/s
+[00:00:00.000] edge black: event eye=0 frame=8301 t=10:01:35.211 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=30 deg/s
+[00:00:00.000] edge black: event eye=1 frame=8577 t=10:01:38.247 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=36 deg/s
+[00:00:00.000] edge black: event eye=1 frame=8578 t=10:01:38.258 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=37 deg/s
+[00:00:00.000] edge black: event eye=0 frame=8701 t=10:01:39.611 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=70 deg/s
+[00:00:00.000] edge black: event eye=0 frame=9101 t=10:01:44.011 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=unknown (no head pose known to the graphics half)
+[00:00:00.000] edge black: event eye=0 frame=9501 t=10:01:48.411 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=60 deg/s
+[00:00:00.000] edge black: event eye=1 frame=9574 t=10:01:49.214 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=43 deg/s
+[00:00:00.000] edge black: event eye=1 frame=9575 t=10:01:49.225 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=44 deg/s
+[00:00:00.000] edge black: event eye=0 frame=9901 t=10:01:52.811 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=100 deg/s
+[00:00:00.000] edge black: event eye=0 frame=10301 t=10:01:57.211 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=50 deg/s
+[00:00:00.000] edge black: event eye=1 frame=10571 t=10:02:00.181 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=50 deg/s
+[00:00:00.000] edge black: event eye=1 frame=10572 t=10:02:00.192 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=51 deg/s
+[00:00:00.000] edge black: event eye=0 frame=10701 t=10:02:01.611 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=90 deg/s
+[00:00:00.000] edge black: 60 s: frames 5455 eyes-sampled 10910 events 25 (outer-bottom 13, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top 12, centre 0) largest 30 points; transient points total 760; black-start points (black now, lit before, still black) 0; samples lost 0
+[00:00:00.000] edge black: event eye=0 frame=11101 t=10:02:06.011 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=40 deg/s
+[00:00:00.000] edge black: event eye=0 frame=11501 t=10:02:10.411 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=80 deg/s
+[00:00:00.000] edge black: event eye=1 frame=11568 t=10:02:11.148 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=57 deg/s
+[00:00:00.000] edge black: event eye=1 frame=11569 t=10:02:11.159 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=58 deg/s
+[00:00:00.000] edge black: event eye=0 frame=11901 t=10:02:14.811 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=30 deg/s
+[00:00:00.000] edge black: event eye=0 frame=12301 t=10:02:19.211 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=70 deg/s
+[00:00:00.000] edge black: event eye=0 frame=12701 t=10:02:23.611 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=unknown (no head pose known to the graphics half)
+[00:00:00.000] edge black: event eye=0 frame=13101 t=10:02:28.011 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=60 deg/s
+[00:00:00.000] edge black: event eye=0 frame=13501 t=10:02:32.411 points=30 cells=5x6 centre=0.04,0.95 region=outer-bottom border=1 head=100 deg/s
+[00:00:00.000] edge black: event eye=1 frame=13562 t=10:02:33.082 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=71 deg/s
+[00:00:00.000] edge black: event eye=1 frame=13563 t=10:02:33.093 points=16 cells=4x4 centre=0.09,0.16 region=inner-top border=0 head=72 deg/s
+[00:00:00.000] edge black: 60 events listed; further events are counted in the summaries only.
+[00:00:00.000] edge black: 60 s: frames 5455 eyes-sampled 10910 events 22 (outer-bottom 14, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top 8, centre 0) largest 30 points; transient points total 714; black-start points (black now, lit before, still black) 5120; samples lost 0
+[00:00:00.000] edge black: 60 s: frames 5455 eyes-sampled 10910 events 26 (outer-bottom 14, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top 12, centre 0) largest 30 points; transient points total 790; black-start points (black now, lit before, still black) 0; samples lost 0
+[00:00:00.000] edge black: 57 s: frames 5179 eyes-sampled 10359 events 22 (outer-bottom 12, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top 10, centre 0) largest 30 points; transient points total 690; black-start points (black now, lit before, still black) 0; samples lost 0
+[00:00:00.000] edge black: closed -- totals for the run: frames 27000 eyes-sampled 54000 events 119 (outer-bottom 67, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top 52, centre 0) largest 30 points; transient points total 3714; black-start points (black now, lit before, still black) 5120; samples lost 0

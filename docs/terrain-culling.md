@@ -2,59 +2,62 @@
 
 ## Status
 
-- **State (2026-10-09, flights 4 and 5): CLOSED. The head-pose fix ships as
-  behaviour (no key, no write to the game): Elite's "now" requests are located at
-  the latest frame's display time PLUS that frame's period (`next`).** Elite's game
-  thread asks GetDeviceToAbsoluteTrackingPose (return RVA 0x4E3881, prediction ~0 s)
-  and culls planet terrain with it; the frame is drawn at its display time. Flight 3:
-  that pose was **41 to 44 ms** older, up to **4.1 deg** off, r = **+0.98** with head
-  speed. `display` stopped the gaze-switch squares; rapid turns still showed some.
-- **What ships.** A call whose return address is in the game's image and whose
-  prediction is under 5 ms either way is answered at display time + period (freshness
-  judged on the CACHED frame); no frame, a stale frame, no period, an overflow or a
-  reference change in between: now + prediction (a counted fallback); TIME_INVALID is
-  retried likewise. First-sight line `head pose: ...`; the 60 s `pose gap:` line stays.
-- **Why (the model, pilot-judged).** The game thread calls the pose function BETWEEN
-  frames for work that feeds the NEXT frame, so it needs D_N + period; while a frame
-  renders it reads its own latched pose, already right. `display` left the direct
-  calls a period short; the engine patch put the latched readers a period ahead.
-  Test build e3692ed4: `display` squares on rapid turns; `next_direct` squares and the
-  DSS scanner UI followed the head; `display_direct` a flash; `next` no flash. It fits
-  every observation but is NOT a direct view of the cull camera's consumer (review
-  finding 3): terrain-generation latency could add rare flashes.
+- **State (2026-10-10).** The head-pose fix is CLOSED and ships as behaviour (no key, no
+  write to the game): Elite's "now" requests (return RVA 0x4E3881, prediction under 5 ms)
+  are answered at the latest frame's display time PLUS its period (`next`); no frame, a
+  stale one, no period, an overflow or a reference change: now + prediction (a counted
+  fallback). Before it that pose was 41 to 44 ms old, up to 4.1 deg, r +0.98 with head
+  speed; `next` ended the gaze-switch squares. Model and evidence: "Status detail".
 - **Not shipped:** the latch-bypass patch (RVA 0x4E36EE), `advanced.cull_pose`,
   `HandedOutPoses` (branches claude/cull-pose-next-frame, claude/cull-display-direct-bypass).
-  **Removed (2026-10-09):** the terrain guard and its six keys (`fix.cull_guard*`,
-  `advanced.cull_guard_channel`), `advanced.cull_probe`; the FOV trim is untouched.
-- **Ruled out** (evidence under "Status detail"): a static frustum deficit, the
-  fov getter as the culler's input, the 09-23 "same +19.4% ask" premise, H3, the
-  union model, H2, FUN_13ACC40 as the consumer. **UNRELIABLE:** the 09-23
-  verdict "the culler follows `GetProjectionRaw`, not the matrix" (a pilot's
-  judgement under flicker, a 10-degree trim, 1.6%).
-- **Separate:** the flight-4 boarding crash is Elite's allocator (no EDVR frames).
-- **Field report (2026-10-10, v0.19.0):** Quest 3 via VD, 72 Hz: "significant black
-  blocking in the periphery" with the fix engaged; their checkerboard is ON, Sean's Q3
-  with it ON showed none at one planet. Also open: terrain-generation latency, VD timewarp.
-- **Late frames (2026-10-10, Quest 3 via VD, 72 and 90 Hz):** infrequent quick black
-  flashes at the outer edges on head turns; the fix is engaged, but the game misses
-  display slots 40-60 times a minute and one Elite thread logs 4-44 fallbacks a minute.
-  H-late: a late frame shows at D+2P, `next` is a period short. H-stale: D goes stale,
-  the call falls to now. H-overshoot: the cache had advanced. H-mix: the call is served
-  on the owner thread, which may be blocked in the frame wait when it arrives; served
-  before the next publish it is answered D(N)+P, after it D(N+1)+P, a period apart.
-- **TEST BUILD FLOWN (claude/cull-late-frames f24ca5d0, Frontier, Q3 via VD 72 Hz,
-  log edvr_openxr_20261010_171008_107_23432):** `pose slot:` / `pose arrival:` lines
-  and the temporary key `advanced.cull_pose_timing = next | slot | arrival` (remove at
-  close). Steady flight (17:13 on): 0 late frames, 0 fallbacks; tid 28956 97% Straddled,
-  tid 25756 100% Between, every call in the same class each frame; next = slot there.
-  The 282 stale fallbacks (up to 12 deg) fell in the load minute only. Pilot: "several
-  flashes in each segment", in flat areas only; `arrival` (25756 a period later) no change.
-- **Ruled out:** the pose timing (H-late, H-stale, H-overshoot, H-mix) as the cause of
-  the VD flashes, because the answers were consistent in steady flight and the flashes
-  came alike under next, slot and arrival.
-- **Next:** temporary AA off (EDVR's DLSS out of the chain); the same flat low flight on
-  the Crystal Super and in flat mode (is it Elite's own, on any rig?); then terrain
-  generation latency, which a culling margin would hide.
+  **Removed (2026-10-09):** the terrain guard and its six keys, `advanced.cull_probe`; the
+  FOV trim is untouched. **Separate:** the flight-4 boarding crash is Elite's allocator.
+- **Ruled out** (evidence under "Status detail"): a static frustum deficit, the fov getter
+  as the culler's input, the 09-23 "same +19.4% ask" premise, H3, the union model, H2,
+  FUN_13ACC40 as the consumer. **UNRELIABLE:** the 09-23 "culler follows `GetProjectionRaw`".
+- **OPEN: quick black flashes over flat planet ground.** Quest 3 via VD (72, 90 Hz; a
+  v0.19.0 field report likewise) and the Crystal Super since its 2026-09-23 Pimax Play FOV
+  crop. At the outer corners of either eye, several per 4 min, never in flat mode, predates
+  EDVR's temporal work, no frame synthesis. The pilot now also sees black shapes FLOATING
+  INSIDE the view with terrain around them, in varying shapes (square, diamond, parallelogram).
+- **Ruled out (f24ca5d0, Q3 via VD 72 Hz, log edvr_openxr_20261010_171008_107_23432):** the
+  pose timing (H-late, H-stale, H-overshoot, H-mix). From 17:13: 0 late frames, 0 fallbacks,
+  each calling thread in one class every frame, so next = slot (the 282 stale fallbacks fell
+  in the load minute). "Several flashes in each segment" alike under next, slot and arrival.
+- **THE RENDERED FIELD DECIDES.** Sean flew the Crystal Super, same f24ca5d0, log
+  edvr_openxr_20261010_173409_735_33536 (17:34-17:37, 5424 x 5356 per eye), Pimax Play crop
+  REMOVED: no flashes over flat ground. Uncropped (m00 0.781, m11 0.791, m02 -0.194; about
+  103 x 103 deg): none. Cropped since 09-23 (0.939, 0.971; 93 x 92 deg): flashes. Quest 3 via
+  VD Godlike (0.903, 0.835, m12 -0.193; 94 x 99 deg): flashes. The crop kept the Pimax
+  vertically symmetric, so symmetry is not the discriminator; the SIZE of the field is.
+- **Hypotheses (corrected 2026-10-10 after the pilot saw shapes float).** **Leading,
+  H-gen-edge:** tiles entering the view at its edge during a head turn are generated or
+  selected a few frames late and travel inward while missing. At 103 x 103 that edge sits
+  in the lens periphery, where nothing is seen clearly; in a field cropped inside the clear
+  area (93 x 92, VD's Quest 3) the late tiles are in plain view; flat ground has the largest
+  tiles. **H-after** (reprojection shows the image's own edge, black beyond it, at a corner)
+  is WEAKENED: an exposed edge cannot float. The split: is the black in the image Elite
+  SUBMITS (**H-image**; H-gen-edge is its late-tile form) or added after EDVR submits?
+- **BUILT, not flown (claude/cull-late-frames): the edge-black watch, always on.** Per
+  eye-frame, on the texture Elite submits (stage game, before any EDVR pass): a 64 x 64
+  point-sampled grid (max of R, G, B) from a compute shader, read back 4 frames deep without
+  waiting. TRANSIENT BLACK: under 0.004 (code 0-1 of 255; R8G8B8A8 read as code/255, the
+  texture's own encoding) in frame f, over 0.03 (code 8+) in f-1 and f+1, or lit, black,
+  black, lit. EVENT: 3+ touching transient points in an eye-frame, with points, cells,
+  centre, region (outer/inner by eye, thirds), border touch (0 = inside the view), head
+  speed. Graphics log: `edge black:` start line, first 60 events, a summary every 60 s
+  (zeros too), a closing line; `python tools\edvr_log.py --tally edge`. Cost: judgement 6.6
+  us per eye-frame (rig), one 8 x 8 dispatch, a 16 KB copy and a 16 KB Map; the log's
+  `periodic work: edge_black` line has the measured figure.
+- **THE FLIGHT (next):** the same flat low flight on the CROPPED Crystal Super (or Quest 3),
+  the pilot counting flashes over a segment of known length. Game-stage events at about the
+  pilot's count = H-image (border=0 events = H-gen-edge); zero events while flashes are seen
+  = H-after. Black-start points are the control (a horizon moving in), not flashes.
+- **Remedy if H-gen-edge** (not built): a margin so Elite prepares terrain beyond what it
+  shows, either (a) widening only what the terrain culler reads (the old guard's route,
+  never proved; the watch gives an objective count to test it) or (b) rendering a margin
+  beyond the cropped field and cropping it (certain, costs pixels).
+- **Temporary key:** `advanced.cull_pose_timing = next | slot | arrival` (default next), removed at close.
 
 ## The bug in short
 
@@ -1053,3 +1056,71 @@ timing (late frames, the stale fallback, overshoot, the arrival mix) as the caus
 and consistent where the flashes came, and moving one thread a whole period changed nothing. The stale fallback during loads is real
 but harmless (no terrain then). Flat ground only fits large tiles, where one late or dropped tile is a big square: next are temporal
 AA off, the same flight on the Crystal Super and in flat mode, then terrain-generation latency.
+
+## 2026-10-10 — the rendered field decides; the edge-black watch (test build, branch claude/cull-late-frames)
+
+**The result (Sean, Crystal Super, f24ca5d0, log edvr_openxr_20261010_173409_735_33536.log, 17:34 to 17:37 local, 5424 x 5356 per eye).** With the Pimax Play FOV crop
+REMOVED there were NO flashes over flat ground. The three fields that have been flown over flat ground, from the projection the runtime hands Elite:
+
+| rig | m00 | m11 | other | about | flashes |
+|---|---|---|---|---|---|
+| Crystal Super, uncropped (this flight) | 0.780744255 | 0.7906425 | m02 -0.193965569, m12 0 | 103 x 103 deg | none |
+| Crystal Super, cropped in Pimax Play (since 2026-09-23 14:28) | 0.939449012 | 0.971494555 | | 93 x 92 deg | yes |
+| Quest 3 via Virtual Desktop Godlike | 0.902738333 | 0.835478902 | m12 -0.193187431 | 94 x 99 deg | yes |
+
+The crop kept the Pimax vertically symmetric (m12 still 0), so symmetry is not what separates them. What separates them is how much of the lens the rendered field covers.
+
+**Correction, same day (the pilot).** The black shapes also appear FLOATING INSIDE the view, with terrain around them, in varying shapes (square, diamond, parallelogram).
+That changes the reading of the table above. The first reading (H-after: the runtime's ordinary reprojection shifts the frame for head motion and, with a field cropped
+inside the lens's visible area, the edge of the rendered image, black beyond it, shows at a corner) is WEAKENED: an exposed image edge sits at the border and cannot float.
+Leading instead is **H-gen-edge**: tiles that enter the view at its edge during a head turn are generated or selected a few frames late and travel inward while missing.
+With the full 103 x 103 field that edge is in the lens periphery, where nothing is seen clearly; with a field cropped inside the clearly visible area (the 93 x 92 crop, VD's
+Quest 3 field) the late tiles are in plain view; flat ground has the largest tiles, so one missing tile is a big shape. It fits: flat ground only, varying shapes, outer corners
+where a turn brings new ground in, never in flat mode (a flat screen has no lens periphery to hide an edge in), and it predates EDVR's temporal work. It is a hypothesis: the pose timing was the last thing
+that could be measured from the runtime side, and it is out (above); nothing so far looks at the image itself.
+
+**The split the watch makes.** H-image: the black is IN the texture Elite submits (H-gen-edge is its late-tile form). H-after: the black is added after EDVR submits (the
+runtime's reprojection, the vendor compositor, the headset). Game-stage events at about the pilot's count say H-image; zero events while the pilot sees flashes say H-after.
+
+**The instrument (always on, TEMPORARY; src/d3d11/edge_black.cpp and edge_black_core.h, the grid shader edge_black_shader.h).** Hooked into the native temporal channel's
+`treat()` after the submit's own validation and before any EDVR pass touches the texture, so it runs whether or not temporal AA is on and reads exactly what the luma probe
+calls the stage "game". Per eye per frame: one 8 x 8 dispatch of 8 x 8 thread groups, each thread one point-sampled texel of a 64 x 64 grid (the centre of the cell, `u =
+(x + 0.5) / 64`, the largest of R, G, B), written to a 16 KB buffer, copied to a staging ring four frames deep, and the oldest ready staging buffer mapped without waiting (a
+buffer not yet ready waits for the next frame; the verdict is two frames behind the draw plus the readback, three to four frames). No full-eye copy, no query, no device wait.
+The shader is compiled at build time by tools\temporal_shader_build into temporal_shader_bytecode.h (d3d11.dll must not import d3dcompiler_47.dll, the PE gate). The
+texture is read through a plain UNORM view: R8G8B8A8 and B8G8R8A8 as code/255, R10G10B10A2 as code/1023, R16G16B16A16 UNORM as code/65535, float formats as they are; an sRGB
+texture, an unlisted format or a texture with no shader view is said once (`edge black: eye E is not watched: ...`) and left alone. Elite's eye texture is
+R8G8B8A8_TYPELESS, so the encoding is code/255.
+
+*The rule.* Per point, black is the largest channel under 0.004 (an 8-bit code of 0 or 1: 1/255 = 0.00392), lit is over 0.03 (a code of 8 and up), anything between (or NaN)
+is dim and counts as neither. A point is TRANSIENT BLACK in frame f when it is black in f and lit in both f-1 and f+1, or black in f and f+1 with lit in f-1 and f+2 (two
+frames). The verdict for frame f is given when f+2 has arrived. A frame whose sequence number does not follow the last one, or a texture resize, empties that eye's history
+(the frames it held and never judged are counted as `samples lost`). An EVENT is an eye-frame with at least three transient points that touch (8-neighbourhood); the largest
+cluster is reported, `clusters=N` is appended when there are several. BLACK-START points (black now, lit before, still black two frames on) are the control: a horizon or a dark
+object moving in, which is not a flash. Region labels per eye: eye 0's outer (temporal) side is x < 0.5, eye 1's is x > 0.5; bottom, middle and top are thirds; `centre` is the
+middle third within 0.1 of the midline. `head=` is the angular speed between the frame's head pose and the previous one, `unknown` when the graphics half has no pose.
+
+*The lines (graphics log).* `edge black: watching stage game (...)` once, when the first eye is sampled (grid, metric, format and encoding, thresholds, rule, readback depth);
+`edge black: event eye=E frame=N t=HH:MM:SS.mmm points=K cells=WxH centre=X,Y region=R border=B head=H deg/s` for the first 60 events (then `edge black: 60 events listed;
+further events are counted in the summaries only.`); every 60 s, events or none, `edge black: 60 s: frames N eyes-sampled M events E (outer-bottom a, outer-middle b, ...,
+centre c) largest K points; transient points total T; black-start points (black now, lit before, still black) S; samples lost L`; and `edge black: closed -- totals for the
+run: ...` when the channel closes. `python tools\edvr_log.py --target <t> --tally edge` tables them. No `edge black:` start line means the watch never ran.
+
+*Cost.* The CPU side is about a dozen D3D calls and the judgement of one grid (three passes over 4096 bytes: 6.6 us measured in the rig, on the development machine); the GPU
+side is 4096 single-texel loads and stores. The log's `periodic work: edge_black` line carries the measured per-eye figure from a real flight. Memory: 16 KB x 4 x 2 staging.
+
+*Tests.* tools\edge_black_test (build.bat `:rig_edge_black_test`): the thresholds including the NaN and the boundaries, the region labels for both eyes, the clustering, the
+transient rule over a history (lit-black-lit, lit-black-black-lit, a black of three frames, a dim neighbour, a frame missing, a resize), black-start, the window, the event cap,
+the exact lines, the production shader on WARP against a synthetic eye texture (a scripted flash at the cells it should come out at, a sub-region of the texture, a mirrored
+eye, a resize in the middle of a flash, a format and a bind the watch refuses), and tools\edge_black_fixture.log held byte for byte; tools\native_temporal_test (the hook is
+fed per eye, closed once); tools\temporal_shader_build (the shader's contract and reflection); the log tool's `--self-test` (`--tally edge`).
+
+**Protocol.** The same flat low flight, on the cropped Crystal Super (or the Quest 3 via VD), the pilot counting flashes over a segment of known length, ideally two or three
+segments of about 4 minutes. Read `--tally edge` for the segment: events at about the pilot's count (same eye and corner where the pilot can say) are H-image, and border=0
+events are the late-tile signature; zero events with flashes seen is H-after (the next question is then the vendor compositor, with the runtime's own reprojection as the
+first suspect); a few events and many flashes is a threshold question (check `black-start` and `transient points`, which the thresholds cannot hide). Not flown.
+
+**The remedy, if H-gen-edge** (not built; waits for the flight). Elite needs to prepare terrain beyond what it shows. Either (a) widen only what the terrain culler reads, the
+old guard's route (removed 2026-10-09, never proved: the watch now gives an objective count of black events to test it against), or (b) render a margin beyond the cropped field
+and crop it, which is certain and costs pixels (the full uncropped field is 1.20 times as wide and 1.23 times as tall in tangent space as the crop, from the m00 and m11 above, so about 1.5 times the pixels at the
+same density; a margin of a few degrees costs correspondingly less, with the cropped view cut from it). The earlier plan of a temporary AA-off flight is superseded: the watch reads the image before EDVR's AA, so AA cannot be part of an event.

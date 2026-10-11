@@ -8,6 +8,7 @@
     python tools/edvr_log.py --target frontier --tally vh
     python tools/edvr_log.py --target frontier --tally vh --frame 1
     python tools/edvr_log.py --target steam --tally pose
+    python tools/edvr_log.py --target steam --tally edge
     python tools/edvr_log.py --target frontier --tally periodic --expect-build HEAD
     python tools/edvr_log.py --target frontier --tally periodic --window-ms 250
     python tools/edvr_log.py --target frontier --tally periodic --infer-runs
@@ -68,6 +69,12 @@ came next, the fallbacks by reason, how many of each were turned more than 1 and
 the three signatures (H-late, H-stale, H-overshoot). It also tables the `pose arrival:` lines: per mode (next, slot, arrival) and thread, how many calls arrived between
 frames and were served before the next publish (Between), after it (Straddled), or while the frame rendered (Render, Other), their queue times, and where each class was
 located against the first frame published after it arrived (0p, +1p, +2p+, -1p-), with the calls above 1 and 2 degrees.
+
+--tally edge tables the edge-black watch (TEMPORARY, an always-on instrument of the cull-late-frames test build): the `edge black:` lines in the GRAPHICS log, which
+judge the texture Elite SUBMITS (before any EDVR pass) on a 64 x 64 grid per eye per frame for transient black, a point lit, black, lit. It tables the per-minute summaries,
+the listed events (eye, frame, time, size, centre, region, whether the cluster touches the grid edge, head speed) and the totals, with events per 4 minutes to set against
+the pilot's count of flashes. Events at about the pilot's rate mean the black is in Elite's own image; none while flashes are seen means it is added after EDVR submits
+(docs\terrain-culling.md). Exit 1 when the log has no such line.
 
 --tally periodic answers one question about one flight: which periodic work
 coincides with long frames. It reads the graphics log and the runtime log
@@ -1069,6 +1076,155 @@ def print_pose_arrival_tally(windows, notes):
     print("[edvr] How to read it: under `next`, between-frames calls answered at 0p AND at +1p are the mix -- the same place in Elite's pipeline, a period apart, so the cull pose jumps a "
           "period back and forth (a flash at either edge on a head turn). If Between calls are a real share of the between-frames calls on this runtime with calls above 1 degree, the mix "
           "explains the flashes and `arrival` (every between-frames call at +1p) should clear them; if nearly every between-frames call is Straddled here too, the mix is not it.")
+
+# --tally edge: the edge-black watch (src/d3d11/edge_black_core.h writes every line; tools\edge_black_test holds tools\edge_black_fixture.log, which this script's
+# --self-test reads, to exactly what it writes). TEMPORARY, an always-on instrument of the cull-late-frames test build (docs\terrain-culling.md, 2026-10-10). The watch
+# judges the texture Elite SUBMITS (stage game, before any EDVR pass) on a 64 x 64 grid per eye per frame, and writes to the GRAPHICS log:
+#
+#   edge black: watching stage game (...); the first 60 events are listed, a summary every 60 s.
+#   edge black: event eye=E frame=N t=HH:MM:SS.mmm points=K cells=WxH centre=X,Y region=R border=B head=H deg/s|unknown (...)[ clusters=C]
+#   edge black: 60 events listed; further events are counted in the summaries only.
+#   edge black: S s: frames N eyes-sampled M events E (outer-bottom a, outer-middle b, outer-top c, inner-bottom d, inner-middle e, inner-top f, centre g) largest K points;
+#       transient points total T; black-start points (black now, lit before, still black) B; samples lost L
+#   edge black: closed -- totals for the run: <the same counts>
+#   edge black: eye E is not watched: WHY (the submitted texture is FORMAT).
+#
+# An event is a frame-eye with at least three touching points that were lit, black, lit (or lit, black, black, lit) in the game's own submitted image.
+
+EDGE_REGIONS = ("outer-bottom", "outer-middle", "outer-top", "inner-bottom", "inner-middle", "inner-top", "centre")
+_EDGE_COUNTS = (r"frames (?P<frames>\d+) eyes-sampled (?P<eyes>\d+) events (?P<events>\d+) \(outer-bottom (?P<r0>\d+), outer-middle (?P<r1>\d+), outer-top (?P<r2>\d+), "
+                r"inner-bottom (?P<r3>\d+), inner-middle (?P<r4>\d+), inner-top (?P<r5>\d+), centre (?P<r6>\d+)\) largest (?P<largest>\d+) points; "
+                r"transient points total (?P<transient>\d+); black-start points \(black now, lit before, still black\) (?P<bstart>\d+); samples lost (?P<lost>\d+)")
+EDGE_WINDOW_RE = re.compile(r"edge black: (?P<secs>\d+) s: " + _EDGE_COUNTS)
+EDGE_CLOSE_RE = re.compile(r"edge black: closed -- totals for the run: " + _EDGE_COUNTS)
+EDGE_EVENT_RE = re.compile(r"edge black: event eye=(?P<eye>\d) frame=(?P<frame>\d+) t=(?P<t>\d\d:\d\d:\d\d\.\d\d\d) points=(?P<points>\d+) cells=(?P<cw>\d+)x(?P<ch>\d+) "
+                           r"centre=(?P<cx>[0-9.]+),(?P<cy>[0-9.]+) region=(?P<region>[a-z-]+) border=(?P<border>[01]) "
+                           r"head=(?:(?P<head>\d+) deg/s|unknown \([^)]*\))(?: clusters=(?P<clusters>\d+))?\s*$")
+EDGE_START_RE = re.compile(r"edge black: watching stage game")
+EDGE_CAP_RE = re.compile(r"edge black: (?P<n>\d+) events listed; further events are counted in the summaries only\.")
+EDGE_UNWATCHED_RE = re.compile(r"edge black: eye (?P<eye>\d) is not watched: (?P<why>.*)$")
+
+
+def _edge_counts(m):
+    """The counts a summary or closing line carries, as a dict."""
+    c = {k: int(m.group(k)) for k in ("frames", "eyes", "events", "largest", "transient", "bstart", "lost")}
+    c["region"] = [int(m.group("r%d" % i)) for i in range(7)]
+    return c
+
+
+def parse_edge_black(text):
+    """Every `edge black:` line, in order. Returns a dict: start (the watch's start line, or None), events (a list of dicts: eye, frame, t, points, cells (w, h), centre (x, y),
+    region, border (bool), head (deg/s, None when unknown), clusters (1 when the line names none)), cap (the number of events the watch listed before it stopped listing, or
+    None), windows (one dict per summary: secs and the counts), close (the totals the closing line carries, or None when the log was cut off before it), unwatched (the
+    text of each `eye E is not watched` note), sums (False when a window's region counts do not add up to its events)."""
+    out = {"start": None, "events": [], "cap": None, "windows": [], "close": None, "unwatched": [], "sums": True}
+    for line in text.splitlines():
+        if "edge black:" not in line:
+            continue
+        m = EDGE_EVENT_RE.search(line)
+        if m:
+            out["events"].append({"eye": int(m.group("eye")), "frame": int(m.group("frame")), "t": m.group("t"), "points": int(m.group("points")),
+                                  "cells": (int(m.group("cw")), int(m.group("ch"))), "centre": (float(m.group("cx")), float(m.group("cy"))), "region": m.group("region"),
+                                  "border": m.group("border") == "1", "head": int(m.group("head")) if m.group("head") is not None else None,
+                                  "clusters": int(m.group("clusters")) if m.group("clusters") is not None else 1})
+            continue
+        m = EDGE_WINDOW_RE.search(line)
+        if m:
+            w = _edge_counts(m)
+            w["secs"] = int(m.group("secs"))
+            if sum(w["region"]) != w["events"]:
+                out["sums"] = False
+            out["windows"].append(w)
+            continue
+        m = EDGE_CLOSE_RE.search(line)
+        if m:
+            out["close"] = _edge_counts(m)
+            continue
+        m = EDGE_CAP_RE.search(line)
+        if m:
+            out["cap"] = int(m.group("n"))
+            continue
+        m = EDGE_UNWATCHED_RE.search(line)
+        if m:
+            out["unwatched"].append("eye %s is not watched: %s" % (m.group("eye"), m.group("why")))
+            continue
+        if EDGE_START_RE.search(line) and out["start"] is None:
+            out["start"] = line.split("edge black:", 1)[1].strip()
+    return out
+
+
+def tally_edge_black(parsed):
+    """The --tally edge numbers. Totals come from the closing line when the log has one, and are summed over the windows (flagged as such) when it does not. Returns a dict:
+    total (the counts), from_close, minutes (the windows' lengths summed), per_region (the listed events by region), border (listed events touching the grid's edge) and inner
+    (those that do not), by_eye, head (the listed events' known head speeds, in deg/s), unknown_head, multi (listed events with more than one cluster) and mismatch (the
+    closing totals differ from the windows' sum)."""
+    windows = parsed["windows"]
+    summed = {"frames": 0, "eyes": 0, "events": 0, "transient": 0, "bstart": 0, "lost": 0, "largest": 0, "region": [0] * 7}
+    for w in windows:
+        for k in ("frames", "eyes", "events", "transient", "bstart", "lost"):
+            summed[k] += w[k]
+        summed["largest"] = max(summed["largest"], w["largest"])
+        summed["region"] = [a + b for a, b in zip(summed["region"], w["region"])]
+    close = parsed["close"]
+    events = parsed["events"]
+    heads = [e["head"] for e in events if e["head"] is not None]
+    return {"total": close if close else summed, "from_close": close is not None, "summed": summed, "minutes": sum(w["secs"] for w in windows) / 60.0,
+            "per_region": [sum(1 for e in events if e["region"] == r) for r in EDGE_REGIONS], "border": sum(1 for e in events if e["border"]),
+            "inner": sum(1 for e in events if not e["border"]), "by_eye": [sum(1 for e in events if e["eye"] == i) for i in range(2)], "head": heads,
+            "unknown_head": sum(1 for e in events if e["head"] is None), "multi": sum(1 for e in events if e["clusters"] > 1),
+            "mismatch": bool(close) and any(close[k] != summed[k] for k in ("frames", "eyes", "events", "transient", "bstart", "lost"))}
+
+
+def print_edge_black_tally(parsed):
+    """The --tally edge report. Returns the process exit code: 1 when the log has no `edge black:` line."""
+    if parsed["start"] is None and not parsed["windows"] and not parsed["events"] and parsed["close"] is None and not parsed["unwatched"]:
+        print("[edvr] no `edge black:` lines in this log: a build without the edge-black watch (it is always on and writes a start line, a summary every 60 s and a closing line), or the "
+              "graphics log of another run -- this tally reads --tag gfx.")
+        return 1
+    r = tally_edge_black(parsed)
+    t = r["total"]
+    print("[edvr] tally edge: %d one-minute summary line(s) over %.1f min, %d event line(s)%s; totals %s" % (
+        len(parsed["windows"]), r["minutes"], len(parsed["events"]),
+        " (the watch stopped listing at %d; the rest are in the summaries)" % parsed["cap"] if parsed["cap"] is not None else "",
+        "from the closing line" if r["from_close"] else "summed over the windows (no closing line: the run did not end cleanly, or the log was cut off)"))
+    if parsed["start"] is None:
+        print("[edvr] no start line in this log (a log cut at the front, or the watch never saw a texture it could sample).")
+    else:
+        print("[edvr] %s" % parsed["start"])
+    for note in parsed["unwatched"]:
+        print("[edvr] edge black: %s" % note)
+    if r["mismatch"]:
+        print("[edvr] the closing totals differ from the sum of the summaries (a summary line is missing, or the log was edited).")
+    if not parsed["sums"]:
+        print("[edvr] a summary whose region counts do not add up to its events (a cut-off or edited log?).")
+    if parsed["windows"]:
+        print("%4s %5s %8s %9s %7s  %-37s %8s %10s %12s %5s" % ("win", "secs", "frames", "eyes", "events", "ob/om/ot/ib/im/it/c", "largest", "transient", "black-start", "lost"))
+        for i, w in enumerate(parsed["windows"], 1):
+            print("%4d %5d %8d %9d %7d  %-37s %8d %10d %12d %5d" % (i, w["secs"], w["frames"], w["eyes"], w["events"], "/".join(str(v) for v in w["region"]), w["largest"],
+                                                                     w["transient"], w["bstart"], w["lost"]))
+    minutes = r["minutes"] if r["minutes"] > 0 else None
+    print("[edvr] totals: frames %d, eyes sampled %d, events %d (%s), largest %d point(s), transient points %d, black-start points %d, samples lost %d." % (
+        t["frames"], t["eyes"], t["events"], ", ".join("%s %d" % (name, n) for name, n in zip(EDGE_REGIONS, t["region"])), t["largest"], t["transient"], t["bstart"], t["lost"]))
+    if minutes:
+        print("[edvr] events per minute %.2f, per 4 minutes %.1f." % (t["events"] / minutes, 4.0 * t["events"] / minutes))
+    events = parsed["events"]
+    if events:
+        print("%4s %-3s %9s %-12s %6s %7s %-11s %-13s %-6s %-9s" % ("#", "eye", "frame", "t", "points", "cells", "centre", "region", "border", "head deg/s"))
+        for i, e in enumerate(events, 1):
+            print("%4d %-3d %9d %-12s %6d %7s %-11s %-13s %-6d %-9s%s" % (i, e["eye"], e["frame"], e["t"], e["points"], "%dx%d" % e["cells"], "%.2f,%.2f" % e["centre"],
+                                                                         e["region"], 1 if e["border"] else 0, str(e["head"]) if e["head"] is not None else "unknown",
+                                                                         ("  clusters=%d" % e["clusters"]) if e["clusters"] > 1 else ""))
+        head = r["head"]
+        med = statistics.median(head) if head else None
+        print("[edvr] the %d listed event(s): eye 0 %d, eye 1 %d; touching the grid's edge (border=1) %d, floating inside the view (border=0) %d; more than one cluster %d; "
+              "head speed median %s deg/s over %d known, unknown %d." % (len(events), r["by_eye"][0], r["by_eye"][1], r["border"], r["inner"], r["multi"],
+                                                                         ("%.0f" % med) if med is not None else "n/a", len(head), r["unknown_head"]))
+    print("[edvr] How to read it: this is the image Elite SUBMITS, before any EDVR pass. Events here at about the rate the pilot counts flashes (same segment, same ground) mean the black is "
+          "IN Elite's own image (H-image; border=0 events are black shapes floating inside the view with terrain around them, the signature of tiles generated or selected late, "
+          "H-gen-edge). No events while the pilot sees flashes means the black is added after EDVR submits (H-after). Black-start points are black now, lit before and still "
+          "black: a horizon or a dark object moving in, the control that is not a flash.")
+    return 0
+
 
 # --camera-census: the VR camera census (advanced.vr_camera_census), one flight
 # in the VR profile with the key on. The question it answers (design doc section
@@ -9972,9 +10128,11 @@ def main(argv=None):
                     help="print only lines matching this regular expression")
     ap.add_argument("--tail", type=int, default=None,
                     help="print only the last N lines (after --grep)")
-    ap.add_argument("--tally", choices=["vh", "periodic", "pose"], default=None,
+    ap.add_argument("--tally", choices=["vh", "periodic", "pose", "edge"], default=None,
                     help="aggregate instead of dumping: pose tables the `pose gap:` "
                          "lines of the runtime log by caller; "
+                         "edge tables the `edge black:` lines of the graphics log (the black "
+                         "transients the watch found in the texture Elite submits); "
                          "vh counts eye-texture "
                          "DC lines per vh= hash, split by r= render-target "
                          "token, with the DC frame summaries as totals; "
@@ -10202,6 +10360,8 @@ def main(argv=None):
         return print_periodic_report(path, text, ver, want, args, native_dirs)
     if args.tally == "pose":
         return print_pose_tally(text)
+    if args.tally == "edge":
+        return print_edge_black_tally(parse_edge_black(text))
     if args.tally:
         return print_vh_tally(text, args.frame)
 
@@ -10655,6 +10815,8 @@ def self_test():
     if not self_test_pose_slot():
         ok = False
     if not self_test_pose_arrival():
+        ok = False
+    if not self_test_edge_black():
         ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
@@ -11166,6 +11328,157 @@ def self_test_pose_arrival():
         rc, out = run(["--dir", logs, "--tally", "pose"])
         if rc != 0 or "1 call(s) never met a first frame after arrival" not in out:
             fail("unresolved calls are not said -> rc %d:\n%s" % (rc, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
+EDGE_FIXTURE = "edge_black_fixture.log"
+
+
+def self_test_edge_black():
+    """--tally edge on tools\\edge_black_fixture.log (which tools\\edge_black_test holds to exactly what src/d3d11/edge_black_core.h writes for the scripted run: 27000 frames
+    of both eyes at 11 ms, a 5 x 6 black square every 400th frame in eye 0's outer-bottom corner and a 4 x 4 one for two frames in eye 1's inner-top, a horizon band that makes
+    5120 black-start points and no transients; 119 events, the first 60 listed, five summaries -- the last cut short at 57 s -- and the closing totals), then on lines altered to
+    break each thing the report depends on. Returns ok."""
+    ok = True
+
+    def fail(message):
+        nonlocal ok
+        print("self_test_edge_black: %s" % message)
+        ok = False
+
+    import contextlib
+    import io
+    import shutil
+    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), EDGE_FIXTURE)
+    if not os.path.isfile(fixture):
+        fail("the fixture %s is missing beside this script" % EDGE_FIXTURE)
+        return False
+    text = read_text(fixture)
+    p = parse_edge_black(text)
+    if p["start"] is None or not p["start"].startswith("watching stage game (the texture Elite submits, before any EDVR pass): a 64x64 grid per eye each frame") \
+            or "readback 4 frames deep" not in p["start"]:
+        fail("the start line -> %r" % (p["start"],))
+    if len(p["events"]) != 60 or p["cap"] != 60 or len(p["windows"]) != 5 or p["close"] is None or p["unwatched"] or not p["sums"]:
+        fail("the fixture parsed to %d events, cap %r, %d windows, close %r, unwatched %r, sums %r; want 60, 60, 5, a closing line, none, True"
+             % (len(p["events"]), p["cap"], len(p["windows"]), p["close"], p["unwatched"], p["sums"]))
+        return False
+    e0, e1 = p["events"][0], p["events"][1]
+    if e0 != {"eye": 0, "frame": 301, "t": "10:00:07.211", "points": 30, "cells": (5, 6), "centre": (0.04, 0.95), "region": "outer-bottom", "border": True, "head": 40, "clusters": 1}:
+        fail("the first event parsed to %r" % (e0,))
+    if e1 != {"eye": 1, "frame": 601, "t": "10:00:10.511", "points": 16, "cells": (4, 4), "centre": (0.09, 0.16), "region": "inner-top", "border": False, "head": 70, "clusters": 1}:
+        fail("the second event (eye 1, a square floating inside the view) parsed to %r" % (e1,))
+    if [e["frame"] for e in p["events"] if e["head"] is None] != [1901, 5501, 9101, 12701]:
+        fail("the events with no known head speed -> %r" % ([e["frame"] for e in p["events"] if e["head"] is None],))
+    close = p["close"]
+    if (close["frames"], close["eyes"], close["events"], close["largest"], close["transient"], close["bstart"], close["lost"], close["region"]) \
+            != (27000, 54000, 119, 30, 3714, 5120, 0, [67, 0, 0, 0, 0, 52, 0]):
+        fail("the closing totals parsed to %r" % (close,))
+    w = p["windows"]
+    if [x["secs"] for x in w] != [60, 60, 60, 60, 57] or [x["events"] for x in w] != [24, 25, 22, 26, 22] or [x["bstart"] for x in w] != [0, 0, 5120, 0, 0] \
+            or w[0]["region"] != [14, 0, 0, 0, 0, 10, 0] or w[4]["frames"] != 5179 or w[0]["eyes"] != 10911:
+        fail("the summaries parsed to %r" % ([(x["secs"], x["events"], x["bstart"]) for x in w],))
+    r = tally_edge_black(p)
+    if not r["from_close"] or r["total"] != r["summed"] or r["mismatch"] or abs(r["minutes"] - 297.0 / 60.0) > 1e-9:
+        fail("the totals (the closing line's against the windows' sum) -> %r" % ({k: v for k, v in r.items() if k not in ("head",)},))
+    if (r["border"], r["inner"], r["by_eye"], r["unknown_head"], r["multi"], r["per_region"]) != (34, 26, [34, 26], 4, 0, [34, 0, 0, 0, 0, 26, 0]) or len(r["head"]) != 56:
+        fail("the listed events' split -> %r" % ({k: v for k, v in r.items() if k not in ("total", "summed", "head")},))
+
+    # A line altered: an event with no head speed and two clusters; an unknown-head event parses; a log with no closing line sums its windows; a missing summary is a mismatch;
+    # region counts that do not add up are flagged; a "not watched" note is carried.
+    first = [l for l in text.splitlines() if "edge black: event" in l][0]
+    multi = text.replace(first, first.replace("head=40 deg/s", "head=unknown (no head pose known to the graphics half) clusters=2"), 1)
+    mp = parse_edge_black(multi)
+    if mp["events"][0]["head"] is not None or mp["events"][0]["clusters"] != 2 or len(mp["events"]) != 60 or tally_edge_black(mp)["multi"] != 1 or tally_edge_black(mp)["unknown_head"] != 5:
+        fail("an event with no known head speed and two clusters parsed to %r" % (mp["events"][0],))
+    cut = "\n".join(l for l in text.splitlines() if "closed -- totals" not in l) + "\n"
+    cp = parse_edge_black(cut)
+    cr = tally_edge_black(cp)
+    if cp["close"] is not None or cr["from_close"] or cr["total"] != cr["summed"] or cr["total"]["events"] != 119 or cr["mismatch"]:
+        fail("a log with no closing line -> %r" % (cr["total"],))
+    lost = "\n".join(l for l in text.splitlines() if "edge black: 60 s: frames 5455 eyes-sampled 10910 events 25 " not in l) + "\n"
+    lr = tally_edge_black(parse_edge_black(lost))
+    if not lr["mismatch"] or lr["total"]["events"] != 119 or lr["summed"]["events"] != 94:
+        fail("a log missing one summary line: mismatch %r, totals %r, summed events %r" % (lr["mismatch"], lr["total"]["events"], lr["summed"]["events"]))
+    broken = text.replace("events 24 (outer-bottom 14,", "events 24 (outer-bottom 13,", 1)
+    if parse_edge_black(broken)["sums"]:
+        fail("a summary whose region counts add up to 23 of 24 events was not flagged")
+    note = "[00:00:00.002] edge black: eye 1 is not watched: the texture is multisampled (the submitted texture is R16G16B16A16_FLOAT).\n"
+    np_ = parse_edge_black(note + text)
+    if np_["unwatched"] != ["eye 1 is not watched: the texture is multisampled (the submitted texture is R16G16B16A16_FLOAT)."] or len(np_["events"]) != 60:
+        fail("a `not watched` note -> %r" % (np_["unwatched"],))
+    if parse_edge_black("[00:00:00.001] pose slot: tid 1 mode next calls 0\n[00:00:00.002] luma probe: stage game 5424x5356\n") != {
+            "start": None, "events": [], "cap": None, "windows": [], "close": None, "unwatched": [], "sums": True}:
+        fail("lines of another instrument parsed as edge-black lines")
+
+    # Through main(), on a directory the tool discovers on its own: the graphics log is the default.
+    head = "[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-09 12:00:00 UTC\n"
+    tmp = tempfile.mkdtemp(prefix="edvr_edgeblack_selftest_")
+    try:
+        logs = os.path.join(tmp, "edvr_logs")
+        os.makedirs(logs)
+
+        def run(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        name = os.path.join(logs, "edvr_gfx_20261010_120000.log")
+        with open(name, "wb") as f:
+            f.write((head + text).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "edge"])
+        for want in ("[edvr] tally edge: 5 one-minute summary line(s) over 5.0 min, 60 event line(s) (the watch stopped listing at 60; the rest are in the summaries); totals from the closing line",
+                     "[edvr] watching stage game (the texture Elite submits, before any EDVR pass): a 64x64 grid per eye each frame",
+                     " win  secs   frames      eyes  events  ob/om/ot/ib/im/it/c                    largest  transient  black-start  lost",
+                     "   1    60     5456     10911      24  14/0/0/0/0/10/0                             30        760            0     0",
+                     "   3    60     5455     10910      22  14/0/0/0/0/8/0                              30        714         5120     0",
+                     "   5    57     5179     10359      22  12/0/0/0/0/10/0                             30        690            0     0",
+                     "[edvr] totals: frames 27000, eyes sampled 54000, events 119 (outer-bottom 67, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top 52, centre 0), "
+                     "largest 30 point(s), transient points 3714, black-start points 5120, samples lost 0.",
+                     "[edvr] events per minute 24.04, per 4 minutes 96.2.",
+                     "   1 0         301 10:00:07.211     30     5x6 0.04,0.95   outer-bottom  1      40       ",
+                     "   2 1         601 10:00:10.511     16     4x4 0.09,0.16   inner-top     0      70       ",
+                     "   9 0        1901 10:00:24.811     30     5x6 0.04,0.95   outer-bottom  1      unknown  ",
+                     "[edvr] the 60 listed event(s): eye 0 34, eye 1 26; touching the grid's edge (border=1) 34, floating inside the view (border=0) 26; more than one cluster 0; "
+                     "head speed median 70 deg/s over 56 known, unknown 4.",
+                     "IN Elite's own image (H-image; border=0 events are black shapes floating inside the view",
+                     "No events while the pilot sees flashes means the black is added after EDVR submits (H-after)."):
+            if want not in out:
+                fail("--tally edge output lacks %r:\n%s" % (want, out))
+        if rc != 0:
+            fail("--tally edge exited %d" % rc)
+        if "no start line" in out or "closing totals differ" in out or "do not add up" in out:
+            fail("--tally edge flagged a clean fixture:\n%s" % out)
+        # No closing line, a missing summary, a summary that does not add up, a note.
+        for label, body, wants in (
+                ("no closing line", cut, ("summed over the windows (no closing line: the run did not end cleanly, or the log was cut off)",)),
+                ("a missing summary", lost, ("[edvr] the closing totals differ from the sum of the summaries",)),
+                ("region counts that do not add up", broken, ("a summary whose region counts do not add up to its events",)),
+                ("a not-watched note", note + text, ("[edvr] edge black: eye 1 is not watched: the texture is multisampled",)),
+                ("an unknown head with two clusters", multi, ("  clusters=2", "unknown 5."))):
+            with open(name, "wb") as f:
+                f.write((head + body).encode("utf-8"))
+            rc, out = run(["--dir", logs, "--tally", "edge"])
+            if rc != 0 or any(want not in out for want in wants):
+                fail("%s -> rc %d, output lacks one of %r:\n%s" % (label, rc, wants, out))
+        # A watch that ran for a minute and saw nothing still writes its start line and summary: zero events is a report, not an error.
+        quiet_lines = [l for l in text.splitlines() if "edge black: event" not in l and "events listed" not in l]
+        quiet = "\n".join(l.replace("events 24 (outer-bottom 14, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top 10", "events 0 (outer-bottom 0, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top 0")
+                          for l in quiet_lines[:2]) + "\n"
+        with open(name, "wb") as f:
+            f.write((head + quiet).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "edge"])
+        if rc != 0 or "tally edge: 1 one-minute summary line(s) over 1.0 min, 0 event line(s)" not in out or "events per minute 0.00, per 4 minutes 0.0." not in out \
+                or "the listed event(s)" in out:
+            fail("a log with a start line and a zero-event summary -> rc %d:\n%s" % (rc, out))
+        # A log with no edge-black line: exit 1 and the reason.
+        with open(name, "wb") as f:
+            f.write((head + "[00:00:00.002] pose gap: tid 1 calls 1\n").encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "edge"])
+        if rc != 1 or "no `edge black:` lines in this log" not in out:
+            fail("a log with no edge black line -> rc %d:\n%s" % (rc, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return ok

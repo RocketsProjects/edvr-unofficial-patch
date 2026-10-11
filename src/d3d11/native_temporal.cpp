@@ -8,6 +8,7 @@
 #include "ui_surfaces.h"
 #include "vr_world_route.h"    // the VR world route: does it own the next frame, did the layer take this eye
 #include "vscreen.h"           // vScreenClearRenderTargetViewRaw: the black frame's one clear
+#include "edge_black.h"       // the edge-black watch (docs/terrain-culling.md): the game's submitted eye, sampled before any pass of ours
 #include "vr_camera_census.h"   // nativeTemporalEyeGeometry's declaration, so its definition below is checked against it
 #include "../common/config.h"
 #include "../common/frame_flag.h"
@@ -15,6 +16,7 @@
 #include "../common/temporal_mode.h"
 #include "../common/supersample_math.h"
 #include "../common/log.h"
+#include "../common/guard.h"
 
 #include <atomic>
 #include <cmath>
@@ -416,6 +418,9 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // fix.ui_quality's eye check (ui_layer.h): what the game submitted for
   // this eye, the one authority on which eye is which.
   edvr::uiLayerNoteSubmitted(seq,eye,source);
+  // The edge-black watch (edge_black.h; TEMPORARY, an always-on instrument of this test build): what the GAME submitted for this eye, before any pass of ours
+  // and whether or not the temporal pass is on. Never blocks, never fails the submit.
+  edvr::guarded("edge black",[&]{edvr::edgeBlackSample(s->device,source,int(eye),seq,region,flipU,flipV,s->head);});
   if (eye==0) {
     edvr::announceEyeTextureSize(w,h);
     const float outer=-s->frusta[0][0], inner=s->frusta[0][1];
@@ -525,6 +530,7 @@ HRESULT WINAPI close(void* p){
       (unsigned long long)s->layerOnly,(unsigned long long)s->layerOnlyDeclined);
   edvr::Log::get().note("native temporal omissions: skipped=%llu, history_kept=%llu, returned_resets=%llu, unjudged_resets=%llu.",
       (unsigned long long)s->skipped,(unsigned long long)s->spared,(unsigned long long)s->returned,(unsigned long long)s->unjudged);
+  edvr::edgeBlackClose();   // the watch's open window and its totals
   reset(*s);releaseBlank(s->blank[0]);releaseBlank(s->blank[1]);s->active=false;s->begun=false;s->device=nullptr;
   if(current==s){current=nullptr;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);}return S_OK;
 }

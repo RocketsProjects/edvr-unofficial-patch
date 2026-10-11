@@ -67,6 +67,14 @@ static std::vector<Variant> siblingVariants() {
     };
 }
 
+// The edge-black watch's grid sampler (src/d3d11/edge_black_shader.h; docs/terrain-culling.md, 2026-10-10): one new compute shader, held to its own contract in
+// the self-test (symbol, source name, entry, profile, the text, the thread group and the three bindings).
+static std::vector<Variant> edgeBlackVariants() {
+    return {
+        {"kEdgeBlackBytecode", "edge black", "main", nullptr, {}, false, edvr::kEdgeBlackCs, "cs_5_0"},
+    };
+}
+
 static std::vector<LegacyContract> coreLegacyContracts() {
     return {
         {"ui_layer_composite_cs", "main", "cs_5_0", nullptr, 0x237EEBB920BC9015ull},

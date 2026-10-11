@@ -75,6 +75,13 @@ namespace edvr{void breadcrumb(const char*){}}
 namespace edvr{void uiLayerNoteTemporal(uint64_t seq,uint32_t eye,const void* out){++uiLayerNotes;uiLayerNoteSeq=seq;uiLayerNoteEye=eye;uiLayerNoteOut=out;}
 void uiLayerNoteSubmitted(uint64_t,uint32_t eye,const void* submitted){++uiLayerSubmits;if(eye<2)uiLayerSubmitted[eye]=submitted;}
 void vrWorldRouteNoteSceneReset(){++worldRouteSceneResets;}}
+// The edge-black watch (src/d3d11/edge_black.cpp, docs/terrain-culling.md), which treat() feeds every eye with what the game submitted, before any pass of
+// ours: recorded here, asserted below. It is the real thing's job to judge; this rig holds only that it is fed, with the right eye, sequence and region.
+unsigned edgeBlackSamples=0,edgeBlackCloses=0;int edgeBlackEyeSeen[2]{};uint64_t edgeBlackLastSeq=0;uint32_t edgeBlackLastRegion[4]{};bool edgeBlackLastFlipU=false;
+namespace edvr{
+void edgeBlackSample(ID3D11Device*,ID3D11Texture2D*,int eye,uint64_t seq,const uint32_t region[4],bool flipU,bool,const float*){
+  ++edgeBlackSamples;if(eye>=0&&eye<2)++edgeBlackEyeSeen[eye];edgeBlackLastSeq=seq;edgeBlackLastFlipU=flipU;std::memcpy(edgeBlackLastRegion,region,16);}
+void edgeBlackClose(){++edgeBlackCloses;}}
 // The served floor's NGX query (dlaa.cpp), shaped the way the flights'
 // modes lines read (edvr_gfx_20260923_153446.log line 435): quality,
 // balanced and performance take half the output up to the output, ultra
@@ -307,6 +314,8 @@ void run(){
    check(edvr::nativeTemporalEyeGeometry(0,nullptr,nullptr,nullptr),"a caller may ask for any subset of the answer");}
   check(uiLayerNotes>=3&&uiLayerNoteSeq==2&&uiLayerNoteEye==0&&uiLayerNoteOut==source.Get(),"each treated eye is noted to the UI layer with the pass's output");
   check(uiLayerSubmits>=3&&uiLayerSubmitted[0]==source.Get()&&uiLayerSubmitted[1]==source.Get(),"the game's submitted texture is noted per eye for the UI layer's eye check");
+  check(edgeBlackSamples>=3&&edgeBlackEyeSeen[0]>=1&&edgeBlackEyeSeen[1]>=1&&edgeBlackLastSeq==2&&edgeBlackLastRegion[2]>edgeBlackLastRegion[0]&&edgeBlackLastRegion[3]>edgeBlackLastRegion[1],
+        "the edge-black watch is fed what the game submitted, each eye, with the frame's sequence and a non-empty region (before the pass, whether or not it is on)");
   check(std::fabs(c.jx)>.01f||std::fabs(c.jy)>.01f,"known-size jitter engaged");
   check(c.head&&closeFloat(c.offset[0],-.032f)&&closeFloat(c.currentHead[3],.1f)&&closeFloat(c.previousHead[3],0),"world path receives exact head pair and eye offset");
   check(c.motion&&closeFloat(c.translation[0],.1f)&&closeFloat(c.swapped[0],.1f)&&closeFloat(c.delta[0],1),"pure translation expected reprojection");
@@ -328,7 +337,9 @@ void run(){
   f=frame(11,8);p=begin(t,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"flipped eye suppresses jitter");
   check(treat(t,8,0,source.Get())==S_OK&&(calls.back().flags&1),"unflipped image resets history");
   f=frame(11,9);begin(t,f,false);check(treat(t,9,0,source.Get())==E_PENDING,"no projection query cannot justify jittered image metadata");
+  const unsigned closesBefore=edgeBlackCloses;
   check(t.close(t.context)==S_OK&&t.close(t.context)==S_FALSE,"idempotent CPU close");
+  check(edgeBlackCloses==closesBefore+1,"the edge-black watch is told the channel closed, once (the second close finds nothing to close)");
   warmDev=reinterpret_cast<ID3D11Device*>(1);warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target once the channel closes");
   {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn)&&!edvr::nativeTemporalAsked(&rw,&rh)&&!edvr::nativeTemporalTrueVerticalTangents(&u,&dn),"no recommendation, frustum, ask or true frustum once the channel closes");}

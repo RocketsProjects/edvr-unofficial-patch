@@ -28,6 +28,7 @@
 #include "../../src/d3d11/night_vision_shader.h"
 #include "../../src/d3d11/stellar_coverage.h"
 #include "../../src/d3d11/supercruise_bars_shader.h"
+#include "../../src/d3d11/edge_black_shader.h"   // the edge-black watch's grid sampler (src/d3d11/edge_black.cpp)
 #include "../../src/openxr/stereo_shader_source.h"
 
 namespace fs = std::filesystem;
@@ -312,6 +313,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), supercruise.begin(), supercruise.end());
     const auto sibling = siblingVariants();
     variants.insert(variants.end(), sibling.begin(), sibling.end());
+    const auto edgeBlack = edgeBlackVariants();
+    variants.insert(variants.end(), edgeBlack.begin(), edgeBlack.end());
     return variants;
 }
 
@@ -572,8 +575,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 14 && coreFixed.size() == 63 && coreLegacy.size() + 14 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader and the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two) are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 14 && coreFixed.size() == 64 && coreLegacy.size() + 15 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two) and the edge-black watch's grid sampler are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -771,6 +774,40 @@ static void selfTest() {
                 }
                 check(bound, "each sibling-pass shader keeps its inputs and outputs at the slots the runtime sets them at");
             }
+        }
+    }
+
+    // The edge-black watch's grid sampler (src/d3d11/edge_black_shader.h, edge_black.cpp): new, held to its own contract -- the symbol, source name, entry,
+    // profile and flags, the text it compiles, the 8 x 8 thread group the watch dispatches 8 x 8 of (4096 points, one thread each), and the three slots
+    // edge_black.cpp binds: the game's texture at t0, the output buffer at u0 and the 32-byte parameter block at b0.
+    {
+        auto& shader = coreFixed[coreLegacy.size() + 14];
+        check(!std::strcmp(shader.symbol, "kEdgeBlackBytecode") && !std::strcmp(shader.sourceName, "edge black") && !std::strcmp(shader.entry, "main") &&
+              !std::strcmp(shader.profile, "cs_5_0") && shader.alternate == edvr::kEdgeBlackCs && shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+              "the edge-black grid sampler has its distinct symbol and exact source/stage contract");
+        check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+              "the edge-black grid sampler compiles to fixed DXBC");
+        if (reflect && !shader.bytes.empty()) {
+            ComPtr<ID3D11ShaderReflection> reflection;
+            D3D11_SHADER_DESC desc{};
+            const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()));
+            UINT x = 0, y = 0, z = 0;
+            const UINT threads = reflection ? reflection->GetThreadGroupSize(&x, &y, &z) : 0;
+            check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) && D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_COMPUTE_SHADER &&
+                  D3D11_SHVER_GET_MAJOR(desc.Version) == 5 && threads == 64 && x == 8 && y == 8 && z == 1,
+                  "the edge-black grid sampler reflects as a Shader Model 5 compute shader with 8 x 8 threads a group, the group the watch dispatches 8 x 8 of");
+            struct Binding { const char* name; D3D_SHADER_INPUT_TYPE type; UINT slot; };
+            const Binding bindings[] = {{"Src", D3D_SIT_TEXTURE, 0}, {"Out", D3D_SIT_UAV_RWSTRUCTURED, 0}, {"P", D3D_SIT_CBUFFER, 0}};
+            bool bound = reflection != nullptr && desc.BoundResources == 3;
+            for (size_t j = 0; reflection && j < 3; ++j) {
+                D3D11_SHADER_INPUT_BIND_DESC bind{};
+                bound = bound && SUCCEEDED(reflection->GetResourceBindingDescByName(bindings[j].name, &bind)) && bind.Type == bindings[j].type &&
+                        bind.BindPoint == bindings[j].slot && bind.BindCount == 1;
+            }
+            D3D11_SHADER_BUFFER_DESC bufferDesc{};
+            ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName("P") : nullptr;
+            check(bound && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 32,
+                  "...reading the game's texture at t0, writing the output buffer at u0 and reading one 32-byte parameter block at b0, and nothing else");
         }
     }
 

@@ -569,6 +569,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
+    "src\d3d11\edge_black.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
@@ -1803,6 +1804,21 @@ cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: luma_probe_test build failed & exit /b 1 )
 "%OBJ%\lumaprobetest\luma_probe_test.exe" --dry-run || exit /b 1
 "%OBJ%\lumaprobetest\luma_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_edge_black_test
+echo [edvr] === edge-black watch: the transient rule, the grid shader on WARP, the exact log lines ===
+REM The production edge_black.cpp included directly with stubs for the log and the shader job; the pure judgement (edge_black_core.h) case by case, the
+REM production compute shader (the build's own bytecode, hence /I GEN) on WARP, and tools\edge_black_fixture.log held to what the core writes.
+if not exist "%OBJ%\edgeblacktest" mkdir "%OBJ%\edgeblacktest"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 /I"%GEN%" ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\edgeblacktest\\" /Fe"%OBJ%\edgeblacktest\edge_black_test.exe" ^
+    "tools\edge_black_test\edge_black_test.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: edge_black_test build failed & exit /b 1 )
+"%OBJ%\edgeblacktest\edge_black_test.exe" --dry-run || exit /b 1
+"%OBJ%\edgeblacktest\edge_black_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_hologram_depth_test
