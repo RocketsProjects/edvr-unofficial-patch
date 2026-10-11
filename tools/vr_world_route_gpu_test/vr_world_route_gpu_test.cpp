@@ -222,6 +222,9 @@ bool engineVelocitySourceViews(ID3D11Texture2D* depth, EngineVelocityViews* out)
     return true;
 }
 ID3D11ShaderResourceView* weaponMotionView() { return g_weaponMapSrv.Get(); }
+// This isolated rig links vr_world_route.cpp without device_hook.cpp. Its
+// Legacy-on-foot scenarios keep the owner admitted while exercising the route.
+bool onFootPanelOwnerAllowed() noexcept { return true; }
 bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 bool dlaaAvailable(ID3D11Device*, const char**) { return true; }

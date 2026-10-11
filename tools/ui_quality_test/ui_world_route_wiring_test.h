@@ -127,7 +127,7 @@ std::vector<WirePin> vscreenCurvedPins(const std::string& text) {
     // forwardWithVerdict's curve branch: the substitution skips its own per-eye motion pass exactly when the route re-issues this draw, and a
     // swallowed draw goes to curvedScreenSwallowed with that same fact and returns, before the verdict's own Begin.
     pins.push_back({"curve-branch",
-                    inOrder(fwd, {"if(forwardInputs.read(forwardInputs.fact.curveThisDrawCurveGate,[&]{returng_state->curveThisDraw;},[&]{returng_state->curveThisDraw;})){g_state->curveThisDraw=false;", "constboollayered=uiLayer&&uiLayerBegin(self);",
+                    inOrder(fwd, {"if(g_state->onFootPanelOwnerAllowed&&forwardInputs.read(forwardInputs.fact.curveThisDrawCurveGate,[&]{returng_state->curveThisDraw;},[&]{returng_state->curveThisDraw;})){g_state->curveThisDraw=false;", "constboollayered=uiLayer&&uiLayerBegin(self);",
                                   "constboolswallowed=panelCurveSubstitute(self,g_state->realDrawIndexedInstanced,!worldReissue.on);",
                                   "if(layered)uiLayerEnd(self);if(swallowed){curvedScreenSwallowed(trace,self,v,count,instances,args,worldReissue.on);return;}",
                                   "if(v!=DrawVerdict::kNone){", "forwardVerdictBegin(self,v);"}) &&
@@ -147,8 +147,8 @@ std::vector<WirePin> vscreenCurvedPins(const std::string& text) {
     // What curvedScreenSwallowed does for a swallowed draw: the footprint behind its own flag; the recognition and the re-issue only for a frame the route owns.
     pins.push_back({"swallowed-gates",
                     inOrder(swallowed, {"if(self!=g_state->ownerCtx)return;",
-                                        "if(g_state->rtv0Eye&&count&&instances&&vscreenFootprintWanted())footprintEyeDraw(self,"
-                                        "v==DrawVerdict::kPanel?g_state->distanceScale:1.0f,args.base,args.startInstance);",
+                                        "runVScreenFootprintOwned(g_state,[&]{if(g_state->rtv0Eye&&count&&instances&&vscreenFootprintWanted())footprintEyeDraw(self,"
+                                        "v==DrawVerdict::kPanel?g_state->distanceScale:1.0f,args.base,args.startInstance);});",
                                         "if(!routeOwns)return;", "if(screenMotionLive())screenMotionRecognize();", "worldScreenReissueCurved(trace,self,'X',count,instances,args);"}) &&
                         countOf(swallowed, "footprintEyeDraw(") == 1 && countOf(swallowed, "screenMotionRecognize(") == 1 && countOf(swallowed, "worldScreenReissueCurved(") == 1,
                     "curvedScreenSwallowed: the owner context only; the footprint instrument only when it is armed (vscreenFootprintWanted); the recognition and the curved "
@@ -216,10 +216,10 @@ void testCurvedControls(const std::string& layerText, const std::string& vscreen
          "    if (screenMotionLive()) screenMotionRecognize();\n    if (!routeOwns) return;", "swallowed-gates"},
         {false, "the route's gate is gone", "    if (!routeOwns) return;\n", "", "swallowed-gates"},
         {false, "the footprint is called whether or not it is armed",
-         "    if (g_state->rtv0Eye && count && instances && vscreenFootprintWanted())\n        footprintEyeDraw(",
-         "    if (g_state->rtv0Eye && count && instances)\n        footprintEyeDraw(", "swallowed-gates"},
-        {false, "a deferred context is measured and re-issued too", "    if (self != g_state->ownerCtx) return;\n    if (g_state->rtv0Eye && count && instances",
-         "    if (g_state->rtv0Eye && count && instances", "swallowed-gates"},
+         "        if (g_state->rtv0Eye && count && instances && vscreenFootprintWanted())\n            footprintEyeDraw(",
+         "        if (g_state->rtv0Eye && count && instances)\n            footprintEyeDraw(", "swallowed-gates"},
+        {false, "a deferred context is measured and re-issued too", "    if (self != g_state->ownerCtx) return;\n    runVScreenFootprintOwned(g_state, [&] {",
+         "    runVScreenFootprintOwned(g_state, [&] {", "swallowed-gates"},
         {false, "the flat re-issue's End is told something", "uiLayerWorldReissueEnd(self);",
          "uiLayerWorldReissueEnd(self, true);", "flat-unchanged"},
         {false, "the flat call site loses its originalIssued term", "    if (worldReissue.on && originalIssued) {\n        worldScreenReissue(trace, self, kind, count, instances, args);",

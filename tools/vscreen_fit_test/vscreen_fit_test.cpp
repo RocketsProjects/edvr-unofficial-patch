@@ -1101,20 +1101,26 @@ void caseR12() {
         // from the swallowed path, on the owner context, for an eye draw, behind the same flag, and before the route's return.
         const std::string swallowed = functionBody(vs, "void curvedScreenSwallowed(");
         check(count(swallowed, "footprintEyeDraw(") == 1 && has(swallowed, "if (self != g_state->ownerCtx) return;") &&
+                  has(swallowed, "runVScreenFootprintOwned(g_state, [&] {") &&
                   has(swallowed, "if (g_state->rtv0Eye && count && instances && vscreenFootprintWanted())") &&
-                  before(swallowed, "if (self != g_state->ownerCtx) return;", "footprintEyeDraw(self,") && before(swallowed, "footprintEyeDraw(self,", "if (!routeOwns) return;"),
-              "R12f: the curved screen's swallowed draw calls the instrument once: owner context only, an eye draw, behind the same flag, whether or not the route owns the frame");
-        check(has(swallowed, "v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f, args.base, args.startInstance"),
+                  before(swallowed, "if (self != g_state->ownerCtx) return;", "runVScreenFootprintOwned(g_state, [&] {") &&
+                  before(swallowed, "runVScreenFootprintOwned(g_state, [&] {", "footprintEyeDraw(self,") &&
+                  before(swallowed, "footprintEyeDraw(self,", "if (!routeOwns) return;"),
+              "R12f: the curved screen's swallowed draw calls the instrument once: owner context and On-foot admission, an eye draw, behind the same flag, whether or not the route owns the frame");
+        check(has(swallowed, "footprintEyeDraw(self, v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f,\n                             args.base, args.startInstance);"),
               "R12f: and tells it the panel distance the draw's constants carry, with the draw's own base vertex and start instance");
         const std::string gate = functionBody(vs, "bool drawGateSubscribed(State* s) {");
         const std::string ownedGate = functionBody(vs, "#define EDVR_GATE_OWNED(name, expression)");
         const std::string dust = functionBody(vs, "id == SiteId::kSpaceDustSkip");
         const std::string registration = functionBody(vs, "bool registerLegacyDrawGates(State* state, std::uint32_t* registeredCount = nullptr) {");
         const std::string frameBoundary = functionBody(vs, "void vScreenFrameBoundary() {");
-        check(has(vs, "EDVR_GATE_GLOBAL(vscreen_footprint, vscreenFootprintWanted())"),
-              "R12g: the footprint adapter exposes its arming predicate as a named gate subscription");
-        check(has(vs, "{\"legacy.vscreen-footprint\", &drawGate_vscreen_footprint, false}"),
-              "R12g: the registry table includes the footprint adapter under its stable subscription name");
+        check(has(vs, "EDVR_GATE_ON_FOOT(vscreen_footprint, vscreenFootprintWanted())") &&
+                  has(vs, "EDVR_GATE_ON_FOOT(panel_curve, panelCurveWants())"),
+              "R12g: the footprint and panel-curve adapters expose owner-scoped arming predicates as named gate subscriptions");
+        check(has(vs, "{\"legacy.vscreen-footprint\", &drawGate_vscreen_footprint, true, LegacyGateOwner::OnFootPanel}") &&
+                  has(vs, "{\"legacy.panel-distance\", &drawGate_panel_distance, true, LegacyGateOwner::OnFootPanel}") &&
+                  has(vs, "{\"legacy.panel-curve\", &drawGate_panel_curve, true, LegacyGateOwner::OnFootPanel}"),
+              "R12g: footprint, panel distance and the panel-curve classifier are exact On-foot-owned legacy rows");
         check(has(vs, "{\"legacy.transition-flash-eye-count\", &drawGate_transition_flash_eye_count, true, LegacyGateOwner::Comfort}") &&
                   has(vs, "{\"legacy.remlok\", &drawGate_remlok, true, LegacyGateOwner::CockpitVisuals}") &&
                   has(vs, "{\"legacy.sun-glare\", &drawGate_sun_glare, true, LegacyGateOwner::CockpitOrComfort}") &&
@@ -1124,8 +1130,9 @@ void caseR12() {
                   has(vs, "{\"legacy.loader-panel\", &drawGate_loader_panel, true, LegacyGateOwner::Intro}") &&
                   has(vs, "{\"legacy.intro-panel\", &drawGate_intro_panel, true, LegacyGateOwner::Intro}") &&
                   has(vs, "{\"legacy.intro-curve\", &drawGate_intro_curve, true, LegacyGateOwner::Intro}") &&
-                  has(vs, "case LegacyGateOwner::Intro:\n        return state && state->introOwnerAllowed;"),
-              "R12g: Cockpit, Comfort, Intro and shared-glare rows carry precise ownership while unmarked rows remain Core");
+                  has(vs, "case LegacyGateOwner::Intro:\n        return state && state->introOwnerAllowed;") &&
+                  has(vs, "case LegacyGateOwner::OnFootPanel:\n        return state && state->onFootPanelOwnerAllowed;"),
+              "R12g: Cockpit, Comfort, Intro and On-foot rows carry precise ownership while unmarked rows remain Core");
         check(has(vs, "EDVR_GATE_OWNED(space_dust, spaceDustHidden())") &&
                   has(vs, "{\"legacy.space-dust\", &drawGate_space_dust, true, LegacyGateOwner::CockpitVisuals}") &&
                   has(ownedGate, "runCockpitVisualsOwned(s && s->cockpitVisualsOwnerAllowed, [&] {") &&
@@ -1144,9 +1151,11 @@ void caseR12() {
               "R12g: vScreen filters absent owner rows before publishing the named table during installation");
         check(has(gate, "pluginRegistryWantsDraws(s)") && has(frameBoundary, "drawGateSet(drawGateSubscribed(s));"),
               "R12g: the frame gate consumes the registry aggregate, including registered plugin and legacy subscriptions");
-        check(count(vs, "tkVScreenFootprint.run(") == 1 && before(vs, "tkVrCameraCensus.run(", "tkVScreenFootprint.run(") && before(vs, "tkVScreenFootprint.run(", "tkScreenMotion.run(") &&
-                  has(vs, "EDVR_BOUNDARY_TICK(tkVScreenFootprint, \"vscreen_footprint\");"),
-              "R12g: its frame-boundary tick is declared and run once, after the route's and the census's and before screen motion's");
+        check(count(vs, "tkVScreenFootprint.run(") == 1 && before(frameBoundary, "tkVrCameraCensus.run(", "runVScreenFootprintOwned(g_state, [&] {") && before(frameBoundary, "runVScreenFootprintOwned(g_state, [&] {", "tkScreenMotion.run(") &&
+                  has(vs, "EDVR_BOUNDARY_TICK(tkVScreenFootprint, \"vscreen_footprint\");") &&
+                  has(frameBoundary, "runVScreenFootprintOwned(g_state, [&] {") &&
+                  has(frameBoundary, "tkVScreenFootprint.run([&] {"),
+              "R12g: the real footprint frame tick is owner-gated while preserving its existing budget and order before screen motion");
         check(has(vs, "vscreenFootprintShutdown();"), "R12g: its staging buffer is released at vScreen's shutdown");
         const std::string noteFlat = flatRuntime;
         check(!has(noteFlat, "vscreenFootprint") && !has(noteFlat, "vscreen_footprint"), "R12h: the flat runtime never touches the instrument");

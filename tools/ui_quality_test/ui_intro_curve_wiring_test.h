@@ -38,7 +38,7 @@ const char* const kClear = "s->curveThisDraw=false;if(s->introOwnerAllowed)s->in
 const char* const kSet = "if(s->introOwnerAllowed&&kind=='X'&&count==6&&introCurveWants())s->introCurveThisDraw=introCurveOnComposite(self,kind,count,instances);";
 const char* const kEnd = "if(g_state->introOwnerAllowed&&g_state->introCurveThisDraw){g_state->introCurveThisDraw=false;runIntroOwned(g_state->introOwnerAllowed,[&]{introCurveEndDraw();});}";
 const char* const kGuard =
-    "if(panelCurveWants()&&srv0IsPanelSized(s,kind,count)&&!(kind=='X'&&count==6&&bindingShaderHash(BindSlot::Vs)==kIntroCompositeVsHash))s->curveThisDraw=true;";
+    "if(s->onFootPanelOwnerAllowed&&panelCurveWants()&&srv0IsPanelSized(s,kind,count)&&!(kind=='X'&&count==6&&bindingShaderHash(BindSlot::Vs)==kIntroCompositeVsHash))s->curveThisDraw=true;";
 const char* const kCandidate = "if(g_state->introOwnerAllowed&&(v==DrawVerdict::kIntroPanel||forwardInputs.read(forwardInputs.fact.introCurveThisDrawStripGate,[&]{returng_state->introCurveThisDraw;},[&]{returng_state->introCurveThisDraw;}))&&owner&&panelCurveSurfaceWanted()){";
 const char* const kNumbers =
     "if(v==DrawVerdict::kIntroPanel){if(introPanelStripArmed()){stripGain=introPanelStripGain();stripToward=1;stripReverseU=introPanelStripReverseU();}}"
@@ -128,8 +128,8 @@ std::vector<WirePin> wiringPins(const std::string& text, const std::string& ladd
     // The on-foot curve's recognition does not claim the intro composite; the term sits behind panelCurveWants().
     pins.push_back({"guard",
                     has(bpo, kGuard) && countOf(bpo, "s->curveThisDraw=true;") == 1 && countOf(all, "kIntroCompositeVsHash") == 1,
-                    "intro curve wiring [guard]: the on-foot curve's recognition (panelCurveWants() && srv0IsPanelSized) does not claim a six-index X draw whose VS is the intro "
-                    "composite's, and the new term sits behind panelCurveWants()"});
+                    "intro curve wiring [guard]: the admitted On-foot curve's recognition (panelCurveWants() && srv0IsPanelSized) does not claim a six-index X draw whose VS is the intro "
+                    "composite's, and the new term sits behind owner admission and panelCurveWants()"});
     // The arming predicate is adapted to a named subscription, published to the registry, and consumed through its aggregate at the frame gate.
     pins.push_back({"gate",
                     has(all, "EDVR_GATE_INTRO(intro_curve,introCurveWants())") &&
@@ -236,7 +236,8 @@ const char* const kRawObserved = R"x(    const bool originalIssued=observedDraw(
                                                ? AlteredDraw(alteredClass, alteredFixOf(v)) : AlteredDraw(alteredClass));
 )x";
 const char* const kRawStripStart = "    float stripGain = 0.0f;\n";
-const char* const kRawGuard = R"x(            if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&
+const char* const kRawGuard = R"x(            if (s->onFootPanelOwnerAllowed && panelCurveWants() &&
+                srv0IsPanelSized(s, kind, count) &&
                 !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash))
 )x";
 const char* const kRawDim = R"x(            const bool stripDim = stripIssued && panelCurveSurfaceDraw(

@@ -74,6 +74,9 @@ void hookDevice(ID3D11Device* device);
 // The Comfort owner decision is sampled once after the device hooks commit.
 // Consumers read this cached value; it never performs an admission query.
 bool comfortOwnerAllowed() noexcept;
+// On-foot panel admission is sampled once after deviceHook.commit. This getter
+// reads the immutable cached decision; it never calls the transport query.
+bool onFootPanelOwnerAllowed() noexcept;
 // Manually armed flat producer probe only. Saves exact creation bytes by hash;
 // false is explicitly missing evidence, never permission to infer a shader.
 bool captureFlatProbeShader(char stage, uint64_t hash);

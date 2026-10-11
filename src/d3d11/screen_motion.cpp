@@ -43,6 +43,7 @@ struct State {
     bool noted=false;
     bool seen=false;
     bool weapon=true,weaponNoted=false;
+    bool onFootPanelOwnerAllowed=false;
     unsigned lastScreen=0;
     unsigned frame=0,sourceFrame=~0u,sourceWrite=0,sourcePrevious=~0u;
     Ptr<ID3D11Buffer> camera[2];
@@ -219,14 +220,19 @@ bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev,Screen& e,unsigned w,uns
     return true;
 }
 }
-void screenMotionConfigure(Config& cfg) {
+void screenMotionConfigure(Config& cfg, bool onFootPanelOwnerAllowed) {
     bool on=temporalModeEnabled(cfg.getString("fix.temporal_aa","off"));
     if(on!=detail::g_screenMotionEnabled){g_gpu.close();g=State{};detail::g_screenMotionEnabled=on;detail::g_screenMotionFailed=false;}
+    g.onFootPanelOwnerAllowed = onFootPanelOwnerAllowed;
     if(on&&!g_gpu.policyNoted){g_gpu.policyNoted=true;Log::get().note("on-foot motion GPU diagnostics: enabled for screen UI clears/reissues, per-eye screen projection, and weapon identify/capture/raster; exact sparse query intervals only, one admission per category per frame, 1800 source-frame windows and a 120-frame no-wait drain.");}
-    const bool weapon=cfg.getBool("fix.weapon_stability",true);
-    if(weapon!=g.weapon)g_gpu.close();
-    g.weapon=weapon;
-    weaponMotionConfigure(detail::g_screenMotionEnabled && g.weapon);
+    if (onFootPanelOwnerAllowed) {
+        const bool weapon=cfg.getBool("fix.weapon_stability",true);
+        if(weapon!=g.weapon)g_gpu.close();
+        g.weapon=weapon;
+        weaponMotionConfigure(detail::g_screenMotionEnabled && g.weapon);
+    } else {
+        g.weapon = false;
+    }
 }
 bool screenMotionRecognize() {
     bool matched=detail::g_screenMotionEnabled && !detail::g_screenMotionFailed && bindingShaderHash(BindSlot::Vs)==0x5C36AF051B98B9F1ull &&
@@ -302,7 +308,8 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
     if(terrain)g.terrainFrame=g.frame;
     else if(!g.screenDepthNoted){g.screenDepthNoted=true;Log::get().note("screen motion: no terrain or scene draw names the on-foot source here (a hangar): it is named by its own depth -- the %ux%u depth that took the most pool family draws last frame (%u), at its first pool family draw this frame that is not a first-person weapon or tool shader; that draw's camera is the source camera.",w,h,g.screenDepthDraws);}
     g_gpu.noteSource(tex.Get(),td.Width,td.Height,g.frame);
-    weaponMotionSource(tex.Get());
+    if (g.onFootPanelOwnerAllowed && g.weapon)
+        weaponMotionSource(tex.Get());
     // The source pass's pool draws take MRT6 into this depth's slot target,
     // held to the camera this draw reads (the one g.camera just copied).
     Ptr<ID3D11Buffer> scene;ctx->VSGetConstantBuffers(1,1,&scene);
@@ -533,7 +540,8 @@ static void flushPanelCounts(ID3D11DeviceContext* ctx) {
     }
 }
 void screenMotionFrameBoundary(ID3D11DeviceContext* ctx){
-    weaponMotionFrameBoundary(ctx);
+    if (g.onFootPanelOwnerAllowed)
+        weaponMotionFrameBoundary(ctx);
     g_gpu.tick(ctx,g.frame);
     flushPanelCounts(ctx);
     // The naming without terrain: this frame's busiest screen-sized pool depth
@@ -567,7 +575,7 @@ void screenMotionFrameBoundary(ID3D11DeviceContext* ctx){
         }
     }
     ++g.frame;
-    if(g.seen && g.frame-g.lastScreen>120){g_gpu.close();bool weapon=g.weapon;g=State{};g.weapon=weapon;detail::g_screenMotionFailed=false;}
+    if(g.seen && g.frame-g.lastScreen>120){g_gpu.close();bool weapon=g.weapon;bool owner=g.onFootPanelOwnerAllowed;g=State{};g.weapon=weapon;g.onFootPanelOwnerAllowed=owner;detail::g_screenMotionFailed=false;}
 }
 ScreenMotionGpuDiagnostics screenMotionGpuDiagnostics(){
     ScreenMotionGpuDiagnostics s{};s.scope=g_gpu.scope;s.sourceFrames=g_gpu.sourceFrames;
@@ -579,5 +587,5 @@ ScreenMotionGpuDiagnostics screenMotionGpuDiagnostics(){
     s.uiClearInvalid=g_gpu.uiClear.timer.totals.invalid;s.uiDrawInvalid=g_gpu.uiDraw.timer.totals.invalid;s.eyeClearInvalid=g_gpu.eyeClear.timer.totals.invalid;s.projectionInvalid=g_gpu.projection.timer.totals.invalid;
     s.collecting=g_gpu.phase==GpuDiagnostics::Phase::Collecting;s.draining=g_gpu.phase==GpuDiagnostics::Phase::Draining;return s;
 }
-void screenMotionShutdown(){g_gpu.reset(nullptr);g=State{};detail::g_screenMotionEnabled=false;detail::g_screenMotionFailed=false;weaponMotionShutdown();}
+void screenMotionShutdown(){const bool owner=g.onFootPanelOwnerAllowed;g_gpu.reset(nullptr);g=State{};detail::g_screenMotionEnabled=false;detail::g_screenMotionFailed=false;if(owner)weaponMotionShutdown();}
 }

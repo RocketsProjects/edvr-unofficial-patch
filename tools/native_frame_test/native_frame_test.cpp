@@ -26,11 +26,13 @@
 // The journal watcher is stubbed so the on-foot signal is the rig's to set.
 static bool g_journalActive = false, g_onFootKnown = false, g_onFoot = false;
 static bool g_comfortOwnerAllowed = true;
+static bool g_onFootPanelOwnerAllowed = true;
 namespace edvr {
 bool journalWatchActive() { return g_journalActive; }
 bool journalOnFootKnown() { return g_onFootKnown; }
 bool journalOnFoot() { return g_onFoot; }
 bool comfortOwnerAllowed() noexcept { return g_comfortOwnerAllowed; }
+bool onFootPanelOwnerAllowed() noexcept { return g_onFootPanelOwnerAllowed; }
 }
 
 using Microsoft::WRL::ComPtr;
@@ -329,6 +331,7 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameRequest request{
         sizeof(request), EDVR_NATIVE_FRAME_VERSION_1, device.Get(), 41};
     EdvrNativeFrameTable table{sizeof(table), EDVR_NATIVE_FRAME_VERSION_1};
+    g_onFootPanelOwnerAllowed = true; // Keep the existing provider oracle Legacy-admitted.
     std::puts("native_frame_test: acquiring");
     check(edvrAcquireNativeFrame(&request, &table) == S_OK && table.context &&
               table.beginFrame && table.reservedCall && table.latchSubmit &&
@@ -822,6 +825,61 @@ int wmain(int argc, wchar_t** argv) {
     edvr::Config::get().set("fix.transition_flash", savedTransition.c_str());
     };
     nativeFrameComfortOwnerDenied();
+
+    // The cached On-foot owner is sampled at provider acquisition. With stale
+    // weapon config and a positive journal signal, the real native-frame path
+    // must keep core and Comfort outputs while leaving deferred pacing off.
+    auto nativeFrameOnFootOwnerDenied = [&] {
+        const std::string savedTransition =
+            edvr::Config::get().getString("fix.transition_flash", "1");
+        const std::string savedWeapon =
+            edvr::Config::get().getString("fix.weapon_stability", "1");
+        const bool savedComfort = g_comfortOwnerAllowed;
+        const bool savedOnFootOwner = g_onFootPanelOwnerAllowed;
+        const bool savedJournal = g_journalActive;
+        const bool savedKnown = g_onFootKnown;
+        const bool savedOnFoot = g_onFoot;
+        edvr::Config::get().set("fix.transition_flash", "1");
+        edvr::Config::get().set("fix.weapon_stability", "1");
+        g_comfortOwnerAllowed = true;
+        g_onFootPanelOwnerAllowed = false;
+        g_journalActive = g_onFootKnown = g_onFoot = true;
+        EdvrNativeFrameRequest deniedOnFootRequest{
+            sizeof(deniedOnFootRequest), EDVR_NATIVE_FRAME_VERSION_1,
+            device.Get(), 44};
+        EdvrNativeFrameTable deniedOnFootTable{
+            sizeof(deniedOnFootTable), EDVR_NATIVE_FRAME_VERSION_1};
+        const HRESULT acquired = edvrAcquireNativeFrame(
+            &deniedOnFootRequest, &deniedOnFootTable);
+        check(acquired == S_OK && deniedOnFootTable.context &&
+                  deniedOnFootTable.beginFrame && deniedOnFootTable.close,
+              "On-foot-denied native-frame provider remains available for core output");
+        if (acquired == S_OK && deniedOnFootTable.context) {
+            edvr::publishGameDevice(device.Get());
+            edvr::announceSceneArrived();
+            EdvrNativeFrameInput deniedOnFootInput = input(44, 8, 1);
+            EdvrNativeFrameOutput deniedOnFootOutput{
+                sizeof(deniedOnFootOutput), EDVR_NATIVE_FRAME_VERSION_5};
+            check(deniedOnFootTable.beginFrame(
+                      deniedOnFootTable.context, &deniedOnFootInput,
+                      &deniedOnFootOutput) == S_OK &&
+                      deniedOnFootOutput.sceneReady == 1 &&
+                      deniedOnFootOutput.resubmitEnabled == 1 &&
+                      deniedOnFootOutput.transitionEnabled == 1 &&
+                      deniedOnFootOutput.deferredPacing == 0,
+                  "cached On-foot absence skips stale weapon pacing while core and admitted Comfort frame fields continue");
+            check(deniedOnFootTable.close(deniedOnFootTable.context) == S_OK,
+                  "On-foot-denied native-frame provider closes cleanly");
+        }
+        g_comfortOwnerAllowed = savedComfort;
+        g_onFootPanelOwnerAllowed = savedOnFootOwner;
+        g_journalActive = savedJournal;
+        g_onFootKnown = savedKnown;
+        g_onFoot = savedOnFoot;
+        edvr::Config::get().set("fix.transition_flash", savedTransition.c_str());
+        edvr::Config::get().set("fix.weapon_stability", savedWeapon.c_str());
+    };
+    nativeFrameOnFootOwnerDenied();
 
     // advanced.slow_test_ms's end-frame hold (frame_flag.h, v36): d3d11 -> openvr, 0 is no hold, and the
     // runtime never holds a frame for more than five seconds whatever is asked.

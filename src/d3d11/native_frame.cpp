@@ -22,6 +22,7 @@ struct State {
     uint64_t generation = 0;
     uint64_t sequenceFloor = 0;
     bool comfortOwnerAllowed = false;
+    bool onFootPanelOwnerAllowed = false;
     bool active = false;
     bool invalidated = false;
     bool began = false;
@@ -279,24 +280,26 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // eye's Submit (deferred pacing, OpenXR Toolkit's "Turbo mode"), which
     // is what holds the weapon steady on mouse turns. Off, in a ship, or
     // with the watcher off, the wait stays in WaitGetPoses.
-    const bool weaponStability = edvr::Config::get().getBool(
-        "fix.weapon_stability", true);
-    result.deferredPacing =
-        (weaponStability && edvr::journalOnFootKnown() && edvr::journalOnFoot())
-            ? 1u : 0u;
-    if (!state->weaponStabilityNoted ||
-        state->lastWeaponStability != weaponStability) {
-        edvr::Log::get().note(
-            "weapon stability: %s (live; the frame wait moves to the eye "
-            "submit while on foot).", weaponStability ? "on" : "off");
-        state->weaponStabilityNoted = true;
-        state->lastWeaponStability = weaponStability;
-    }
-    if (weaponStability && !state->pacingNoted && !edvr::journalWatchActive()) {
-        edvr::Log::get().note(
-            "weapon stability: needs the journal watcher (d3d11.journal_watch) "
-            "to say when you are on foot, and it is off, so it never engages.");
-        state->pacingNoted = true;
+    if (state->onFootPanelOwnerAllowed) {
+        const bool weaponStability = edvr::Config::get().getBool(
+            "fix.weapon_stability", true);
+        result.deferredPacing =
+            (weaponStability && edvr::journalOnFootKnown() && edvr::journalOnFoot())
+                ? 1u : 0u;
+        if (!state->weaponStabilityNoted ||
+            state->lastWeaponStability != weaponStability) {
+            edvr::Log::get().note(
+                "weapon stability: %s (live; the frame wait moves to the eye "
+                "submit while on foot).", weaponStability ? "on" : "off");
+            state->weaponStabilityNoted = true;
+            state->lastWeaponStability = weaponStability;
+        }
+        if (weaponStability && !state->pacingNoted && !edvr::journalWatchActive()) {
+            edvr::Log::get().note(
+                "weapon stability: needs the journal watcher (d3d11.journal_watch) "
+                "to say when you are on foot, and it is off, so it never engages.");
+            state->pacingNoted = true;
+        }
     }
 
     if (physicalValid) {
@@ -467,6 +470,7 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     state.device = request->gameDevice;
     state.generation = request->generation;
     state.comfortOwnerAllowed = edvr::comfortOwnerAllowed();
+    state.onFootPanelOwnerAllowed = edvr::onFootPanelOwnerAllowed();
     state.active = true;
     g_current = &state;
     table->context = &state;

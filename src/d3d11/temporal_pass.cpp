@@ -1597,7 +1597,7 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
         if(edits) {Microsoft::WRL::ComPtr<ID3D11Resource> r;edits->GetResource(&r);r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[8]));}
         auto* screen=screenMotionView(0,d.Width,d.Height);
         if(screen){Microsoft::WRL::ComPtr<ID3D11Resource> r;screen->GetResource(&r);r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[9]));}
-        auto* weapon=weaponMotionView();
+        auto* weapon=onFootPanelOwnerAllowed() ? weaponMotionView() : nullptr;
         if(weapon){Microsoft::WRL::ComPtr<ID3D11Resource> r;weapon->GetResource(&r);r->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&textures[10]));}
     }
     if(scene) {

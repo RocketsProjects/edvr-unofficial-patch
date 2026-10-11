@@ -59,6 +59,13 @@ SLICE_PATHS = {
     "terrain_cover": ROOT / "src/d3d11/terrain_cull_cover_hook.cpp",
     "terrain_cover_fixture": ROOT / "tools/terrain_cover_test/terrain_cover_test.cpp",
     "sunglare": ROOT / "src/d3d11/sunglare_fix.cpp",
+    "onfoot_owner_gate": ROOT / "src/d3d11/on_foot_panel_owner_gate.h",
+    "screen_motion": ROOT / "src/d3d11/screen_motion.cpp",
+    "vr_world_route": ROOT / "src/d3d11/vr_world_route.cpp",
+    "temporal_pass": ROOT / "src/d3d11/temporal_pass.cpp",
+    "menu": ROOT / "src/d3d11/menu.cpp",
+    "vscreen_fit_fixture": ROOT / "tools/vscreen_fit_test/vscreen_fit_test.cpp",
+    "screen_motion_fixture": ROOT / "tools/screen_motion_test/screen_motion_test.cpp",
 }
 PATHS = (
     ROOT / "src/plugins/comfort/scanners/scanner_lifecycle.h",
@@ -901,7 +908,7 @@ def check_module_slices(sources: dict[str, str]) -> None:
     intro_interest_gate = body(intro_interests,
                                "runIntroOwned(introOwnerAllowed, [&] {")
     if "enable(InterestId::IntroCurveObserve, introCurveDrawInterestConfigured());" not in intro_interest_gate or \
-            "enable(InterestId::PanelCurveObserve, panelCurveDrawInterestConfigured());" not in intro_interests:
+            "enable(InterestId::PanelCurveObserve,\n           onFootPanelOwnerAllowed && panelCurveDrawInterestConfigured());" not in intro_interests:
         raise AssertionError("Intro curve interest must be gated while shared On-foot panel curve stays active")
 
     # Both startup and reload configure all module-owned settings from the
@@ -1190,10 +1197,10 @@ def check_module_slices(sources: dict[str, str]) -> None:
         raise AssertionError("VScreen must not re-query Comfort admission during setup, Present, or shutdown")
     if "comfortOwnerAllowed" not in body(vscreen, "void vScreenFrameBoundary()"):
         raise AssertionError("Comfort frame paths must use the cached State bit")
-    if "configureLegacyDrawInterests(g_state->cockpitVisualsOwnerAllowed,\n                                 g_state->comfortOwnerAllowed,\n                                 g_state->introOwnerAllowed);" not in vstartup or \
-            "configureLegacyDrawInterests(s->cockpitVisualsOwnerAllowed,\n                                 s->comfortOwnerAllowed,\n                                 s->introOwnerAllowed);" not in body(
+    if "configureLegacyDrawInterests(g_state->cockpitVisualsOwnerAllowed,\n                                 g_state->comfortOwnerAllowed,\n                                 g_state->introOwnerAllowed,\n                                 g_state->onFootPanelOwnerAllowed);" not in vstartup or \
+            "configureLegacyDrawInterests(s->cockpitVisualsOwnerAllowed,\n                                 s->comfortOwnerAllowed,\n                                 s->introOwnerAllowed,\n                                 s->onFootPanelOwnerAllowed);" not in body(
                 vscreen, "void vScreenRefreshConfig()"):
-        raise AssertionError("legacy draw-interest configuration must receive all three cached owner decisions")
+        raise AssertionError("legacy draw-interest configuration must receive all four cached owner decisions")
     interests = body(vscreen, "static bool configureLegacyDrawInterests(")
     if "runComfortOwned(comfortOwnerAllowed, [&] {\n        enable(InterestId::FssPanel" not in interests or \
             "runComfortOwned(comfortOwnerAllowed, [&] {\n        filtersFit = filtersFit && append(fssPanelDrawInterestFilters)" not in interests:
@@ -1247,8 +1254,8 @@ def check_module_slices(sources: dict[str, str]) -> None:
             "{\"legacy.intro-curve\", &drawGate_intro_curve, true, LegacyGateOwner::Intro}"):
         if row not in registrations:
             raise AssertionError(f"Intro draw subscription must carry cached owner State: {row}")
-    if '{"legacy.panel-curve", &drawGate_panel_curve, false}' not in registrations:
-        raise AssertionError("shared On-foot panel curve bridge must remain Core-owned")
+    if '{"legacy.panel-curve", &drawGate_panel_curve, true, LegacyGateOwner::OnFootPanel}' not in registrations:
+        raise AssertionError("panel-curve observer must retain On-foot ownership while its runtime remains shared with Intro")
     comfort_gates = body(vscreen, "#define EDVR_GATE_COMFORT(name, expression)")
     if "if (!s || !s->comfortOwnerAllowed) return 0;" not in comfort_gates:
         raise AssertionError("owner-only Comfort draw bridges must exit before evaluating module predicates")
@@ -1394,18 +1401,18 @@ def check_module_slices(sources: dict[str, str]) -> None:
             "                              &deniedScanner, true, false, 'X', 6, 1, 5, 6)" not in
             vscreen_predicate_fixture):
         raise AssertionError("FSS panel real visitor must pass Comfort denied to its owner gate")
-    if "testCockpitComfortIntroLegacyGateRegistration()" not in vscreen_predicate_fixture or \
-            "okay &= testCockpitComfortIntroLegacyGateRegistration();" not in vscreen_predicate_fixture:
+    if "testOnFootOwnerLegacyGateRegistration()" not in vscreen_predicate_fixture or \
+            "okay &= testOnFootOwnerLegacyGateRegistration();" not in vscreen_predicate_fixture:
         raise AssertionError("actual legacy registry owner-filter fixture is missing or not invoked")
-    gate_fixture = body(vscreen_predicate_fixture, "bool testCockpitComfortIntroLegacyGateRegistration()")
-    for token in ("checkInventory(false, false, false, 14, 0, 0, 0, 0",
-                  "checkInventory(true, false, false, 21, 6, 0, 0, 1",
-                  "checkInventory(false, true, false, 19, 0, 4, 0, 1",
-                  "checkInventory(true, true, false, 25, 6, 4, 0, 1",
-                  "checkInventory(false, false, true, 19, 0, 0, 5, 0",
-                  "checkInventory(true, false, true, 26, 6, 0, 5, 1",
-                  "checkInventory(false, true, true, 24, 0, 4, 5, 1",
-                  "checkInventory(true, true, true, 30, 6, 4, 5, 1"):
+    gate_fixture = body(vscreen_predicate_fixture, "bool testOnFootOwnerLegacyGateRegistration()")
+    for token in ("checkInventory(false, false, false, false, 11, 0, 0, 0, 0, 0",
+                  "checkInventory(true, false, false, false, 18, 6, 0, 0, 1, 0",
+                  "checkInventory(false, true, false, false, 16, 0, 4, 0, 1, 0",
+                  "checkInventory(false, false, true, false, 16, 0, 0, 5, 0, 0",
+                  "checkInventory(false, false, false, true, 14, 0, 0, 0, 0, 3",
+                  "checkInventory(true, false, true, true, 26, 6, 0, 5, 1, 3",
+                  "checkInventory(false, true, true, true, 24, 0, 4, 5, 1, 3",
+                  "checkInventory(true, true, true, true, 30, 6, 4, 5, 1, 3"):
         if token not in gate_fixture:
             raise AssertionError(f"real owner-filter registration fixture lost {token}")
     intro_visitor_fixture = body(vscreen_predicate_fixture,
@@ -1444,6 +1451,129 @@ def check_module_slices(sources: dict[str, str]) -> None:
             "check(treat(t,1,1,source.Get())==S_OK")
     if "comfortOwnerAllowed" in temporal_run or "runComfortOwned" in temporal_run:
         raise AssertionError("independent native temporal core must not be swallowed by Comfort ownership")
+
+    check_onfoot_boundary(sources)
+
+
+def check_onfoot_boundary(sources: dict[str, str]) -> None:
+    device = sources["device"]
+    vscreen = sources["vscreen"]
+    gate = sources["onfoot_owner_gate"]
+    screen_motion = sources["screen_motion"]
+    native_frame = sources["native_frame"]
+    temporal_pass = sources["temporal_pass"]
+    world_route = sources["vr_world_route"]
+    menu = sources["menu"]
+
+    if "bool onFootPanelOwnerAllowed = false;" not in device or \
+            "bool onFootPanelOwnerAllowed = false;" not in vscreen:
+        raise AssertionError("On-foot ownership caches must default denied in device and VScreen State")
+    if device.count("plugins::kPluginOnFootPanel") != 1 or \
+            device.count("ownerAllowedForStartup(\n            plugins::kPluginOnFootPanel)") != 1:
+        raise AssertionError("device startup must sample the published On-foot decision exactly once")
+    device_query = device.index("plugins::kPluginOnFootPanel")
+    if not (device.index("s.device = device;") < device_query <
+            device.index('runOnFootPanelOwned(s.onFootPanelOwnerAllowed, [&] {\n            Config& cfg = Config::get();')):
+        raise AssertionError("On-foot admission must be post-commit and precede its first owned configuration")
+    gate_start = device.index("runOnFootPanelOwned(s.onFootPanelOwnerAllowed, [&] {")
+    gate_end = device.index("        });", gate_start)
+    resolution_gate = device[gate_start:gate_end]
+    ordered(resolution_gate, "Config& cfg = Config::get();",
+            "resolveVScreenTargetResolution(cfg, &w, &h);",
+            "applied = (w && h) && applyVScreenModeResolution(w, h);")
+    if "vScreenSetPanelSize(applied ? w : kStockW, applied ? h : kStockH);" not in device:
+        raise AssertionError("stock panel dimensions must remain published when optional On-foot ownership is absent")
+    if "if (onFootPanelOwnerAllowed()) revertVScreenModeResolution();" not in device:
+        raise AssertionError("device shutdown must revert the On-foot mode only for an admitted owner")
+
+    install = body(vscreen, "void installVScreenFixes(")
+    if install.count("edvr::onFootPanelOwnerAllowed()") != 1 or \
+            "ownerAllowedForStartup(plugins::kPluginOnFootPanel)" in install:
+        raise AssertionError("VScreen must copy the device-published On-foot decision without a second transport query")
+    ordered(install, "const bool onFootPanelOwnerAllowed = edvr::onFootPanelOwnerAllowed();",
+            "runOnFootPanelOwned(onFootPanelOwnerAllowed, [&] {",
+            'cfg.getBool("fix.black_void", true)', 'cfg.getFloat("fix.panel_distance", 1.0f)',
+            "(!onFootPanelOwnerAllowed ||\n         !cfg.getBool(\"advanced.panel_hooks_always\", true))",
+            "g_state->onFootPanelOwnerAllowed = onFootPanelOwnerAllowed;")
+    if "if (g_state->onFootPanelOwnerAllowed)\n        g_state->distanceIndex = readDistanceIndex(cfg);" not in install:
+        raise AssertionError("On-foot distance index adoption must be deferred until cached admission")
+    refresh = body(vscreen, "void vScreenRefreshConfig()")
+    if "runOnFootPanelOwned(s->onFootPanelOwnerAllowed, [&] {" not in refresh or \
+            's->distanceIndex = readDistanceIndex(cfg);' not in refresh:
+        raise AssertionError("On-foot live reload must keep its entire settings block behind cached ownership")
+    if "if (s->onFootPanelOwnerAllowed || s->introOwnerAllowed)\n        panelCurveConfigure(cfg);" not in vscreen or \
+            "if (g_state->onFootPanelOwnerAllowed || g_state->introOwnerAllowed)\n        panelCurveShutdown();" not in vscreen:
+        raise AssertionError("panel-curve shared runtime must remain available to either On-foot or Intro")
+
+    for row in ('{"legacy.panel-distance", &drawGate_panel_distance, true, LegacyGateOwner::OnFootPanel}',
+                '{"legacy.panel-curve", &drawGate_panel_curve, true, LegacyGateOwner::OnFootPanel}',
+                '{"legacy.vscreen-footprint", &drawGate_vscreen_footprint, true, LegacyGateOwner::OnFootPanel}'):
+        if row not in vscreen:
+            raise AssertionError(f"On-foot legacy row lost its owner metadata: {row}")
+    registry = body(vscreen, "bool registerLegacyDrawGates(")
+    ordered(registry, "if (!legacyDrawGateOwnerAllowed(registration, state)) continue;",
+            "pluginRegistryRegisterLegacyDrawGate(registration.name,")
+    if "case LegacyGateOwner::OnFootPanel:\n        return state && state->onFootPanelOwnerAllowed;" not in vscreen:
+        raise AssertionError("On-foot draw-gate callback must consume its borrowed cached State")
+    if "runVScreenFootprintOwned(g_state, [&] {" not in vscreen or \
+            "if (g_state->onFootPanelOwnerAllowed) vscreenFootprintShutdown();" not in vscreen:
+        raise AssertionError("On-foot footprint tick and teardown must use cached ownership")
+    frame_boundary = body(vscreen, "void vScreenFrameBoundary()")
+    if "runVScreenFootprintOwned(g_state, [&] {\n            tkVScreenFootprint.run([&] {" not in frame_boundary:
+        raise AssertionError("footprint frame collection must stay inside the owner wrapper")
+    for token in ("if (!s->onFootPanelOwnerAllowed)\n                return exited(id, DrawVerdict::kNone);",
+                  "if (s->onFootPanelOwnerAllowed && panelCurveWants() &&",
+                  "if (g_state->onFootPanelOwnerAllowed && self == g_state->ownerCtx"):
+        if token not in vscreen:
+            raise AssertionError(f"On-foot panel/curve visitor or direct draw lost its owner gate: {token}")
+
+    if "if (onFootPanelOwnerAllowed) {\n        const bool weapon=cfg.getBool(\"fix.weapon_stability\",true);" not in screen_motion:
+        raise AssertionError("weapon config must be lazy when On-foot ownership is absent")
+    if "if (g.onFootPanelOwnerAllowed)\n        weaponMotionFrameBoundary(ctx);\n    g_gpu.tick(ctx,g.frame);\n    flushPanelCounts(ctx);" not in screen_motion:
+        raise AssertionError("ScreenMotion must gate only weapon frame work and preserve core temporal-AA progress")
+    if "if(owner)weaponMotionShutdown();" not in screen_motion:
+        raise AssertionError("ScreenMotion shutdown must preserve core cleanup and gate weapon teardown")
+
+    if "state.onFootPanelOwnerAllowed = edvr::onFootPanelOwnerAllowed();" not in native_frame:
+        raise AssertionError("native-frame provider must cache owner admission at Acquire")
+    native_begin = body(native_frame, "HRESULT WINAPI beginFrame(")
+    if "if (state->onFootPanelOwnerAllowed) {" not in native_begin or \
+            '"fix.weapon_stability", true' not in native_begin:
+        raise AssertionError("native-frame weapon pacing/config must use the Acquire cache")
+    if "sceneReady" not in native_begin or "resubmitEnabled" not in native_begin or \
+            "transitionEnabled" not in native_begin:
+        raise AssertionError("core and Comfort native-frame outputs must remain independent of On-foot gating")
+    if "auto* weapon=onFootPanelOwnerAllowed() ? weaponMotionView() : nullptr;" not in temporal_pass or \
+            "ID3D11ShaderResourceView* map = onFootPanelOwnerAllowed()" not in world_route:
+        raise AssertionError("temporal-AA and VR world routes must include weapon data only for admitted On-foot")
+    if "if (onFootPanelOwnerAllowed())\n                    resolveVScreenTargetResolution" not in menu:
+        raise AssertionError("menu resolution hints must not read On-foot config when absent")
+
+    fixture = sources["vscreen_predicate_fixture"]
+    for token in ("testOnFootOwnerDeniedPanelCurve(device, immediate);",
+                  "testOnFootOwnerDeniedFootprint(device, immediate);",
+                  "testOnFootOwnerLegacyGateRegistration();"):
+        if token not in fixture:
+            raise AssertionError(f"real WARP On-foot denial/admission fixture is not invoked: {token}")
+    distance_fixture = body(fixture, "bool testPanelDistanceApiTransaction(")
+    if "testPanelDistanceApiTransaction(immediate, deferred);" not in fixture or \
+            "onFootDenied.onFootOwnerAllowed = false;" not in distance_fixture:
+        raise AssertionError("real PanelDistance API transaction must run and include the denied-owner control")
+    for token in ("outcome ==\n                          edvr::draw_ladder::SiteOutcome::Declined", "result.mapCalls == 0", "result.unmapCalls == 0",
+                  "constantBufferCalls == 0", "afterDenied.entries == before.entries",
+                  "g_resourceAttempts == 0", "afterAllowed.entries == before.entries + 1",
+                  "copyPendingAfterDraw"):
+        if token not in fixture:
+            raise AssertionError(f"On-foot WARP fixture lost a denied-path/positive-control assertion: {token}")
+    native_fixture = sources["native_frame_fixture"]
+    if "nativeFrameOnFootOwnerDenied();" not in native_fixture or \
+            "deniedOnFootOutput.deferredPacing == 0" not in native_fixture:
+        raise AssertionError("real native-frame On-foot denial fixture is missing")
+    motion_fixture = sources["screen_motion_fixture"]
+    for token in ("cached On-foot absence keeps the real screen-motion frame tick alive",
+                  "owner-allowed Legacy control reads the live weapon key"):
+        if token not in motion_fixture:
+            raise AssertionError(f"ScreenMotion On-foot absence control is missing: {token}")
 
 
 def expect_slice(label: str, sources: dict[str, str]) -> None:
@@ -1800,8 +1930,8 @@ def self_test_slices(sources: dict[str, str]) -> None:
 
     changed = dict(sources)
     changed["device"] = once(changed["device"],
-        "plugins::kPluginComfort);\n    runComfortOwned(s.comfortOwnerAllowed, [&] {\n        fssResConfigure(sentinelCfg);",
-        "plugins::kPluginExplorerCam);\n    runComfortOwned(s.comfortOwnerAllowed, [&] {\n        fssResConfigure(sentinelCfg);")
+        "plugins::kPluginComfort);",
+        "plugins::kPluginExplorerCam);")
     expect_slice("device startup snapshots the Comfort owner, not another manifest", changed)
 
     changed = dict(sources)
@@ -1927,7 +2057,7 @@ def self_test_slices(sources: dict[str, str]) -> None:
 
     changed = dict(sources)
     changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],
-        "okay &= testCockpitComfortIntroLegacyGateRegistration();",
+        "okay &= testOnFootOwnerLegacyGateRegistration();",
         "/* actual registry fixture omitted */")
     expect_slice("actual owner-filtered registry callback fixture is invoked", changed)
 
@@ -2007,9 +2137,9 @@ def self_test_slices(sources: dict[str, str]) -> None:
 
     changed = dict(sources)
     changed["vscreen"] = once(changed["vscreen"],
-        "{\"legacy.panel-curve\", &drawGate_panel_curve, false}",
-        "{\"legacy.panel-curve\", &drawGate_panel_curve, true, LegacyGateOwner::Intro}")
-    expect_slice("shared On-foot panel curve remains Core-owned", changed)
+        "{\"legacy.panel-curve\", &drawGate_panel_curve, true, LegacyGateOwner::OnFootPanel}",
+        "{\"legacy.panel-curve\", &drawGate_panel_curve, true, LegacyGateOwner::Core}")
+    expect_slice("panel-curve observer retains On-foot ownership despite shared Intro runtime", changed)
 
     changed = dict(sources)
     changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],
@@ -2069,6 +2199,106 @@ def self_test_slices(sources: dict[str, str]) -> None:
         "edvr::hookDevice(device);\n        if (swapChain)",
         "edvr::hookSwapChain(swapChain);\n        if (swapChain)")
     expect_slice("device owner publication precedes Present-capable swapchain hooks", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "bool onFootPanelOwnerAllowed = false;", "bool onFootPanelOwnerAllowed = true;")
+    expect_slice("On-foot device cache is fail-closed before publication", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "plugins::kPluginOnFootPanel);", "plugins::kPluginPerformance);")
+    expect_slice("device startup snapshots the On-foot manifest owner", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "runOnFootPanelOwned(s.onFootPanelOwnerAllowed, [&] {\n            Config& cfg = Config::get();",
+        "runOnFootPanelOwned(true, [&] {\n            Config& cfg = Config::get();")
+    expect_slice("initial On-foot panel resolution remains denied without admission", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "const bool onFootPanelOwnerAllowed = edvr::onFootPanelOwnerAllowed();",
+        "const bool onFootPanelOwnerAllowed = true;")
+    expect_slice("VScreen copies the cached On-foot owner instead of opening the path", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "runOnFootPanelOwned(onFootPanelOwnerAllowed, [&] {\n        wantVoid = cfg.getBool(\"fix.black_void\", true);",
+        "runOnFootPanelOwned(true, [&] {\n        wantVoid = cfg.getBool(\"fix.black_void\", true);")
+    expect_slice("cold On-foot startup config stays behind cached admission", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "runOnFootPanelOwned(s->onFootPanelOwnerAllowed, [&] {\n        s->blackVoid = cfg.getBool(\"fix.black_void\", true);",
+        "runOnFootPanelOwned(true, [&] {\n        s->blackVoid = cfg.getBool(\"fix.black_void\", true);")
+    expect_slice("On-foot reload config cannot run for an absent owner", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        '{"legacy.panel-distance", &drawGate_panel_distance, true, LegacyGateOwner::OnFootPanel}',
+        '{"legacy.panel-distance", &drawGate_panel_distance, true, LegacyGateOwner::Core}')
+    expect_slice("On-foot panel-distance registry row retains owner filtering", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "if (!legacyDrawGateOwnerAllowed(registration, state)) continue;",
+        "if (false) continue;")
+    expect_slice("denied On-foot registry callbacks are filtered before registration", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "if (s->onFootPanelOwnerAllowed && panelCurveWants() &&",
+        "if (panelCurveWants() &&")
+    expect_slice("panel-curve observer preserves trace but skips absent-owner module work", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "runVScreenFootprintOwned(g_state, [&] {\n            tkVScreenFootprint.run",
+        "runVScreenFootprintOwned(nullptr, [&] {\n            tkVScreenFootprint.run")
+    expect_slice("footprint capture and frame work remain cached-owner gated", changed)
+
+    changed = dict(sources)
+    changed["screen_motion"] = once(changed["screen_motion"],
+        "if (onFootPanelOwnerAllowed) {\n        const bool weapon=cfg.getBool(\"fix.weapon_stability\",true);",
+        "if (true) {\n        const bool weapon=cfg.getBool(\"fix.weapon_stability\",true);")
+    expect_slice("ScreenMotion does not read weapon config without On-foot admission", changed)
+
+    changed = dict(sources)
+    changed["screen_motion"] = once(changed["screen_motion"],
+        "if (g.onFootPanelOwnerAllowed)\n        weaponMotionFrameBoundary(ctx);\n    g_gpu.tick(ctx,g.frame);",
+        "weaponMotionFrameBoundary(ctx);\n    g_gpu.tick(ctx,g.frame);")
+    expect_slice("weapon frame work stays owner-gated while core temporal-AA continues", changed)
+
+    changed = dict(sources)
+    changed["native_frame"] = once(changed["native_frame"],
+        "if (state->onFootPanelOwnerAllowed) {\n        const bool weaponStability",
+        "if (true) {\n        const bool weaponStability")
+    expect_slice("native-frame weapon pacing uses the provider's cached owner", changed)
+
+    changed = dict(sources)
+    changed["temporal_pass"] = once(changed["temporal_pass"],
+        "auto* weapon=onFootPanelOwnerAllowed() ? weaponMotionView() : nullptr;",
+        "auto* weapon=weaponMotionView();")
+    expect_slice("Temporal-AA does not consume weapon maps while On-foot is absent", changed)
+
+    changed = dict(sources)
+    changed["vr_world_route"] = once(changed["vr_world_route"],
+        "ID3D11ShaderResourceView* map = onFootPanelOwnerAllowed()\n        ? weaponMotionView() : nullptr;",
+        "ID3D11ShaderResourceView* map = weaponMotionView();")
+    expect_slice("VR world route does not consume weapon maps while On-foot is absent", changed)
+
+    changed = dict(sources)
+    changed["menu"] = once(changed["menu"],
+        "if (onFootPanelOwnerAllowed())\n                    resolveVScreenTargetResolution",
+        "if (true)\n                    resolveVScreenTargetResolution")
+    expect_slice("menu hint avoids On-foot settings reads when the owner is absent", changed)
+
+    changed = dict(sources)
+    changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],
+        "okay &= testOnFootOwnerDeniedFootprint(device, immediate);",
+        "/* On-foot footprint denial fixture omitted */")
+    expect_slice("real footprint absence and admitted-copy fixture stays invoked", changed)
 
 
 def expect(label: str, sources: tuple[str, ...], changed: tuple[str, ...]) -> None:

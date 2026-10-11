@@ -43,6 +43,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "journal_watch.h"
 #include "explorer_cam.h"   // Explorer Cam's public API remains stable across module ownership.
 #include "explorer_cam_owner_gate.h"
+#include "on_foot_panel_owner_gate.h"
 #include "comfort_owner_gate.h"
 #include "plugin_registry.h"
 #include "plugin_admission_transport.h"
@@ -181,6 +182,7 @@ struct State {
     // Published once after the device hook commit, before Comfort config or
     // lifecycle work can reach a device or Present callback.
     bool comfortOwnerAllowed = false;
+    bool onFootPanelOwnerAllowed = false;
     VTableHook deviceHook;
     VTableHook swapChainHook;
     VTableHook factoryHook;
@@ -727,7 +729,8 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         rememberFlatProbeShader('v', hash, bytecode, len);
         registerShaderHash(*out, hash);
         engineVelocityRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
-        weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
+        if (onFootPanelOwnerAllowed())
+            weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
         orbitalWidthRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);   // fix.ui_quality: the orbit lines (orbital_width.h)
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
@@ -2183,6 +2186,10 @@ bool comfortOwnerAllowed() noexcept {
     return g_state && g_state->comfortOwnerAllowed;
 }
 
+bool onFootPanelOwnerAllowed() noexcept {
+    return g_state && g_state->onFootPanelOwnerAllowed;
+}
+
 bool captureFlatProbeShader(char stage, uint64_t hash) {
     if (!g_state || !runtimeFlatProfile() || !hash ||
         (stage != 'v' && stage != 'p' && stage != 'c' && stage!='h' && stage!='d' && stage!='g')) return false;
@@ -2639,6 +2646,9 @@ void hookDevice(ID3D11Device* device) {
     s.comfortOwnerAllowed =
         plugin_admission_transport::ownerAllowedForStartup(
             plugins::kPluginComfort);
+    s.onFootPanelOwnerAllowed =
+        plugin_admission_transport::ownerAllowedForStartup(
+            plugins::kPluginOnFootPanel);
     runComfortOwned(s.comfortOwnerAllowed, [&] {
         fssResConfigure(sentinelCfg);
     });
@@ -2887,14 +2897,16 @@ void hookDevice(ID3D11Device* device) {
     // at. Switching it mid-session would leave a mix of both, which renders
     // worse than either. Comparing it means changing the value and restarting.
     {
-        Config& cfg = Config::get();
         uint32_t w = 0, h = 0;
-        resolveVScreenTargetResolution(cfg, &w, &h);
+        bool applied = false;
+        runOnFootPanelOwned(s.onFootPanelOwnerAllowed, [&] {
+            Config& cfg = Config::get();
+            resolveVScreenTargetResolution(cfg, &w, &h);
+            applied = (w && h) && applyVScreenModeResolution(w, h);
+        });
         // Elite's own on-foot panel size, and what the panel still renders at if
         // the patch is not asked for or refuses.
         const uint32_t kStockW = 1920, kStockH = 1080;
-
-        const bool applied = (w && h) && applyVScreenModeResolution(w, h);
 
         // Tell vScreen what the panel ACTUALLY renders at, from the outcome
         // rather than the request. This return value used to be discarded, and
@@ -3177,7 +3189,7 @@ void shutdownDeviceHooks() {
     vtableWatchStop();
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.
-    revertVScreenModeResolution();
+    if (onFootPanelOwnerAllowed()) revertVScreenModeResolution();
     uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
     vrSsaaHoldShutdown();    // the Supersampling hold's loader slot, back to the game's
     vertexResyncShutdown();  // the vertex-buffer resync's session line (the hook itself stays; the game's process exit says the line through Log::setExitLine)

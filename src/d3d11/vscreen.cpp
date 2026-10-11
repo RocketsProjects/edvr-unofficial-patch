@@ -40,6 +40,7 @@
 #include "cockpit_visuals_owner_gate.h"
 #include "comfort_owner_gate.h"
 #include "intro_owner_gate.h"
+#include "on_foot_panel_owner_gate.h"
 #include "intro_lifecycle.h"
 #include "../plugins/comfort/scanners/scanner_lifecycle.h"
 #include "../plugins/comfort/scanners/scanner_claim.h"
@@ -134,7 +135,7 @@ namespace {
 // only writes to a source instance, bone or camera buffer invalidate them.
 // Reached from every Unmap, Copy and Update on the owner context.
 static void motionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)){
-    weaponMotionResourceWritten(resource);
+    if (onFootPanelOwnerAllowed()) weaponMotionResourceWritten(resource);
     uiDepthMotionResourceWritten(resource,first,end);
     // Engine-record velocity: a write to an open eye-frame's pool or scene
     // constants drops that eye-frame's engine data (engine_velocity.h).
@@ -379,6 +380,7 @@ struct State {
     bool cockpitVisualsOwnerAllowed = false;
     bool comfortOwnerAllowed = false;
     bool introOwnerAllowed = false;
+    bool onFootPanelOwnerAllowed = false;
     VTableHook hook;
     // Owner-thread classifier settings epoch captured with each replay frame.
     uint32_t classifierConfigEpoch = 0;
@@ -994,6 +996,13 @@ struct State {
     // alone cannot say "long enough that this is not startup".
     uint64_t installMs = 0;
 };
+
+template <class Callback>
+bool runVScreenFootprintOwned(State* state, Callback&& callback) {
+    return runOnFootPanelOwned(
+        state && state->onFootPanelOwnerAllowed,
+        std::forward<Callback>(callback));
+}
 
 State* g_state = nullptr;
 bool g_vScreenInstallAttempted = false;
@@ -1941,15 +1950,18 @@ uint32_t g_testCockpitLegacyGateCallbacks = 0;
 uint32_t g_testComfortLegacyGateCallbacks = 0;
 uint32_t g_testIntroLegacyGateCallbacks = 0;
 uint32_t g_testSharedGlareLegacyGateCallbacks = 0;
+uint32_t g_testOnFootLegacyGateCallbacks = 0;
 #define EDVR_TEST_COUNT_COCKPIT_GATE() (++g_testCockpitLegacyGateCallbacks)
 #define EDVR_TEST_COUNT_COMFORT_GATE() (++g_testComfortLegacyGateCallbacks)
 #define EDVR_TEST_COUNT_INTRO_GATE() (++g_testIntroLegacyGateCallbacks)
 #define EDVR_TEST_COUNT_SHARED_GLARE_GATE() (++g_testSharedGlareLegacyGateCallbacks)
+#define EDVR_TEST_COUNT_ON_FOOT_GATE() (++g_testOnFootLegacyGateCallbacks)
 #else
 #define EDVR_TEST_COUNT_COCKPIT_GATE() ((void)0)
 #define EDVR_TEST_COUNT_COMFORT_GATE() ((void)0)
 #define EDVR_TEST_COUNT_INTRO_GATE() ((void)0)
 #define EDVR_TEST_COUNT_SHARED_GLARE_GATE() ((void)0)
+#define EDVR_TEST_COUNT_ON_FOOT_GATE() ((void)0)
 #endif
 #define EDVR_GATE_STATE(name, expression)                                      \
     uint32_t drawGate_##name(void* opaque) {                                   \
@@ -1985,8 +1997,15 @@ uint32_t g_testSharedGlareLegacyGateCallbacks = 0;
         EDVR_TEST_COUNT_INTRO_GATE();                                        \
         return (expression) ? 1u : 0u;                                       \
     }
+#define EDVR_GATE_ON_FOOT(name, expression)                                  \
+    uint32_t drawGate_##name(void* opaque) {                                  \
+        State* s = static_cast<State*>(opaque);                              \
+        if (!s || !s->onFootPanelOwnerAllowed) return 0;                     \
+        EDVR_TEST_COUNT_ON_FOOT_GATE();                                      \
+        return (expression) ? 1u : 0u;                                       \
+    }
 
-EDVR_GATE_STATE(panel_distance, s->distanceEnabled)
+EDVR_GATE_ON_FOOT(panel_distance, s->distanceEnabled)
 EDVR_GATE_COMFORT(transition_flash_eye_count, s->countForFlashFix)
 EDVR_GATE_STATE(census_skip_count, s->censusSkipCount != 0)
 EDVR_GATE_STATE(census_skip_ranges, s->censusSkipRangeCount != 0)
@@ -2002,7 +2021,7 @@ EDVR_GATE_OWNED(target_indicator, targetSharpWantsDraws())
 EDVR_GATE_GLOBAL(ui_depth, uiDepthWantsDraws())
 EDVR_GATE_GLOBAL(draw_census, drawCensusArmed())
 EDVR_GATE_GLOBAL(object_probe, objectProbeWantsDraws())
-EDVR_GATE_GLOBAL(panel_curve, panelCurveWants())
+EDVR_GATE_ON_FOOT(panel_curve, panelCurveWants())
 uint32_t drawGate_sun_glare(void* opaque) {
     State* s = static_cast<State*>(opaque);
     if (!s || (!s->cockpitVisualsOwnerAllowed && !s->comfortOwnerAllowed))
@@ -2021,7 +2040,7 @@ EDVR_GATE_OWNED(wake_pulse, wakePulseWantsDraws())
 EDVR_GATE_OWNED(witchspace_stars, witchspaceStarsHidden())
 EDVR_GATE_OWNED(space_dust, spaceDustHidden())
 EDVR_GATE_GLOBAL(depth_probe, depthProbeWanted())
-EDVR_GATE_GLOBAL(vscreen_footprint, vscreenFootprintWanted())
+EDVR_GATE_ON_FOOT(vscreen_footprint, vscreenFootprintWanted())
 EDVR_GATE_INTRO(intro_curve, introCurveWants())
 
 #undef EDVR_GATE_STATE
@@ -2029,23 +2048,26 @@ EDVR_GATE_INTRO(intro_curve, introCurveWants())
 #undef EDVR_GATE_OWNED
 #undef EDVR_GATE_COMFORT
 #undef EDVR_GATE_INTRO
+#undef EDVR_GATE_ON_FOOT
 #undef EDVR_TEST_COUNT_COCKPIT_GATE
 #undef EDVR_TEST_COUNT_COMFORT_GATE
 #undef EDVR_TEST_COUNT_INTRO_GATE
 #undef EDVR_TEST_COUNT_SHARED_GLARE_GATE
+#undef EDVR_TEST_COUNT_ON_FOOT_GATE
 
 struct LegacyDrawGateRegistration {
     const char* name;
     EdvrLegacyDrawGateFn predicate;
     bool needsState;
     enum class Owner : std::uint8_t {
-        Core, CockpitVisuals, Comfort, Intro, CockpitOrComfort
+        Core, CockpitVisuals, Comfort, Intro, OnFootPanel,
+        CockpitOrComfort
     };
     Owner owner = Owner::Core;
 };
 using LegacyGateOwner = LegacyDrawGateRegistration::Owner;
 constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] = {
-    {"legacy.panel-distance", &drawGate_panel_distance, true},
+    {"legacy.panel-distance", &drawGate_panel_distance, true, LegacyGateOwner::OnFootPanel},
     {"legacy.transition-flash-eye-count", &drawGate_transition_flash_eye_count, true, LegacyGateOwner::Comfort},
     {"legacy.census-skip-count", &drawGate_census_skip_count, true},
     {"legacy.census-skip-ranges", &drawGate_census_skip_ranges, true},
@@ -2062,7 +2084,7 @@ constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] = {
     {"legacy.sun-glare", &drawGate_sun_glare, true, LegacyGateOwner::CockpitOrComfort},
     {"legacy.draw-census", &drawGate_draw_census, false},
     {"legacy.object-probe", &drawGate_object_probe, false},
-    {"legacy.panel-curve", &drawGate_panel_curve, false},
+    {"legacy.panel-curve", &drawGate_panel_curve, true, LegacyGateOwner::OnFootPanel},
     {"legacy.particles", &drawGate_particles, true, LegacyGateOwner::CockpitVisuals},
     {"legacy.backdrop", &drawGate_backdrop, true, LegacyGateOwner::Intro},
     {"legacy.scrim", &drawGate_scrim, false},
@@ -2073,7 +2095,7 @@ constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] = {
     {"legacy.witchspace-stars", &drawGate_witchspace_stars, true, LegacyGateOwner::CockpitVisuals},
     {"legacy.space-dust", &drawGate_space_dust, true, LegacyGateOwner::CockpitVisuals},
     {"legacy.depth-probe", &drawGate_depth_probe, false},
-    {"legacy.vscreen-footprint", &drawGate_vscreen_footprint, false},
+    {"legacy.vscreen-footprint", &drawGate_vscreen_footprint, true, LegacyGateOwner::OnFootPanel},
     {"legacy.intro-curve", &drawGate_intro_curve, true, LegacyGateOwner::Intro},
 };
 
@@ -2087,6 +2109,8 @@ bool legacyDrawGateOwnerAllowed(const LegacyDrawGateRegistration& registration,
         return state && state->comfortOwnerAllowed;
     case LegacyGateOwner::Intro:
         return state && state->introOwnerAllowed;
+    case LegacyGateOwner::OnFootPanel:
+        return state && state->onFootPanelOwnerAllowed;
     case LegacyGateOwner::CockpitOrComfort:
         return state && (state->cockpitVisualsOwnerAllowed ||
                          state->comfortOwnerAllowed);
@@ -3676,11 +3700,14 @@ struct VScreenDrawLadderVisitor {
             // Keep the replay site's outcome stable without counting or acting.
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kPanelCurveObserve) {
-            if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&
+            if (s->onFootPanelOwnerAllowed && panelCurveWants() &&
+                srv0IsPanelSized(s, kind, count) &&
                 !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash))
                 s->curveThisDraw = true;
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kEyeNoDistanceNone) {
+            if (!s->onFootPanelOwnerAllowed)
+                return exited(id, DrawVerdict::kNone);
             if constexpr (TracePolicy::enabled) {
                 const bool distanceEnabled = s->distanceEnabled;
                 BasicDrawObservation fact{};
@@ -3695,6 +3722,8 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kPanelEligibilityNone) {
+            if (!s->onFootPanelOwnerAllowed)
+                return exited(id, DrawVerdict::kNone);
             if (!srv0IsPanelSized(s, kind, count)) return exited(id, DrawVerdict::kNone, 1);
             void* cb = bindingGet(BindSlot::VsCb0);
             if (!cb) return exited(id, DrawVerdict::kNone, 2);
@@ -3707,7 +3736,8 @@ struct VScreenDrawLadderVisitor {
                 return exited(id, DrawVerdict::kNone, 6);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kPanelDistanceClaim) {
-            if (!s->distanceEnabled) return SiteResult::declined();
+            if (!s->onFootPanelOwnerAllowed || !s->distanceEnabled)
+                return SiteResult::declined();
             const uint32_t bytes = s->shadowBytes;
             D3D11_MAPPED_SUBRESOURCE m{};
             ApiPolicy::template note<panel_distance_cost::owner,
@@ -5198,7 +5228,10 @@ __declspec(noinline) void cameraCensusEyeDraw(ID3D11DeviceContext* self) {
 // composite it does not sample.
 __declspec(noinline) void footprintEyeDraw(ID3D11DeviceContext* self, float applied, INT baseVertex, UINT startInstance) {
     if (bindingShaderHash(BindSlot::Vs) != 0x5C36AF051B98B9F1ull || bindingShaderHash(BindSlot::Ps) != 0xCFE84157BC76E921ull) return;
-    vscreenFootprintCompositeDraw(self, applied, static_cast<int>(baseVertex), static_cast<unsigned>(startInstance));
+    runVScreenFootprintOwned(g_state, [&] {
+        vscreenFootprintCompositeDraw(self, applied, static_cast<int>(baseVertex),
+                                      static_cast<unsigned>(startInstance));
+    });
 }
 
 template <class TracePolicy>
@@ -5290,8 +5323,11 @@ __declspec(noinline) void curvedScreenSwallowed(TracePolicy& trace,
                                                 UINT count, UINT instances,
                                                 const DrawArgs& args, bool routeOwns) {
     if (self != g_state->ownerCtx) return;
-    if (g_state->rtv0Eye && count && instances && vscreenFootprintWanted())
-        footprintEyeDraw(self, v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f, args.base, args.startInstance);
+    runVScreenFootprintOwned(g_state, [&] {
+        if (g_state->rtv0Eye && count && instances && vscreenFootprintWanted())
+            footprintEyeDraw(self, v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f,
+                             args.base, args.startInstance);
+    });
     if (!routeOwns) return;
     if (screenMotionLive()) screenMotionRecognize();
     worldScreenReissueCurved(trace, self, 'X', count, instances, args);
@@ -5805,7 +5841,8 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // The geometry substitution, which SWALLOWS the game's draw when it
     // succeeds and forwards it untouched when it does not -- so a failure
     // here is a flat screen, never a missing one.
-    if (forwardInputs.read(forwardInputs.fact.curveThisDrawCurveGate,
+    if (g_state->onFootPanelOwnerAllowed &&
+        forwardInputs.read(forwardInputs.fact.curveThisDrawCurveGate,
             [&] { return g_state->curveThisDraw; },
             [&] { return g_state->curveThisDraw; })) {
         g_state->curveThisDraw = false;
@@ -6934,7 +6971,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                               baseVertex, startInstance);
         }
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
-        if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
+        if (g_state->onFootPanelOwnerAllowed && self == g_state->ownerCtx && !g_state->rtv0Eye &&
             weaponMotionWants(bindingShaderHash(BindSlot::Vs))) {
             GpuCensusScope census(self, GpuCensusSection::FrameWeaponMotion);
             if constexpr (std::is_same<Api, plugin_cost::NoApi>::value) {
@@ -6992,8 +7029,12 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             if (g_vrWorldWants && vrCameraCensusWanted()) cameraCensusEyeDraw(self);
             // fix.vscreen_res_width = auto's footprint instrument: the same composite, the same moment. Armed only in the VR
             // profile with the key auto; with the distance override applied to THIS draw its constants carry the scaled distance.
-            if (eyeGeometry && vscreenFootprintWanted())
-                footprintEyeDraw(self, v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f, baseVertex, startInstance);
+            runVScreenFootprintOwned(g_state, [&] {
+                if (eyeGeometry && vscreenFootprintWanted())
+                    footprintEyeDraw(self,
+                        v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f,
+                        baseVertex, startInstance);
+            });
             // The VR world route re-issues this 2D screen composite into the eye's layer right after the game's
             // own issue (ui_layer.h), and the door runs layer-only for the eye: the per-eye motion reissues below
             // are unused while the route owns it (0.24 ms), so they are skipped -- but the RECOGNITION still runs.
@@ -7063,6 +7104,8 @@ using VScreenContextTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kForeignContextNone, draw_ladder::SiteKind::Exit>;
 using VScreenDistanceTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeNoDistanceNone, draw_ladder::SiteKind::Exit>;
+using VScreenPanelCurveTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kPanelCurveObserve, draw_ladder::SiteKind::Observe>;
 using VScreenSpaceDustTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kSpaceDustSkip, draw_ladder::SiteKind::Claim>;
 using VScreenFssPanelTestSite = draw_ladder::Site<
@@ -7500,6 +7543,9 @@ draw_ladder::SiteResult vScreenPredicateTestInvoke(
     if (siteId == static_cast<std::uint16_t>(VScreenContextTestSite::id)) {
         return vScreenPredicateTestInvokeSite<VScreenContextTestSite>(visitor, trace);
     }
+    if (siteId == static_cast<std::uint16_t>(VScreenPanelCurveTestSite::id)) {
+        return vScreenPredicateTestInvokeSite<VScreenPanelCurveTestSite>(visitor, trace);
+    }
     if (siteId == static_cast<std::uint16_t>(VScreenSpaceDustTestSite::id)) {
         return vScreenPredicateTestInvokeSite<VScreenSpaceDustTestSite>(visitor, trace);
     }
@@ -7546,9 +7592,10 @@ bool vScreenPredicateTestVisit(
     bool comfortAllowed, char kind, std::uint32_t count,
     std::uint32_t instances, std::uint32_t fssBodyFrame,
     std::uint32_t frameNo, std::uint32_t fssJumpFrame,
-    bool introAllowed) noexcept {
+    bool introAllowed, bool onFootAllowed) noexcept {
     if (!result || (siteId != static_cast<std::uint16_t>(VScreenContextTestSite::id) &&
                     siteId != static_cast<std::uint16_t>(VScreenDistanceTestSite::id) &&
+                    siteId != static_cast<std::uint16_t>(VScreenPanelCurveTestSite::id) &&
                     siteId != static_cast<std::uint16_t>(VScreenSpaceDustTestSite::id) &&
                     siteId != static_cast<std::uint16_t>(VScreenFssPanelTestSite::id) &&
                     siteId != static_cast<std::uint16_t>(VScreenFssRevealTestSite::id) &&
@@ -7562,6 +7609,7 @@ bool vScreenPredicateTestVisit(
     fixture.cockpitVisualsOwnerAllowed = ownerAllowed;
     fixture.comfortOwnerAllowed = comfortAllowed;
     fixture.introOwnerAllowed = introAllowed;
+    fixture.onFootPanelOwnerAllowed = onFootAllowed;
     fixture.fssBodyFrame = fssBodyFrame;
     fixture.frameNo = frameNo;
     fixture.fssJumpFrame = fssJumpFrame;
@@ -7570,6 +7618,7 @@ bool vScreenPredicateTestVisit(
     fixture.distanceEnabled = distanceEnabled;
     fixture.foreignCount = 0;
     fixture.foreignDraws = 0;
+    fixture.curveThisDraw = false;
     State* const priorState = g_state;
     const bool priorUiDepth = t_uiDepthThisDraw;
     const bool priorComposite = t_compositeThisDraw;
@@ -7598,21 +7647,43 @@ bool vScreenPredicateTestVisit(
         result->siteResult = vScreenPredicateTestInvoke(visitor, siteId, trace);
     }
     result->glareClampAfter = fixture.glareClamp;
+    result->curveThisDrawAfter = fixture.curveThisDraw;
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;
     return true;
 }
 
+bool vScreenFootprintOwnerTestVisit(
+    bool ownerAllowed, ID3D11DeviceContext* context, bool onFoot,
+    float distance, int baseVertex, unsigned startInstance,
+    bool* samplePendingAfter) noexcept {
+    if (samplePendingAfter) *samplePendingAfter = false;
+    if (!context) return false;
+    State fixture{};
+    fixture.onFootPanelOwnerAllowed = ownerAllowed;
+    const bool ran = runVScreenFootprintOwned(&fixture, [&] {
+        vscreenFootprintCompositeDraw(context, distance, baseVertex, startInstance);
+        // Snapshot the real module's issued-copy state before frame-boundary
+        // collection can map and retire a WARP sample immediately.
+        if (samplePendingAfter)
+            *samplePendingAfter = vscreenFootprintSamplePending();
+        vscreenFootprintFrameBoundary(context, onFoot);
+    });
+    return ran;
+}
+
 bool vScreenLegacyGateRegistrationTest(
     bool cockpitAllowed, bool comfortAllowed, bool introAllowed,
+    bool onFootAllowed,
     std::uint32_t* registeredCount,
     std::uint32_t* cockpitCallbacks,
     std::uint32_t* comfortCallbacks,
     std::uint32_t* introCallbacks,
-    std::uint32_t* sharedGlareCallbacks) noexcept {
+    std::uint32_t* sharedGlareCallbacks,
+    std::uint32_t* onFootCallbacks) noexcept {
     if (!registeredCount || !cockpitCallbacks || !comfortCallbacks || !introCallbacks ||
-        !sharedGlareCallbacks) return false;
+        !sharedGlareCallbacks || !onFootCallbacks) return false;
 
     // Isolate only the legacy-gate table; lifecycle/plugin registrations and
     // their state remain untouched and are restored after the temporary visit.
@@ -7621,16 +7692,19 @@ bool vScreenLegacyGateRegistrationTest(
     fixture.cockpitVisualsOwnerAllowed = cockpitAllowed;
     fixture.comfortOwnerAllowed = comfortAllowed;
     fixture.introOwnerAllowed = introAllowed;
+    fixture.onFootPanelOwnerAllowed = onFootAllowed;
     g_testCockpitLegacyGateCallbacks = 0;
     g_testComfortLegacyGateCallbacks = 0;
     g_testIntroLegacyGateCallbacks = 0;
     g_testSharedGlareLegacyGateCallbacks = 0;
+    g_testOnFootLegacyGateCallbacks = 0;
     const bool registered = registerLegacyDrawGates(&fixture, registeredCount);
     (void)pluginRegistryVisitLegacyDrawGatesForTest(&fixture);
     *cockpitCallbacks = g_testCockpitLegacyGateCallbacks;
     *comfortCallbacks = g_testComfortLegacyGateCallbacks;
     *introCallbacks = g_testIntroLegacyGateCallbacks;
     *sharedGlareCallbacks = g_testSharedGlareLegacyGateCallbacks;
+    *onFootCallbacks = g_testOnFootLegacyGateCallbacks;
     pluginRegistryEndLegacyDrawGateTest();
     return registered;
 }
@@ -7647,6 +7721,7 @@ bool vScreenForwardingPredicateTestVisit(
     fixture.cockpitVisualsOwnerAllowed = true;
     fixture.comfortOwnerAllowed = true;
     fixture.introOwnerAllowed = true;
+    fixture.onFootPanelOwnerAllowed = true;
     fixture.ownerCtx = context;
     fixture.rtv0Eye = nullptr;
     fixture.curveThisDraw = input.curveThisDraw;
@@ -7796,6 +7871,7 @@ bool vScreenEyeCensusPredicateTestVisit(
     static State fixture{};
     fixture.cockpitVisualsOwnerAllowed = true;
     fixture.introOwnerAllowed = true;
+    fixture.onFootPanelOwnerAllowed = true;
     fixture.ownerCtx = context;
     fixture.censusSkipCount = ruleCount;
     fixture.censusSkipped = censusSkippedSeed;
@@ -7884,6 +7960,7 @@ bool vScreenLoaderPanelPredicateTestVisit(
     static State fixture{};
     fixture.cockpitVisualsOwnerAllowed = true;
     fixture.introOwnerAllowed = true;
+    fixture.onFootPanelOwnerAllowed = true;
     fixture.ownerCtx = context;
     fixture.eyeDrawsLastFrame = eyeDrawsLastFrame;
     fixture.qsStartIndex = qsStartIndex;
@@ -7939,6 +8016,7 @@ bool vScreenTargetSharpPredicateTestVisit(
     fixture.renderH = renderH;
     fixture.cockpitVisualsOwnerAllowed = ownerAllowed;
     fixture.introOwnerAllowed = true;
+    fixture.onFootPanelOwnerAllowed = true;
     State* const priorState = g_state;
     const bool priorUiDepth = t_uiDepthThisDraw;
     const bool priorComposite = t_compositeThisDraw;
@@ -7992,6 +8070,7 @@ bool vScreenSunglareSkipPredicateTestVisit(
     fixture.cockpitVisualsOwnerAllowed = ownerAllowed;
     fixture.comfortOwnerAllowed = true;
     fixture.introOwnerAllowed = true;
+    fixture.onFootPanelOwnerAllowed = true;
     State* const priorState = g_state;
     g_state = &fixture;
     draw_ladder_trace::DrawFacts facts{};
@@ -8032,6 +8111,7 @@ bool vScreenSunglareNominationPredicateTestVisit(
     State fixture{};
     fixture.cockpitVisualsOwnerAllowed = true;
     fixture.introOwnerAllowed = true;
+    fixture.onFootPanelOwnerAllowed = true;
     fixture.ownerCtx = context;
     fixture.sceneCbNominated = nominatedBefore;
     State* const priorState = g_state;
@@ -8099,6 +8179,7 @@ bool vScreenPanelDistanceApiTransactionTest(
     static State fixture{};
     fixture.cockpitVisualsOwnerAllowed = true;
     fixture.introOwnerAllowed = true;
+    fixture.onFootPanelOwnerAllowed = true;
     const uint32_t priorEyeW = fixture.eyeW;
     const uint32_t priorEyeH = fixture.eyeH;
     const uint32_t priorEyeDraws = fixture.eyeDrawsThisFrame;
@@ -8117,6 +8198,7 @@ bool vScreenPanelDistanceApiTransactionTest(
     fixture.cockpitVisualsOwnerAllowed = true;
     fixture.comfortOwnerAllowed = true;
     fixture.introOwnerAllowed = true;
+    fixture.onFootPanelOwnerAllowed = input.onFootOwnerAllowed;
     fixture.pluginDispatchEnabled = input.cockpitPluginDispatch;
     fixture.rtv0Eye = false;
     // Restoring the borrowed binding slot makes its next test generation
@@ -8946,7 +9028,8 @@ bool vScreenRenderBelowEye(uint32_t* renderW, uint32_t* renderH, uint32_t* eyeW,
 
 static bool configureLegacyDrawInterests(bool cockpitVisualsOwnerAllowed,
                                          bool comfortOwnerAllowed,
-                                         bool introOwnerAllowed) {
+                                         bool introOwnerAllowed,
+                                         bool onFootPanelOwnerAllowed) {
     using draw_interest::InterestId;
     using draw_interest::ShaderFilter;
     constexpr std::size_t kFilterCapacity = 16;
@@ -8980,7 +9063,8 @@ static bool configureLegacyDrawInterests(bool cockpitVisualsOwnerAllowed,
     runIntroOwned(introOwnerAllowed, [&] {
         enable(InterestId::IntroCurveObserve, introCurveDrawInterestConfigured());
     });
-    enable(InterestId::PanelCurveObserve, panelCurveDrawInterestConfigured());
+    enable(InterestId::PanelCurveObserve,
+           onFootPanelOwnerAllowed && panelCurveDrawInterestConfigured());
 
     bool filtersFit = true;
     runCockpitVisualsOwned(cockpitVisualsOwnerAllowed, [&] {
@@ -9045,10 +9129,12 @@ void vScreenRefreshConfig() {
     const bool  wasVoid  = s->blackVoid;
     const float wasScale = s->distanceScale;
 
-    s->blackVoid = cfg.getBool("fix.black_void", true);
-    s->distanceScale = cfg.getFloat("fix.panel_distance", 1.0f);
-    s->distanceEnabled = s->distanceScale != 1.0f;
-    s->distanceIndex = readDistanceIndex(cfg);
+    runOnFootPanelOwned(s->onFootPanelOwnerAllowed, [&] {
+        s->blackVoid = cfg.getBool("fix.black_void", true);
+        s->distanceScale = cfg.getFloat("fix.panel_distance", 1.0f);
+        s->distanceEnabled = s->distanceScale != 1.0f;
+        s->distanceIndex = readDistanceIndex(cfg);
+    });
     s->countForFlashFix = s->comfortOwnerAllowed && glitchFrameNeedsEyeDraws();
     readEyeRenderSize(cfg, s);
     readCensusSkip(cfg, s);
@@ -9078,7 +9164,7 @@ void vScreenRefreshConfig() {
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
     configureSchedulerLifecycle(cfg);
-    screenMotionConfigure(cfg);
+    screenMotionConfigure(cfg, s->onFootPanelOwnerAllowed);
     pluginRegistryConfigure(&cfg);
     depthProbeConfigure(cfg);
     configureIntroLifecycleStage(kIntroLifecycleBackdrop, cfg,
@@ -9121,13 +9207,18 @@ void vScreenRefreshConfig() {
         sunglareConfigure(cfg);
     });
     runComfortOwned(s->comfortOwnerAllowed, [&] { exposureConfigure(cfg); });
-    panelCurveConfigure(cfg);
+    // The curve generator is a shared surface: Intro composites consume it
+    // even when the On-foot owner is absent. Its curvature keys therefore
+    // remain part of this shared service configuration.
+    if (s->onFootPanelOwnerAllowed || s->introOwnerAllowed)
+        panelCurveConfigure(cfg);
     runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
         particleConfigure(cfg);
     });
     configureLegacyDrawInterests(s->cockpitVisualsOwnerAllowed,
                                  s->comfortOwnerAllowed,
-                                 s->introOwnerAllowed);
+                                 s->introOwnerAllowed,
+                                 s->onFootPanelOwnerAllowed);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
     perfMonitorPluginCostConfigure(static_cast<uint8_t>(runtimeVrProfile()
@@ -9341,10 +9432,12 @@ void vScreenFrameBoundary() {
         // run, and every 30 s prints its line and stores the on-foot head-on floor (p10) for the next launch's width. The gate it is
         // handed is the one the route reads: the layer's world-screen gate while the layer is live, else the journal's word.
         // Unarmed (the flat profile, an explicit width) it is one config read a second and returns.
-        tkVScreenFootprint.run([&] {
-            const bool onFoot = uiLayerLiveForWorldRoute() ? uiLayerWorldScreenHeld()
-                                                           : (journalOnFootKnown() && journalOnFoot());
-            vscreenFootprintFrameBoundary(g_state->ownerCtx, onFoot);
+        runVScreenFootprintOwned(g_state, [&] {
+            tkVScreenFootprint.run([&] {
+                const bool onFoot = uiLayerLiveForWorldRoute() ? uiLayerWorldScreenHeld()
+                                                               : (journalOnFootKnown() && journalOnFoot());
+                vscreenFootprintFrameBoundary(g_state->ownerCtx, onFoot);
+            });
         });
         tkScreenMotion.run([&] { screenMotionFrameBoundary(g_state->ownerCtx); });
         tkEngineVelocity.run([&] { engineVelocityFrameBoundary(g_state->ownerCtx); });
@@ -10321,10 +10414,15 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     const bool comfortOwnerAllowed = edvr::comfortOwnerAllowed();
     const IntroStartupAdmission introAdmission = readIntroStartupAdmission();
     const bool introOwnerAllowed = introAdmission.ownerAllowed;
+    const bool onFootPanelOwnerAllowed = edvr::onFootPanelOwnerAllowed();
 
     Config& cfg = Config::get();
-    const bool wantVoid = cfg.getBool("fix.black_void", true);
-    const float scale = cfg.getFloat("fix.panel_distance", 1.0f);
+    bool wantVoid = false;
+    float scale = 1.0f;
+    runOnFootPanelOwned(onFootPanelOwnerAllowed, [&] {
+        wantVoid = cfg.getBool("fix.black_void", true);
+        scale = cfg.getFloat("fix.panel_distance", 1.0f);
+    });
     // Register profile-supported modules before the dormant-hook check so
     // their own config contract can request hooks without core duplicating
     // plugin-owned setting names or defaults.
@@ -10361,7 +10459,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
          !(comfortOwnerAllowed && exposureDampingActive())) &&
         !introAdmission.strictSelection &&
         !cfg.getBool("advanced.app_gpu_timing", true) &&
-        !cfg.getBool("advanced.panel_hooks_always", true)) {
+        (!onFootPanelOwnerAllowed ||
+         !cfg.getBool("advanced.panel_hooks_always", true))) {
         // The optional fixes are deliberately dormant, but native discovery
         // still needs the exact immediate-context transport. It has its own
         // one-shot install and does not create State, configure a fix, or bind
@@ -10391,6 +10490,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     g_state->cockpitVisualsOwnerAllowed = cockpitVisualsOwnerAllowed;
     g_state->comfortOwnerAllowed = comfortOwnerAllowed;
     g_state->introOwnerAllowed = introOwnerAllowed;
+    g_state->onFootPanelOwnerAllowed = onFootPanelOwnerAllowed;
     g_state->classifierConfigEpoch = 1;
     g_state->replayTraceEnabled = cfg.getBool("advanced.draw_replay", false);
     g_state->pluginDispatchEnabled = cockpitVisualsRegistered;
@@ -10399,7 +10499,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     g_state->blackVoid = wantVoid;
     g_state->distanceScale = scale;
     g_state->distanceEnabled = scale != 1.0f;
-    g_state->distanceIndex = readDistanceIndex(cfg);
+    if (g_state->onFootPanelOwnerAllowed)
+        g_state->distanceIndex = readDistanceIndex(cfg);
     readEyeRenderSize(cfg, g_state);
     readCensusSkip(cfg, g_state);
     runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
@@ -10427,7 +10528,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
     configureSchedulerLifecycle(cfg);
-    screenMotionConfigure(cfg);
+    screenMotionConfigure(cfg, g_state->onFootPanelOwnerAllowed);
     pluginRegistryConfigure(&cfg);
     depthProbeConfigure(cfg);
     configureIntroLifecycleStage(kIntroLifecycleBackdrop, cfg,
@@ -10462,13 +10563,17 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     });
     runComfortOwned(g_state->comfortOwnerAllowed,
                     [&] { exposureConfigure(cfg); });
-    panelCurveConfigure(cfg);
+    // Intro uses the same generated surface and its panel-curvature settings;
+    // keep the shared service configured for either admitted owner.
+    if (g_state->onFootPanelOwnerAllowed || g_state->introOwnerAllowed)
+        panelCurveConfigure(cfg);
     runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
         particleConfigure(cfg);
     });
     configureLegacyDrawInterests(g_state->cockpitVisualsOwnerAllowed,
                                  g_state->comfortOwnerAllowed,
-                                 g_state->introOwnerAllowed);
+                                 g_state->introOwnerAllowed,
+                                 g_state->onFootPanelOwnerAllowed);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
@@ -10791,8 +10896,9 @@ void shutdownVScreenFixes() {
                     g_state->eyeDrawsMax);
 
     g_state->distanceEnabled = false;
-    panelCurveShutdown();
-    vscreenFootprintShutdown();
+    if (g_state->onFootPanelOwnerAllowed || g_state->introOwnerAllowed)
+        panelCurveShutdown();
+    if (g_state->onFootPanelOwnerAllowed) vscreenFootprintShutdown();
     runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
         particleShutdown();
     });

@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -37,6 +38,7 @@
 #include "../../src/d3d11/intro_curve.h"
 #include "../../src/d3d11/intro_panel.h"
 #include "../../src/d3d11/panel_curve.h"
+#include "../../src/d3d11/vscreen_footprint.h"
 #include "../../src/d3d11/sunglare_fix.h"
 #include "../../src/d3d11/sunglare_nomination_observation.h"
 #include "../../src/d3d11/plugin_registry.h"
@@ -870,6 +872,25 @@ bool testPanelDistanceApiTransaction(ID3D11DeviceContext* immediate,
     okay &= check(apiCallsAre(window, 2, 2) &&
                       siteMaskIs(window, true, true, true, true),
                   "SampledApi attributes successful Map/Unmap and both binds to OnFootPanel");
+
+    // The same real claim visitor with a stale, distance-enabled module must
+    // stop before Map/Unmap/bind callbacks when On-foot ownership is absent.
+    // The original game draw still forwards once. The successful transaction
+    // above proves these counters are connected.
+    auto onFootDenied = base;
+    onFootDenied.onFootOwnerAllowed = false;
+    result = {};
+    okay &= check(run(onFootDenied, true, false, &result, &window) &&
+                      result.siteResult.outcome ==
+                          edvr::draw_ladder::SiteOutcome::Declined &&
+                      result.mapCalls == 0 && result.unmapCalls == 0 &&
+                      result.constantBufferCalls == 0 &&
+                      result.originalDrawCalls == 1 && result.drawArgumentsValid &&
+                      result.finalBoundCb == base.compositeCb &&
+                      panelEventSequence(result, {VScreenPanelDistanceApiTestEvent::OriginalDraw}) &&
+                      apiCallsAre(window, 0, 0) &&
+                      siteMaskIs(window, false, false, false, false),
+                  "On-foot-denied real PanelDistance claim skips stale active candidate Map and every transaction callback");
 
     // A Map HRESULT failure still counts the actual Map call, but no later
     // transfer or binding exists to attribute.
@@ -2746,40 +2767,60 @@ bool testNvPrecedenceSubprocesses() {
     return true;
 }
 
-bool testCockpitComfortIntroLegacyGateRegistration() {
+bool testOnFootOwnerLegacyGateRegistration() {
     const auto checkInventory = [](bool cockpitAllowed, bool comfortAllowed,
-                                   bool introAllowed, std::uint32_t expectedRows,
+                                   bool introAllowed, bool onFootAllowed,
+                                   std::uint32_t expectedRows,
                                    std::uint32_t expectedCockpit,
                                    std::uint32_t expectedComfort,
                                    std::uint32_t expectedIntro,
                                    std::uint32_t expectedShared,
+                                   std::uint32_t expectedOnFoot,
                                    const char* label) {
-        std::uint32_t rows = 0, cockpit = 0, comfort = 0, intro = 0, shared = 0;
+        std::uint32_t rows = 0, cockpit = 0, comfort = 0, intro = 0,
+                      shared = 0, onFoot = 0;
         const bool registered = edvr::vScreenLegacyGateRegistrationTest(
-            cockpitAllowed, comfortAllowed, introAllowed, &rows, &cockpit,
-            &comfort, &intro, &shared);
+            cockpitAllowed, comfortAllowed, introAllowed, onFootAllowed,
+            &rows, &cockpit, &comfort, &intro, &shared, &onFoot);
         return check(registered && rows == expectedRows &&
                          cockpit == expectedCockpit && comfort == expectedComfort &&
-                         intro == expectedIntro && shared == expectedShared,
+                         intro == expectedIntro && shared == expectedShared &&
+                         onFoot == expectedOnFoot,
                      label);
     };
     bool okay = true;
-    okay &= checkInventory(false, false, false, 14, 0, 0, 0, 0,
-                           "real legacy registry omits absent Cockpit, Comfort, Intro and shared-glare rows");
-    okay &= checkInventory(true, false, false, 21, 6, 0, 0, 1,
-                           "Cockpit-only admission restores its six stored callbacks and shared glare");
-    okay &= checkInventory(false, true, false, 19, 0, 4, 0, 1,
-                           "Comfort-only admission restores its four stored callbacks and shared glare");
-    okay &= checkInventory(true, true, false, 25, 6, 4, 0, 1,
-                           "existing Cockpit-plus-Comfort callback counts stay exact with Intro absent");
-    okay &= checkInventory(false, false, true, 19, 0, 0, 5, 0,
-                           "Intro-only admission restores exactly five Intro callbacks without shared glare");
-    okay &= checkInventory(true, false, true, 26, 6, 0, 5, 1,
-                           "Cockpit-plus-Intro admits both exact callback families and shared glare");
-    okay &= checkInventory(false, true, true, 24, 0, 4, 5, 1,
-                           "Comfort-plus-Intro admits both exact callback families and shared glare");
-    okay &= checkInventory(true, true, true, 30, 6, 4, 5, 1,
-                           "all admitted owners restore exact stored callback counts and all subscriptions");
+    okay &= checkInventory(false, false, false, false, 11, 0, 0, 0, 0, 0,
+                           "real legacy registry retains only eleven Core rows when every optional owner is absent");
+    okay &= checkInventory(true, false, false, false, 18, 6, 0, 0, 1, 0,
+                           "Cockpit-only admission restores six stored callbacks and shared glare");
+    okay &= checkInventory(false, true, false, false, 16, 0, 4, 0, 1, 0,
+                           "Comfort-only admission restores four stored callbacks and shared glare");
+    okay &= checkInventory(false, false, true, false, 16, 0, 0, 5, 0, 0,
+                           "Intro-only admission restores exactly five callbacks; shared curve service is tested separately");
+    okay &= checkInventory(false, false, false, true, 14, 0, 0, 0, 0, 3,
+                           "On-foot-only admission restores its exact three callbacks including panel-curve classification");
+    okay &= checkInventory(true, true, false, false, 22, 6, 4, 0, 1, 0,
+                           "Cockpit-plus-Comfort retains exact callbacks with Intro and On-foot absent");
+    okay &= checkInventory(true, false, true, false, 23, 6, 0, 5, 1, 0,
+                           "Cockpit-plus-Intro keeps exact callbacks and shared glare");
+    okay &= checkInventory(true, false, false, true, 21, 6, 0, 0, 1, 3,
+                           "Cockpit-plus-On-foot keeps exact callbacks and shared glare");
+    okay &= checkInventory(false, true, true, false, 21, 0, 4, 5, 1, 0,
+                           "Comfort-plus-Intro keeps shared glare with exact callback counts");
+    okay &= checkInventory(false, true, false, true, 19, 0, 4, 0, 1, 3,
+                           "Comfort-plus-On-foot keeps shared glare with exact callback counts");
+    okay &= checkInventory(false, false, true, true, 19, 0, 0, 5, 0, 3,
+                           "Intro-plus-On-foot has exact separate curve and On-foot callback registrations");
+    okay &= checkInventory(true, true, true, false, 27, 6, 4, 5, 1, 0,
+                           "three owners admit exact callbacks while On-foot stays absent");
+    okay &= checkInventory(true, true, false, true, 25, 6, 4, 0, 1, 3,
+                           "Cockpit, Comfort and On-foot admit exact callbacks while Intro stays absent");
+    okay &= checkInventory(true, false, true, true, 26, 6, 0, 5, 1, 3,
+                           "Cockpit, Intro and On-foot admit exact callbacks while Comfort stays absent");
+    okay &= checkInventory(false, true, true, true, 24, 0, 4, 5, 1, 3,
+                           "Comfort, Intro and On-foot admit exact callbacks while Cockpit stays absent");
+    okay &= checkInventory(true, true, true, true, 30, 6, 4, 5, 1, 3,
+                           "all owners restore exact family callbacks and the unchanged thirty-row table");
     return okay;
 }
 
@@ -2794,6 +2835,7 @@ bool testIntroOwnerDeniedVisitor(ID3D11Device* device,
     const void* savedVs = edvr::bindingGet(edvr::BindSlot::Vs);
     const std::uint64_t savedVsHash = edvr::bindingShaderHash(edvr::BindSlot::Vs);
     const std::uint32_t savedResourceAttempts = g_resourceAttempts;
+    const auto savedGetResource = g_originalGetResource;
     const edvr::IntroCurveInfo priorCurveState = edvr::introCurveInfo();
     const bool curveStateIsClean = priorCurveState.entries == 0 &&
         priorCurveState.staging == 0 && !priorCurveState.retired &&
@@ -2845,8 +2887,9 @@ bool testIntroOwnerDeniedVisitor(ID3D11Device* device,
         const bool hookReady = hookResource(resourceHook, srv.Get());
         edvr::ResourceInfo queriedResource{};
         g_resourceAttempts = 0;
-        const bool queryResolved = hookReady && edvr::bindingResolve(srv.Get(), &queriedResource);
-        okay &= check(queryResolved && queriedResource.isTexture2D &&
+        const bool resolverControl = hookReady &&
+            edvr::bindingResolve(srv.Get(), &queriedResource);
+        okay &= check(resolverControl && queriedResource.isTexture2D &&
                           queriedResource.a == textureDesc.Width &&
                           queriedResource.b == textureDesc.Height &&
                           g_resourceAttempts == 1,
@@ -2865,7 +2908,7 @@ bool testIntroOwnerDeniedVisitor(ID3D11Device* device,
                               g_resourceAttempts == 0 && edvr::introPanelWants(),
                           "owner-denied real Intro panel visitor declines before candidate SRV query despite stale active module state");
             resourceHook.uninstall();
-            g_originalGetResource = nullptr;
+            g_originalGetResource = savedGetResource;
         } else {
             okay &= check(false, "Intro panel denial requires a hooked WARP SRV query counter");
         }
@@ -2910,6 +2953,202 @@ bool testIntroOwnerDeniedVisitor(ID3D11Device* device,
     config.set("fix.panel_curvature", savedCurvature.c_str());
     edvr::panelCurveConfigure(config);
     g_resourceAttempts = savedResourceAttempts;
+    g_originalGetResource = savedGetResource;
+    return okay;
+}
+
+bool testOnFootOwnerDeniedPanelCurve(ID3D11Device* device,
+                                     ID3D11DeviceContext* context) {
+    if (!device || !context)
+        return check(false, "On-foot panel-curve visitor has a real WARP device/context");
+
+    auto& config = edvr::Config::get();
+    const std::string savedCurvature = config.getString("fix.panel_curvature", "0");
+    const void* savedSrv = edvr::bindingGet(edvr::BindSlot::PsSrv0);
+    const void* savedVs = edvr::bindingGet(edvr::BindSlot::Vs);
+    const std::uint64_t savedVsHash = edvr::bindingShaderHash(edvr::BindSlot::Vs);
+    const std::uint32_t savedResourceAttempts = g_resourceAttempts;
+    const auto savedGetResource = g_originalGetResource;
+    ID3D11ShaderResourceView* priorActualRaw = nullptr;
+    context->PSGetShaderResources(0, 1, &priorActualRaw);
+    ComPtr<ID3D11ShaderResourceView> priorActual;
+    priorActual.Attach(priorActualRaw);
+
+    bool okay = true;
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = 1920;
+    desc.Height = 1080;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    HRESULT hr = device->CreateTexture2D(&desc, nullptr, &texture);
+    if (SUCCEEDED(hr)) hr = device->CreateShaderResourceView(texture.Get(), nullptr, &srv);
+    okay &= check(SUCCEEDED(hr) && srv,
+                  "On-foot panel-curve fixture creates the real panel-sized WARP SRV");
+
+    if (SUCCEEDED(hr) && srv) {
+        config.set("fix.panel_curvature", "0.3");
+        edvr::panelCurveConfigure(config);
+        context->PSSetShaderResources(0, 1, srv.GetAddressOf());
+        edvr::bindingSet(edvr::BindSlot::PsSrv0, srv.Get());
+        edvr::bindingSetShader(edvr::BindSlot::Vs, reinterpret_cast<void*>(1),
+                               0xA11F0071ull);
+        okay &= check(edvr::panelCurveWants(),
+                      "stale shared panel-curve module is active before On-foot denial");
+
+        edvr::VTableHook resourceHook;
+        const bool hookReady = hookResource(resourceHook, srv.Get());
+        edvr::ResourceInfo control{};
+        g_resourceAttempts = 0;
+        const bool resolverControl = hookReady && edvr::bindingResolve(srv.Get(), &control);
+        okay &= check(resolverControl && control.isTexture2D &&
+                          control.a == desc.Width && control.b == desc.Height &&
+                          g_resourceAttempts == 1,
+                      "panel-sized WARP resolver positive control proves candidate-query counter is connected");
+
+        if (hookReady) {
+            g_resourceAttempts = 0;
+            edvr::VScreenPredicateTestResult denied{};
+            const bool deniedVisited = edvr::vScreenPredicateTestVisit(
+                static_cast<std::uint16_t>(edvr::draw_ladder::SiteId::kPanelCurveObserve),
+                context, context, 0, false, true, &denied,
+                true, true, 'N', 6, 1, 0, 0, 0, false, false);
+            okay &= check(deniedVisited && denied.token.valid() &&
+                              denied.siteResult.outcome ==
+                                  edvr::draw_ladder::SiteOutcome::Observed &&
+                              !denied.curveThisDrawAfter && g_resourceAttempts == 0 &&
+                              edvr::panelCurveWants(),
+                          "On-foot-denied real panel-curve visitor preserves trace and stale shared surface but skips candidate query");
+
+            g_resourceAttempts = 0;
+            edvr::VScreenPredicateTestResult allowed{};
+            const bool allowedVisited = edvr::vScreenPredicateTestVisit(
+                static_cast<std::uint16_t>(edvr::draw_ladder::SiteId::kPanelCurveObserve),
+                context, context, 0, false, true, &allowed,
+                true, true, 'N', 6, 1, 0, 0, 0, false, true);
+            okay &= check(allowedVisited && allowed.token.valid() &&
+                              allowed.siteResult.outcome ==
+                                  edvr::draw_ladder::SiteOutcome::Observed &&
+                              allowed.curveThisDrawAfter && g_resourceAttempts == 1,
+                          "On-foot-admitted real panel-curve visitor resolves once and sets the actual curve draw state");
+            resourceHook.uninstall();
+            g_originalGetResource = nullptr;
+        } else {
+            okay &= check(false, "panel-curve query proof requires the hooked WARP SRV resolver");
+        }
+    }
+
+    context->PSSetShaderResources(0, 1, priorActual.GetAddressOf());
+    edvr::bindingSet(edvr::BindSlot::PsSrv0, const_cast<void*>(savedSrv));
+    edvr::bindingSetShader(edvr::BindSlot::Vs, const_cast<void*>(savedVs), savedVsHash);
+    config.set("fix.panel_curvature", savedCurvature.c_str());
+    edvr::panelCurveConfigure(config);
+    g_resourceAttempts = savedResourceAttempts;
+    g_originalGetResource = savedGetResource;
+    return okay;
+}
+
+bool testOnFootOwnerDeniedFootprint(ID3D11Device* device,
+                                    ID3D11DeviceContext* context) {
+    if (!device || !context)
+        return check(false, "On-foot footprint owner seam has a real WARP device/context");
+
+    auto& config = edvr::Config::get();
+    const std::string savedWidth = config.getString("fix.vscreen_res_width", "auto");
+    const auto savedProfile = edvr::g_runtimeProfile;
+    const bool savedWanted = edvr::detail::g_footprintWanted;
+    const std::uint64_t savedWindowMs = edvr::detail::g_footprintWindowMs;
+    const std::uint64_t savedSampleMs = edvr::detail::g_footprintSampleMs;
+    const std::uint64_t savedConfigMs = edvr::detail::g_footprintConfigMs;
+    const bool clean = !edvr::vscreenFootprintSamplePending() && !savedWanted;
+    bool okay = check(clean,
+        "footprint absence fixture requires exclusive clean pending/wanted module state");
+    if (!clean) return false;
+
+    ID3D11Buffer* priorCbRaw[2] = {};
+    context->VSGetConstantBuffers(0, 2, priorCbRaw);
+    ComPtr<ID3D11Buffer> priorCb[2];
+    priorCb[0].Attach(priorCbRaw[0]);
+    priorCb[1].Attach(priorCbRaw[1]);
+    ID3D11Buffer* priorVbRaw[2] = {};
+    UINT priorStrides[2] = {}, priorOffsets[2] = {};
+    context->IAGetVertexBuffers(0, 2, priorVbRaw, priorStrides, priorOffsets);
+    ComPtr<ID3D11Buffer> priorVb[2];
+    priorVb[0].Attach(priorVbRaw[0]);
+    priorVb[1].Attach(priorVbRaw[1]);
+
+    std::array<float, 52> cb0Data{};
+    const float model[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 4};
+    std::memcpy(cb0Data.data() + 36, model, sizeof(model));
+    std::array<float, 5376 / sizeof(float)> cb1Data{};
+    const float clip[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    std::memcpy(cb1Data.data() + 270 * 4, clip, sizeof(clip));
+    const float vertices[40] = {9,9,9,9,9, 9,9,9,9,9,
+        -1,-1,0,0,1, 1,-1,0,1,1, -1,1,0,0,0, 1,1,0,1,0,
+        9,9,9,9,9, 9,9,9,9,9};
+    const float sizes[4] = {1, 1, 20, 20};
+    const auto makeBuffer = [&](UINT bytes, UINT bind, const void* data,
+                                ComPtr<ID3D11Buffer>& out) {
+        D3D11_BUFFER_DESC desc{};
+        desc.ByteWidth = bytes;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = bind;
+        D3D11_SUBRESOURCE_DATA initial{};
+        initial.pSysMem = data;
+        return SUCCEEDED(device->CreateBuffer(&desc, &initial, &out)) && out;
+    };
+    ComPtr<ID3D11Buffer> cb0, cb1, vb0, vb1;
+    const bool buffersReady = makeBuffer(208, D3D11_BIND_CONSTANT_BUFFER,
+                                         cb0Data.data(), cb0) &&
+        makeBuffer(5376, D3D11_BIND_CONSTANT_BUFFER, cb1Data.data(), cb1) &&
+        makeBuffer(160, D3D11_BIND_VERTEX_BUFFER, vertices, vb0) &&
+        makeBuffer(16, D3D11_BIND_VERTEX_BUFFER, sizes, vb1);
+    okay &= check(buffersReady,
+                  "WARP creates the four real footprint-copy source buffers");
+
+    if (buffersReady) {
+        ID3D11Buffer* cbs[2] = {cb0.Get(), cb1.Get()};
+        context->VSSetConstantBuffers(0, 2, cbs);
+        ID3D11Buffer* vbs[2] = {vb0.Get(), vb1.Get()};
+        const UINT strides[2] = {20, 8}, offsets[2] = {0, 0};
+        context->IASetVertexBuffers(0, 2, vbs, strides, offsets);
+
+        config.set("fix.vscreen_res_width", "auto");
+        edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
+        edvr::detail::g_footprintSampleMs = 0;
+        edvr::detail::g_footprintConfigMs = 0;
+        edvr::detail::g_footprintWindowMs = 600000;
+        edvr::detail::g_footprintWanted = true;
+        bool copyPendingAfterDraw = true;
+        const bool denied = edvr::vScreenFootprintOwnerTestVisit(
+            false, context, true, 1.0f, 4, 1, &copyPendingAfterDraw);
+        okay &= check(!denied && !copyPendingAfterDraw &&
+                          !edvr::vscreenFootprintSamplePending(),
+                      "On-foot-denied real footprint owner wrapper skips stale module draw and frame callbacks before any pending GPU copy");
+
+        copyPendingAfterDraw = false;
+        const bool allowed = edvr::vScreenFootprintOwnerTestVisit(
+            true, context, true, 1.0f, 4, 1, &copyPendingAfterDraw);
+        okay &= check(allowed && copyPendingAfterDraw,
+                      "owner-allowed real footprint wrapper issues the actual four-source WARP copy");
+        edvr::vscreenFootprintShutdown();
+    }
+
+    ID3D11Buffer* restoreCbs[2] = {priorCb[0].Get(), priorCb[1].Get()};
+    context->VSSetConstantBuffers(0, 2, restoreCbs);
+    ID3D11Buffer* restoreVbs[2] = {priorVb[0].Get(), priorVb[1].Get()};
+    context->IASetVertexBuffers(0, 2, restoreVbs, priorStrides, priorOffsets);
+    config.set("fix.vscreen_res_width", savedWidth.c_str());
+    edvr::g_runtimeProfile = savedProfile;
+    edvr::detail::g_footprintWanted = savedWanted;
+    edvr::detail::g_footprintWindowMs = savedWindowMs;
+    edvr::detail::g_footprintSampleMs = savedSampleMs;
+    edvr::detail::g_footprintConfigMs = savedConfigMs;
     return okay;
 }
 } // namespace
@@ -4591,7 +4830,9 @@ int main(int argc, char** argv) {
         okay &= testSunglareNomination(device, immediate);
         okay &= testCockpitOwnerDeniedGlareAndCore(device, immediate);
         okay &= testIntroOwnerDeniedVisitor(device, immediate);
-        okay &= testCockpitComfortIntroLegacyGateRegistration();
+        okay &= testOnFootOwnerDeniedPanelCurve(device, immediate);
+        okay &= testOnFootOwnerDeniedFootprint(device, immediate);
+        okay &= testOnFootOwnerLegacyGateRegistration();
         for (std::uint32_t i = 0; i < 4; ++i)
             edvr::bindingSet(static_cast<edvr::BindSlot>(
                                  static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i), nullptr);

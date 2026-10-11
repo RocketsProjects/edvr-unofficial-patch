@@ -6,7 +6,7 @@
 struct ID3D11ShaderResourceView;
 namespace edvr {
 class Config;
-void screenMotionConfigure(Config&);
+void screenMotionConfigure(Config&, bool onFootPanelOwnerAllowed = true);
 
 // Is this fix live? The first term of screenMotionSource, screenMotionUiDraw
 // and screenMotionRecognize, published so the draw path can decline without a

@@ -28,6 +28,7 @@
 #include "vr_camera_census.h"
 #include "vr_world_mips.h"
 #include "weapon_motion.h"
+#include "device_hook.h"
 #include "vscreen.h"
 #include "../common/config.h"
 #include "../common/log.h"
@@ -243,7 +244,8 @@ struct WorldFirstPerson {
 };
 WorldFirstPerson worldFirstPerson() {
     WorldFirstPerson fp;
-    ID3D11ShaderResourceView* map = weaponMotionView();   // null unless a weapon draw made the map THIS frame (and it is not ambiguous)
+    ID3D11ShaderResourceView* map = onFootPanelOwnerAllowed()
+        ? weaponMotionView() : nullptr;   // null unless an admitted weapon draw made the map THIS frame
     if (!map || !g_depthViews.stencil) return fp;
     fp.motion = map;
     fp.stencil = g_depthViews.stencil.Get();

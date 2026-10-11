@@ -21,6 +21,7 @@ struct VScreenPredicateTestResult final {
     std::uint32_t glareClampAfter = 0;
     std::uint64_t censusSkippedAfter = 0;
     void* sceneCbNominatedAfter = nullptr;
+    bool curveThisDrawAfter = false;
 };
 
 struct VScreenForwardingTestInput final {
@@ -73,6 +74,7 @@ struct VScreenPanelDistanceApiTestInput final {
     bool traceEnabled = false;
     bool cpuSample = false;
     bool distanceEnabled = true;
+    bool onFootOwnerAllowed = true;
     std::uint8_t shadow[256]{};
     std::uint32_t shadowBytes = 0;
     std::uint32_t distanceIndex = 0;
@@ -226,17 +228,28 @@ bool vScreenPredicateTestVisit(std::uint16_t siteId,
                                std::uint32_t fssBodyFrame = 0,
                                std::uint32_t frameNo = 0,
                                std::uint32_t fssJumpFrame = 0,
-                               bool introAllowed = true) noexcept;
+                               bool introAllowed = true,
+                               bool onFootAllowed = true) noexcept;
+
+// Run the real VScreen composite-tail and frame-boundary footprint owner path
+// with a per-call cached On-foot decision. The production draw/tick callbacks
+// remain the evidence source; tests inspect the real module sample state.
+bool vScreenFootprintOwnerTestVisit(
+    bool ownerAllowed, ID3D11DeviceContext* context, bool onFoot,
+    float distance, int baseVertex, unsigned startInstance,
+    bool* samplePendingAfter = nullptr) noexcept;
 
 // Serialized registry test. Brackets and clears the global legacy-gate
 // registry while counting successful subscriptions and actual callback calls.
 bool vScreenLegacyGateRegistrationTest(
     bool cockpitAllowed, bool comfortAllowed, bool introAllowed,
+    bool onFootAllowed,
     std::uint32_t* registeredCount,
     std::uint32_t* cockpitCallbacks,
     std::uint32_t* comfortCallbacks,
     std::uint32_t* introCallbacks,
-    std::uint32_t* sharedGlareCallbacks) noexcept;
+    std::uint32_t* sharedGlareCallbacks,
+    std::uint32_t* onFootCallbacks) noexcept;
 
 bool vScreenEyeCensusPredicateTestVisit(
     ID3D11DeviceContext* context, char kind, std::uint32_t count,

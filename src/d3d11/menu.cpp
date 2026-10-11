@@ -2129,7 +2129,8 @@ void buildContent(MenuContent& c) {
                 // not once at startup, so the resolver must stay silent here.
                 uint32_t vw = 0, vh = 0;
                 vscreenfit::Decision autoRule;
-                resolveVScreenTargetResolution(Config::get(), &vw, &vh, /*announce=*/false, &autoRule);
+                if (onFootPanelOwnerAllowed())
+                    resolveVScreenTargetResolution(Config::get(), &vw, &vh, /*announce=*/false, &autoRule);
                 if (vw && vh && autoRule.width) {
                     // "auto": which of its two rules chose it (vscreen_fit.h).
                     vscreenfit::formatHint(c.hint, sizeof(c.hint), autoRule);

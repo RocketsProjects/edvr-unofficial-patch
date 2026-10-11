@@ -131,7 +131,8 @@ W_BEGIN = "        forwardVerdictBegin(self, v);\n"
 W_OBSERVED = ("    const bool originalIssued=observedDraw(alteredClass == AlteredDrawClass::Verdict\n"
               "                                               ? AlteredDraw(alteredClass, alteredFixOf(v)) : AlteredDraw(alteredClass));\n")
 W_STRIP_START = "    float stripGain = 0.0f;\n"
-W_GUARD = ("            if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&\n"
+W_GUARD = ("            if (s->onFootPanelOwnerAllowed && panelCurveWants() &&\n"
+           "                srv0IsPanelSized(s, kind, count) &&\n"
            "                !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash))\n")
 W_GATE = '    {"legacy.intro-curve", &drawGate_intro_curve, true, LegacyGateOwner::Intro},\n'
 W_DIM = ("            const bool stripDim = stripIssued && panelCurveSurfaceDraw(\n"
@@ -362,9 +363,9 @@ MUTANTS = [
                   "the recognizer precedes the movie claim, so movie-owned draws reach it"),
     wiring_ladder("iw-recognition-away-from-the-movie", "after-movie", LADDER_AFTER_INTRO_PANEL, LADDER_INTRO_AWAY,
                   "the recognizer is no longer the next rung after the movie claim"),
-    wiring("iw-guard-gone", "guard", [(W_GUARD, "            if (panelCurveWants() && srv0IsPanelSized(s, kind, count))\n")], "the on-foot recognition claims the intro composite again"),
+    wiring("iw-guard-gone", "guard", [(W_GUARD, "            if (s->onFootPanelOwnerAllowed && panelCurveWants() &&\n                srv0IsPanelSized(s, kind, count))\n")], "the on-foot recognition claims the intro composite again"),
     wiring("iw-guard-before-the-gate", "guard",
-           [(W_GUARD, "            if (!(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash) &&\n                panelCurveWants() && srv0IsPanelSized(s, kind, count))\n")],
+           [(W_GUARD, "            if (s->onFootPanelOwnerAllowed &&\n                !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash) &&\n                panelCurveWants() && srv0IsPanelSized(s, kind, count))\n")],
            "the guard is read before panelCurveWants(): curvature 0 reads something new"),
     wiring("iw-gate-unlisted", "gate", [(W_GATE, "")],
            "the draw gate does not list the recogniser"),

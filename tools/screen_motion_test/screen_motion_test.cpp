@@ -59,15 +59,19 @@ ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,const void* bytes
 }
 
 ID3D11ShaderResourceView* testWeaponMotion=nullptr;
-void weaponMotionConfigure(bool){}
-void weaponMotionSource(ID3D11Texture2D*){}
+unsigned testWeaponConfigureCalls=0,testWeaponSourceCalls=0,testWeaponFrameCalls=0,testWeaponShutdownCalls=0;
+void weaponMotionConfigure(bool){++testWeaponConfigureCalls;}
+void weaponMotionSource(ID3D11Texture2D*){++testWeaponSourceCalls;}
 ID3D11ShaderResourceView* weaponMotionView(){return testWeaponMotion;}
-void weaponMotionFrameBoundary(ID3D11DeviceContext*){}
-void weaponMotionShutdown(){}
+void weaponMotionFrameBoundary(ID3D11DeviceContext*){++testWeaponFrameCalls;}
+void weaponMotionShutdown(){++testWeaponShutdownCalls;}
 uint64_t testVs=0,testPs=0;ID3D11RenderTargetView* testRtv=nullptr;
 Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
+Config& Config::get(){static Config cfg;return cfg;}
 std::string Config::getString(const char*,const char*)const{return "dlss";}
+unsigned testWeaponStabilityReads=0;
 bool Config::getBool(const char* key,bool def)const{
+    ++testWeaponStabilityReads;
     check(!strcmp(key,"fix.weapon_stability")&&def,"weapon temporal motion uses existing live toggle");return true;
 }
 // engine_velocity.cpp is not linked here: the on-foot engine path is driven
@@ -501,6 +505,35 @@ int main(int argc,char** argv){
               "shutdown clears the arming pair with State");
     }
     screenMotionShutdown();
+    {
+        const unsigned savedWeaponConfigureCalls=testWeaponConfigureCalls;
+        const unsigned savedWeaponSourceCalls=testWeaponSourceCalls;
+        const unsigned savedWeaponFrameCalls=testWeaponFrameCalls;
+        const unsigned savedWeaponShutdownCalls=testWeaponShutdownCalls;
+        const unsigned savedWeaponStabilityReads=testWeaponStabilityReads;
+        testWeaponConfigureCalls=testWeaponSourceCalls=testWeaponFrameCalls=testWeaponShutdownCalls=0;
+        testWeaponStabilityReads=0;
+        screenMotionConfigure(Config::get(),false);
+        const uint64_t frameBefore=g.frame;
+        screenMotionFrameBoundary(ctx.Get());
+        check(screenMotionLive() && g.frame==frameBefore+1 &&
+                  testWeaponStabilityReads==0 && testWeaponConfigureCalls==0 &&
+                  testWeaponSourceCalls==0 && testWeaponFrameCalls==0 &&
+                  testWeaponShutdownCalls==0,
+              "cached On-foot absence keeps the real screen-motion frame tick alive while skipping the cold weapon key and every weapon callback");
+
+        screenMotionConfigure(Config::get(),true);
+        screenMotionFrameBoundary(ctx.Get());
+        check(g.frame==frameBefore+2 && testWeaponStabilityReads==1 &&
+                  testWeaponConfigureCalls==1 && testWeaponFrameCalls==1,
+              "owner-allowed Legacy control reads the live weapon key and dispatches the real integration callbacks");
+        screenMotionShutdown();
+        testWeaponConfigureCalls=savedWeaponConfigureCalls;
+        testWeaponSourceCalls=savedWeaponSourceCalls;
+        testWeaponFrameCalls=savedWeaponFrameCalls;
+        testWeaponShutdownCalls=savedWeaponShutdownCalls;
+        testWeaponStabilityReads=savedWeaponStabilityReads;
+    }
     {auto d=screenMotionGpuDiagnostics();check(!d.collecting&&!d.draining&&!d.sourceFrames&&!d.uiClearCalls&&!d.uiDrawCalls&&!d.eyeClearCalls&&!d.projectionCalls,"screen GPU diagnostics reset on shutdown");}
     testScreenConsumers(dev.Get(),ctx.Get());
     if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessages();++i){SIZE_T messageBytes=0;queue->GetMessage(i,nullptr,&messageBytes);std::vector<unsigned char> b(messageBytes);auto* m=reinterpret_cast<D3D11_MESSAGE*>(b.data());queue->GetMessage(i,m,&messageBytes);if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"D3D debug layer clean");}}

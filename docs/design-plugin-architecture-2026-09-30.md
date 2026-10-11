@@ -24,14 +24,14 @@
   `build/full-comfort-absence-offline-20261011-r4.log` (receipt `bcd91fc6`).
   Intro's startup/subscription/callback gates pass full offline validation:
   `build/full-intro-absence-offline-20261011-r2.log` (receipt `09b71d3e`).
-- **Module progress:** five owners pass offline. On-foot, Temporal AA and
-  Diagnostics remain. Selections unavailable; runtime absence/order open.
-- **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
-  version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
-  Capture uses consumed values; unarmed paths construct no predicate payload.
-  The fault fixture covers a caught fault after matching reads; earlier faults
-  with unavailable reads are conservatively rejected. The oracle consumes the
-  post-helper mask, not rectangle derivation or learning effects.
+  On-foot startup/subscription/callback gates pass full offline validation:
+  `build/full-onfoot-absence-offline-20261011-r3.log` (receipt `a8122006`).
+- **Module progress:** six owners pass offline. Temporal AA and Diagnostics
+  remain. Selections unavailable; runtime absence/order open.
+- **Offline evidence:** FSS site 1 has a frozen selector oracle, v16 facts,
+  seven-base-fact capacity and terminal X/6 fixtures. Capture uses consumed
+  values; unarmed paths build no payload. Caught faults after matching reads
+  are covered; missing reads reject. The oracle uses the post-helper mask.
 - **Held cleanup:** frame-end release now uses the existing sampled
   `kEngineDraw` clock/family. Fake-clock and real WARP/refcount checks cover
   cleanup after restore and stand-down. Owner/flush/cleanup/GPU-close ordering
@@ -5223,3 +5223,45 @@ Main `99476a02` updates the Intel planetary-startup evidence and adds a XeSS
 investigation scope. The merge changes documentation only. Intro's full-build
 receipt still matches the source tree; no native rebuild, installation or
 flight is needed for this integration. The feature remains on its own branch.
+
+### 2026-10-11 — On-foot startup, subscriptions and callback absence
+
+The On-foot owner is cached after device-hook publication and before its
+configuration and panel-resolution setup. The cache covers panel distance,
+curvature, black void, footprint capture and weapon stability through startup,
+reload, draw, copy, frame and shutdown. Shared actual-or-stock panel dimensions
+still publish to Core. Intro retains its independent curve consumer, and
+Comfort retains its configured panel-distance inheritance.
+
+The WARP checks exercise real denied/admitted panel-distance transactions,
+panel-curve resource queries and footprint copies. The actual stored registry
+has the exact expected callbacks for all sixteen Cockpit, Comfort, Intro and
+On-foot combinations. Native-frame denial preserves Core and Comfort outputs
+while skipping the weapon setting and deferred pacing. Screen-motion checks
+keep temporal frame progression independent of weapon callbacks; the latter are
+fixture stubs, with the existing weapon rig serving as a module control.
+
+The compiled predicate test caught an ownership mismatch: the panel-curve row
+was filtered by On-foot but its callback still used an unowned adapter. The
+production adapter now checks the cached owner, and a mutation pins it. Ruled
+out: a denied panel-distance visitor should suppress the original game draw,
+because the real forwarding helper issues it once after decline. The corrected
+oracle requires that original draw while requiring zero Map and bind work.
+
+Production objects were rebuilt before the repaired fixtures ran; an earlier
+focused attempt had reused objects from before the new signatures. Source
+checks retain 135 lifecycle, 149 fit and 94 world-route mutation anchors.
+
+Full R2 passed the WARP owner checks and later stopped at the old on-foot maps
+source-order assertion. Its corrected pin requires the owner guard before the
+curve read while keeping the three recognition sites and negative controls.
+This repair changed the fixture only; downstream source-pinned rigs passed.
+
+Full R3 passes all 169 jobs, both production DLLs, the config contract,
+exports and the self-contained installer resources:
+`build/full-onfoot-absence-offline-20261011-r3.log`, receipt `a8122006`.
+
+Availability remains closed and strict selected-profile startup has not been
+flown. Diagnostics and Temporal AA remain staged work. Steam installation is
+held; no DLL promotion, live settings edit, flight or feature-to-main merge
+occurred.
