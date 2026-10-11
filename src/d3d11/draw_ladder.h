@@ -95,8 +95,9 @@ enum class SiteId : std::uint16_t {
     kDrawIndexedInstancedIndirectRuntimeBypass = 74,
     kDrawInstancedIndirectRuntimeBypass = 75,
     kInternalWorldBypass = 76,
+    kSpaceDustSkip = 77,
 
-    kSiteIdCount = 77,
+    kSiteIdCount = 78,
 };
 
 // Wire ordinals for DrawVerdict. Production keeps its local enum; it pins each
@@ -302,6 +303,7 @@ constexpr plugin_cost::Owner cpuOwnerForSite() noexcept {
         return plugin_cost::Owner::Diagnostics;
     } else if constexpr (Id == SiteId::kParticleSubstitute ||
                          Id == SiteId::kWitchspaceStarsSkip ||
+                         Id == SiteId::kSpaceDustSkip ||
                          Id == SiteId::kOffscreenWakePulseSkip ||
                          Id == SiteId::kSunglareNomination || Id == SiteId::kNightVisionClaim ||
                          Id == SiteId::kRemlokHideSkip || Id == SiteId::kRemlokScissorClaim ||
@@ -432,6 +434,7 @@ using CommonSequence = Sequence<
     FirstLegacyInterestSite,
     InterestGated<SiteId::kWitchspaceStarsSkip, SiteKind::Claim,
                   draw_interest::InterestId::WitchspaceStars>,
+    Site<SiteId::kSpaceDustSkip, SiteKind::Claim>,
     Site<SiteId::kStateSnapshot, SiteKind::Observe>,
     Site<SiteId::kRouteSelected, SiteKind::Observe>>;
 
@@ -503,7 +506,7 @@ using DrawInstancedIndirectBypassSequence = Sequence<
 using InternalWorldBypassSequence = Sequence<
     Site<SiteId::kInternalWorldBypass, SiteKind::Exit>>;
 
-static_assert(CommonSequence::size == 8, "common ladder site count changed");
+static_assert(CommonSequence::size == 9, "common ladder site count changed");
 static_assert(OffscreenSequence::size == 10, "offscreen ladder site count changed");
 static_assert(EyeSequence::size == 31, "eye ladder site count changed");
 static_assert(FlatRuntimeBypassSequence::size == 1, "flat bypass site count changed");
@@ -523,5 +526,8 @@ static_assert(!std::tuple_element_t<0, CommonSequence::Types>::interestGated &&
               !std::tuple_element_t<2, CommonSequence::Types>::interestGated &&
               !std::tuple_element_t<3, CommonSequence::Types>::interestGated,
               "mandatory common claims/exits/observations precede the first interest snapshot");
+static_assert(std::tuple_element_t<6, CommonSequence::Types>::id == SiteId::kSpaceDustSkip &&
+              !std::tuple_element_t<6, CommonSequence::Types>::interestGated,
+              "space dust must run unconditionally before the eye state snapshot");
 
 } // namespace edvr::draw_ladder

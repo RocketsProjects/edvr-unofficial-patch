@@ -12,11 +12,11 @@
   implementations, generated config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** selection transport and TargetSharp private
-  policy boundary validated at `0ceff96a`; full build
-  `build/full-plugin-selection-targetsharp-offline-20261010-r4.log`
-  passed with receipt `05d898e7`. Selection remains informational and no
-  availability or performance claim is established.
+- **Current integration:** main `3983bb45` integrated from `76f72292`;
+  full offline build
+  `build/full-plugin-main3983-sampler-offline-20261010-r2.log` passed
+  (receipt `df40be52`), including dust and sampler-hook fixtures.
+  Selections remain informational; runtime acceptance stays open.
 - **Module progress:** Performance owns resolution, FOV engine/settings,
   and sampler. Cockpit owns RemLok and TargetSharp policy/state; shared
   VScreen services stay core. Diagnostics owns scheduler. Comfort owns
@@ -4715,3 +4715,49 @@ VScreen predicate and plugin-cost fixtures also passed. Receipt
 matches the completed
 `full-plugin-selection-targetsharp-offline-20261010-r4.log` log and the
 exact precommit source inputs. No install or live Config read occurred.
+
+### 2026-10-10 — main sync, dust routing and sampler hook fixture
+
+Main `3983bb452002e2178eeace7a8b20fbd059ecbfe0` was integrated into the
+feature branch after checkpoint `76f72292` was validated and pushed. The
+merge preserves main's map SMAA/EASU and GuiFocus temporal-AA routing,
+flat census ordering, and VR Supersampling loader/window/Present hold
+alongside plugin lifecycle, selection transport and policy boundaries.
+
+The first full run stopped at an existing late batch label after the
+merge edit wrote an LF-only batch file. Restoring CRLF preserved the
+exact normalized recipe text; the focused run then reached and passed
+the terrain fixture. Focused runs also caught a stale eight-element
+reference-array signature and a numeric route-record index after
+CommonSequence grew to nine. The corrections preserve the independent
+reference walk and find the route record by its site ID. Failed trace
+output was archived before rerunning. These failures were resolved and
+the completed normal full build below validates the final source.
+
+Both retained, default-on dust keys (`fix.supercruise_dust` and
+`fix.normal_space_dust`) belong to Cockpit Visuals. Their legacy draw
+subscription and independent shader-pair skips run before the shared
+state snapshot, with census reason `d` and terminal skip before UI
+routing. The append-only draw site 77 preserves existing site ordinals;
+source, fixture and replay/parser wiring were reviewed. The catalog
+covers 127 settings. Ownership-only changes preserve the selection
+fingerprint.
+
+The sampler fixture compiles the exact production
+`hookedCreateSamplerState` body through a shared include. Independent
+null-policy, disabled-settings and malformed-policy cases retain core
+census and original-call behavior while doing no rewrite callback work.
+The enabled case changes only the three policy-owned descriptor fields.
+Forwarding corners preserve arguments, HRESULT and output. The fixture
+substitutes the original COM call and budget wrapper; it does not prove
+startup admission, fault-budget behavior, whole-Performance absence or
+runtime CPU/GPU benefit.
+
+The normal absolute full build passed with receipt
+`df40be52fda6d61a87afbe9b9a95ca1ea1bb70179db27909960925c755f4bf87` in
+`build/full-plugin-main3983-sampler-offline-20261010-r2.log`. Its
+production DLLs, native rigs, export checks, config contract and
+self-contained installer gates passed. No Steam install, live settings
+edit, promotion or flight occurred. Feature-to-main remains held until
+shipping approval; final matched performance validation stays at
+rendering-code freeze.

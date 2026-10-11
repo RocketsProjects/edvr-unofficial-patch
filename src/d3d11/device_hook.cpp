@@ -49,6 +49,11 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
+#include "vr_ssaa_gate.h"   // the step-1 Supersampling gate instruments (log only)
+#include "vr_ssaa_hold.h"   // the Supersampling hold's shutdown (the loader slot goes back)
+#include "vr_display_observer.h"  // the game window's state (read only) and its handle
+
+#include <intrin.h>         // _ReturnAddress: the caller of each observed call
 #include "orbital_width.h" // orbitalWidthRememberVs: the orbit lines' shader, captured at its creation
 #include "xinput_watch.h"
 #include "joy_watch.h"
@@ -1156,6 +1161,7 @@ HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT cou
     if (ours) flatResizeNote("ResizeBuffers", count, width, height, format, flags, hr, refs);
     return hr;
 }
+
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* masks, IUnknown* const* queues) {
     const bool ours = static_cast<IDXGISwapChain*>(self) == g_state->swapChain;
     long refs = -1;
@@ -1286,6 +1292,8 @@ void tickHotkeys() {
     if (g_state->censusKey.pressed()) {
         if (runtimeFlatProfile()) {
             flatTemporalArm((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+            // The flat profile's draw census, both tiers: every draw, offscreen included, for two frames (draw_census.h).
+            drawCensusFlatRequest();
         } else {
             drawCensusRequest();
             // Same key: the census says WHAT was drawn, the quad probe says
@@ -1654,7 +1662,7 @@ void presentFrameBoundary() {
             configureDiagnosticHotkeys();
             g_state->fssModeLatchWanted =
                 eyeSyncFromConfig(Config::get()).any();
-            journalWatchSetEagerStatus(g_state->fssModeLatchWanted);
+            journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
         });
         tkFrameFlagPeer.run(tickFrameFlagPeer);
         // The liveness pass, on the same once-a-second cadence. In-place
@@ -1726,6 +1734,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (self != g_state->swapChain) {
         return g_state->realPresent(self, syncInterval, flags);
     }
+    vrSsaaGateNotePresent();  // log only: the first Present's place in the order of the Supersampling lines
     // The frame-tick chain starts here (frame_ticks.h): what follows, to this
     // hook's return, is EDVR's or the driver's; what came before it is the game's.
     g_frameTicks.enter(hookEnter);
@@ -2143,7 +2152,8 @@ State& ensureState() {
         journalWatchConfigure();
         g_state->fssModeLatchWanted =
             eyeSyncFromConfig(Config::get()).any();
-        journalWatchSetEagerStatus(g_state->fssModeLatchWanted);
+        // Flat reads the GuiFocus of the open map (temporal AA off on the Galaxy Map, the System Map and the Orrery) from Status.json, at the same 100 ms the FSS latch wants.
+        journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
     }
     return *g_state;
 }
@@ -2310,6 +2320,10 @@ bool samplerReadEliteHmdMultiplier(void*, float* mult, float* ssaa,
                               static_cast<size_t>(fileCapacity));
 }
 
+bool deviceHookFxcfgMultipliers(float* mult, float* ssaa, char* fileOut, size_t fileLen) {
+    return eliteHmdMultiplier(mult, ssaa, fileOut, fileLen);
+}
+
 // The reduction type lives in bits 7-8 of a D3D11_FILTER: 0 standard,
 // 1 comparison, 2 minimum, 3 maximum. Only a standard filter is ours to
 // touch, and only a linear or anisotropic one -- promoting a point
@@ -2351,95 +2365,7 @@ void samplerCensusNote(State& s) {
     ++s.samplerCensusPrints;
 }
 
-HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
-                                                   const D3D11_SAMPLER_DESC* desc,
-                                                   ID3D11SamplerState** out) {
-    if (!g_state || !g_state->realCreateSamplerState) {
-        return E_FAIL;
-    }
-    State& s = *g_state;
-    if (!desc || self != s.device) return s.realCreateSamplerState(self, desc, out);
-    D3D11_SAMPLER_DESC d = *desc;
-    guardedBudget(g_createBudget, [&] {
-        const uint32_t filter = static_cast<uint32_t>(desc->Filter);
-        ++s.samplerCreates;
-        if (!s.samplerFirstMs) s.samplerFirstMs = GetTickCount64();
-        bool found = false;
-        for (uint32_t i = 0; i < s.samplerShapeCount; ++i) {
-            State::SamplerShape& sh = s.samplerShapes[i];
-            if (sh.filter == filter && sh.aniso == desc->MaxAnisotropy &&
-                sh.bias == desc->MipLODBias) {
-                ++sh.count;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            const uint32_t n = sizeof(s.samplerShapes) / sizeof(s.samplerShapes[0]);
-            if (s.samplerShapeCount < n) {
-                State::SamplerShape& sh = s.samplerShapes[s.samplerShapeCount++];
-                sh.filter = filter;
-                sh.aniso = desc->MaxAnisotropy;
-                sh.bias = desc->MipLODBias;
-                sh.count = 1;
-            } else {
-                ++s.samplerOther;
-            }
-        }
-        // The Performance callback is absent-safe. The host constructs a
-        // fixed-width copy only when the selected policy is present; the
-        // original descriptor and its one real COM call stay in core.
-        if (s.samplerSettings.rewriteEnabled && s.samplerPolicy &&
-            s.samplerPolicy->structSize ==
-                                   sizeof(*s.samplerPolicy) &&
-            s.samplerPolicy->version ==
-                plugins::performance::kTextureSamplerPolicyOpsVersion1 &&
-            s.samplerPolicy->rewrite) {
-            plugins::performance::TextureSamplerDescV1 input{};
-            input.filter = filter;
-            input.addressU = static_cast<uint32_t>(desc->AddressU);
-            input.addressV = static_cast<uint32_t>(desc->AddressV);
-            input.addressW = static_cast<uint32_t>(desc->AddressW);
-            input.mipLodBias = desc->MipLODBias;
-            input.maxAnisotropy = desc->MaxAnisotropy;
-            input.comparisonFunc = static_cast<uint32_t>(desc->ComparisonFunc);
-            for (size_t i = 0; i < 4; ++i) input.borderColor[i] = desc->BorderColor[i];
-            input.minLod = desc->MinLOD;
-            input.maxLod = desc->MaxLOD;
-            plugins::performance::TextureSamplerDescV1 output{};
-            const bool rewritten = s.samplerPolicy->rewrite(
-                s.samplerPolicy->context, &s.samplerSettings, &input, &output);
-            if (rewritten) {
-                d.Filter = static_cast<D3D11_FILTER>(output.filter);
-                d.MaxAnisotropy = output.maxAnisotropy;
-                d.MipLODBias = output.mipLodBias;
-            }
-            if (rewritten && !s.samplerForceNoted) {
-                s.samplerForceNoted = true;
-                Log::get().note(
-                    "texture filtering: the game's linear and anisotropic samplers are "
-                    "being created with anisotropy %d and %+.2f added to their mip bias "
-                    "(%s). Point, comparison, minimum and maximum filters are left alone. A "
-                    "positive bias trades sharpness for quiet on distant repeating "
-                    "detail; a negative one does the reverse.",
-                    s.samplerSettings.anisotropy,
-                    static_cast<double>(s.samplerSettings.bias),
-                    s.samplerSettings.biasWhy[0] ? s.samplerSettings.biasWhy :
-                                                   "no bias asked for");
-            }
-        }
-        // Once the creates have settled: a renderer makes its samplers up
-        // front, so ten seconds after the first is past the burst. Printed
-        // again only if a shape appears that the first line did not carry.
-        const bool settled = GetTickCount64() - s.samplerFirstMs > 10000;
-        if (settled && (s.samplerCensusPrints == 0 ||
-                        (s.samplerCensusPrints < 3 &&
-                         s.samplerShapeCount > s.samplerPrintedShapes))) {
-            samplerCensusNote(s);
-        }
-    });
-    return s.realCreateSamplerState(self, &d, out);
-}
+#include "sampler_create_hook.inl"
 
 // ---- WHAT THE GAME ASKS THE DEVICE ABOUT FORMATS, AND WHAT IT IS TOLD -------------
 //
@@ -2645,6 +2571,7 @@ void hookDevice(ID3D11Device* device) {
     EDVR_HOOK_DEV_CREATE(kDevCreateRtv, true);
     EDVR_HOOK_DEV_CREATE(kDevCreateDsv, true);
 #undef EDVR_HOOK_DEV_CREATE
+    vrSsaaGateStartup();  // log only: the 3D mode file, the .fxcfg's Supersampling and HMD Quality, once per process
     {
         s.samplerPolicy = plugins::performance::textureSamplerPolicyOpsV1();
         if (s.samplerPolicy &&
@@ -2992,7 +2919,10 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
             third->Release();
         }
         Log::get().note("flat runtime resize hooks: ResizeBuffers=%u ResizeBuffers1=%u; release owned backbuffer references before forwarding", resize?1u:0u, resize1?1u:0u);
-        if (!resize) { s.swapChainHook.uninstall(); return; }
+        if (!resize) {
+            s.swapChainHook.uninstall();
+            return;
+        }
     }
     if (!s.swapChainHook.commit()) {
         s.swapChainHook.uninstall();
@@ -3000,6 +2930,10 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
     }
     s.swapChain = swapChain;
     Log::get().note("Present hook installed");
+    {
+        DXGI_SWAP_CHAIN_DESC windowDesc{};
+        if (SUCCEEDED(swapChain->GetDesc(&windowDesc))) vrDisplayObserveWindow(windowDesc.OutputWindow);
+    }
 
     if (Config::get().getBool("d3d11.focus_on_launch", true)) {
         DXGI_SWAP_CHAIN_DESC desc{};
@@ -3198,6 +3132,7 @@ void shutdownDeviceHooks() {
     // exposure fix's, so it comes off first.
     revertVScreenModeResolution();
     uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
+    vrSsaaHoldShutdown();    // the Supersampling hold's loader slot, back to the game's
     vertexResyncShutdown();  // the vertex-buffer resync's session line (the hook itself stays; the game's process exit says the line through Log::setExitLine)
     shutdownGlitchFrameFix();
     if (pluginRegistryHasLifecycleComponent(

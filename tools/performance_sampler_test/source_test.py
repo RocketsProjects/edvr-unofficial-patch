@@ -1,8 +1,8 @@
 """Source pins for the production texture sampler policy adapter.
 
-The C++ rig covers the production policy and descriptors. These pins cover the
-host hook's cold disabled/absent path and its null/foreign forwarding, which
-cannot be invoked without patching a live D3D vtable.
+The policy rig covers policy math. The separate hook rig includes the same
+production hook body as device_hook.cpp and exercises its forwarding and
+disabled/absent paths without a live D3D vtable.
 """
 
 import argparse
@@ -12,9 +12,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HOST_PATH = ROOT / "src/d3d11/device_hook.cpp"
+HOOK_PATH = ROOT / "src/d3d11/sampler_create_hook.inl"
 POLICY_PATH = ROOT / "src/plugins/performance/texture_sampler_policy.cpp"
 HEADER_PATH = ROOT / "src/plugins/performance/texture_sampler_policy.h"
 RIG_PATH = ROOT / "tools/performance_sampler_test/texture_sampler_policy_test.cpp"
+HOOK_RIG_PATH = ROOT / "tools/performance_sampler_hook_test/sampler_hook_test.cpp"
 
 
 def code_only(source):
@@ -104,12 +106,17 @@ def ordered(source, *patterns):
     return True
 
 
-def inspect(host_text=None, policy_text=None, header_text=None):
+def inspect(host_text=None, policy_text=None, header_text=None,
+            hook_text=None, hook_rig_text=None):
     host_raw = HOST_PATH.read_text(encoding="utf-8") if host_text is None else host_text
+    hook_raw = HOOK_PATH.read_text(encoding="utf-8") if hook_text is None else hook_text
     policy_raw = POLICY_PATH.read_text(encoding="utf-8") if policy_text is None else policy_text
     header_raw = HEADER_PATH.read_text(encoding="utf-8") if header_text is None else header_text
     rig_raw = RIG_PATH.read_text(encoding="utf-8")
+    hook_rig_raw = (HOOK_RIG_PATH.read_text(encoding="utf-8")
+                    if hook_rig_text is None else hook_rig_text)
     host = code_only(host_raw)
+    hook_source = code_only(hook_raw)
     policy = code_only(policy_raw)
     header = code_only(header_raw)
     policy_compact = re.sub(r"\s+", " ", policy_raw)
@@ -119,8 +126,14 @@ def inspect(host_text=None, policy_text=None, header_text=None):
         if not condition:
             failures.append(message)
 
+    require(host_raw.count('#include "sampler_create_hook.inl"') == 1 and
+            hook_rig_raw.count('#include "../../src/d3d11/sampler_create_hook.inl"') == 1 and
+            "HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(" not in host_raw and
+            "HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(" not in hook_rig_raw,
+            "host and hook rig must include the one production hook body without a duplicate")
+
     try:
-        hook = function_body(host, "hookedCreateSamplerState")
+        hook = function_body(hook_source, "hookedCreateSamplerState")
         configure = function_body(policy, "resolveTextureSamplerSettingsV1")
         resolve = function_body(policy, "resolveTextureSamplerSettingsFromValuesV1")
         rewrite = function_body(policy, "rewriteTextureSamplerV1")
@@ -132,7 +145,7 @@ def inspect(host_text=None, policy_text=None, header_text=None):
     require(len(re.findall(r"\bs\.realCreateSamplerState\s*\(", hook)) == 2,
             "the host hook must have one bypass forward and one final real call")
     require(ordered(hook,
-                    r"if\s*\(\s*s\.samplerSettings\.rewriteEnabled\s*&&\s*s\.samplerPolicy",
+                    r"if\s*\(\s*s\.samplerSettings\.rewriteEnabled\s*&&\s*s\.samplerPolicy\s*&&",
                     r"TextureSamplerDescV1\s+input",
                     r"s\.samplerPolicy->rewrite\s*\(",
                     r"if\s*\(\s*rewritten\s*\)"),
@@ -227,13 +240,26 @@ def self_test():
     if errors:
         raise AssertionError("\n".join(errors))
     host = HOST_PATH.read_text(encoding="utf-8")
+    hook = HOOK_PATH.read_text(encoding="utf-8")
+    hook_rig = HOOK_RIG_PATH.read_text(encoding="utf-8")
     # Negative mutation: removing the disabled guard must make this source
     # gate fail before the expensive native fixture or any flight is needed.
-    mutated = host.replace("s.samplerSettings.rewriteEnabled && s.samplerPolicy",
+    mutated = hook.replace("s.samplerSettings.rewriteEnabled && s.samplerPolicy",
                            "s.samplerPolicy", 1)
-    if mutated == host or not inspect(host_text=mutated):
+    if mutated == hook or not inspect(hook_text=mutated):
         raise AssertionError("negative mutation escaped the disabled-fast-path pin")
-    return 1
+    mutated = hook.replace("s.samplerSettings.rewriteEnabled && s.samplerPolicy",
+                           "s.samplerSettings.rewriteEnabled", 1)
+    if mutated == hook or not inspect(hook_text=mutated):
+        raise AssertionError("negative mutation escaped the absent-policy pin")
+    mutated = host.replace('#include "sampler_create_hook.inl"', "", 1)
+    if mutated == host or not inspect(host_text=mutated):
+        raise AssertionError("negative mutation escaped the production include pin")
+    mutated = hook_rig.replace(
+        '#include "../../src/d3d11/sampler_create_hook.inl"', "", 1)
+    if mutated == hook_rig or not inspect(hook_rig_text=mutated):
+        raise AssertionError("negative mutation escaped the fixture include pin")
+    return 4
 
 
 def main():
@@ -244,7 +270,7 @@ def main():
     if not args.self_test:
         parser.error("--self-test is required")
     count = self_test()
-    print(f"performance sampler source pins: {count} negative mutation passed")
+    print(f"performance sampler source pins: {count} negative mutations passed")
     return 0
 
 

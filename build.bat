@@ -274,6 +274,10 @@ REM vendored headers stay byte-identical to upstream (src\d3d11\fsr\).
 python "tools\gen_fsr_hlsl.py" --self-test || exit /b 1
 python "tools\gen_fsr_hlsl.py" --root "%ROOT%" --out "%GEN%"
 if errorlevel 1 ( echo [edvr] ERROR: FSR shader embedding failed & exit /b 1 )
+REM SMAA 1x (MIT, src\d3d11\smaa\, pinned to upstream commit 71c806a8) as embeddable HLSL, the same way: the map temporal-off frames below native.
+python "tools\gen_smaa_hlsl.py" --self-test || exit /b 1
+python "tools\gen_smaa_hlsl.py" --root "%ROOT%" --out "%GEN%"
+if errorlevel 1 ( echo [edvr] ERROR: SMAA shader embedding failed & exit /b 1 )
 
 if not exist "%OBJ%\temporalshader" mkdir "%OBJ%\temporalshader"
 cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
@@ -686,7 +690,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\stall_watch.cpp" "src\d3d11\vram_tick.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
-    "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
+    "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
@@ -721,6 +725,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" ^
     "src\d3d11\wake_pulse.cpp" ^
+    "src\d3d11\vr_ssaa_gate.cpp" "src\d3d11\vr_ssaa_hold.cpp" "src\d3d11\vr_display_observer.cpp" "src\d3d11\vr_window_trampolines.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
@@ -1117,6 +1122,17 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: performance sampler policy test build failed & exit /b 1 )
 "%BUILD%\performance_sampler_test.exe" --dry-run || exit /b 1
 "%BUILD%\performance_sampler_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_performance_sampler_hook_test
+echo [edvr] === performance_sampler_hook_test.exe ===
+if not exist "%OBJ%\performance_sampler_hook" mkdir "%OBJ%\performance_sampler_hook"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\performance_sampler_hook\\" /Fe"%BUILD%\performance_sampler_hook_test.exe" ^
+    "tools\performance_sampler_hook_test\sampler_hook_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: performance sampler hook test build failed & exit /b 1 )
+"%BUILD%\performance_sampler_hook_test.exe" --dry-run || exit /b 1
+"%BUILD%\performance_sampler_hook_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_fov_trim_settings_test
@@ -1642,7 +1658,7 @@ if not exist "%OBJ%\vrworldroutegpu" mkdir "%OBJ%\vrworldroutegpu"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\vrworldroutegpu\\" ^
     /Fe"%BUILD%\vr_world_route_gpu_test.exe" "tools\vr_world_route_gpu_test\vr_world_route_gpu_test.cpp" ^
-    "src\d3d11\vr_world_route.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" "src\d3d11\flat_mono_resolve.cpp" ^
+    "src\d3d11\vr_world_route.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" ^
     "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib version.lib
@@ -1670,7 +1686,7 @@ if not exist "%OBJ%\flat_mono_resolve_test" mkdir "%OBJ%\flat_mono_resolve_test"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\flat_mono_resolve_test\\" ^
     /Fe"%BUILD%\flat_mono_resolve_test.exe" "tools\flat_mono_resolve_test\flat_mono_resolve_test.cpp" ^
-    "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
+    "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: flat mono resolve test build failed & exit /b 1 )
 "%BUILD%\flat_mono_resolve_test.exe" --dry-run || exit /b 1
@@ -4666,6 +4682,19 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: DLSS runtime info test build failed & exit /b 1 )
 "%BUILD%\dlss_runtime_info_test.exe" --dry-run || exit /b 1
 "%BUILD%\dlss_runtime_info_test.exe" --self-test "%BUILD%\dlss_no_version_fixture.dll" || exit /b 1
+exit /b 0
+:rig_vr_ssaa_hold_test
+echo [edvr] === vr_ssaa_hold_test.exe ===
+REM The VR Supersampling hold's pure decision (src\d3d11\vr_ssaa_hold_math.h, docs\vr-supersampling-gate-2026-10-10.md): the Settings.xml
+REM mode parse, the held value by profile and mode, the toast. The DLL calls the same functions; the hooks are not in this rig.
+if not exist "%OBJ%\vrssaahold" mkdir "%OBJ%\vrssaahold"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /utf-8 ^
+    /Fo"%OBJ%\vrssaahold\\" /Fe"%OBJ%\vrssaahold\vr_ssaa_hold_test.exe" ^
+    "tools\vr_ssaa_hold_test\vr_ssaa_hold_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: vr_ssaa_hold_test build failed & exit /b 1 )
+"%OBJ%\vrssaahold\vr_ssaa_hold_test.exe" --dry-run || exit /b 1
+"%OBJ%\vrssaahold\vr_ssaa_hold_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_orbital_width_test

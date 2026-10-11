@@ -22,6 +22,8 @@
 #include "../../src/d3d11/ui_layer.h"
 #include "../../src/d3d11/ui_depth.h"
 #include "../../src/d3d11/binding_shadow.h"
+#include "../../src/d3d11/particle_fix.h"
+#include "../../src/d3d11/supercruise_lines.h"
 #include "../../src/d3d11/exposure_fix.h"
 #include "../../src/d3d11/basic_draw_observation.h"
 #include "../../src/d3d11/eye_census_observation.h"
@@ -1073,6 +1075,7 @@ bool testFullClassifierTerminalPath(ID3D11Device* device,
         {SiteId::kParticleProbe, SiteKind::Observe, SiteOutcome::Observed},
         {SiteId::kParticleSubstitute, SiteKind::Claim, SiteOutcome::NotEligible},
         {SiteId::kWitchspaceStarsSkip, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kSpaceDustSkip, SiteKind::Claim, SiteOutcome::Declined},
         {SiteId::kStateSnapshot, SiteKind::Observe, SiteOutcome::Observed},
         {SiteId::kRouteSelected, SiteKind::Observe, SiteOutcome::Observed, 6},
         {SiteId::kEyeDepthAndCount, SiteKind::Observe, SiteOutcome::Observed},
@@ -1114,6 +1117,7 @@ bool testFullClassifierTerminalPath(ID3D11Device* device,
         {SiteId::kParticleProbe, SiteKind::Observe, SiteOutcome::Observed},
         {SiteId::kParticleSubstitute, SiteKind::Claim, SiteOutcome::NotEligible},
         {SiteId::kWitchspaceStarsSkip, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kSpaceDustSkip, SiteKind::Claim, SiteOutcome::Declined},
         {SiteId::kStateSnapshot, SiteKind::Observe, SiteOutcome::Observed},
         {SiteId::kRouteSelected, SiteKind::Observe, SiteOutcome::Observed, 6},
         {SiteId::kEyeDepthAndCount, SiteKind::Observe, SiteOutcome::Observed},
@@ -1152,6 +1156,7 @@ bool testFullClassifierTerminalPath(ID3D11Device* device,
         {SiteId::kParticleProbe, SiteKind::Observe, SiteOutcome::Observed},
         {SiteId::kParticleSubstitute, SiteKind::Claim, SiteOutcome::NotEligible},
         {SiteId::kWitchspaceStarsSkip, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kSpaceDustSkip, SiteKind::Claim, SiteOutcome::Declined},
         {SiteId::kStateSnapshot, SiteKind::Observe, SiteOutcome::Observed},
         {SiteId::kRouteSelected, SiteKind::Observe, SiteOutcome::Observed, 6},
         {SiteId::kEyeDepthAndCount, SiteKind::Observe, SiteOutcome::Observed},
@@ -3433,6 +3438,48 @@ int main(int argc, char** argv) {
                           result.siteResult.outcome == SiteOutcome::Declined &&
                           edvr::draw_ladder_trace::basicFactCountForTest(result.token) == 0,
                       "NoTrace enabled-distance specialization declines without facts");
+
+        // Exercise the production dust Claim visitor with paired shadow hashes.
+        // The pointers stay non-null so the helper reads the hashes without a
+        // D3D fallback query; neither key can silence the other pair.
+        {
+            constexpr auto dustSite = static_cast<std::uint16_t>(SiteId::kSpaceDustSkip);
+            const bool priorSuper = edvr::detail::g_supercruiseDustHidden;
+            const bool priorNormal = edvr::detail::g_normalSpaceDustHidden;
+            void* const priorVs = edvr::bindingGet(edvr::BindSlot::Vs);
+            void* const priorPs = edvr::bindingGet(edvr::BindSlot::Ps);
+            const auto priorVsHash = edvr::bindingShaderHash(edvr::BindSlot::Vs);
+            const auto priorPsHash = edvr::bindingShaderHash(edvr::BindSlot::Ps);
+            int vsToken = 0, psToken = 0;
+            const auto visitDust = [&](bool superHidden, bool normalHidden,
+                                       std::uint64_t vsHash, std::uint64_t psHash,
+                                       bool traceEnabled, bool skipped) {
+                edvr::detail::g_supercruiseDustHidden = superHidden;
+                edvr::detail::g_normalSpaceDustHidden = normalHidden;
+                edvr::bindingSetShader(edvr::BindSlot::Vs, &vsToken, vsHash);
+                edvr::bindingSetShader(edvr::BindSlot::Ps, &psToken, psHash);
+                const bool visited = edvr::vScreenPredicateTestVisit(
+                    dustSite, immediate, immediate, 0, false, traceEnabled, &result);
+                return visited && result.siteResult.flow == (skipped ? Flow::Stop : Flow::Continue) &&
+                    result.siteResult.outcome == (skipped ? SiteOutcome::Exited : SiteOutcome::Declined);
+            };
+            okay &= check(visitDust(true, false, edvr::kUiVsSpaceDust,
+                                     edvr::kUiPsSpaceDust, true, true) &&
+                          visitDust(false, true, edvr::kVsNormalSpaceDust,
+                                     edvr::kPsNormalSpaceDust, false, true),
+                          "both default-on dust keys reach the actual visitor and skip only their own shader pair");
+            okay &= check(visitDust(false, true, edvr::kUiVsSpaceDust,
+                                     edvr::kUiPsSpaceDust, false, false) &&
+                          visitDust(true, false, edvr::kVsNormalSpaceDust,
+                                     edvr::kPsNormalSpaceDust, true, false) &&
+                          visitDust(true, true, edvr::kUiVsSpaceDust,
+                                     edvr::kPsNormalSpaceDust, false, false),
+                          "independent dust controls and exact VS/PS pairs decline unmatched draws");
+            edvr::bindingSetShader(edvr::BindSlot::Vs, priorVs, priorVsHash);
+            edvr::bindingSetShader(edvr::BindSlot::Ps, priorPs, priorPsHash);
+            edvr::detail::g_supercruiseDustHidden = priorSuper;
+            edvr::detail::g_normalSpaceDustHidden = priorNormal;
+        }
 
         constexpr std::uint8_t kFilterOff = 0;
         constexpr std::uint8_t kFilterSize = 1;

@@ -1113,6 +1113,11 @@ void caseR12() {
               "R12g: the footprint adapter exposes its arming predicate as a named gate subscription");
         check(has(vs, "{\"legacy.vscreen-footprint\", &drawGate_vscreen_footprint, false}"),
               "R12g: the registry table includes the footprint adapter under its stable subscription name");
+        check(has(vs, "EDVR_GATE_GLOBAL(space_dust, spaceDustHidden())") &&
+                  has(vs, "{\"legacy.space-dust\", &drawGate_space_dust, false}") &&
+                  before(vs, "id == SiteId::kSpaceDustSkip", "id == SiteId::kStateSnapshot") &&
+                  has(vs, "drawCensusNoteUnseen('d')"),
+              "main dust compatibility uses a named registry gate and skips before eye-state snapshot with census reason d");
         check(has(registration, "pluginRegistryRegisterLegacyDrawGate(registration.name") &&
                   count(vs, "(void)registerLegacyDrawGates(g_state);") == 1,
               "R12g: vScreen publishes the named subscription table to the registry during installation");
@@ -1126,6 +1131,9 @@ void caseR12() {
         check(!has(noteFlat, "vscreenFootprint") && !has(noteFlat, "vscreen_footprint"), "R12h: the flat runtime never touches the instrument");
         const std::string flatThunk = functionBody(vs, "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(");
         check(before(flatThunk, "if (runtimeFlatProfile())", "footprintEyeDraw(self,"), "R12h: the call sits after the flat profile's early return in the thunk");
+        check(count(vs, "flatCensusDraw(self,") == 4 &&
+                  count(vs, "flatDraw.uiReissue(") == 4,
+              "main flat census and UI reissue remain on all four direct draw thunks");
     }
 
     // The instrument itself.

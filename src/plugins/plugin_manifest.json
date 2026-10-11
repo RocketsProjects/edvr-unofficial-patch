@@ -102,7 +102,7 @@
       "index": 1,
       "id": "cockpit-visuals",
       "name": "Cockpit visuals",
-      "description": "Sun glare, particle billboards, witchspace stars, RemLok lines, wake pulse, target indicator, and night vision.",
+      "description": "Sun glare, space dust, particle billboards, witchspace stars, RemLok lines, wake pulse, target indicator, and night vision.",
       "profiles": [
         "vr"
       ],
@@ -126,10 +126,12 @@
         "experimental.night_vision_realistic",
         "experimental.target_indicator",
         "fix.night_vision_stability",
+        "fix.normal_space_dust",
         "fix.particle_billboard",
         "fix.remlok_line_angle",
         "fix.remlok_lines",
         "fix.sun_glare",
+        "fix.supercruise_dust",
         "fix.wake_pulse",
         "fix.witchspace_stars"
       ],

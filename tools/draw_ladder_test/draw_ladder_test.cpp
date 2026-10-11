@@ -115,6 +115,10 @@ struct ModelVisitor final {
             return ladder::SiteResult::exited(
                 static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
         }
+        if (id == ladder::SiteId::kSpaceDustSkip && id == scenario.exitAt) {
+            return ladder::SiteResult::exited(
+                static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
+        }
         if (id == ladder::SiteId::kOffscreenCensusSkip &&
             id == scenario.exitAt) {
             return ladder::SiteResult::exited(
@@ -548,6 +552,7 @@ constexpr ladder::SiteId kFrozenCommon[] = {
     ladder::SiteId::kParticleProbe,
     ladder::SiteId::kParticleSubstitute,
     ladder::SiteId::kWitchspaceStarsSkip,
+    ladder::SiteId::kSpaceDustSkip,
     ladder::SiteId::kStateSnapshot,
     ladder::SiteId::kRouteSelected,
 };
@@ -604,6 +609,7 @@ bool frozenShouldStop(const Scenario& s, ladder::SiteId id, ladder::SiteKind kin
     if (id == ladder::SiteId::kDrawGateDisabledNone && s.drawGateOff) return true;
     if (id == ladder::SiteId::kEyeRangeSkip && id == s.exitAt) return true;
     if (id == ladder::SiteId::kWitchspaceStarsSkip && id == s.exitAt) return true;
+    if (id == ladder::SiteId::kSpaceDustSkip && id == s.exitAt) return true;
     if (id == ladder::SiteId::kOffscreenCensusSkip && id == s.exitAt) return true;
     if (id == ladder::SiteId::kEyeCensusSkip && id == s.exitAt) return true;
     if (kind == ladder::SiteKind::Claim && id == s.claimAt) return true;
@@ -652,11 +658,11 @@ std::vector<ladder::SiteId> frozenWalkRanges(const Scenario& s,
     return result;
 }
 
-template <std::size_t N>
+template <std::size_t M, std::size_t N>
 std::vector<ladder::SiteId> frozenWalk(const Scenario& s,
-                                      const ladder::SiteId (&common)[8],
+                                      const ladder::SiteId (&common)[M],
                                       const ladder::SiteId (&tail)[N]) {
-    return frozenWalkRanges(s, common, 8, tail, N);
+    return frozenWalkRanges(s, common, M, tail, N);
 }
 
 bool same(const std::vector<ladder::SiteId>& a, const std::vector<ladder::SiteId>& b) {
@@ -1236,6 +1242,7 @@ std::int16_t expectedTerminalVerdict(ladder::SiteId id) {
     switch (id) {
     case ladder::SiteId::kFssChromeSkip:
     case ladder::SiteId::kWitchspaceStarsSkip:
+    case ladder::SiteId::kSpaceDustSkip:
     case ladder::SiteId::kOffscreenWakePulseSkip:
     case ladder::SiteId::kOffscreenCensusSkip:
     case ladder::SiteId::kEyeCensusSkip:
@@ -1582,6 +1589,7 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         scenario.exitAt = terminal;   // The FSS handler returns Exited/Skip.
     } else if (terminal == ladder::SiteId::kEyeRangeSkip ||
              terminal == ladder::SiteId::kWitchspaceStarsSkip ||
+             terminal == ladder::SiteId::kSpaceDustSkip ||
              terminal == ladder::SiteId::kOffscreenCensusSkip ||
              terminal == ladder::SiteId::kEyeCensusSkip) scenario.exitAt = terminal;
     else if (terminalKind == ladder::SiteKind::Claim) scenario.claimAt = terminal;
@@ -2031,7 +2039,7 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         policy.fssFact(reveal);
     }
     std::vector<ladder::SiteId> expected = includeCommon
-        ? frozenWalkRanges(scenario, kFrozenCommon, 8, referenceTail, referenceTailCount)
+        ? frozenWalkRanges(scenario, kFrozenCommon, 9, referenceTail, referenceTailCount)
         : frozenWalkRanges(scenario, referenceTail, referenceTailCount, nullptr, 0);
     if (stagedFss) {
         // Compare invoked mock helpers here. The policy still records both
@@ -2477,7 +2485,7 @@ bool traceWriterChecks(const char* rootArg) {
             ladder::SequenceId::kCommon,
             (terminal == ladder::SiteId::kWitchspaceStarsSkip || fssChromeTerminal) ? 'X' : 'D',
             terminal, false,
-            kFrozenCommon, 8, ladder::CommonSequence{}, 1, false, false,
+            kFrozenCommon, 9, ladder::CommonSequence{}, 1, false, false,
             edvr::SunglareTraceMode::kStock, false, false, 0, 15,
             false, false, 0, 0, 0, 0, 0, fssChromeTerminal ? 3u : 0u,
             false, 0, 0,
@@ -2488,6 +2496,7 @@ bool traceWriterChecks(const char* rootArg) {
     addCommon(ladder::SiteId::kFssChromeSkip, false, false);
     addCommon(ladder::SiteId::kParticleSubstitute, false, false);
     addCommon(ladder::SiteId::kWitchspaceStarsSkip, false, false);
+    addCommon(ladder::SiteId::kSpaceDustSkip, false, false);
 
     const ladder::SiteId offscreenTerminals[] = {
         ladder::SiteId::kOffscreenBackdropBlit,
@@ -3859,7 +3868,7 @@ bool traceWriterChecks(const char* rootArg) {
     const bool missingBasicStarted = beginFssCase("basic_missing_fact", "edvr_gfx_basic_missing.log", 52);
     const bool missingBasicWritten = missingBasicStarted && writeTerminalCase(
         ladder::RouteId::kForeignOwner, ladder::SequenceId::kCommon, 'D',
-        ladder::SiteId::kForeignContextNone, false, kFrozenCommon, 8,
+        ladder::SiteId::kForeignContextNone, false, kFrozenCommon, 9,
         ladder::CommonSequence{}, 1, false, false, edvr::SunglareTraceMode::kStock,
         false, false, 0, 52, false, false, 1);
     trace::frameEnd(52);
@@ -3902,7 +3911,7 @@ bool traceWriterChecks(const char* rootArg) {
     const bool basicUnknownStarted = beginFssCase("basic_unknown", "edvr_gfx_basic_unknown.log", 57);
     const bool basicUnknownWritten = basicUnknownStarted && writeTerminalCase(
         ladder::RouteId::kForeignOwner, ladder::SequenceId::kCommon, 'D',
-        ladder::SiteId::kForeignContextNone, false, kFrozenCommon, 8,
+        ladder::SiteId::kForeignContextNone, false, kFrozenCommon, 9,
         ladder::CommonSequence{}, 1, false, false, edvr::SunglareTraceMode::kStock,
         false, false, 0, 57, false, false, 2);
     trace::frameEnd(57);
@@ -4439,6 +4448,8 @@ static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kScrim) == 17);
     static_assert(static_cast<std::uint16_t>(ladder::SiteId::kDrawIndexedInstancedIndirectRuntimeBypass) == 74);
     static_assert(static_cast<std::uint16_t>(ladder::SiteId::kDrawInstancedIndirectRuntimeBypass) == 75);
     static_assert(static_cast<std::uint16_t>(ladder::SiteId::kInternalWorldBypass) == 76);
+    static_assert(static_cast<std::uint16_t>(ladder::SiteId::kSpaceDustSkip) == 77);
+    static_assert(static_cast<std::uint16_t>(ladder::SiteId::kSiteIdCount) == 78);
     static_assert(static_cast<std::uint8_t>(ladder::RouteId::kAutoBypass) == 8);
     static_assert(static_cast<std::uint8_t>(ladder::RouteId::kDrawIndexedInstancedIndirectBypass) == 9);
     static_assert(static_cast<std::uint8_t>(ladder::RouteId::kDrawInstancedIndirectBypass) == 10);
@@ -4606,7 +4617,9 @@ static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kScrim) == 17);
     ok &= check(vrNightTrace.sites.back().result.verdict == vrNightVision.verdict &&
                 vrNightTrace.sites.back().result.outcome == ladder::SiteOutcome::Claimed,
                 "selected claim records the unchanged verdict ordinal");
-    ok &= check(vrNightTrace.sites[7].result.subsite ==
+    const std::size_t vrRouteSite = traceSiteIndex(vrNightTrace, ladder::SiteId::kRouteSelected);
+    ok &= check(vrRouteSite < vrNightTrace.sites.size() &&
+                vrNightTrace.sites[vrRouteSite].result.subsite ==
                 static_cast<std::uint16_t>(ladder::RouteId::kVrEye),
                 "route site records VR route id");
     ok &= check(vrNightInterest.legacyMaskLoads == 1 &&

@@ -1928,6 +1928,7 @@ EDVR_GATE_GLOBAL(loader_panel, loaderPanelWants())
 EDVR_GATE_GLOBAL(intro_panel, introPanelWants())
 EDVR_GATE_GLOBAL(wake_pulse, wakePulseWantsDraws())
 EDVR_GATE_GLOBAL(witchspace_stars, witchspaceStarsHidden())
+EDVR_GATE_GLOBAL(space_dust, spaceDustHidden())
 EDVR_GATE_GLOBAL(depth_probe, depthProbeWanted())
 EDVR_GATE_GLOBAL(vscreen_footprint, vscreenFootprintWanted())
 EDVR_GATE_GLOBAL(intro_curve, introCurveWants())
@@ -1967,6 +1968,7 @@ constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] = {
     {"legacy.intro-panel", &drawGate_intro_panel, false},
     {"legacy.wake-pulse", &drawGate_wake_pulse, false},
     {"legacy.witchspace-stars", &drawGate_witchspace_stars, false},
+    {"legacy.space-dust", &drawGate_space_dust, false},
     {"legacy.depth-probe", &drawGate_depth_probe, false},
     {"legacy.vscreen-footprint", &drawGate_vscreen_footprint, false},
     {"legacy.intro-curve", &drawGate_intro_curve, false},
@@ -2649,6 +2651,14 @@ struct VScreenDrawLadderVisitor {
             }
             if (skipped) {
                 if (drawCensusArmed()) drawCensusNoteUnseen('w');
+                return exited(id, DrawVerdict::kSkip);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kSpaceDustSkip) {
+            // Both dust controls are independent. Their helper admits exact
+            // VS/PS pairs before the eye-size route and before UI redirection.
+            if (spaceDustHidden() && spaceDustSkip(self, kind, count, instances)) {
+                if (drawCensusArmed()) drawCensusNoteUnseen('d');
                 return exited(id, DrawVerdict::kSkip);
             }
             return SiteResult::declined();
@@ -6377,6 +6387,14 @@ struct DrawClock {
     }
 };
 
+// The flat profile's draws never reach beginPanelOverride: its thunks take the flat branch first, and the census's per-draw record
+// lives there. So the flat branch records the draw itself, before FlatRuntimeDrawScope substitutes any binding. Every flat draw is
+// recorded as an offscreen (DCO) line: flat has no eye textures to count, and the census arms its offscreen record for flat.
+// Armed is one bool load; the record is drawCensusOffDraw's own gate (frames left and offscreen), so an unarmed census costs nothing.
+static void flatCensusDraw(ID3D11DeviceContext* self, char kind, uint32_t count, uint32_t instances, const DrawArgs& args) {
+    if (drawCensusArmed()) drawCensusOffDraw(self, kind, count, instances, args);
+}
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDraw];
@@ -6385,10 +6403,12 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             // Capture original game bindings before the temporal scope substitutes
             // the engine-motion PS/MRT or the output-copy SRV.
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
+            flatCensusDraw(self, 'D', count, 1, args);
             FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
             if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
             g_state->realDraw(self, count, start);
             if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+            flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'D', count, 1, args, 1);
@@ -6487,10 +6507,12 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         DrawArgs args{}; args.start = startIndex; args.base = baseVertex;
         withFlatBypassTrace(self, 'I', count, 1, args, [&](auto& trace) {
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
+            flatCensusDraw(self, 'I', count, 1, args);
             FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
             if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
             g_state->realDrawIndexed(self, count, startIndex, baseVertex);
             if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+            flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'I', count, 1, args, 1);
@@ -6553,11 +6575,13 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         withFlatBypassTrace(self, 'N', perInstance, instances, args, [&](auto& trace) {
             if (self == g_state->ownerCtx && flatTemporalCapturing())
                 flatTemporalDraw(self, perInstance, instances);
+            flatCensusDraw(self, 'N', perInstance, instances, args);
             FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
                                           static_cast<int32_t>(startVertex), startInstance);
             if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
             g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
             if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+            flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'N', perInstance, instances, args, 1);
@@ -6630,12 +6654,14 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         withFlatBypassTrace(self, 'X', perInstance, instances, args, [&](auto& trace) {
             if (self == g_state->ownerCtx && flatTemporalCapturing())
                 flatTemporalDraw(self, perInstance, instances);
+            flatCensusDraw(self, 'X', perInstance, instances, args);
             FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
                                           baseVertex, startInstance);
             if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
             g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                               baseVertex, startInstance);
             if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+            flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'X', perInstance, instances, args, 1);
@@ -6827,6 +6853,8 @@ using VScreenContextTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kForeignContextNone, draw_ladder::SiteKind::Exit>;
 using VScreenDistanceTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeNoDistanceNone, draw_ladder::SiteKind::Exit>;
+using VScreenSpaceDustTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kSpaceDustSkip, draw_ladder::SiteKind::Claim>;
 using VScreenEyeCensusTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeCensusSkip, draw_ladder::SiteKind::Claim>;
 using VScreenLoaderPanelTestSite = draw_ladder::Site<
@@ -7248,6 +7276,9 @@ draw_ladder::SiteResult vScreenPredicateTestInvoke(
     if (siteId == static_cast<std::uint16_t>(VScreenContextTestSite::id)) {
         return vScreenPredicateTestInvokeSite<VScreenContextTestSite>(visitor, trace);
     }
+    if (siteId == static_cast<std::uint16_t>(VScreenSpaceDustTestSite::id)) {
+        return vScreenPredicateTestInvokeSite<VScreenSpaceDustTestSite>(visitor, trace);
+    }
     return vScreenPredicateTestInvokeSite<VScreenDistanceTestSite>(visitor, trace);
 }
 
@@ -7271,7 +7302,8 @@ bool vScreenPredicateTestVisit(
     bool distanceEnabled, bool traceEnabled,
     VScreenPredicateTestResult* result) noexcept {
     if (!result || (siteId != static_cast<std::uint16_t>(VScreenContextTestSite::id) &&
-                    siteId != static_cast<std::uint16_t>(VScreenDistanceTestSite::id)))
+                    siteId != static_cast<std::uint16_t>(VScreenDistanceTestSite::id) &&
+                    siteId != static_cast<std::uint16_t>(VScreenSpaceDustTestSite::id)))
         return false;
 
     static State fixture{};

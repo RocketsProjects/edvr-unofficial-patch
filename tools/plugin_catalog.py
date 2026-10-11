@@ -856,6 +856,13 @@ def self_test():
               [claim['id'] for claim in cockpit['claims']] == ['night-vision'] and
               all(rig in cockpit['rigs'] for rig in
                   ('plugin_dispatch_test', 'remlok_predicate_test', 'cockpit_api_test')))
+        dust_keys = {'fix.normal_space_dust', 'fix.supercruise_dust'}
+        all_owned_keys = set(original['coreOwnedConfigKeys'])
+        for plugin in original['plugins']:
+            all_owned_keys.update(plugin['ownedConfigKeys'])
+        check('Cockpit Visuals owns the two retained dust controls and the combined key stays retired',
+              dust_keys <= set(cockpit['ownedConfigKeys']) and
+              'fix.space_dust' not in all_owned_keys and 'fix.space_dust' not in documented)
         comfort_index = EXPECTED_IDS.index('comfort')
         comfort = original['plugins'][comfort_index]
         check('comfort lifecycle owns Exposure, Scanners, and Transition Flash while remaining non-selectable',
@@ -954,8 +961,8 @@ def self_test():
                       set(metric) == {'state', 'unit', 'coverage'}
                       for metric in plugin['costBudget']['metrics'].values())
                   for plugin in original['plugins']))
-        check('manifest still covers all 125 documented configuration keys',
-              len(documented) == 125)
+        check('manifest still covers all 127 documented configuration keys',
+              len(documented) == 127)
 
         bad = copy.deepcopy(original)
         bad['plugins'][0]['costBudget']['metrics']['cpu']['referenceValue'] = 0
@@ -1133,6 +1140,15 @@ def self_test():
         cosmetic['plugins'][0]['costNote'] += ' changed note'
         check('selection fingerprint excludes prose, rigs, and cost notes',
               selection_contract_fingerprint(cosmetic) == fingerprint)
+        ownership_change = copy.deepcopy(original)
+        moved_key = 'fix.normal_space_dust'
+        ownership_change['plugins'][cockpit_index]['ownedConfigKeys'].remove(moved_key)
+        ownership_change['coreOwnedConfigKeys'].append(moved_key)
+        ownership_change['coreOwnedConfigKeys'].sort()
+        check('ownership-only mutation retains a complete unique key inventory',
+              not validate_manifest(ownership_change, documented))
+        check('selection fingerprint excludes plugin config ownership metadata',
+              selection_contract_fingerprint(ownership_change) == fingerprint)
         contract_change = copy.deepcopy(original)
         contract_change['plugins'][0]['selectionAvailableProfiles'] = ['vr']
         check('selection fingerprint changes when availability changes',

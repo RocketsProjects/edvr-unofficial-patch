@@ -40,13 +40,13 @@ SITE_KINDS = {
     52: 2, 53: 2, 54: 2, 55: 2, 56: 2, 57: 2, 58: 2,
     59: 2, 60: 2, 61: 2, 62: 2, 63: 2, 64: 1, 65: 1,
     66: 2, 67: 3, 68: 3, 69: 3, 70: 1, 71: 1, 72: 3,
-    73: 3, 74: 3, 75: 3, 76: 3,
+    73: 3, 74: 3, 75: 3, 76: 3, 77: 2,
 }
 NOT_ELIGIBLE_SITES = {
     5, 6, 44, 50, 54, 57, 58, 59, 65,
 }
 TERMINAL_VERDICTS = {
-    1: 2, 5: 10, 6: 2, 22: 18, 23: 2, 24: 2, 25: 16, 26: 15,
+    1: 2, 5: 10, 6: 2, 77: 2, 22: 18, 23: 2, 24: 2, 25: 16, 26: 15,
     43: 7, 48: 2, 49: 2, 50: 6, 51: 2, 52: 3, 53: 4, 54: 5,
     55: 17, 56: 18, 57: 11, 58: 12, 59: 13, 60: 14, 61: 2,
     62: 9, 63: 8, 66: 1,
@@ -57,7 +57,8 @@ TERMINAL_VERDICTS = {
 # This table describes only the canonical site order for validating recorded
 # visit order and inferring the short-circuited suffix. Arbitration itself is
 # intentionally delegated to the production C++ selector/rig.
-COMMON = [1, 2, 3, 4, 5, 6, 7, 8]
+COMMON = [1, 2, 3, 4, 5, 6, 77, 7, 8]
+PRE_DUST_COMMON = [1, 2, 3, 4, 5, 6, 7, 8]
 OFFSCREEN = [70, 22, 20, 21, 23, 24, 25, 26, 27, 28]
 EYE = [40, 41, 42, 43, 44, 45, 71, 46, 47, 48, 49, 50, 51, 52, 53,
        54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 67, 68, 66, 69]
@@ -78,6 +79,12 @@ SEQUENCES = {
     (10, 8): DRAW_INSTANCED_INDIRECT_BYPASS,
     (11, 9): INTERNAL_WORLD_BYPASS,
 }
+PRE_DUST_SEQUENCES = dict(SEQUENCES)
+PRE_DUST_SEQUENCES.update({
+    (1, 1): PRE_DUST_COMMON, (2, 1): PRE_DUST_COMMON,
+    (3, 1): PRE_DUST_COMMON, (4, 2): PRE_DUST_COMMON + OFFSCREEN,
+    (6, 4): PRE_DUST_COMMON + EYE,
+})
 TRI_STATES = {"unknown", "no", "yes"}
 FORWARD_TRI_FIELDS = {
     "owner": 1 << 0,
@@ -3707,7 +3714,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
         fact_label = "%s.predicateFacts[%d]" % (label, index)
         if not isinstance(fact, dict):
             raise TraceError(fact_label + " must be an object")
-        site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
+        site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 77)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
                         23 if predicate_fact_version >= 16 else
                         22 if predicate_fact_version >= 15 else
@@ -4866,6 +4873,18 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
     draws = data.get("draws")
     if not isinstance(draws, list) or len(draws) > MAX_DRAWS:
         raise TraceError("draws must be a bounded array")
+    # Site 77 was appended without a sidecar version change. An older capture
+    # cannot contain it; if any draw records 77, all draws in that capture use
+    # the new common order. A capture with no 77 is interpreted with the old
+    # order, even when every draw stopped before 77 and the era is ambiguous.
+    # This keeps the inferred suffix conservative and never invents a dust
+    # predicate fact or an equivalence claim for historical captures.
+    has_dust_site = any(
+        isinstance(draw, dict) and isinstance(draw.get("sites"), list) and
+        any(isinstance(event, dict) and event.get("id") == 77
+            for event in draw["sites"])
+        for draw in draws)
+    capture_sequences = SEQUENCES if has_dust_site else PRE_DUST_SEQUENCES
     route_counts = {}
     total_sites = 0
     total_actions = 0
@@ -4977,7 +4996,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
             raise TraceError(label + " direct command parameters must be recorded")
         route = _integer(draw.get("route"), label + ".route", 1, 11)
         sequence = _integer(draw.get("sequence"), label + ".sequence", 1, 9)
-        ordered = SEQUENCES.get((route, sequence))
+        ordered = capture_sequences.get((route, sequence))
         if ordered is None:
             raise TraceError(label + " has an unsupported route/sequence pair")
         expected_route = {
@@ -5007,7 +5026,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
             event_label = "%s.sites[%d]" % (label, event_index)
             if not isinstance(event, dict):
                 raise TraceError(event_label + " must be an object")
-            site_id = _integer(event.get("id"), event_label + ".id", 1, 76)
+            site_id = _integer(event.get("id"), event_label + ".id", 1, 77)
             if site_id not in ordered or site_id in seen:
                 raise TraceError(event_label + " is not a unique member of its route sequence")
             pos = ordered.index(site_id)
@@ -5764,7 +5783,7 @@ def self_test():
     d["route"] = 6
     d["sequence"] = 4
     d["sites"] = []
-    for site_id in [1, 2, 3, 4, 5, 6, 7, 8, 40, 41, 42, 43]:
+    for site_id in COMMON + [40, 41, 42, 43]:
         kind = SITE_KINDS[site_id]
         outcome = 3 if site_id == 43 else (1 if kind == 1 else 2)
         d["sites"].append({
@@ -5800,6 +5819,34 @@ def self_test():
             raise TraceError("VR trace scope or short-circuited suffix was not reported")
     except Exception as exc:
         print("draw-ladder VR trace fixture rejected: %s" % exc)
+        return 1
+
+    pre_dust = json.loads(json.dumps(vr))
+    pre_dust["draws"][0]["sites"] = [site for site in pre_dust["draws"][0]["sites"]
+                                     if site["id"] != 77]
+    try:
+        older = validate_trace(pre_dust)
+        if (older["siteCount"] != summary["siteCount"] - 1 or
+                older["inferredUnvisitedSiteCount"] != summary["inferredUnvisitedSiteCount"] or
+                "predicate equivalence not established" not in older["scope"]):
+            raise TraceError("pre-dust order or conservative scope changed")
+    except Exception as exc:
+        print("pre-dust historical trace fixture rejected: %s" % exc)
+        return 1
+
+    dust_terminal = json.loads(json.dumps(vr))
+    dust_draw = dust_terminal["draws"][0]
+    dust_draw["sites"] = dust_draw["sites"][:COMMON.index(77) + 1]
+    dust_draw["sites"][-1].update(outcome=4, flow=1, verdict=2)
+    dust_draw.update(winnerSiteId=77, verdict=2, forwardFacts=None,
+                     actions=[dust_draw["actions"][0], dust_draw["actions"][-1]])
+    try:
+        dust_summary = validate_trace(dust_terminal)
+        if (dust_summary["siteCount"] != COMMON.index(77) + 1 or
+                "predicate equivalence not established" not in dust_summary["scope"]):
+            raise TraceError("dust terminal did not preserve observed-only scope")
+    except Exception as exc:
+        print("site-77 dust terminal fixture rejected: %s" % exc)
         return 1
 
     # Independent input-driven selector fixtures: boundaries are inclusive,
@@ -5845,7 +5892,7 @@ def self_test():
     def range_trace(eye_index, ranges, expected, known="yes"):
         trace = json.loads(json.dumps(vr))
         draw = trace["draws"][0]
-        ids = [1, 2, 3, 4, 5, 6, 7, 8, 40, 41, 42, 43, 44, 45, 71,
+        ids = COMMON + [40, 41, 42, 43, 44, 45, 71,
                46, 47, 48, 49]
         site49_event, expected_delta = expected
         stop = 49 if site49_event["outcome"] == 4 else 50
@@ -6998,7 +7045,7 @@ def self_test():
         draw = data["draws"][0]
         draw["route"] = 6
         draw["sequence"] = 4
-        ids = [1, 2, 3, 4, 5, 6, 7, 8, 40, 41, 42, 43]
+        ids = COMMON + [40, 41, 42, 43]
         draw["sites"] = []
         for site_id in ids:
             kind = SITE_KINDS[site_id]
@@ -7045,6 +7092,7 @@ def self_test():
         ("overflow", lambda d: d["footer"].update(overflow=True)),
         ("missing footer", lambda d: d.pop("footer")),
         ("unknown site", lambda d: d["draws"][0]["sites"][0].update(id=73)),
+        ("site past append-only range", lambda d: d["draws"][0]["sites"][0].update(id=78)),
         ("terminal mismatch", lambda d: d["draws"][0].update(winnerSiteId=71)),
         ("exit verdict mismatch", lambda d: d["draws"][0].update(verdict=1)),
         ("unknown terminal verdict", lambda d: d["draws"][0]["sites"][0].update(verdict=999)),
