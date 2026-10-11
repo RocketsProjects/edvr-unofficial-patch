@@ -19,6 +19,8 @@
 #include "../../src/common/temporal_math.h"
 #include "../../src/common/temporal_census.h"
 #include "../../src/common/hmd_camera_tag.h"
+#include "../../src/common/camera_writes.h"
+#include <chrono>
 #include <stdexcept>
 #include "../../src/common/temporal_mode.h"
 #include "../../src/d3d11/temporal_history.h"
@@ -765,6 +767,203 @@ int main() {
             edvr::census::fillDraw(d, 5u, 1u, bad, false, 3u, blk);
             check(!d.hasRows && d.T[0] == 0.0f && d.P[15] == 15.5f && d.seq == 3u,
                   "census: a non-rotation write keeps its P floats and clock, and no translation or rotation");
+        }
+    }
+    // THE CAMERA WRITES (diag.camera_writes, camera_writes.h, 2026-10-11): the key off does no work; the ring keeps 256 writes a frame and counts the
+    // overflow; the pick and drawn marks land on the write with that clock; a record's translation, quaternion and projection floats are the rows'
+    // and the block's; the exe's image range keeps the RVAs of its own frames; a TCWR line parses back; the expected projection and the cost line
+    // are as written. The write's cost in this rig is measured (noteWrite alone; the stack capture is Windows and is measured by the flight).
+    {
+        namespace cw = edvr::camwrites;
+        static cw::Ring ring, offRing, bench;
+        float rows[12], blk[16];
+        rows34(90.0f, 1.0f, 2.0f, 3.0f, rows);
+        for (int j = 0; j < 16; ++j) blk[j] = static_cast<float>(j) + 0.5f;
+        auto mk = [&](uint32_t seq) {
+            cw::In in;
+            in.seq = seq;
+            in.obj = 0x1000u + seq;
+            in.off = 0;
+            in.len = 944u * 4u;
+            in.tid = 77;
+            in.co = 1;
+            in.rot = true;
+            in.rows = rows;
+            in.blk = blk;
+            return in;
+        };
+        // A. Key off: nothing is stored or counted.
+        {
+            uint64_t calls = 0;
+            const bool stored = cw::noteWrite(offRing, false, 7u, mk(1u), &calls);
+            check(!stored && calls == 0 && offRing.frames[7].frame == ~0u && offRing.frames[7].n == 0,
+                  "camera writes key off: a write stores nothing and counts nothing");
+        }
+        // B. The cap: 300 writes in frame 9 keep the first 256 in clock order and count 44 as overflow.
+        {
+            uint64_t calls = 0;
+            for (uint32_t s = 0; s < 300u; ++s) cw::noteWrite(ring, true, 9u, mk(100u + s), &calls);
+            const cw::Frame& f = ring.frames[9];
+            check(f.frame == 9u && f.n == 256u && f.overflow == 44u && calls == 300u,
+                  "camera writes cap: 300 writes give 256 kept, 44 overflowed, all 300 counted");
+            bool ordered = true;
+            for (uint32_t k = 0; k < f.n; ++k) ordered = ordered && f.w[k].seq == 100u + k;
+            check(ordered && f.w[0].obj == 0x1000u + 100u && f.w[0].tid == 77u && f.w[0].co == 1u && f.w[0].len == 944u * 4u && f.w[0].off == 0u,
+                  "camera writes: each record keeps its clock, object, byte range, thread and depth, in write order");
+            // The slot is reused by its frame number, on a ring of its own: frame 9 + 64 lands in frame 9's slot and resets its counts.
+            static cw::Ring reuse;
+            cw::noteWrite(reuse, true, 9u, mk(1u));
+            cw::noteWrite(reuse, true, 9u, mk(2u));
+            cw::noteWrite(reuse, true, 9u + static_cast<uint32_t>(cw::kFrames), mk(3u));
+            check(reuse.frames[9].frame == 9u + static_cast<uint32_t>(cw::kFrames) && reuse.frames[9].n == 1u &&
+                  reuse.frames[9].overflow == 0u && reuse.frames[9].w[0].seq == 3u,
+                  "camera writes: a frame's slot is reset when the ring comes round to it, not added to");
+        }
+        // C. The marks: a write named by both pickers takes both bits; an unknown clock or frame marks nothing; a draw marks the write it saw,
+        // and an overflowed write (clock 399) cannot be marked.
+        {
+            check(cw::markPick(ring, 9u, 100u, cw::kPickLegacy) && cw::markPick(ring, 9u, 100u, cw::kPickTag) &&
+                  ring.frames[9].w[0].pick == 3,
+                  "camera writes pick: a write named by both pickers takes both bits (pick=both)");
+            check(cw::markPick(ring, 9u, 105u, cw::kPickLegacy) && ring.frames[9].w[5].pick == cw::kPickLegacy,
+                  "camera writes pick: the chooser's write is found by its clock");
+            check(!cw::markPick(ring, 9u, 9999u, cw::kPickLegacy) && !cw::markPick(ring, 8u, 105u, cw::kPickLegacy),
+                  "camera writes pick: an unknown clock, or a frame not in the ring, marks nothing");
+            check(cw::markDrawn(ring, 9u, 110u) && ring.frames[9].w[10].drawn && !ring.frames[9].w[11].drawn,
+                  "camera writes drawn: the draw's write is marked and its neighbour is not");
+            check(!cw::markDrawn(ring, 9u, 399u), "camera writes drawn: an overflowed write has no record to mark");
+        }
+        // D. The record's fields: the rows' translation and quaternion, the projection floats (block floats 0, 2, 5, 6, 10, 11, 14 of 784..799).
+        {
+            const cw::Write& w = ring.frames[9].w[0];
+            checkNear(w.T[0], 1.0f, 1e-6f, "camera writes: the record's translation x is the rows' (1)");
+            checkNear(w.T[2], 3.0f, 1e-6f, "camera writes: the record's translation z is the rows' (3)");
+            checkNear(w.R[0], 0.70710678f, 1e-5f, "camera writes: the record's quaternion w of a 90 deg yaw");
+            checkNear(w.R[2], 0.70710678f, 1e-5f, "camera writes: the record's quaternion y of a 90 deg yaw");
+            const float want[7] = {blk[0], blk[2], blk[5], blk[6], blk[10], blk[11], blk[14]};
+            bool pOk = true;
+            for (int k = 0; k < 7; ++k) pOk = pOk && w.P[k] == want[k];
+            check(pOk && w.P[0] == 0.5f && w.P[4] == 10.5f && w.P[6] == 14.5f,
+                  "camera writes: P0,P2,P5,P6,P10,P11,P14 are block floats 784 + 0,2,5,6,10,11,14");
+        }
+        // E. A write whose rows are not a rotation keeps its clock and projection, with no translation or rotation (rot=0).
+        {
+            cw::In in = mk(500u);
+            in.rot = false;
+            cw::noteWrite(ring, true, 10u, in);
+            const cw::Write& w = ring.frames[10].w[0];
+            check(!w.rot && w.T[0] == 0.0f && w.R[0] == 0.0f && w.P[0] == 0.5f && w.seq == 500u,
+                  "camera writes: a non-rotation write keeps its clock and projection, and no translation or rotation");
+        }
+        // F. The stack: the return addresses inside the exe's image are kept as RVAs, innermost first; EDVR's and the driver's are skipped; the
+        // cap holds. A stub image: base 0x140000000, 1 MiB.
+        {
+            const uintptr_t base = 0x140000000ull;
+            const size_t size = 0x100000u;
+            const void* frames[8] = {
+                reinterpret_cast<const void*>(base + 0x1234u),
+                reinterpret_cast<const void*>(0x7FFD00001000ull),
+                reinterpret_cast<const void*>(base + 0x5678u),
+                reinterpret_cast<const void*>(base + size),
+                reinterpret_cast<const void*>(base),
+                reinterpret_cast<const void*>(0x7FFD00002000ull),
+                reinterpret_cast<const void*>(base + 0x9abcu),
+                reinterpret_cast<const void*>(0x7FFD00003000ull),
+            };
+            uint32_t out[6] = {};
+            const int n = cw::rvasInRange(frames, 8, base, size, out, 6);
+            check(n == 4 && out[0] == 0x1234u && out[1] == 0x5678u && out[2] == 0u && out[3] == 0x9abcu,
+                  "stack: the frames inside the exe's image are kept as RVAs, innermost first; frames outside it are skipped");
+            const void* many[10];
+            for (int i = 0; i < 10; ++i) many[i] = reinterpret_cast<const void*>(base + 0x100u * static_cast<uintptr_t>(i + 1));
+            const int capped = cw::rvasInRange(many, 10, base, size, out, 6);
+            check(capped == 6 && out[0] == 0x100u && out[5] == 0x600u,
+                  "stack: the cap holds (6 of 10 inside the image)");
+        }
+        // G. The TCWR line: a record formats and parses back to its fields; a buffer that is too small is refused; a malformed line is refused.
+        {
+            cw::Write w;
+            w.seq = 4242u;
+            w.obj = 0xABCDEF0u;
+            w.off = 0u;
+            w.len = 3775u;
+            w.tid = 1234u;
+            w.co = 2u;
+            w.rot = true;
+            w.pick = cw::kPickLegacy | cw::kPickTag;
+            w.drawn = true;
+            w.stkN = 3u;
+            w.stk[0] = 0x2869068u;
+            w.stk[1] = 0x594B60u;
+            w.stk[2] = 0x1u;
+            w.T[0] = 1.5f; w.T[1] = -2.0f; w.T[2] = 3.25f;
+            w.R[0] = 1.0f; w.R[1] = 0.0f; w.R[2] = 0.0f; w.R[3] = 0.0f;
+            for (int k = 0; k < 7; ++k) w.P[k] = 0.5f + static_cast<float>(k) * 2.0f;
+            char line[640] = {};
+            const int len = cw::formatWrite(line, sizeof(line), 9u, w);
+            cw::Parsed p;
+            const bool parsed = cw::parseWrite(line, p);
+            check(len > 0 && parsed && p.frame == 9u && p.seq == 4242u && p.obj == 0xABCDEF0u && p.off == 0u && p.len == 3775u &&
+                  p.tid == 1234u && p.co == 2u && p.rot && p.drawn && std::strcmp(p.pick, "both") == 0 && p.stkN == 3u &&
+                  p.stk[0] == 0x2869068u && p.stk[1] == 0x594B60u && p.stk[2] == 1u && p.T[1] == -2.0f && p.T[2] == 3.25f &&
+                  p.R[0] == 1.0f && p.P[0] == 0.5f && p.P[6] == 12.5f,
+                  "camera writes format: a TCWR line parses back to its clock, object, bytes, thread, depth, rows, stack, picks and projection");
+            const char* pp = std::strstr(line, "P=(");
+            int commas = 0;
+            if (pp) for (const char* c = pp; *c && *c != ')'; ++c) if (*c == ',') ++commas;
+            check(pp && commas == 6 && std::strstr(line, " stk=2869068,594B60,1 pick=both drawn=1 rot=1") != nullptr,
+                  "camera writes format: seven P floats, then the stack in hex, then pick, drawn and rot");
+            check(cw::formatWrite(line, 60, 9u, w) == 0, "camera writes format: a line that does not fit its buffer is refused, not truncated");
+            cw::Write e;
+            e.stkN = 0;
+            e.pick = 0;
+            char empty[640] = {};
+            check(cw::formatWrite(empty, sizeof(empty), 9u, e) > 0 && cw::parseWrite(empty, p) && p.stkN == 0u &&
+                  std::strcmp(p.pick, "-") == 0 && !p.drawn && !p.rot && std::strstr(empty, " stk=- pick=- drawn=0 rot=0") != nullptr,
+                  "camera writes format: no stack and no pick print as - and parse back");
+            check(!cw::parseWrite("TCWR f9 s4 nonsense", p), "camera writes parse: a malformed line is refused");
+            char head[96] = {};
+            check(cw::formatFrame(head, sizeof(head), 9u, 256u, 44u) > 0 && std::strcmp(head, "TCWRF f9 writes=256 overflow=44") == 0,
+                  "camera writes format: the frame header line");
+        }
+        // H. The expected projection: a symmetric frustum has no centre term; an offset one has the textbook values. The TCWRE line carries the
+        // tangents in the pass's order (left, right, bottom, top).
+        {
+            float P[4] = {};
+            cw::expectedProjection(-1.0f, 1.0f, 0.5f, -0.5f, P);
+            check(P[0] == 1.0f && P[1] == 0.0f && P[2] == 2.0f && P[3] == 0.0f,
+                  "camera writes expected: a symmetric frustum has P0 = 2/(r-l), P5 = 2/(t-b) and no centre term");
+            cw::expectedProjection(-0.5f, 1.0f, 0.8f, -0.4f, P);
+            checkNear(P[0], 4.0f / 3.0f, 1e-5f, "camera writes expected: P0 = 2/(r-l) of an offset frustum");
+            checkNear(P[1], 1.0f / 3.0f, 1e-5f, "camera writes expected: P2 = (r+l)/(r-l) of an offset frustum");
+            checkNear(P[2], 5.0f / 3.0f, 1e-5f, "camera writes expected: P5 = 2/(t-b) of an offset frustum");
+            checkNear(P[3], 1.0f / 3.0f, 1e-5f, "camera writes expected: P6 = (t+b)/(t-b) of an offset frustum");
+            const float tan[4] = {-0.5f, 1.0f, -0.4f, 0.8f};
+            char line[320] = {};
+            const int len = cw::formatExpect(line, sizeof(line), 1, tan, 0.25f, -0.5f);
+            check(len > 0 && std::strstr(line, "TCWRE eye=1 tan=(-0.5,+1,-0.4,+0.8)") != nullptr && std::strstr(line, "P0=+1.333333") != nullptr,
+                  "camera writes expected: the TCWRE line carries the tangents and the expected P0");
+        }
+        // I. The 20 s cost line: writes, frames and the cost a frame in microseconds; zero frames print as zeros, not as a division by zero.
+        {
+            char line[240] = {};
+            const int len = cw::formatCost(line, sizeof(line), 12000u, 60u, 2400u, 1.0e6);
+            check(len > 0 && std::strcmp(line, "temporal camera writes: 12000 writes over 60 frames (200.0 a frame), cost 40.0 us a frame") == 0,
+                  "camera writes cost line: writes, frames, and the cost a frame in microseconds");
+            const int zero = cw::formatCost(line, sizeof(line), 0u, 0u, 0u, 0.0);
+            check(zero > 0 && std::strcmp(line, "temporal camera writes: 0 writes over 0 frames (0.0 a frame), cost 0.0 us a frame") == 0,
+                  "camera writes cost line: zero frames and zero writes print as zeros");
+        }
+        // J. The rig's measured cost: noteWrite alone, 200 000 writes over 782 frames of 256 (the overflow path included), with a whole write each.
+        {
+            const int kWrites = 200000;
+            uint64_t calls = 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < kWrites; ++i) cw::noteWrite(bench, true, static_cast<uint32_t>(i / 256), mk(static_cast<uint32_t>(i)), &calls);
+            const auto t1 = std::chrono::steady_clock::now();
+            const double ns = std::chrono::duration<double, std::nano>(t1 - t0).count() / static_cast<double>(kWrites);
+            printf("  cost  camera writes: noteWrite %.1f ns a write (rig, %d writes, no stack capture)\n", ns, kWrites);
+            check(calls == static_cast<uint64_t>(kWrites), "camera writes cost: the rig's writes are all counted");
         }
     }
     // THE HEADSET CAMERA TAG (hmd_camera_tag.h, 2026-10-11): the gate, the chooser's pick, the depth scope, the 30 s line, the census's cost line and

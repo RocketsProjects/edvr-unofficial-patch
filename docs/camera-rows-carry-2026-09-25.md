@@ -2,14 +2,12 @@
 
 ## Status
 
-*Last updated 2026-10-11: the continuity fix is PARKED on `claude/vr-camera-continuity`
-(not for merge); the per-draw census is built on `claude/vr-camera-diag`, NOT flown.*
+*Last updated 2026-10-11 (camera writes): the continuity fix is PARKED on `claude/vr-camera-continuity`
+(not for merge); the per-write diagnostic `diag.camera_writes` is built on `claude/vr-camera-writes`, NOT flown.*
 
-- **2026-10-11 (open):** a docked hangar shows one-frame camera excursions (75 m / 2.9 deg
-  and smaller). The census (`diag.temporal_draws`, default off) asks whether a view-pose
-  draw exists every frame and whether its VS hash or projection identifies it. Next:
-  same hangar, key on, Pause on visible resets (2026-10-11 entry).
-- **2026-10-11 (built, NOT flown):** `fix.hmd_camera_tag` hooks coordinator `0x594B60` and stamps the writes made inside it; the chooser takes the frame's latest stamp. Entry at the end. Next: hangar, key on then off.
+- **2026-10-11 (REFUTED as built):** `fix.hmd_camera_tag` picks probe faces, not the headset camera: it stamps every write made inside coordinator `0x594B60` (100-200 a frame), and eye dump 085301 has the pick wrong on 10 of 16 frames. The symptom is path-2 static-world pixels (hangar walls, elevator shaft).
+- **2026-10-11 (built, NOT flown):** `diag.camera_writes = on` logs every camera-block write for the Pause dump's TCWR lines (entry at the end; temporary key, removal proposed at close). Next: hangar, `diag.camera_writes = on`, `diag.temporal_draws = off`, `fix.hmd_camera_tag = off`, Pause when the panels reset; then the offline read.
+- **2026-10-11 (open, census):** `diag.temporal_draws` (default off) asks whether a view-pose draw exists each frame, and whether its VS hash or projection identifies it.
 
 - **State:** the 2026-09-25 gate fix (branch `claude/camera-rows-carry`, merged
   to main) is FLOWN and working as designed, and its open hypothesis is now
@@ -420,3 +418,41 @@ Branch `claude/vr-camera-hmd-tag`, from `claude/vr-camera-source-trace` e1d7c4c9
 3. In either run, the `temporal draw census:` line should now print each 20 s totals window. Its cost figure is per window, not a session total.
 4. TDRW `hmd=1` rows should equal the TCAM `selected rows` (the view pose) on every frame that has a stamp.
 Refute: `stamped_writes=0` with `hook=live` means the Unmap is not on the coordinator's thread; the next static step is the `[C+0x108]` item vtable's `+0x88`.
+## 2026-10-11 -- the camera writes, one record each (diag.camera_writes), built, NOT flown
+
+**The tag is refuted as built.** `fix.hmd_camera_tag` stamps every camera-block write made inside coordinator `0x594B60`, and the coordinator makes 100-200 of them a frame. "Latest stamped" therefore picks whichever of them was written last, and that is not the headset camera. Eye dump 085301 (flight tag on) has the chosen rows wrong on 10 of 16 frames: the same position rotated 90, 120 or 180 degrees (probably reflection-probe faces), or a camera about 187 m away.
+
+**Symptom, mapped.** The static world panels (hangar walls, elevator shaft) lose DLSS history. Their motion is path 2, computed from the camera rows the chooser selects, so the wrong write is the cause. The cockpit (head-locked) and the landing pad (engine-record motion) take other paths and do not show it.
+
+- ruled out: the headset tag as the eye camera's selector, because it stamps every write inside the coordinator, probe faces included (eye dump 085301).
+- open: which deterministic property separates the eye camera from the probe faces and the other cameras. Candidates are the projection, the call stack and the object. This entry does not claim one.
+
+**What the diagnostic records.** `diag.camera_writes = on` (temporary; VR only; default off; `edvr.ini` `[diag]`). Every observed camera-block write, rotation or not, goes into a 64-frame ring of 256 writes a frame (overflow counted, not stored). Each record carries:
+
+- the write clock `s` (the clock a draw's `seq` carries), the object pointer, the byte range (a whole Unmap: off 0, len = the buffer's bytes), the thread id and the coordinator depth;
+- the rows' translation T and quaternion R (zero when rot=0);
+- the projection floats P0, P2, P5, P6, P10, P11, P14, which are block floats 784+0, 2, 5, 6, 10, 11, 14 (P10 and P11 are the z row's A and B; depth = A + B / z);
+- up to 6 return addresses inside EliteDangerous64.exe as RVAs (RtlCaptureStackBackTrace; frames outside the image are skipped);
+- `pick`: which chooser took the write this frame, legacy (today's), tag (the latest stamp), both, or -;
+- `drawn`: 1 when an eye's scene draw this frame saw the write as its object's latest before the draw.
+
+Once per eye per session, `TCWRE` prints the four tangents as the temporal pass holds them (left, right, bottom, top), the jitter, and the expected P0, P2, P5, P6 (jitter-free; a tangent shift adds 2*shift/(r-l) to P2 and 2*shift/(t-b) to P6).
+
+**The Pause dump** (the history key, `temporalPassDumpHistory`) prints one `TCWRF f<frame> writes=<kept> overflow=<n>` line per frame, then the frame's `TCWR` lines in clock order, newest frame first, capped at 6000 lines (a frame is kept whole or not at all):
+
+`TCWR f<frame> s<seq> obj=<hex> off=<bytes> len=<bytes> tid=<tid> co=<depth> T=(x,y,z) R=(w,x,y,z) P=(p0,p2,p5,p6,p10,p11,p14) stk=<rva,...|-> pick=<legacy|tag|both|-> drawn=<0|1> rot=<0|1>`
+
+The `rot=` field is an addition to the spec: T and R are the rows' only when rot=1.
+
+**Cost.** `temporal camera writes: N writes over F frames (x a frame), cost y us a frame` every 20 s while on. In the rig, noteWrite alone costs 13-16 ns a write (200 000 writes). The stack capture is Windows-only and is not in the rig; the flight's 20 s line includes it.
+
+**Rig** (`tools\temporal_test`, 30 new checks, all pass): key off stores and counts nothing; 300 writes keep 256 in clock order and count 44 as overflow; a frame's slot is reset when the ring comes round; pick and drawn marks land by clock, and an overflowed clock cannot be marked; T, R and the seven P floats are the rows' and the block's; a non-rotation write keeps its clock and P with no T or R; the exe-range filter on a stub image keeps the RVAs in order, skips outside frames and holds the cap of 6; a TCWR line parses back to its fields; an empty stack and no pick print as `-`; the expected projection formula; the cost line. The rig caught one real bug on the first build: `formatWrite` overwrote its `-` for an empty stack, so the line failed to parse. Fixed before the commit.
+
+**Next flight** (hangar): `diag.camera_writes = on`, `diag.temporal_draws = off`, `fix.hmd_camera_tag = off`, then press Pause a few times when the panels reset. The offline read, per dump frame:
+
+1. Which write is the eye camera? The eye's draws mark it `drawn=1`. Its rows should be the ones the pick took.
+2. Which property separates it from the probe faces? Test the projection first: a cube face has a 90 degree frustum (P0 = P5 = 1 when symmetric), while the headset's eye does not, so compare each candidate's P0 and P5 with the TCWRE expectation. If that does not separate them, test the stack's RVAs for a common caller, then the object pointer.
+
+Refute: if the drawn write's P0 and P5 do not match the TCWRE expectation, the projection is not the eye's signature.
+
+Temporary key: `diag.camera_writes` goes when this arc closes; its removal is proposed here and needs Sean's word before it is made (Scope control).

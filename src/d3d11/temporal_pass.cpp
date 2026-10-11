@@ -32,6 +32,7 @@
 #include "../common/temporal_math.h"
 #include "../common/temporal_census.h"   // the per-draw census's ring and TDRW format (diag.temporal_draws)
 #include "../common/hmd_camera_tag.h"    // the headset camera tag: the stamp, the chooser's pick and the 30 s line (fix.hmd_camera_tag)
+#include "../common/camera_writes.h"     // the camera writes diagnostic: the per-write ring, TCWR lines and the 20 s line (diag.camera_writes)
 #include "hmd_camera_tag_hook.h"         // the coordinator hook's state and frame, for the 30 s line
 #include "depth_probe.h"
 #include "luma_probe.h"
@@ -2221,6 +2222,19 @@ int64_t       g_tagWindowTicks = 0;
 uint32_t      g_hmdRowsFrame = ~0u;
 bool          g_hmdRowsValid = false;
 float         g_hmdRows[12] = {};
+// The camera writes diagnostic (diag.camera_writes; camera_writes.h): the key, the per-write ring and its mutex (shared with the draw hook and the
+// Pause dump), the 20 s line's window and cost, the exe's image range for the stack's RVAs, and the once-per-eye expected projection. Temporary,
+// default off: every hook checks the key before any work.
+bool                g_camWritesOn = false;
+camwrites::Ring     g_camRing;
+std::mutex          g_camMutex;
+uint64_t            g_camTicks = 0;      // the diagnostic's own QPC cost this window: the write and draw hooks' marking
+uint64_t            g_camCalls = 0;      // writes recorded this window, overflowed ones included
+uint32_t            g_camWinFrame = 0;   // g_rowsFrame at the window's start: the line's frame count
+int64_t             g_camWinTicks = 0;
+uintptr_t           g_camExeBase = 0;    // EliteDangerous64.exe's image, for the stack's RVAs (set at the first write)
+size_t              g_camExeSize = 0;
+bool                g_camExpNoted[2] = {};
 uint64_t    g_candSumCount = 0;      // this frame's candidate writes, summed
 uint32_t    g_chooseBound = 0;       // frames whose chosen rows were the bound object's
 uint32_t    g_chooseOther = 0;       // ...another object's, by continuity
@@ -2452,6 +2466,13 @@ void chooseCameraRows() {
         const RowsWrite& w = g_rowsRing[i];
         return hmdtag::Cand{w.valid ? w.frame : ~0u, w.seq, w.valid && w.hmd};
     });
+    // The camera writes diagnostic (camera_writes.h): which write each picker names this frame, by its clock, for the dump's pick= field. Here
+    // pick is still today's choice, before the tag's decision below.
+    if (g_camWritesOn) {
+        std::lock_guard<std::mutex> lock(g_camMutex);
+        if (pick >= 0) camwrites::markPick(g_camRing, g_rowsFrame, g_rowsRing[pick].observedSeq, camwrites::kPickLegacy);
+        if (tagIdx >= 0) camwrites::markPick(g_camRing, g_rowsFrame, g_rowsRing[tagIdx].observedSeq, camwrites::kPickTag);
+    }
     const hmdtag::Decision dec = hmdtag::decide(pick, tagIdx, g_tagKeyOn);
     ++g_tag.frames;
     if (tagIdx >= 0) ++g_tag.framesWithStamp;
@@ -2672,6 +2693,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     const float* headTransSwapped, float nearZ, float farZ,
                     float headDeg, int motion, float blend, float clampSigma,
                     unsigned outW, unsigned outH, unsigned flags) {
+    // The camera writes diagnostic (camera_writes.h): the eye's tangents as the pass holds them, once per eye per session, to read the TCWR
+    // projection floats against.
+    if (g_camWritesOn && eye >= 0 && eye <= 1 && tanNow && !g_camExpNoted[eye]) {
+        g_camExpNoted[eye] = true;
+        char line[320];
+        if (camwrites::formatExpect(line, sizeof(line), eye, tanNow, jxNow, jyNow) > 0) Log::get().note("%s", line);
+    }
     lumaProbeBegin(eye);
     TemporalHistoryScope history(eye,flags,jxNow,jyNow);
     auto& trace=history.entry;
@@ -4453,7 +4481,7 @@ uint64_t     g_tdrwCalls = 0;         // recognised eye-target draws recorded th
 uint32_t     g_tdrwFrames = 0;        // frames this interval while the census is on: the cost line's denominator (its own clock, see temporalPassCensusLine)
 
 bool temporalPassDrawsWanted() {
-    return g_tdrwOn && detail::g_temporalPassWantedFssChrome;
+    return (g_tdrwOn || g_camWritesOn) && detail::g_temporalPassWantedFssChrome;
 }
 
 void temporalPassNoteEyeDraw(ID3D11DeviceContext* ctx, const void* dsv, uint64_t vertexShaderHash, uint32_t indexCount) {
@@ -4466,19 +4494,30 @@ void temporalPassNoteEyeDraw(ID3D11DeviceContext* ctx, const void* dsv, uint64_t
         ID3D11Buffer* cb = nullptr;
         ctx->VSGetConstantBuffers(1, 1, &cb);
         const ObservedRowsWrite* observed = cb ? observedRowsCurrent(cb) : nullptr;
-        census::Draw d;
-        census::fillDraw(d, vertexShaderHash, indexCount, observed ? observed->rows : nullptr,
-                         observed && observed->rowsValid, observed ? observed->seq : 0u,
-                         observed ? observed->blk : nullptr);
-        // The tag's test: this object's rows are the frame's latest headset-stamped rows (made before this draw).
-        d.hmd = observed && observed->rowsValid && g_hmdRowsValid && g_hmdRowsFrame == g_rowsFrame &&
-                memcmp(observed->rows, g_hmdRows, sizeof(g_hmdRows)) == 0;
+        if (g_tdrwOn) {
+            census::Draw d;
+            census::fillDraw(d, vertexShaderHash, indexCount, observed ? observed->rows : nullptr,
+                             observed && observed->rowsValid, observed ? observed->seq : 0u,
+                             observed ? observed->blk : nullptr);
+            // The tag's test: this object's rows are the frame's latest headset-stamped rows (made before this draw).
+            d.hmd = observed && observed->rowsValid && g_hmdRowsValid && g_hmdRowsFrame == g_rowsFrame &&
+                    memcmp(observed->rows, g_hmdRows, sizeof(g_hmdRows)) == 0;
+            std::lock_guard<std::mutex> lock(g_tdrwMutex);
+            census::noteDraw(g_tdrwRing, true, g_rowsFrame, eye, d, &g_tdrwCalls);
+        }
+        // The camera writes diagnostic (camera_writes.h): the write this draw saw as its object's latest is marked drawn. Its own cost is timed.
+        if (g_camWritesOn && observed) {
+            LARGE_INTEGER c0{}, c1{};
+            QueryPerformanceCounter(&c0);
+            std::lock_guard<std::mutex> lock(g_camMutex);
+            camwrites::markDrawn(g_camRing, g_rowsFrame, observed->seq);
+            QueryPerformanceCounter(&c1);
+            g_camTicks += static_cast<uint64_t>(c1.QuadPart - c0.QuadPart);
+        }
         if (cb) cb->Release();
-        std::lock_guard<std::mutex> lock(g_tdrwMutex);
-        census::noteDraw(g_tdrwRing, true, g_rowsFrame, eye, d, &g_tdrwCalls);
     }
     QueryPerformanceCounter(&t1);
-    g_tdrwTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
+    if (g_tdrwOn) g_tdrwTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
 }
 
 void temporalPassDumpHistory(const char* trigger) {
@@ -4590,6 +4629,52 @@ void temporalPassDumpHistory(const char* trigger) {
                             static_cast<unsigned>(frames.size() - firstFrame), frames.size(), lines);
         }
     }
+    // The camera writes (diag.camera_writes, camera_writes.h): every observed camera-block write of the newest frames, newest frame first, at most
+    // camwrites::kDumpLines lines; a frame is kept whole or not at all. One TCWRF line per frame, then its TCWR lines in write-clock order.
+    if (!g_camWritesOn) {
+        Log::get().note("TCWR off: diag.camera_writes is off; no camera-block writes are recorded.");
+    } else {
+        std::vector<camwrites::Frame> snap;
+        {
+            std::lock_guard<std::mutex> lock(g_camMutex);
+            snap.assign(g_camRing.frames, g_camRing.frames + camwrites::kFrames);
+        }
+        std::vector<size_t> order;
+        for (size_t i = 0; i < snap.size(); ++i) if (snap[i].frame != ~0u) order.push_back(i);
+        std::sort(order.begin(), order.end(), [&snap](size_t a, size_t b) { return snap[a].frame > snap[b].frame; });
+        Log::get().note(
+            "TCWR legend (diag.camera_writes): one line per observed camera-block write of the newest frames, newest frame first; "
+            "TCWRF gives a frame's kept writes and its overflow (writes past %d a frame are counted only). f = frame, s = the write clock "
+            "(a draw's seq is the same clock), obj = the constant buffer object, off and len = the written bytes, tid = the writing thread, "
+            "co = the camera coordinator's depth on that thread, T = the rows' translation, R = the rows' quaternion w x y z (zero when rot=0), "
+            "P = the projection floats P0,P2,P5,P6,P10,P11,P14 (block floats 784 + 0,2,5,6,10,11,14; P10 and P11 are the z row's A and B). "
+            "TCWRE, once per eye at the session's first frame, gives that eye's expected projection from the tangents (camera_writes.h).",
+            camwrites::kPerFrame);
+        Log::get().note(
+            "TCWR legend, continued: stk = exe return addresses as RVAs, innermost first, pick = the chooser that took it (legacy = today's "
+            "chooser, tag = the headset tag's latest stamp, both, or - for neither), drawn = 1 when an eye's scene draw this frame saw it as "
+            "its object's latest write, rot = the rows were a rotation.");
+        size_t lines = 0, kept = 0;
+        for (size_t k = 0; k < order.size(); ++k) {
+            const size_t need = 1 + snap[order[k]].n;
+            if (lines + need > camwrites::kDumpLines) break;
+            lines += need;
+            ++kept;
+        }
+        for (size_t k = 0; k < kept; ++k) {
+            const camwrites::Frame& f = snap[order[k]];
+            char head[96];
+            if (camwrites::formatFrame(head, sizeof(head), f.frame, f.n, f.overflow) > 0) Log::get().note("%s", head);
+            for (uint32_t i = 0; i < f.n; ++i) {
+                char buf[640];
+                if (camwrites::formatWrite(buf, sizeof(buf), f.frame, f.w[i])) Log::get().note("%s", buf);
+            }
+        }
+        if (kept < order.size()) {
+            Log::get().note("TCWR older frames omitted: the dump keeps %zu of %zu frames (%zu lines, cap %zu).",
+                            kept, order.size(), lines, camwrites::kDumpLines);
+        }
+    }
     Log::get().note("--- end temporal submission history ---");
 }
 
@@ -4614,6 +4699,13 @@ void temporalPassConfigure(Config& cfg) {
     // fix.hmd_camera_tag (temporary A/B; hmd_camera_tag.h): on picks the headset-stamped write when the frame has one. VR only: the flat
     // allow-list does not list it, so flat reads "off" and keeps today's pick.
     g_tagKeyOn = cfg.getString("fix.hmd_camera_tag", "on") == "on";
+    // diag.camera_writes (camera_writes.h): temporary, default off. VR only: the flat allow-list does not list it, so flat reads "off".
+    const bool camOn = cfg.getString("diag.camera_writes", "off") == "on";
+    if (camOn != g_camWritesOn) {
+        g_camWritesOn = camOn;
+        Log::get().note("temporal camera writes: diag.camera_writes = %s%s", camOn ? "on" : "off",
+                        camOn ? ": every camera-block write is kept for the Pause dump's TCWR lines, with a 20 s cost line" : "");
+    }
     const bool wasWanted = detail::g_temporalPassWantedFssChrome;
     detail::g_temporalPassWantedFssChrome = temporalModeEnabled(mode);
     if (detail::g_temporalPassWantedFssChrome != wasWanted) {
@@ -4938,6 +5030,41 @@ void temporalPassTick(ID3D11DeviceContext* ctx) {
     warmTrainedOnce(ctx);
 }
 
+// The camera writes diagnostic's write record (camera_writes.h): the write's clock, object, byte range, thread, coordinator depth, rows,
+// projection floats, and the stack's return addresses inside the exe as RVAs (RtlCaptureStackBackTrace; frames outside the image are skipped).
+// Called from the Unmap path with the key on only: it allocates nothing and logs nothing.
+void noteCameraWrite(const void* res, uint32_t observedSeq, bool rowsValid, const float* rows, const float* blk, uint32_t bytes) {
+    LARGE_INTEGER t0{}, t1{};
+    QueryPerformanceCounter(&t0);
+    if (!g_camExeBase) {
+        const HMODULE exe = GetModuleHandleW(nullptr);
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(exe);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(reinterpret_cast<const uint8_t*>(exe) + dos->e_lfanew);
+        g_camExeSize = nt->OptionalHeader.SizeOfImage;
+        g_camExeBase = reinterpret_cast<uintptr_t>(exe);
+    }
+    void* frames[32] = {};
+    const USHORT got = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
+    uint32_t stk[camwrites::kStack] = {};
+    const int stkN = camwrites::rvasInRange(reinterpret_cast<const void* const*>(frames), got, g_camExeBase, g_camExeSize, stk, camwrites::kStack);
+    camwrites::In in;
+    in.seq = observedSeq;
+    in.obj = reinterpret_cast<uintptr_t>(res);
+    in.off = 0;
+    in.len = bytes;
+    in.tid = GetCurrentThreadId();
+    in.co = std::min<uint32_t>(hmdtag::coordinatorDepth, 255u);
+    in.rot = rowsValid;
+    in.rows = rows;
+    in.blk = blk;
+    in.stk = stk;
+    in.stkN = static_cast<uint32_t>(stkN);
+    std::lock_guard<std::mutex> lock(g_camMutex);
+    camwrites::noteWrite(g_camRing, true, g_rowsFrame, in, &g_camCalls);
+    QueryPerformanceCounter(&t1);
+    g_camTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
+}
+
 void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t bytes) {
     // The true view matrix lives at float offset 932 of the big scene
     // block (measured by the sun-glare fix's two-shot dump: three 3x4
@@ -4963,6 +5090,8 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
             observed->proj[1] = pz[3];
         }
     }
+    // The camera writes diagnostic (camera_writes.h): EVERY observed write, rotation or not, under the observed clock the draws carry.
+    if (g_camWritesOn) noteCameraWrite(res, observedSeq, rowsValid, f, static_cast<const float*>(data) + 784, bytes);
     // The production chooser keeps its existing contract: only rotations enter
     // its ring. The diagnostic record above is deliberately wider so a rejected
     // overwrite before a draw is reported as such, rather than reviving an
@@ -5085,10 +5214,12 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
 }
 
 void temporalPassHmdTagTick();   // the 30 s line, defined with the census line below
+void temporalPassCamWritesTick(); // the camera writes' 20 s line, defined after it
 void temporalPassFrameBoundary() {
     g_eyeFinalClock.boundary(g_eyeFinalRun.armed);
     if (!detail::g_temporalPassWantedFssChrome) return;
     temporalPassHmdTagTick();
+    temporalPassCamWritesTick();
     for (int eye = 0; eye < 2; ++eye) {
         if (g_rigidDraw[eye].seen && g_rigidDraw[eye].frame == g_rowsFrame) {
             g_prevRigidDraw[eye] = g_rigidDraw[eye];
@@ -5484,6 +5615,32 @@ void temporalPassHmdTagTick() {
     char line[600];
     if (hmdtag::formatReport(line, sizeof(line), st.live, st.why, g_tagKeyOn, s) > 0) Log::get().note("%s", line);
     g_tag = hmdtag::Stats{};
+}
+
+// The camera writes' 20 s line (camera_writes.h), on a clock of its own, read at the frame boundary like the headset tag's. Silent with the key off.
+void temporalPassCamWritesTick() {
+    if (!g_camWritesOn) return;
+    const int64_t now = qpcNow();
+    const int64_t freq = qpcFrequency();
+    if (g_camWinTicks == 0) {
+        g_camWinTicks = now;
+        g_camWinFrame = g_rowsFrame;
+        return;
+    }
+    if (freq <= 0 || now - g_camWinTicks < 20 * freq) return;
+    uint64_t writes = 0, ticks = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_camMutex);
+        writes = g_camCalls;
+        ticks = g_camTicks;
+        g_camCalls = 0;
+        g_camTicks = 0;
+    }
+    char line[240];
+    const uint32_t frames = g_rowsFrame - g_camWinFrame;
+    if (camwrites::formatCost(line, sizeof(line), writes, frames, ticks, static_cast<double>(freq)) > 0) Log::get().note("%s", line);
+    g_camWinTicks = now;
+    g_camWinFrame = g_rowsFrame;
 }
 
 bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
