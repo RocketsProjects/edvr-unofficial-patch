@@ -70,7 +70,20 @@ struct Destination {
 namespace emit=edvr::engine_velocity_emit;
 using Check=void (*)(bool,const char*);
 constexpr uint32_t kFrame=42;
-inline bool published(){return copy::g_claimsLive.load()==(!copy::g_emissions.empty() || !copy::g_mergePlans.empty());}
+// The published pool view (any patch, the active leases as (base, slots)) equals what g_pools holds, and no write is mid-flight.
+inline bool viewExact() {
+    std::vector<std::pair<uintptr_t,uint32_t>> truth,seen;bool patches=false;
+    for(const auto& entry:copy::g_pools) {
+        patches=patches || !entry.second.patches.empty();
+        if(entry.second.active)truth.push_back({entry.second.base,entry.second.bytes/copy::kBytes});
+    }
+    const uint32_t n=copy::g_poolView.count.load();
+    if((copy::g_poolView.seq.load()&1u) || copy::g_poolView.patches.load()!=patches || n!=truth.size())return false;
+    for(uint32_t i=0;i<n;++i)seen.push_back({copy::g_poolView.base[i].load(),copy::g_poolView.slots[i].load()});
+    std::sort(truth.begin(),truth.end());std::sort(seen.begin(),seen.end());return truth==seen;
+}
+// Everything the lock-free exits read equals the state they stand for.
+inline bool published(){return copy::g_claimsLive.load()==(!copy::g_emissions.empty() || !copy::g_mergePlans.empty()) && viewExact();}
 inline uintptr_t addressOf(const Record& r){return reinterpret_cast<uintptr_t>(&r);}
 inline bool held(uintptr_t address){return copy::g_emissions.count(address)==1;}
 
@@ -109,6 +122,39 @@ inline void referenceClear(uintptr_t dictionary) noexcept {
         for(auto* plan:copy::g_mergePlans)for(auto address:plan->addresses)if(addresses.count(address)){plan->invalid=true;break;}
     }catch(...){fail();}
 }
+// The copier exactly as it was before its lock-free exit.
+inline void referenceCopier(uintptr_t base,uint32_t stride,uintptr_t source,uint32_t firstSlot,uint32_t count,uint32_t frame) noexcept {
+    copy::ClaimLock lock;copy::g_poolsDirty=true;++copy::g_stats.copies;
+    if(!count)return;
+    copy::Pool* pool=nullptr;
+    uint32_t matches=0;
+    for(auto& entry:copy::g_pools)if(entry.second.active && entry.second.base==base) {
+        pool=&entry.second;++matches;
+    }
+    if(matches>1){++copy::g_stats.copierAmbiguous;for(auto& entry:copy::g_pools)if(entry.second.active && entry.second.base==base){entry.second.patches.clear();entry.second.valid=false;++copy::g_stats.invalidated;}pool=nullptr;}
+    if(!matches)++copy::g_stats.copierNoLease;
+    const bool range=pool && stride==copy::kBytes && count && firstSlot<=pool->bytes/copy::kBytes && count<=pool->bytes/copy::kBytes-firstSlot;
+    if(pool) {
+        if(!range){pool->patches.clear();pool->valid=false;++copy::g_stats.invalidated;++copy::g_stats.copierInvalidRange;}
+        else for(uint32_t i=0;i<count;++i)copy::g_stats.invalidated+=pool->patches.erase(firstSlot+i);
+    }
+    if(count>copy::kMaxPatches || !source || source>UINTPTR_MAX-uint64_t(count)*copy::kBytes) {
+        copy::g_emissions.clear();++copy::g_emissionEpoch;++copy::g_stats.declined;return;
+    }
+    for(uint32_t i=0;i<count;++i) {
+        auto e=copy::g_emissions.find(source+uintptr_t(i)*copy::kBytes);if(e==copy::g_emissions.end())continue;
+        const copy::Emission emission=e->second;copy::g_emissions.erase(e);
+        if(!range || !pool->active || !pool->valid || pool->frame!=frame || emission.frame!=frame || copy::g_overflowFrame==frame) {++copy::g_stats.declined;continue;}
+        std::array<uint32_t,copy::kWords> src{},dst{};
+        if(!emit::read(source+uintptr_t(i)*copy::kBytes,src.data(),copy::kBytes) ||
+           !emit::read(base+uintptr_t(firstSlot+i)*copy::kBytes,dst.data(),copy::kBytes) ||
+           src!=emission.patch.native || dst!=emission.patch.native) {++copy::g_stats.declined;continue;}
+        try {
+            if(pool->patches.size()>=copy::kMaxPatches){copy::overflow(frame);return;}
+            copy::Patch patch=emission.patch;patch.slot=firstSlot+i;pool->patches[patch.slot]=patch;++copy::g_stats.joined;
+        } catch(...) {copy::overflow(frame);return;}
+    }
+}
 struct Outcome {
     std::vector<uintptr_t> keys;
     uint64_t clearNodes=0,clearedClaims=0,invalidated=0,clearFailed=0,sourceResets=0,declined=0,epochDelta=0;
@@ -138,7 +184,155 @@ inline void countNine(Tree& t){t.setCount(0,1,9);}
 inline void unreadableNode(Tree& t){t.setWord(reinterpret_cast<uintptr_t>(t.node(0,0).data),0x10);}
 inline void bucketsOverBound(Tree& t){const uint64_t n=copy::kMaxEmissions+1;std::memcpy(t.head+0x18,&n,8);}
 inline void aliasedBucket(Tree& t){const uint64_t n=2;std::memcpy(t.head+0x18,&n,8);t.buckets[1]=t.entryAddress(0);}
+// The pool copier's lock-free exit: what it takes, what it must leave to the mutex, and that the two agree.
+struct CopierOutcome {
+    uint64_t copies=0,noLease=0,ambiguous=0,invalidRange=0,invalidated=0,declined=0,joined=0,epochDelta=0;
+    std::vector<uintptr_t> keys;std::vector<std::vector<uint64_t>> pools;   // per pool: present, active, valid, patch slots...
+    bool operator==(const CopierOutcome& o) const {
+        return copies==o.copies && noLease==o.noLease && ambiguous==o.ambiguous && invalidRange==o.invalidRange && invalidated==o.invalidated &&
+               declined==o.declined && joined==o.joined && epochDelta==o.epochDelta && keys==o.keys && pools==o.pools;
+    }
+};
+inline void runCopier(ID3D11Device* device,Check check) {
+    D3D11_BUFFER_DESC d{};d.ByteWidth=4*336;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.StructureByteStride=336;d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> poolA,poolB;
+    if(!device || FAILED(device->CreateBuffer(&d,nullptr,&poolA)) || FAILED(device->CreateBuffer(&d,nullptr,&poolB))){check(false,"copier: pool fixtures");return;}
+    Record src[4]={record(10),record(20),record(30),record(40)},mappedA[4]={src[0],src[1],src[2],src[3]},mappedB[4]={src[0],src[1],src[2],src[3]};
+    const uintptr_t baseA=reinterpret_cast<uintptr_t>(mappedA),baseB=reinterpret_cast<uintptr_t>(mappedB),source=addressOf(src[3]);
+    auto mapA=[&](uint64_t seq=1){return copy::beginMap(poolA.Get(),mappedA,sizeof(mappedA),336,D3D11_MAP_WRITE_DISCARD,seq,kFrame);};
+    auto mapB=[&](uintptr_t base){return copy::beginMap(poolB.Get(),reinterpret_cast<void*>(base),sizeof(mappedB),336,D3D11_MAP_WRITE_DISCARD,1,kFrame);};
+    // Production copy vs the pre-change copier, on state the same setup built: everything either leaves behind must match.
+    auto capture=[&](uint64_t epoch){
+        CopierOutcome o;const auto s=copy::stats();
+        o.copies=s.copies;o.noLease=s.copierNoLease;o.ambiguous=s.copierAmbiguous;o.invalidRange=s.copierInvalidRange;
+        o.invalidated=s.invalidated;o.declined=s.declined;o.joined=s.joined;o.epochDelta=copy::g_emissionEpoch-epoch;
+        for(const auto& e:copy::g_emissions)o.keys.push_back(e.first);std::sort(o.keys.begin(),o.keys.end());
+        for(auto* buffer:{poolA.Get(),poolB.Get()}) {
+            const auto it=copy::g_pools.find(buffer);
+            if(it==copy::g_pools.end()){o.pools.push_back({0});continue;}
+            std::vector<uint64_t> state={1,it->second.active?1u:0u,it->second.valid?1u:0u};
+            std::vector<uint64_t> slots;for(const auto& p:it->second.patches)slots.push_back(p.first);std::sort(slots.begin(),slots.end());
+            state.insert(state.end(),slots.begin(),slots.end());o.pools.push_back(state);
+        }
+        return o;
+    };
+    auto equivalent=[&](const char* name,auto&& setup,auto&& call,bool lockFree) {
+        CopierOutcome outcome[2];uint64_t lockedCopies=0;
+        for(int reference=1;reference>=0;--reference) {
+            copy::reset();for(unsigned i=0;i<4;++i){mappedA[i]=src[i];mappedB[i]=src[i];}
+            setup();const auto epoch=copy::g_emissionEpoch;const auto before=copy::g_stats.copies;
+            call(reference!=0);
+            lockedCopies=copy::g_stats.copies-before;
+            check(published(),(std::string("copier equivalence (")+name+"): the published flag and view stay exact").c_str());
+            outcome[reference]=capture(epoch);
+        }
+        check(outcome[0]==outcome[1],(std::string("copier equivalence (")+name+"): same counters, claims, patches, lease state and epoch as the locked copier").c_str());
+        check((lockedCopies==0)==lockFree,(std::string("copier equivalence (")+name+(lockFree?"): handled without the mutex":"): handled under the mutex")).c_str());
+    };
+    auto copyOf=[&](bool reference,uintptr_t base,uint32_t stride,uintptr_t from,uint32_t first,uint32_t count){
+        if(reference)referenceCopier(base,stride,from,first,count,kFrame);else copy::copier(base,stride,from,first,count,kFrame);
+    };
+    auto join=[&](unsigned slot){   // a production join: the emission for src[slot] copied into slot `slot` of lease A
+        mappedA[slot]=src[slot];claim(src[slot],kFrame);copy::copier(baseA,336,addressOf(src[slot]),slot,1,kFrame);
+    };
+    equivalent("no lease",[&]{},[&](bool r){copyOf(r,baseA,336,source,0,1);},true);
+    equivalent("count zero",[&]{mapA();},[&](bool r){copyOf(r,baseA,336,source,0,0);},true);
+    equivalent("one lease that fits",[&]{mapA();},[&](bool r){copyOf(r,baseA,336,source,0,4);},true);
+    equivalent("the last slot of the lease",[&]{mapA();},[&](bool r){copyOf(r,baseA,336,source,3,1);},true);
+    equivalent("a range past the lease",[&]{mapA();},[&](bool r){copyOf(r,baseA,336,source,3,2);},false);
+    equivalent("a first slot past the lease",[&]{mapA();},[&](bool r){copyOf(r,baseA,336,source,5,1);},false);
+    equivalent("a stride that is not a record",[&]{mapA();},[&](bool r){copyOf(r,baseA,320,source,0,1);},false);
+    equivalent("a lease that ended",[&]{mapA();copy::endMap(poolA.Get(),1);},[&](bool r){copyOf(r,baseA,336,source,0,1);},true);
+    equivalent("another base",[&]{mapA();},[&](bool r){copyOf(r,baseB,336,source,0,1);},true);
+    equivalent("two leases at one base",[&]{mapA();mapB(baseA);},[&](bool r){copyOf(r,baseA,336,source,0,1);},false);
+    equivalent("a patch in the range",[&]{mapA();join(1);},[&](bool r){copyOf(r,baseA,336,source,0,2);},false);
+    equivalent("a patch outside the range",[&]{mapA();join(1);},[&](bool r){copyOf(r,baseA,336,source,2,2);},false);
+    equivalent("a patch in a lease that ended",[&]{mapA();join(1);copy::endMap(poolA.Get(),1);},[&](bool r){copyOf(r,baseB,336,source,0,1);},false);
+    equivalent("a claim that joins",[&]{mapA();mappedA[2]=src[2];claim(src[2],kFrame);},[&](bool r){copyOf(r,baseA,336,addressOf(src[2]),2,1);},false);
+    equivalent("a claim with no lease",[&]{claim(src[2],kFrame);},[&](bool r){copyOf(r,baseA,336,addressOf(src[2]),2,1);},false);
+    equivalent("a claim elsewhere",[&]{mapA();claim(src[0],kFrame);},[&](bool r){copyOf(r,baseA,336,source,0,1);},false);
+    equivalent("a detached merge plan in flight",[&]{
+        static Tree detached(1,1);static Destination dst;
+        mapA();detached.item(0,0,0)=record(5);claim(detached.item(0,0,0),kFrame);
+        copy::beginMergeOpaque(dst.ptr(),detached.anchor(0),kFrame);   // the claim is staged into the plan: only the plan is live
+    },[&](bool r){copyOf(r,baseA,336,source,0,1);},false);
+    equivalent("a count over the bound, no claims",[&]{mapA();},[&](bool r){copyOf(r,baseA,336,source,0,copy::kMaxPatches+1);},false);
+    equivalent("a count over the bound, a claim",[&]{mapA();claim(src[0],kFrame);},[&](bool r){copyOf(r,baseA,336,source,0,copy::kMaxPatches+1);},false);
+    equivalent("a null source",[&]{mapA();},[&](bool r){copyOf(r,baseA,336,0,0,1);},false);
+    equivalent("a source whose range wraps",[&]{mapA();},[&](bool r){copyOf(r,baseA,336,UINTPTR_MAX-100,0,1);},false);
+    {   // The patch that exists is erased by a copy over its slot, and the erase is counted: not skipped.
+        copy::reset();mapA();join(1);
+        check(copy::g_poolView.patches.load() && published(),"copier: a join publishes that a pool holds a patch");
+        const auto before=copy::stats().invalidated;
+        copy::copier(baseA,336,source,1,1,kFrame);
+        check(copy::stats().invalidated==before+1 && copy::g_pools.at(poolA.Get()).patches.empty() && !copy::g_poolView.patches.load() && published(),
+              "copier: a copy over a patched slot still erases the patch and counts it, then the pools are quiet again");
+        copy::reset();
+    }
+    {   // Counters fold: skipped copies are copies, and a skipped copy with no lease is a no-lease copy.
+        copy::reset();mapA();
+        for(unsigned i=0;i<10;++i)copy::copier(baseA,336,source,0,4,kFrame);
+        for(unsigned i=0;i<3;++i)copy::copier(baseB,336,source,0,1,kFrame);
+        auto s=copy::stats();
+        check(s.copies==13 && s.copierNoLease==3 && copy::g_stats.copies==0,"copier: lock-free copies are counted as copies and as no-lease copies where they found no lease");
+        copy::reset();s=copy::stats();check(s.copies==0 && s.copierNoLease==0,"copier: reset zeroes the lock-free copy counters");
+    }
+    {   // No heap on the skipped path.
+        copy::reset();mapA();rig_allocations::start();
+        for(unsigned i=0;i<256;++i){copy::copier(baseA,336,source,0,4,kFrame);copy::copier(baseB,336,source,0,1,kFrame);}
+        check(rig_allocations::stop()==0,"copier: the lock-free exit allocates nothing");
+        copy::reset();
+    }
+    {   // Who waits: a skipped copy does not, a copy with a claim or a patch does.
+        struct Holder {
+            std::thread thread;std::atomic<bool> locked{false},release{false};
+            void start(){thread=std::thread([this]{std::unique_lock<std::mutex> hold(copy::g_mutex);locked.store(true);while(!release.load())std::this_thread::yield();});
+                         while(!locked.load())std::this_thread::yield();}
+            void stop(){release.store(true);thread.join();}
+        };
+        auto finishesWhileHeld=[&](auto&& fn,unsigned waitMs)->bool {
+            Holder holder;holder.start();std::atomic<bool> done{false};std::thread worker([&]{fn();done.store(true);});
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(waitMs);
+            while(!done.load() && std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            const bool finished=done.load();holder.stop();worker.join();return finished;
+        };
+        copy::reset();mapA();
+        check(finishesWhileHeld([&]{copy::copier(baseA,336,source,0,4,kFrame);},5000),"mutex: a quiet copy over a fitting lease returns while another thread holds g_mutex");
+        check(finishesWhileHeld([&]{copy::copier(baseB,336,source,0,1,kFrame);},5000),"mutex: a quiet copy with no lease returns while another thread holds g_mutex");
+        check(finishesWhileHeld([&]{copy::copier(baseA,336,source,0,0,kFrame);},5000),"mutex: a copy of nothing returns while another thread holds g_mutex");
+        check(!finishesWhileHeld([&]{copy::copier(baseA,336,source,3,2,kFrame);},150),"mutex: a copy past the lease blocks until g_mutex is released");
+        copy::reset();mapA();join(1);
+        check(!finishesWhileHeld([&]{copy::copier(baseA,336,source,2,1,kFrame);},150),"mutex: a copy while a pool holds a patch blocks until g_mutex is released");
+        copy::reset();mapA();claim(src[0],kFrame);
+        check(!finishesWhileHeld([&]{copy::copier(baseA,336,source,2,1,kFrame);},150),"mutex: a copy while a claim is live blocks until g_mutex is released");
+        check(published(),"mutex: the blocked copies completed afterwards and left the state exact");
+        copy::reset();
+    }
+    {   // Four threads over the same pools: leases opening and closing, joins, quiet copies, claim traffic.
+        constexpr unsigned kRounds=3000;copy::reset();std::atomic<bool> go{false};std::vector<std::thread> pool;
+        Record own[2]={record(61),record(62)};
+        pool.emplace_back([&]{   // the map owner
+            while(!go.load())std::this_thread::yield();
+            for(unsigned i=0;i<kRounds;++i){
+                mapA(i+1);mappedA[1]=src[1];claim(src[1],kFrame);copy::copier(baseA,336,addressOf(src[1]),1,1,kFrame);
+                copy::copier(baseA,336,source,0,4,kFrame);copy::endMap(poolA.Get(),i+1);
+            }
+        });
+        for(unsigned t=0;t<2;++t)pool.emplace_back([&,t]{
+            while(!go.load())std::this_thread::yield();
+            for(unsigned i=0;i<kRounds*4;++i)copy::copier(t?baseB:baseA,336,source,i&3,1+(i&1),kFrame);
+        });
+        pool.emplace_back([&]{
+            while(!go.load())std::this_thread::yield();
+            for(unsigned i=0;i<kRounds*2;++i){if(i&1)claim(own[0],kFrame);else copy::invalidateEmission(addressOf(own[0]));}
+        });
+        go.store(true);for(auto& th:pool)th.join();
+        check(published(),"copier mixed traffic: leases, joins, quiet copies and claims from four threads leave the published state exact");
+        copy::reset();
+    }
+}
 inline void run(ID3D11Device* device,Check check) {
+    runCopier(device,check);
     // --- (d) walk equivalence: the production walk and the pre-change walk leave identical state ---
     constexpr Shape shapes[]={
         {"1 node",1,1,nullptr,{0,0,0},{0,0,0},{0,3,0},2,false},
@@ -482,6 +676,25 @@ inline void run(ID3D11Device* device) {
             line("copier, active pool, no claims, 1 slot",perCall(kIterations,f1),allocationsPerThousand(f1));
             line("copier, active pool, no claims, 8 slots",perCall(kIterations,f8),allocationsPerThousand(f8));
             lineThreads("copier, active pool, no claims, 1 slot",kThreads,contended(kThreads,kContended,[&](unsigned){f1();}));
+            {   // The render thread's copier against job threads that only call invalidateEmission (the emit hook's traffic: it
+                // takes the mutex on every call and, with no claim, changes nothing).
+                std::atomic<bool> stop{false};std::vector<std::thread> emitters;Record item=record(3);
+                for(unsigned t=0;t<3;++t)emitters.emplace_back([&]{while(!stop.load(std::memory_order_relaxed))copy::invalidateEmission(reinterpret_cast<uintptr_t>(&item));});
+                const double ns=perCall(kIterations,f1);stop.store(true);for(auto& th:emitters)th.join();
+                std::printf("bench: %-58s %9.1f ns/call   (3 other threads calling invalidateEmission flat out)\n","copier, active pool, no claims, 1 slot",ns);
+            }
+            {   // The same, with the copier's own pool changing hands: a lease opens and closes between batches of copies.
+                std::atomic<bool> stop{false};std::vector<std::thread> emitters;Record item=record(3);
+                for(unsigned t=0;t<3;++t)emitters.emplace_back([&]{while(!stop.load(std::memory_order_relaxed))copy::invalidateEmission(reinterpret_cast<uintptr_t>(&item));});
+                copy::endMap(buffer.Get(),1);uint64_t sequence=2;
+                auto cycle=[&]{
+                    copy::beginMap(buffer.Get(),mapped.data(),uint32_t(mapped.size()*336),336,D3D11_MAP_WRITE_DISCARD,sequence,kFrame);
+                    for(unsigned i=0;i<16;++i)copy::copier(base,336,src,0,1,kFrame);
+                    copy::endMap(buffer.Get(),sequence++);
+                };
+                const double ns=perCall(kIterations/16,cycle)/16;stop.store(true);for(auto& th:emitters)th.join();
+                std::printf("bench: %-58s %9.1f ns/call   (3 other threads calling invalidateEmission flat out; includes 1/16 of a map+unmap)\n","copier, 16 copies per map cycle, no claims",ns);
+            }
         } else std::printf("bench: copier fixture could not open a pool lease\n");
         copy::endMap(buffer.Get(),1);copy::forget(buffer.Get());copy::reset();
     }

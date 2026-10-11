@@ -57,19 +57,64 @@ alignas(64) inline std::atomic<bool> g_claimsLive{false};
 // mergeCalls/mergeWithoutClaims, so every counter the log prints keeps its meaning.
 alignas(64) inline std::atomic<uint64_t> g_clearSkipped{0};
 alignas(64) inline std::atomic<uint64_t> g_mergeSkipped{0};
-// The only way this header locks g_mutex. The destructor publishes g_claimsLive BEFORE it unlocks, with release order,
-// so a lock-free reader that sees "false" is reading a state no later than the last completed critical section: it is
-// ordered before any mutation that is still in flight, which is a legal interleaving of the call it replaces. A caller
-// whose emission was recorded and returned before this call started sees "true": the unlock publishes it.
+// The pool copier's lock-free exit counts the same way: every copy (stats().copies) and those that found no active
+// lease at their base (stats().copierNoLease).
+alignas(64) inline std::atomic<uint64_t> g_copierSkipped{0};
+inline std::atomic<uint64_t> g_copierNoLeaseSkipped{0};
+// What the copier's lock-free exit needs besides g_claimsLive: whether any pool holds a patch, and the active leases
+// (base address, slots = bytes / kBytes). A seqlock: the writer holds g_mutex, makes seq odd, rewrites, makes it even;
+// a reader keeps what it read only if seq was even and unchanged on both sides. g_claimsLive is stored inside the
+// same window whenever the window opens, so a reader's (claims, patches, leases) is one published state.
+constexpr uint32_t kLeasesUnknown=~0u;
+struct PoolView {
+    std::atomic<uint32_t> seq{0},count{0};
+    std::atomic<bool> patches{false};
+    std::atomic<uintptr_t> base[kMaxPools];
+    std::atomic<uint32_t> slots[kMaxPools];
+};
+alignas(64) inline PoolView g_poolView;
+// Set, under g_mutex, by everything that can change a pool's lease, base, size or patches; ClaimLock then republishes
+// the view. Calls that touch only emissions leave it alone and pay a bool test.
+inline bool g_poolsDirty=false;
+// The only way this header locks g_mutex. The destructor publishes g_claimsLive (and, when pools were touched, the pool
+// view) BEFORE it unlocks, so a lock-free reader that sees "false" is reading a state no later than the last completed
+// critical section: it is ordered before any mutation that is still in flight, which is a legal interleaving of the
+// call it replaces. A caller whose emission was recorded and returned before this call started sees "true": the
+// unlock publishes it.
 struct ClaimLock {
     ClaimLock(){g_mutex.lock();}
-    ~ClaimLock() {
-        const bool live=!g_emissions.empty() || !g_mergePlans.empty();
-        if(g_claimsLive.load(std::memory_order_relaxed)!=live)g_claimsLive.store(live,std::memory_order_release);
-        g_mutex.unlock();
-    }
+    ~ClaimLock(){publish();g_mutex.unlock();}
     ClaimLock(const ClaimLock&)=delete;
     ClaimLock& operator=(const ClaimLock&)=delete;
+private:
+    static void publish() noexcept {
+        const bool claims=!g_emissions.empty() || !g_mergePlans.empty();
+        const bool claimsChanged=g_claimsLive.load(std::memory_order_relaxed)!=claims;
+        if(!g_poolsDirty){if(claimsChanged)g_claimsLive.store(claims,std::memory_order_release);return;}
+        g_poolsDirty=false;
+        uint32_t count=0;uintptr_t base[kMaxPools];uint32_t slots[kMaxPools];bool patches=false;
+        for(const auto& entry:g_pools) {
+            patches=patches || !entry.second.patches.empty();
+            if(!entry.second.active)continue;
+            if(count<kMaxPools){base[count]=entry.second.base;slots[count]=entry.second.bytes/kBytes;}
+            ++count;
+        }
+        if(count>kMaxPools)count=kLeasesUnknown;
+        bool same=patches==g_poolView.patches.load(std::memory_order_relaxed) && count==g_poolView.count.load(std::memory_order_relaxed);
+        for(uint32_t i=0;same && i<count && count!=kLeasesUnknown;++i)
+            same=base[i]==g_poolView.base[i].load(std::memory_order_relaxed) && slots[i]==g_poolView.slots[i].load(std::memory_order_relaxed);
+        if(same){if(claimsChanged)g_claimsLive.store(claims,std::memory_order_release);return;}
+        const uint32_t sequence=g_poolView.seq.load(std::memory_order_relaxed);
+        g_poolView.seq.store(sequence+1,std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        g_poolView.patches.store(patches,std::memory_order_relaxed);
+        g_poolView.count.store(count,std::memory_order_relaxed);
+        for(uint32_t i=0;i<count && count!=kLeasesUnknown;++i) {
+            g_poolView.base[i].store(base[i],std::memory_order_relaxed);g_poolView.slots[i].store(slots[i],std::memory_order_relaxed);
+        }
+        g_claimsLive.store(claims,std::memory_order_release);
+        g_poolView.seq.store(sequence+2,std::memory_order_release);
+    }
 };
 // Address set for the observers' bounded walks of Elite's lists: up to kInline entries live in an inline array searched
 // linearly (a walk of eight nodes is 64 item addresses, so it never touches the heap), and the first insert past that
@@ -102,6 +147,7 @@ private:
 };
 inline emit::Pose current(const uint32_t* r) { return emit::Pose{{r[4],r[5],r[6],r[2],r[3]}}; }
 inline void overflow(uint32_t frame) {
+    g_poolsDirty=true;
     g_overflowFrame=frame;++g_stats.overflows;g_emissions.clear();++g_emissionEpoch;
     for(auto& entry:g_pools)entry.second.patches.clear();
 }
@@ -110,7 +156,7 @@ inline void invalidateEmission(uintptr_t source) noexcept {
     if(source)g_emissions.erase(source);else {g_emissions.clear();++g_emissionEpoch;++g_stats.invalidated;++g_stats.sourceResets;}
 }
 inline void invalidateMapped(uintptr_t base) noexcept {
-    ClaimLock lock;
+    ClaimLock lock;g_poolsDirty=true;
     for(auto& entry:g_pools)if(entry.second.active && (!base || entry.second.base==base)) {
         entry.second.patches.clear();entry.second.valid=false;++g_stats.invalidated;
     }
@@ -146,7 +192,7 @@ inline bool recordEmission(uintptr_t source,const uint32_t native[kWords],const 
 }
 inline bool beginMap(ID3D11Buffer* resource,void* base,uint32_t bytes,uint32_t stride,D3D11_MAP type,
                      uint64_t sequence,uint32_t frame) noexcept {
-    ClaimLock lock;
+    ClaimLock lock;g_poolsDirty=true;
     if(!resource)return false;
     try {
         auto old=g_pools.find(resource);
@@ -161,8 +207,35 @@ inline bool beginMap(ID3D11Buffer* resource,void* base,uint32_t bytes,uint32_t s
         return p.valid;
     } catch(...) {overflow(frame);return false;}
 }
+// The copier's lock-free exit. What the locked copier does with no source claim, no detached plan and no patch in any
+// pool: bump copies; scan the pools for active leases at `base`; with none bump copierNoLease; with one whose size
+// covers the range erase its patches in that range (none exist); with two, or a range that does not fit, invalidate
+// the pools; then walk emissions (none), after refusing a count/source it cannot address (which clears the emissions
+// and bumps the epoch even when there are none). This handles exactly the quiet cases that change nothing but a counter:
+// count 0, no lease, and one lease that fits. Everything else, or any doubt (an odd or moved sequence, claims or patches
+// in the published state), returns false and the caller takes the mutex. The published state is a state some completed
+// critical section left, so the call is ordered before any mutation still in flight.
+inline bool copierLockFree(uintptr_t base,uint32_t stride,uintptr_t source,uint32_t firstSlot,uint32_t count) noexcept {
+    if(!count){g_copierSkipped.fetch_add(1,std::memory_order_relaxed);return true;}
+    if(count>kMaxPatches || !source || source>UINTPTR_MAX-uint64_t(count)*kBytes)return false;
+    const uint32_t before=g_poolView.seq.load(std::memory_order_acquire);
+    if(before&1u)return false;
+    const uint32_t leases=g_poolView.count.load(std::memory_order_relaxed);
+    const bool quiet=!g_claimsLive.load(std::memory_order_relaxed) && !g_poolView.patches.load(std::memory_order_relaxed);
+    if(!quiet || leases>kMaxPools)return false;
+    uint32_t matches=0,slots=0;
+    for(uint32_t i=0;i<leases;++i)if(g_poolView.base[i].load(std::memory_order_relaxed)==base) {
+        ++matches;slots=g_poolView.slots[i].load(std::memory_order_relaxed);
+    }
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if(g_poolView.seq.load(std::memory_order_relaxed)!=before)return false;
+    if(!matches){g_copierSkipped.fetch_add(1,std::memory_order_relaxed);g_copierNoLeaseSkipped.fetch_add(1,std::memory_order_relaxed);return true;}
+    if(matches==1 && stride==kBytes && firstSlot<=slots && count<=slots-firstSlot){g_copierSkipped.fetch_add(1,std::memory_order_relaxed);return true;}
+    return false;
+}
 inline void copier(uintptr_t base,uint32_t stride,uintptr_t source,uint32_t firstSlot,uint32_t count,uint32_t frame) noexcept {
-    ClaimLock lock;++g_stats.copies;
+    if(copierLockFree(base,stride,source,firstSlot,count))return;
+    ClaimLock lock;g_poolsDirty=true;++g_stats.copies;
     if(!count)return;
     Pool* pool=nullptr;
     uint32_t matches=0;
@@ -196,13 +269,13 @@ inline void copier(uintptr_t base,uint32_t stride,uintptr_t source,uint32_t firs
     }
 }
 inline void endMap(ID3D11Buffer* resource,uint64_t sequence) noexcept {
-    ClaimLock lock;auto i=g_pools.find(resource);if(i==g_pools.end())return;
+    ClaimLock lock;g_poolsDirty=true;auto i=g_pools.find(resource);if(i==g_pools.end())return;
     Pool& p=i->second;
     if(!p.active || p.sequence!=sequence){p.patches.clear();p.valid=false;++g_stats.declined;}
     p.active=false;
 }
 inline void forget(ID3D11Buffer* resource) noexcept {
-    ClaimLock lock;g_pools.erase(resource);
+    ClaimLock lock;g_poolsDirty=true;g_pools.erase(resource);
 }
 inline Stats stats();
 inline std::vector<Patch> patches(ID3D11Buffer* resource,uint32_t frame) {
@@ -235,6 +308,7 @@ inline Stats stats() {
     const uint64_t clearSkipped=g_clearSkipped.load(std::memory_order_relaxed),mergeSkipped=g_mergeSkipped.load(std::memory_order_relaxed);
     result.clearCalls+=clearSkipped;result.clearNoClaims+=clearSkipped;
     result.mergeCalls+=mergeSkipped;result.mergeWithoutClaims+=mergeSkipped;
+    result.copies+=g_copierSkipped.load(std::memory_order_relaxed);result.copierNoLease+=g_copierNoLeaseSkipped.load(std::memory_order_relaxed);
     result.activeClaims=g_emissions.size();result.activePlans=g_mergePlans.size();return result;
 }
 inline void invalidateClaims() {g_emissions.clear();++g_emissionEpoch;++g_stats.declined;++g_stats.mergeFailed;}
@@ -451,7 +525,8 @@ inline bool apply(ID3D11DeviceContext* ctx,ID3D11Buffer* privatePool,ID3D11Buffe
 }
 inline void reset() noexcept {
     std::lock_guard<std::mutex> gpu(g_gpuMutex);g_gpu={};
-    ClaimLock lock;g_emissions.clear();g_pools.clear();g_mergePlans.clear();g_stats={};g_overflowFrame=g_emissionFrame=~0u;++g_emissionEpoch;
+    ClaimLock lock;g_poolsDirty=true;g_emissions.clear();g_pools.clear();g_mergePlans.clear();g_stats={};g_overflowFrame=g_emissionFrame=~0u;++g_emissionEpoch;
     g_clearSkipped.store(0,std::memory_order_relaxed);g_mergeSkipped.store(0,std::memory_order_relaxed);
+    g_copierSkipped.store(0,std::memory_order_relaxed);g_copierNoLeaseSkipped.store(0,std::memory_order_relaxed);
 }
 } }
