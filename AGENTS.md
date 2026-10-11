@@ -2,10 +2,11 @@
 
 This is the only instructions file in the repo. CLAUDE.md is a one-line @AGENTS.md import because Claude Code reads only CLAUDE.md; do not add content there.
 
-These notes are for the maintainer's own agent sessions. An agent working
-for anyone else, in a contributor's fork or clone, takes the project facts
-below as they stand but not the Git section's "merge to main, push, no pull
-requests": it follows its own user's workflow, and contributions reach this
+These notes are written for Sean's own agent sessions on his Windows
+machine. If you are working for anyone else, in a fork or a contributor's
+clone, the project rules hold: tools, build gates, diagnosis discipline,
+config editing. The Shell and Git sections and the release-notes rules do
+not. Follow your own user's environment and workflow; changes reach this
 repository as pull requests.
 
 Unofficial VR fixes for Elite Dangerous: Odyssey. A proxy DLL
