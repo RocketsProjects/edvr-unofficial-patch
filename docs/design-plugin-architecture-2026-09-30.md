@@ -12,11 +12,11 @@
   implementations, generated config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `3983bb45` integrated from `76f72292`;
-  full offline build
-  `build/full-plugin-main3983-sampler-offline-20261010-r2.log` passed
-  (receipt `df40be52`), including dust and sampler-hook fixtures.
-  Selections remain informational; runtime acceptance stays open.
+- **Current integration:** main `3983bb45` integrated at `b917041e`.
+  Sampler startup validated in
+  `build/full-plugin-sampler-startup-offline-20261010-r1.log` (receipt
+  `48646d16`). Selections remain informational; availability stays
+  closed.
 - **Module progress:** Performance owns resolution, FOV engine/settings,
   and sampler. Cockpit owns RemLok and TargetSharp policy/state; shared
   VScreen services stay core. Diagnostics owns scheduler. Comfort owns
@@ -4761,3 +4761,38 @@ self-contained installer gates passed. No Steam install, live settings
 edit, promotion or flight occurred. Feature-to-main remains held until
 shipping approval; final matched performance validation stays at
 rendering-code freeze.
+
+### 2026-10-10 — sampler startup absence and profile-wide admission review
+
+After main integration `b917041e`, the sampler startup body gained a
+private nullable-factory boundary. The production caller still supplies
+the existing Performance factory, configures before installing the
+CreateSamplerState hook, and preserves the auto-source warning. A null
+factory clears stale policy/settings without factory, configure or
+HMD-reader calls. No admission, config default, key, availability or
+runtime selection behavior changed.
+
+The actual startup helper and sampler-create hook share a fixture. Its
+separate absent-startup case proves core census/reporting and the
+original call each occur once with unchanged descriptor, output and
+HRESULT. The original independent null-Ops case retains stale enabled
+settings and is preserved exactly. Native validation passed 52 sampler
+checks and ten source mutations. Full production DLL, native rig,
+export, 127-key config and installer gates passed in
+`build/full-plugin-sampler-startup-offline-20261010-r1.log`, receipt
+`48646d16cf9e90cbb350d38c513f4beb54037c0f0ba04987a3b231bca39b7857`.
+
+An independent admission review rejected a Performance-only
+authoritative mask: every applicable group must be ready before a
+profile-wide Supported selection can govern behavior. The revised
+ignored model derives generated identities/readiness, carries the full
+snapshot, and models immutable commit/refcount handling. Its isolated
+compile and simulated fixture passed. This does not prove actual loader
+identity, reentrant startup, native binding, whole-group absence or
+Pimax preload timing. All current groups remain unavailable for
+selection and therefore Legacy. The eight-group absence roadmap
+identifies concrete remaining host bypasses for subsequent work.
+
+No Steam install, live settings edit, promotion or flight occurred.
+Feature-to-main remains held until shipping approval; final matched
+performance validation remains at rendering-code freeze.

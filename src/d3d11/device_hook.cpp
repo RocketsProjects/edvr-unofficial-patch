@@ -46,6 +46,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../plugins/comfort/comfort_lifecycle.h"
 #include "../plugins/explorer_cam/explorer_cam_lifecycle.h"
 #include "../plugins/performance/texture_sampler_policy.h"
+#include "sampler_startup.h"
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
@@ -2573,27 +2574,18 @@ void hookDevice(ID3D11Device* device) {
 #undef EDVR_HOOK_DEV_CREATE
     vrSsaaGateStartup();  // log only: the 3D mode file, the .fxcfg's Supersampling and HMD Quality, once per process
     {
-        s.samplerPolicy = plugins::performance::textureSamplerPolicyOpsV1();
-        if (s.samplerPolicy &&
-            s.samplerPolicy->structSize == sizeof(*s.samplerPolicy) &&
-            s.samplerPolicy->version ==
-                plugins::performance::kTextureSamplerPolicyOpsVersion1 &&
-            s.samplerPolicy->configure) {
-            s.samplerPolicy->configure(s.samplerPolicy->context, nullptr,
-                                       &samplerReadEliteHmdMultiplier,
-                                       &s.samplerSettings);
-            if (s.samplerSettings.biasAutoRequested &&
-                !s.samplerSettings.autoSourceAvailable) {
-                // Preserve the historical startup warning. The module has
-                // already resolved the failed auto value to zero.
-                Log::get().note(
-                    "texture filtering: advanced.texture_lod_bias = auto, but Elite's graphics "
-                    "preset gave no HMDRenderTargetMultiplier (Options\\Graphics\\*.fxcfg under "
-                    "%%LOCALAPPDATA%%\\Frontier Developments\\Elite Dangerous). No bias is applied. "
-                    "Set a number instead, or check the game has written its settings once.");
-            }
-        } else {
-            s.samplerPolicy = nullptr;
+        const bool warnAutoSourceUnavailable = samplerStartupConfigure(
+            &plugins::performance::textureSamplerPolicyOpsV1, nullptr,
+            &samplerReadEliteHmdMultiplier, &s.samplerPolicy,
+            &s.samplerSettings);
+        if (warnAutoSourceUnavailable) {
+            // Preserve the historical startup warning. The module has
+            // already resolved the failed auto value to zero.
+            Log::get().note(
+                "texture filtering: advanced.texture_lod_bias = auto, but Elite's graphics "
+                "preset gave no HMDRenderTargetMultiplier (Options\\Graphics\\*.fxcfg under "
+                "%%LOCALAPPDATA%%\\Frontier Developments\\Elite Dangerous). No bias is applied. "
+                "Set a number instead, or check the game has written its settings once.");
         }
     }
     s.deviceHook.replace(kDevCreateSamplerState, &hookedCreateSamplerState,

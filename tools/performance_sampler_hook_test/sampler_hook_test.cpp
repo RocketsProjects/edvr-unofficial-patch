@@ -2,6 +2,7 @@
 #include <d3d11.h>
 
 #include "../../src/plugins/performance/texture_sampler_policy.h"
+#include "../../src/d3d11/sampler_startup.h"
 
 #include <cstdint>
 #include <cstddef>
@@ -83,8 +84,55 @@ HRESULT STDMETHODCALLTYPE originalCreate(ID3D11Device*, const D3D11_SAMPLER_DESC
 
 struct CallbackCounts { unsigned rewrite = 0; } g_callbacks;
 
-void configure(void*, void*, plugins::performance::ReadEliteHmdMultiplierV1,
-               TextureSamplerSettingsV1*) {}
+struct StartupObservation {
+    unsigned factoryCalls = 0;
+    unsigned configureCalls = 0;
+    unsigned readerCalls = 0;
+    const TextureSamplerPolicyOpsV1* factoryResult = nullptr;
+    void* policyContext = nullptr;
+    void* hostContext = nullptr;
+    void* readerContext = nullptr;
+    plugins::performance::ReadEliteHmdMultiplierV1 reader = nullptr;
+    bool autoRequested = false;
+    bool autoSourceAvailable = false;
+    bool rewriteEnabled = false;
+} g_startup;
+
+void check(bool condition, const char* message);
+void checkCase(bool condition, const char* scenario, const char* expectation);
+
+const TextureSamplerPolicyOpsV1* startupFactory() {
+    ++g_startup.factoryCalls;
+    return g_startup.factoryResult;
+}
+
+bool startupReader(void* context, float* multiplier, float* ssaa,
+                   char*, uint32_t) {
+    ++g_startup.readerCalls;
+    g_startup.readerContext = context;
+    if (multiplier) *multiplier = 1.5f;
+    if (ssaa) *ssaa = 1.0f;
+    return true;
+}
+
+void configure(void* policyContext, void* hostContext,
+               plugins::performance::ReadEliteHmdMultiplierV1 reader,
+               TextureSamplerSettingsV1* settings) {
+    ++g_startup.configureCalls;
+    g_startup.policyContext = policyContext;
+    g_startup.hostContext = hostContext;
+    g_startup.reader = reader;
+    settings->structSize = sizeof(*settings);
+    settings->version = plugins::performance::kTextureSamplerSettingsVersion1;
+    settings->rewriteEnabled = g_startup.rewriteEnabled ? 1u : 0u;
+    settings->biasAutoRequested = g_startup.autoRequested ? 1u : 0u;
+    settings->autoSourceAvailable = g_startup.autoSourceAvailable ? 1u : 0u;
+    if (reader) {
+        float multiplier = 0.0f, ssaa = 0.0f;
+        char file[16]{};
+        reader(hostContext, &multiplier, &ssaa, file, sizeof(file));
+    }
+}
 bool rewrite(void*, const TextureSamplerSettingsV1*, const TextureSamplerDescV1* input,
              TextureSamplerDescV1* output) {
     ++g_callbacks.rewrite;
@@ -95,10 +143,95 @@ bool rewrite(void*, const TextureSamplerSettingsV1*, const TextureSamplerDescV1*
     return true;
 }
 
+int g_policyContextValue = 7;
 TextureSamplerPolicyOpsV1 g_ops = {
     sizeof(TextureSamplerPolicyOpsV1),
     plugins::performance::kTextureSamplerPolicyOpsVersion1,
-    nullptr, &configure, &rewrite};
+    &g_policyContextValue, &configure, &rewrite};
+
+void testSamplerStartupBoundary() {
+    TextureSamplerPolicyOpsV1 badSize = g_ops;
+    badSize.structSize -= 1;
+    TextureSamplerPolicyOpsV1 badVersion = g_ops;
+    badVersion.version += 1;
+    TextureSamplerPolicyOpsV1 noConfigure = g_ops;
+    noConfigure.configure = nullptr;
+    const int hostContextValue = 9;
+    void* const hostContext = const_cast<int*>(&hostContextValue);
+    const struct InvalidCase {
+        const char* name;
+        const TextureSamplerPolicyOpsV1* ops;
+    } invalidCases[] = {
+        {"null Ops record", nullptr},
+        {"invalid Ops size", &badSize},
+        {"invalid Ops version", &badVersion},
+        {"null configure callback", &noConfigure},
+    };
+
+    g_startup = {};
+    const TextureSamplerPolicyOpsV1* policy = &g_ops;
+    TextureSamplerSettingsV1 settings{};
+    settings.rewriteEnabled = 1;
+    settings.biasAutoRequested = 1;
+    const bool absentWarning = edvr::samplerStartupConfigure(
+        nullptr, hostContext, &startupReader, &policy, &settings);
+    check(!absentWarning && policy == nullptr && settings.rewriteEnabled == 0 &&
+              settings.biasAutoRequested == 0 && g_startup.factoryCalls == 0 &&
+              g_startup.configureCalls == 0 && g_startup.readerCalls == 0,
+          "absent factory clears stale enabled state without factory, configure or HMD reads");
+
+    g_startup = {};
+    g_startup.factoryResult = &g_ops;
+    policy = nullptr;
+    settings = {};
+    const bool configuredOffWarning = edvr::samplerStartupConfigure(
+        &startupFactory, hostContext, &startupReader, &policy, &settings);
+    check(!configuredOffWarning && policy == &g_ops && g_startup.factoryCalls == 1 &&
+              g_startup.configureCalls == 1 && g_startup.readerCalls == 1 &&
+              !settings.rewriteEnabled && settings.structSize == sizeof(settings),
+          "valid installed policy configures the current default-off settings");
+    check(g_startup.policyContext == g_ops.context &&
+              g_startup.hostContext == hostContext &&
+              g_startup.reader == &startupReader &&
+              g_startup.readerContext == hostContext,
+          "startup forwards policy context, host context and HMD reader callback");
+
+    g_startup = {};
+    g_startup.factoryResult = &g_ops;
+    g_startup.autoRequested = true;
+    policy = nullptr;
+    settings = {};
+    check(edvr::samplerStartupConfigure(&startupFactory, nullptr, &startupReader,
+                                       &policy, &settings) &&
+              policy == &g_ops && g_startup.configureCalls == 1,
+          "auto-source warning condition remains requested and unavailable");
+
+    g_startup = {};
+    g_startup.factoryResult = &g_ops;
+    g_startup.autoRequested = true;
+    g_startup.autoSourceAvailable = true;
+    policy = nullptr;
+    settings = {};
+    check(!edvr::samplerStartupConfigure(&startupFactory, nullptr, &startupReader,
+                                        &policy, &settings) &&
+              policy == &g_ops && g_startup.configureCalls == 1,
+          "available auto source suppresses the startup warning");
+
+    for (const InvalidCase& scenario : invalidCases) {
+        g_startup = {};
+        g_startup.factoryResult = scenario.ops;
+        policy = &g_ops;
+        settings = {};
+        settings.rewriteEnabled = 1;
+        const bool warning = edvr::samplerStartupConfigure(
+            &startupFactory, hostContext, &startupReader, &policy, &settings);
+        checkCase(!warning && policy == nullptr && !settings.rewriteEnabled &&
+                      g_startup.factoryCalls == 1 && g_startup.configureCalls == 0 &&
+                      g_startup.readerCalls == 0,
+                  scenario.name,
+                  "invalid Ops is absent-safe and cannot configure or read HMD settings");
+    }
+}
 
 D3D11_SAMPLER_DESC sampleDesc() {
     D3D11_SAMPLER_DESC d{};
@@ -188,6 +321,48 @@ void testIndependentNoRewriteGates() {
     }
 }
 
+void testAbsentStartupForwardsThroughHook() {
+    State state{};
+    state.device = reinterpret_cast<ID3D11Device*>(uintptr_t(0x20));
+    state.realCreateSamplerState = &originalCreate;
+    state.samplerPolicy = &g_ops;
+    state.samplerSettings.rewriteEnabled = 1;
+    state.samplerSettings.biasAutoRequested = 1;
+    state.samplerFirstMs = GetTickCount64() - 10001;
+    g_startup = {};
+
+    const bool warning = edvr::samplerStartupConfigure(
+        nullptr, nullptr, &startupReader, &state.samplerPolicy,
+        &state.samplerSettings);
+    check(!warning && state.samplerPolicy == nullptr &&
+              !state.samplerSettings.rewriteEnabled &&
+              !state.samplerSettings.biasAutoRequested &&
+              g_startup.factoryCalls == 0 && g_startup.configureCalls == 0 &&
+              g_startup.readerCalls == 0,
+          "absent startup publishes safe settings without factory, configure or HMD reads");
+
+    g_state = &state;
+    g_callbacks = {};
+    resetOriginal();
+    g_original.result = S_FALSE;
+    D3D11_SAMPLER_DESC desc = sampleDesc();
+    ID3D11SamplerState* out = nullptr;
+    const HRESULT got = hookedCreateSamplerState(state.device, &desc, &out);
+
+    check(g_callbacks.rewrite == 0 && g_startup.factoryCalls == 0 &&
+              g_startup.configureCalls == 0 && g_startup.readerCalls == 0,
+          "absent startup and sampler hook invoke no policy callbacks or HMD reader");
+    check(state.samplerCreates == 1 && state.samplerShapeCount == 1 &&
+              state.samplerShapes[0].count == 1 && state.censusCalls == 1 &&
+              state.samplerCensusPrints == 1,
+          "absent startup retains one core census create and one settled report");
+    check(g_original.calls == 1 && g_original.descAddress != &desc &&
+              sameDescriptor(g_original.desc, desc) &&
+              g_original.outAddress == &out && got == S_FALSE &&
+              out == g_original.returned,
+          "absent startup forwards unchanged descriptor, output and HRESULT exactly once");
+}
+
 void testEnabledPolicyRewritesOnlyOwnedFieldsAndForwardsOnce() {
     State state{};
     state.device = reinterpret_cast<ID3D11Device*>(uintptr_t(0x20));
@@ -274,7 +449,9 @@ void testEarlyOriginalForwarding() {
 }
 
 int selfTest() {
+    testSamplerStartupBoundary();
     testIndependentNoRewriteGates();
+    testAbsentStartupForwardsThroughHook();
     testEnabledPolicyRewritesOnlyOwnedFieldsAndForwardsOnce();
     testEarlyOriginalForwarding();
     std::printf("performance sampler hook fixture: %d checks passed\n", checks);

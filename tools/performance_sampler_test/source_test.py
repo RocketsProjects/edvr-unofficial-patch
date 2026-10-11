@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 HOST_PATH = ROOT / "src/d3d11/device_hook.cpp"
 HOOK_PATH = ROOT / "src/d3d11/sampler_create_hook.inl"
+STARTUP_PATH = ROOT / "src/d3d11/sampler_startup.h"
 POLICY_PATH = ROOT / "src/plugins/performance/texture_sampler_policy.cpp"
 HEADER_PATH = ROOT / "src/plugins/performance/texture_sampler_policy.h"
 RIG_PATH = ROOT / "tools/performance_sampler_test/texture_sampler_policy_test.cpp"
@@ -107,16 +108,21 @@ def ordered(source, *patterns):
 
 
 def inspect(host_text=None, policy_text=None, header_text=None,
-            hook_text=None, hook_rig_text=None):
+            hook_text=None, hook_rig_text=None, startup_text=None,
+            startup_rig_text=None):
     host_raw = HOST_PATH.read_text(encoding="utf-8") if host_text is None else host_text
     hook_raw = HOOK_PATH.read_text(encoding="utf-8") if hook_text is None else hook_text
+    startup_raw = (STARTUP_PATH.read_text(encoding="utf-8")
+                   if startup_text is None else startup_text)
     policy_raw = POLICY_PATH.read_text(encoding="utf-8") if policy_text is None else policy_text
     header_raw = HEADER_PATH.read_text(encoding="utf-8") if header_text is None else header_text
     rig_raw = RIG_PATH.read_text(encoding="utf-8")
     hook_rig_raw = (HOOK_RIG_PATH.read_text(encoding="utf-8")
                     if hook_rig_text is None else hook_rig_text)
+    startup_rig = hook_rig_raw if startup_rig_text is None else startup_rig_text
     host = code_only(host_raw)
     hook_source = code_only(hook_raw)
+    startup_source = code_only(startup_raw)
     policy = code_only(policy_raw)
     header = code_only(header_raw)
     policy_compact = re.sub(r"\s+", " ", policy_raw)
@@ -153,13 +159,69 @@ def inspect(host_text=None, policy_text=None, header_text=None,
     require(set(re.findall(r"\bd\.(\w+)\s*=", hook)) ==
             {"Filter", "MaxAnisotropy", "MipLODBias"},
             "the host may apply only the three sampler fields owned by policy")
-    require("s.samplerPolicy->configure" in host and
+    require("s.deviceHook.replace(kDevCreateSamplerState, &hookedCreateSamplerState" in host,
+            "the sampler hook remains present")
+    require(host_raw.count('#include "sampler_startup.h"') == 1 and
+            startup_rig.count('#include "../../src/d3d11/sampler_startup.h"') == 1,
+            "host and fixture include the same production startup boundary")
+    try:
+        startup = function_body(startup_source, "samplerStartupConfigure")
+    except AssertionError as exc:
+        return [str(exc)]
+    require(ordered(startup,
+                    r"\*policyOut\s*=\s*nullptr",
+                    r"memset\s*\(settingsOut,\s*0",
+                    r"if\s*\(!factory\)\s*return false",
+                    r"const [\w:]*TextureSamplerPolicyOpsV1\* ops\s*=\s*factory\(\)",
+                    r"if\s*\(!ops\s*\|\|[\s\S]*?!ops->configure\)",
+                    r"\*policyOut\s*=\s*ops",
+                    r"ops->configure\s*\(",
+                    r"return settingsOut->biasAutoRequested && !settingsOut->autoSourceAvailable"),
+            "startup clears absent state, validates Ops, then configures and returns the historical warning condition")
+    require("samplerStartupConfigure(" in host and
+            "&plugins::performance::textureSamplerPolicyOpsV1" in host and
+            "&samplerReadEliteHmdMultiplier" in host and
+            "if (warnAutoSourceUnavailable)" in host and
             "s.deviceHook.replace(kDevCreateSamplerState, &hookedCreateSamplerState" in host,
-            "the historical startup configuration and sampler hook remain present")
+            "current device startup uses the private helper and retains sampler hook installation")
+    require("s.samplerPolicy->configure" not in host_raw and
+            "advanced.texture_lod_bias = auto, but Elite's graphics" in host_raw,
+            "configuration moved behind the helper and startup warning text remains literal")
     require(ordered(host,
-                    r"s\.samplerPolicy->configure\s*\(",
+                    r"samplerStartupConfigure\s*\(",
                     r"s\.deviceHook\.replace\(kDevCreateSamplerState,\s*&hookedCreateSamplerState"),
             "settings must resolve before the hook can receive sampler creates")
+    require("testSamplerStartupBoundary();" in startup_rig and
+            "absent factory clears stale enabled state" in startup_rig and
+            "valid installed policy configures the current default-off settings" in startup_rig and
+            "invalid Ops is absent-safe" in startup_rig and
+            "available auto source suppresses the startup warning" in startup_rig,
+            "native hook fixture exercises absent, valid and invalid production startup paths")
+    try:
+        independent_gates = function_body(startup_rig, "testIndependentNoRewriteGates")
+        absent_through_hook = function_body(startup_rig, "testAbsentStartupForwardsThroughHook")
+    except AssertionError as exc:
+        return [str(exc)]
+    require('{"absent policy with stale enabled settings", nullptr, 1}' in
+            independent_gates and
+            "state.samplerSettings.rewriteEnabled = scenario.enabled;" in
+            independent_gates and
+            "samplerStartupConfigure(" not in independent_gates,
+            "independent null-Ops hook gate must retain stale enabled state")
+    require(ordered(absent_through_hook,
+                    r"samplerStartupConfigure\s*\(",
+                    r"hookedCreateSamplerState\s*\(") and
+            "g_startup.factoryCalls == 0" in absent_through_hook and
+            "g_startup.configureCalls == 0" in absent_through_hook and
+            "g_startup.readerCalls == 0" in absent_through_hook and
+            "state.censusCalls == 1" in absent_through_hook and
+            "state.samplerCensusPrints == 1" in absent_through_hook and
+            "g_original.calls == 1" in absent_through_hook and
+            "sameDescriptor(g_original.desc, desc)" in absent_through_hook and
+            "g_original.outAddress == &out" in absent_through_hook and
+            "got == S_FALSE" in absent_through_hook and
+            "testAbsentStartupForwardsThroughHook();" in startup_rig,
+            "separate absent-startup fixture must reach the real hook and check forwarding and census")
     require("input.addressU = static_cast<uint32_t>(desc->AddressU)" in hook and
             "input.addressV = static_cast<uint32_t>(desc->AddressV)" in hook and
             "input.addressW = static_cast<uint32_t>(desc->AddressW)" in hook and
@@ -259,7 +321,32 @@ def self_test():
         '#include "../../src/d3d11/sampler_create_hook.inl"', "", 1)
     if mutated == hook_rig or not inspect(hook_rig_text=mutated):
         raise AssertionError("negative mutation escaped the fixture include pin")
-    return 4
+    startup = STARTUP_PATH.read_text(encoding="utf-8")
+    mutated = startup.replace("if (!factory) return false;", "if (factory) return false;", 1)
+    if mutated == startup or not inspect(startup_text=mutated):
+        raise AssertionError("negative mutation escaped the absent-factory boundary pin")
+    mutated = startup.replace("std::memset(settingsOut, 0, sizeof(*settingsOut));", "", 1)
+    if mutated == startup or not inspect(startup_text=mutated):
+        raise AssertionError("negative mutation escaped the stale-settings reset pin")
+    mutated = hook_rig.replace(
+        '#include "../../src/d3d11/sampler_startup.h"', "", 1)
+    if mutated == hook_rig or not inspect(startup_rig_text=mutated):
+        raise AssertionError("negative mutation escaped the startup fixture include pin")
+    mutated = hook_rig.replace(
+        '{"absent policy with stale enabled settings", nullptr, 1},', "", 1)
+    if mutated == hook_rig or not inspect(startup_rig_text=mutated):
+        raise AssertionError("negative mutation escaped the independent null-Ops pin")
+    mutated = hook_rig.replace(
+        "state.samplerSettings.rewriteEnabled = scenario.enabled;",
+        "state.samplerSettings.rewriteEnabled = scenario.enabled;\n"
+        "        samplerStartupConfigure(nullptr, nullptr, nullptr, "
+        "&state.samplerPolicy, &state.samplerSettings);", 1)
+    if mutated == hook_rig or not inspect(startup_rig_text=mutated):
+        raise AssertionError("negative mutation escaped the independent-gate contamination pin")
+    mutated = hook_rig.replace("testAbsentStartupForwardsThroughHook();", "", 1)
+    if mutated == hook_rig or not inspect(startup_rig_text=mutated):
+        raise AssertionError("negative mutation escaped the absent-through-hook fixture pin")
+    return 10
 
 
 def main():
