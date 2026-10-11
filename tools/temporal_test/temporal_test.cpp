@@ -1363,9 +1363,10 @@ int main() {
               "ipd pair key: off applies the legacy chooser's pick for every chain pick; on applies the chain's");
         check(ip::samePose(D, D) && !ip::samePose(D, P), "ipd pair: samePose is true for one pose and false for the partner");
     }
-    // K. THE NEAREST WRITE (camera_nearest.h, 2026-10-11, flight 6): a 0.55 m a frame flight with 5 cm of jitter stays on track while the 89.6 m and
-    // 125 m writes are offered every frame; the 0.19 m / 2.99 deg hangar excursion is not chosen; 1 deg of rotation counts as 5 cm; the threshold
-    // of a cut; a cut confirmed by a held legacy pick is taken; key off applies the legacy pick; the 30 s line.
+    // K. THE NEAREST WRITE, AS A VETO (camera_nearest.h, 2026-10-11, flight 6): the legacy pick stands unless it is beyond T = 5 cm + 3 steps, and then the
+    // nearest continuous write takes its place. The 0.55 m flight with decoys at 89.6 m and 125 m stays on track; the 0.19 m / 2.99 deg hangar
+    // excursion is vetoed; 1 deg counts as 5 cm; the threshold after a step; a cut held two frames is taken, also with an old view still written
+    // (the galaxy map); a partner eye 6 cm lateral never overrides a normal pick (no alternation); key off applies the legacy pick; the 30 s line.
     {
         namespace cn = edvr::camnearest;
         const float kDeg = 3.14159265f / 180.0f;
@@ -1377,26 +1378,31 @@ int main() {
         };
         float V0[12];
         mkPose(0.4f, 0.10f, 1.60f, -0.30f, V0);
-        // A. The hangar excursion (0.19 m, 2.99 deg) against a still view: the view's own write is the nearer.
+        // Two applied picks: the step is measured (0 here), so the veto is live.
+        auto seed = [](cn::State& st, const float p[12]) {
+            cn::commit(st, p);
+            cn::commit(st, p);
+        };
+        // A. The hangar excursion (0.19 m, 2.99 deg) against a still view: the legacy pick is vetoed and the view's own write takes its place.
         {
             cn::State s;
-            cn::commit(s, V0);
+            seed(s, V0);
             float exc[12], view[12];
             mkPose(0.4f + 2.99f * kDeg, 0.29f, 1.60f, -0.30f, exc);
             mkPose(0.4f, 0.1005f, 1.60f, -0.30f, view);
             const float* cands[2] = {exc, view};
-            const cn::Verdict v = cn::decide(s, cands, 2, false);
-            check(v.index == 1 && !v.reanchor, "nearest: the 0.19 m / 2.99 deg excursion is not chosen; the view's own write is");
-            checkNear(cn::distance(exc, V0), 0.19f + 0.05f * 2.99f, 1e-3f, "nearest: the distance is translation in metres plus 5 cm a degree");
+            const cn::Verdict v = cn::decide(s, exc, cands, 2, false);
+            check(v.vetoed && v.index == 1 && !v.reanchor, "nearest: the 0.19 m / 2.99 deg excursion is vetoed; the view's own write takes its place");
+            checkNear(v.dist, 0.19f + 0.05f * 2.99f, 1e-3f, "nearest: the legacy pick's distance is translation in metres plus 5 cm a degree");
             const float* order[2] = {view, exc};
-            check(cn::decide(s, order, 2, true).index == 0, "nearest: the order of the offer does not matter; the nearest is taken");
+            check(cn::decide(s, exc, order, 2, false).index == 0, "nearest: the order of the offer does not matter; the nearest is taken");
         }
-        // B. The flight: 0.55 m a frame, the written track with 5 cm of jitter, and the 89.6 m and 125 m writes offered every frame. Every applied
-        //    write is the track's, the track's own position is within the jitter, and no cut is confirmed.
+        // B. The flight: 0.55 m a frame, the track with 5 cm of jitter. The legacy pick is the track, except on isolated frames where it is the
+        //    89.6 m or the 125 m write, offered every frame. Every applied write is the track's; the veto fires exactly on the decoy frames.
         {
             cn::State s;
+            uint32_t decoys = 0, vetoes = 0, reanchors = 0;
             bool onTrack = true;
-            uint32_t reanchors = 0;
             float maxErr = 0.0f;
             for (int k = 0; k < 80; ++k) {
                 const float x = 0.55f * static_cast<float>(k);
@@ -1405,47 +1411,84 @@ int main() {
                 mkPose(0.4f, x + jit, 1.60f, -0.30f, tr);
                 mkPose(0.4f, x + 125.0f, 1.60f, -0.30f, w125);
                 mkPose(0.4f, x + 89.6f, 1.60f, -0.30f, w89);
+                const float* cands[3] = {w125, tr, w89};
+                const bool is125 = k > 0 && k % 7 == 3;
+                const bool is89 = k > 0 && !is125 && k % 11 == 5;
+                const float* legacy = is125 ? w125 : is89 ? w89 : tr;
                 if (k == 0) {
                     cn::commit(s, tr);
+                    cn::noteLegacy(s, tr);
                     continue;
                 }
-                const float* cands[3] = {w125, tr, w89};
-                const cn::Verdict v = cn::decide(s, cands, 3, false);
+                if (is125 || is89) ++decoys;
+                const bool agreed = cn::legacyAgrees(s, legacy);
+                const cn::Verdict v = cn::decide(s, legacy, cands, 3, agreed);
+                cn::noteLegacy(s, legacy);
+                if (v.vetoed) ++vetoes;
                 if (v.reanchor) ++reanchors;
-                if (v.index != 1) onTrack = false;
-                if (v.index >= 0) {
-                    const float err = std::fabs(cands[v.index][3] - x);
-                    if (err > maxErr) maxErr = err;
-                    cn::commit(s, cands[v.index]);
-                }
+                const float* applied = v.index >= 0 ? cands[v.index] : legacy;
+                if (v.index < 0 && (is125 || is89)) onTrack = false;
+                if (v.index >= 0 && v.index != 1) onTrack = false;
+                const float err = std::fabs(applied[3] - x);
+                if (err > maxErr) maxErr = err;
+                cn::commit(s, applied);
             }
-            check(onTrack && reanchors == 0 && maxErr <= 0.0501f,
-                  "nearest: 0.55 m a frame with 5 cm of jitter, the 89.6 m and 125 m writes offered: every frame stays on the track");
+            check(onTrack && reanchors == 0 && vetoes == decoys && decoys > 0 && maxErr <= 0.0501f,
+                  "nearest: 0.55 m a frame with 5 cm of jitter and the 89.6 m / 125 m writes as legacy picks: every frame stays on the track, the veto fires on the decoys only");
         }
-        // C. The rotation weight: 10 deg in place is 0.5 m away; 0.3 m along with the same rotation is 0.3 m away. The nearer is taken.
+        // C. The rotation weight: a legacy pick 10 deg in place is 0.5 m away; the 0.3 m write with the same rotation is nearer and is taken.
         {
             cn::State s;
-            cn::commit(s, V0);
+            seed(s, V0);
             float rot10[12], along[12];
             mkPose(0.4f + 10.0f * kDeg, 0.10f, 1.60f, -0.30f, rot10);
             mkPose(0.4f, 0.40f, 1.60f, -0.30f, along);
             const float* cands[2] = {rot10, along};
-            check(cn::decide(s, cands, 2, false).index == 1, "nearest: 1 deg counts as 5 cm, so 10 deg (0.5 m) is farther than 0.3 m of translation");
-            checkNear(cn::distance(rot10, V0), 0.5f, 1e-3f, "nearest: 10 deg of rotation in place is 0.5 m");
+            const cn::Verdict v = cn::decide(s, rot10, cands, 2, false);
+            check(v.vetoed && v.index == 1, "nearest: 1 deg counts as 5 cm, so 10 deg (0.5 m) is vetoed and the 0.3 m write is taken");
+            checkNear(v.dist, 0.5f, 1e-3f, "nearest: 10 deg of rotation in place is 0.5 m");
         }
-        // D. A cut: a far write (10 m) is not taken as a cut until the legacy pick has held two frames; then the legacy pick is taken. The
-        //    re-anchor threshold is max(1 m, 3 steps): after a 0.55 m step a write 1.2 m away is still near, 2.0 m away is a cut.
+        // D. A cut without an old write: a far legacy pick (10 m) is vetoed to the nearest write on the first frame, and taken as a cut once it
+        //    has held two frames.
         {
             cn::State s;
-            cn::commit(s, V0);
+            seed(s, V0);
             float cut[12];
             mkPose(0.4f, 10.0f, 1.60f, -0.30f, cut);
             const float* cands[1] = {cut};
-            const cn::Verdict first = cn::decide(s, cands, 1, false);
-            check(first.index == 0 && !first.reanchor, "nearest: a far write on the first frame of a legacy pick is taken as the nearest, not a cut");
+            const cn::Verdict first = cn::decide(s, cut, cands, 1, cn::legacyAgrees(s, cut));
+            check(first.vetoed && first.index == 0 && !first.reanchor, "nearest: a far legacy pick not yet held is vetoed to the nearest write, not taken");
             cn::noteLegacy(s, cut);
-            const cn::Verdict held = cn::decide(s, cands, 1, cn::legacyAgrees(s, cut));
-            check(held.reanchor && held.index == -1, "nearest: a far write with the legacy pick held two frames is a cut and the legacy pick is taken");
+            const cn::Verdict held = cn::decide(s, cut, cands, 1, cn::legacyAgrees(s, cut));
+            check(held.reanchor && held.index == -1, "nearest: a far legacy pick held two frames is a cut and is taken");
+        }
+        // E. The galaxy map: the old view keeps being written at the last applied pose; the legacy pick moves to a new stable pose 10 m away. The
+        //    first frame is vetoed to the old view; the second re-anchors to the new pose, though the old view is still nearer; the third is the
+        //    legacy pick's own.
+        {
+            cn::State s;
+            seed(s, V0);
+            float oldView[12], map[12];
+            mkPose(0.4f, 0.1005f, 1.60f, -0.30f, oldView);
+            mkPose(0.4f, 10.10f, 1.60f, -0.30f, map);
+            const float* cands[2] = {oldView, map};
+            const bool a1 = cn::legacyAgrees(s, map);
+            const cn::Verdict f1 = cn::decide(s, map, cands, 2, a1);
+            cn::noteLegacy(s, map);
+            check(f1.vetoed && f1.index == 0, "galaxy map, frame 1: the legacy pick is beyond T, not yet held; the old view takes its place");
+            cn::commit(s, cands[f1.index]);
+            const bool a2 = cn::legacyAgrees(s, map);
+            const cn::Verdict f2 = cn::decide(s, map, cands, 2, a2);
+            cn::noteLegacy(s, map);
+            check(a2 && f2.reanchor && f2.index == -1, "galaxy map, frame 2: the new pose held two frames re-anchors within 2 frames, though the old view is nearer");
+            cn::commit(s, map);
+            const bool a3 = cn::legacyAgrees(s, map);
+            const cn::Verdict f3 = cn::decide(s, map, cands, 2, a3);
+            check(!f3.vetoed && !f3.reanchor && f3.index == -1, "galaxy map, frame 3: the legacy pick stands on the new camera");
+        }
+        // F. The threshold after a 0.55 m step: T = 5 cm + 3 x 0.55 m = 1.70 m. A legacy pick 1.2 m away stands; 2.0 m away is vetoed, and taken as a
+        //    cut when it has held two frames.
+        {
             cn::State t;
             cn::commit(t, V0);
             float step1[12], near1[12], near2[12];
@@ -1454,40 +1497,101 @@ int main() {
             checkNear(t.step, 0.55f, 1e-4f, "nearest: the step is the translation between the last two applied poses");
             mkPose(0.4f, 0.65f + 1.2f, 1.60f, -0.30f, near1);
             mkPose(0.4f, 0.65f + 2.0f, 1.60f, -0.30f, near2);
-            const float* n1[1] = {near1};
-            const float* n2[1] = {near2};
-            check(!cn::decide(t, n1, 1, true).reanchor, "nearest: 1.2 m after a 0.55 m step is inside the threshold (1.65 m) and not a cut");
-            check(cn::decide(t, n2, 1, true).reanchor, "nearest: 2.0 m after a 0.55 m step is outside the threshold and a cut when the legacy pick held");
+            const float* c1[1] = {near1};
+            const float* c2[1] = {near2};
+            const cn::Verdict in = cn::decide(t, near1, c1, 1, false);
+            check(!in.vetoed && !in.reanchor && in.index == -1, "nearest: 1.2 m after a 0.55 m step is inside the threshold (1.70 m) and stands");
+            const cn::Verdict out = cn::decide(t, near2, c2, 1, false);
+            check(out.vetoed && out.index == 0, "nearest: 2.0 m after a 0.55 m step is beyond the threshold and vetoed to the nearest write");
+            check(cn::decide(t, near2, c2, 1, true).reanchor, "nearest: 2.0 m held two frames after a 0.55 m step is a cut");
         }
-        // E. The key: off applies the legacy pick; the state follows whatever is applied.
+        // G. The eye pair: the 0.55 m flight, the partner eye 6 cm lateral, both written every frame with the same rotation and ±5 cm of jitter.
+        //    The legacy pick alternates between the eyes on every frame. No pick is beyond T, so the rule never overrides: the applied pick is the
+        //    legacy pick, and the overrides are zero.
         {
             cn::State s;
-            cn::commit(s, V0);
+            uint32_t overrides = 0, reanchors = 0;
+            bool allLegacy = true;
+            for (int k = 0; k < 80; ++k) {
+                const float x = 0.55f * static_cast<float>(k);
+                const float jit = 0.05f * std::sin(1.7f * static_cast<float>(k));
+                float right[12], left[12];
+                mkPose(0.4f, x + jit, 1.60f, -0.30f, right);
+                mkPose(0.4f, x + jit + 0.06f, 1.60f, -0.30f, left);
+                const float* cands[2] = {right, left};
+                const float* legacy = (k % 2 == 0) ? right : left;
+                if (k == 0) {
+                    cn::commit(s, legacy);
+                    cn::noteLegacy(s, legacy);
+                    continue;
+                }
+                const bool agreed = cn::legacyAgrees(s, legacy);
+                const cn::Verdict v = cn::decide(s, legacy, cands, 2, agreed);
+                cn::noteLegacy(s, legacy);
+                if (v.index != -1) allLegacy = false;
+                if (v.vetoed) ++overrides;
+                if (v.reanchor) ++reanchors;
+                cn::commit(s, legacy);
+            }
+            check(allLegacy && overrides == 0 && reanchors == 0,
+                  "nearest: the partner eye 6 cm lateral with ±5 cm jitter, the legacy pick alternating: the applied pick is the legacy pick, zero overrides");
+        }
+        // H. A head turn of 2 deg a frame with the legacy pick on the partner eye: the partner is beyond T by its rotation and offset, so the veto
+        //    takes the chain's own write (the nearer one, with the same rotation).
+        {
+            cn::State s;
+            seed(s, V0);
+            float legit[12], partner[12];
+            mkPose(0.4f + 2.0f * kDeg, 0.10f, 1.60f, -0.30f, legit);
+            mkPose(0.4f + 2.0f * kDeg, 0.16f, 1.60f, -0.30f, partner);
+            const float* cands[2] = {legit, partner};
+            const cn::Verdict v = cn::decide(s, partner, cands, 2, false);
+            check(v.vetoed && v.index == 0, "nearest: a head turn with the partner eye picked is vetoed to the chain's own write");
+        }
+        // I. The key: off applies the legacy pick; the state follows whatever is applied.
+        {
+            cn::State s;
+            seed(s, V0);
             float exc[12], view[12];
             mkPose(0.4f + 2.99f * kDeg, 0.29f, 1.60f, -0.30f, exc);
             mkPose(0.4f, 0.1005f, 1.60f, -0.30f, view);
             const float* cands[2] = {exc, view};
-            const cn::Verdict v = cn::decide(s, cands, 2, false);
+            const cn::Verdict v = cn::decide(s, exc, cands, 2, false);
             check(cn::applied(true, v) == 1 && cn::applied(false, v) == -1,
-                  "nearest key: on applies the nearest write; off applies the legacy pick");
+                  "nearest key: on applies the vetoed write; off applies the legacy pick");
             cn::commit(s, exc);
             check(std::memcmp(s.prev, exc, sizeof(exc)) == 0 && s.step > 0.18f,
                   "nearest: the state follows the applied pose, whichever it was");
         }
-        // F. The first frame has no previous pick: the legacy pick is taken.
+        // J. The first frame has no previous pick: the legacy pick is taken.
         {
             cn::State s;
             float a[12];
             mkPose(0.4f, 0.1f, 1.60f, -0.30f, a);
             const float* c[1] = {a};
-            check(cn::decide(s, c, 1, true).index == -1, "nearest: the first frame has no previous pick and takes the legacy pick");
+            const cn::Verdict v = cn::decide(s, a, c, 1, true);
+            check(v.index == -1 && !v.vetoed && !v.reanchor, "nearest: the first frame has no previous pick and takes the legacy pick");
         }
-        // G. The 30 s line: the counts, the largest nearest distance, the key, and a small buffer refused.
+        // J2. One applied pick is no step yet: a legacy pick 0.61 m away stands (the veto needs a measured step), and the second pick measures one.
+        {
+            cn::State s;
+            float a[12], far[12];
+            mkPose(0.4f, 0.10f, 1.60f, -0.30f, a);
+            mkPose(0.4f, 0.71f, 1.60f, -0.30f, far);
+            cn::commit(s, a);
+            const float* c[1] = {far};
+            const cn::Verdict v = cn::decide(s, far, c, 1, false);
+            check(v.index == -1 && !v.vetoed && !v.reanchor, "nearest: one applied pick is no step yet, so a 0.61 m legacy pick stands");
+            cn::commit(s, far);
+            checkNear(s.step, 0.61f, 1e-3f, "nearest: the second applied pick measures the step");
+        }
+        // K. The 30 s line: the counts, the largest legacy distance, the key, and a small buffer refused.
         {
             cn::Stats st;
             cn::Verdict chosen;
             chosen.index = 1;
             chosen.dist = 0.34f;
+            chosen.vetoed = true;
             cn::Verdict cutV;
             cutV.reanchor = true;
             cutV.dist = 5.0f;
@@ -1498,7 +1602,7 @@ int main() {
             check(st.frames == 3 && st.differs == 1 && st.reanchors == 1, "nearest 30 s line: frames, differs and reanchors count the verdicts");
             char rep[200];
             const int rl = cn::formatReport(rep, sizeof(rep), st, true);
-            check(rl > 0 && std::strcmp(rep, "temporal camera nearest: frames=3 differs_from_legacy=1 reanchors=1 max_dist_m=0.340 key=on") == 0,
+            check(rl > 0 && std::strcmp(rep, "temporal camera nearest: frames=3 differs_from_legacy=1 reanchors=1 max_dist_m=5.000 key=on") == 0,
                   "nearest 30 s line: the counts, max_dist_m and key, in the logged format");
             check(cn::formatReport(rep, sizeof(rep), st, false) > 0 && std::strstr(rep, "key=off") != nullptr,
                   "nearest 30 s line: key off is printed as key=off");

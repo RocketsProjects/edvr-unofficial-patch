@@ -2635,11 +2635,11 @@ void chooseCameraRows() {
         }
     } else if (pick >= 0) {
         // The rule's reference (applied as Rule), else the legacy pick: with the key off, or with no rule pick, today's chooser's own pick.
-        // The nearest-write rule judges the legacy pick (not the rule's): its pick is the nearest candidate, key on only. Its state follows
-        // whatever is applied, so with the key off it tracks the legacy track the flight flew.
+        // The nearest-write veto judges the legacy pick (not the rule's): a legacy pick beyond its threshold gives way to the nearest candidate,
+        // key on only; a cut held two frames is taken. Its state follows whatever is applied, so with the key off it tracks the legacy track.
         int applyIdx = pick;
         if (applied == ipdpair::Pick::Legacy) {
-            const camnearest::Verdict nv = camnearest::decide(g_nearState, nearRows, nearN, nearLegacyAgreed);
+            const camnearest::Verdict nv = camnearest::decide(g_nearState, g_rowsRing[pick].rows, nearRows, nearN, nearLegacyAgreed);
             const bool differs = nv.index >= 0 && nearRing[nv.index] != pick;
             camnearest::note(g_nearStats, nv, differs);
             const int use = camnearest::applied(g_nearKeyOn, nv);

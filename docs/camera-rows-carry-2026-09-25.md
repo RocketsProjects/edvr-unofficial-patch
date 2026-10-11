@@ -5,7 +5,7 @@
 *Last updated 2026-10-11 (nearest write): `claude/camera-nearest` replaces the jump guard with `fix.camera_nearest` (built, NOT flown, NOT merged). The
 eye-pair rule is PARKED (default off). The continuity fix is PARKED on `claude/vr-camera-continuity`; `diag.camera_writes` is on `claude/vr-camera-writes`, NOT flown.*
 
-- **2026-10-11 (built, NOT flown; `claude/camera-nearest`):** `fix.camera_nearest = on` (temporary, `[fix]`, hidden, VR). The camera rows are the continuous write nearest the last applied pose (metres, plus 5 cm a degree), not the legacy chooser's preference; a real cut re-anchors on a held legacy pick. It replaces the jump guard, which flight 6 found wrong (all 58 rejections were real motion). Rig: section K. Entry at the end.
+- **2026-10-11 (built, NOT flown; `claude/camera-nearest`):** `fix.camera_nearest = on` (temporary, `[fix]`, hidden, VR). A veto on the legacy pick: beyond 5 cm plus three steps from the last applied pose (metres, 5 cm a degree), the continuous write nearest that pose takes its place; a pick held two frames beyond it is a cut. It replaces the jump guard, which flight 6 found wrong (all 58 rejections were real motion). Rig: section K (27 checks). Entry at the end.
 - **2026-10-11 (PARKED, default off):** `fix.camera_ipd_pair` is off in code and `edvr.ini`. Its counts still run; the applied pick is the legacy chooser's.
 - **2026-10-11 (REFUTED as built):** `fix.hmd_camera_tag` picks probe faces, not the headset camera: it stamps every write made inside coordinator `0x594B60` (100-200 a frame), and eye dump 085301 has the pick wrong on 10 of 16 frames. The symptom is path-2 static-world pixels (hangar walls, elevator shaft).
 - **2026-10-11 (built, NOT flown):** `diag.camera_writes = on` logs every camera-block write for the Pause dump's TCWR lines (entry at the end; temporary key, removal proposed at close). Next: hangar, `diag.camera_writes = on`, `diag.temporal_draws = off`, `fix.hmd_camera_tag = off`, Pause when the panels reset; then the offline read.
@@ -489,27 +489,39 @@ The `rot=` field is an addition to the spec: T and R are the rows' only when rot
 
 Refute: if the drawn write's P0 and P5 do not match the TCWRE expectation, the projection is not the eye's signature.
 
-## 2026-10-11 -- the nearest write, `fix.camera_nearest` (built, NOT flown, `claude/camera-nearest`)
+## 2026-10-11 -- the nearest write as a veto, `fix.camera_nearest` (built, NOT flown, `claude/camera-nearest`)
 
 **The IPD rule is parked (default off, in code and `edvr.ini`).** Why: the rule picks the newest of many repeated eye writes, which is likely a one-frame lag. With it on, the draw and the pick differed by 1-10 mm on 14% of frames, and the blur was seen. Its counts still run with the key off, and the applied pick is the legacy chooser's. The key, its code and its counters stay for the record.
 
 **Why the jump guard is replaced.** Flight 6 (`edvr_gfx_20261011_141016`, TCWR dumps with the guard's `rejected=` marks): all 58 rejections were real motion. The camera moves about 0.55 m a frame with about 0.05 m of jitter, above the guard's 3.5 cm tolerance, so its shape was wrong. No substitute passed, so nothing was harmed. The chooser's real errors were rare, 2 in 176 frames: legacy picked a write 125 m off the drawn track (frame 24655), and the headset tag picked one 89.6 m off (frame 24687). The drawn camera at frame f+1 equals the write picked at f exactly, so the camera track is well defined. The guard is removed: its header, its key and its `rejected=` TCWR field. The TCWR pick mark is now `pick=nearest` (`kPickNearest`). A line written with the old `rejected=` field still parses.
 
-**The rule, as built** (`src\common\camera_nearest.h`, pure; applied in `chooseCameraRows` on the legacy track, after the tag decision):
-- Candidates: the frame's continuous writes (within 3 deg of the last applied rows), in the chooser's own order. The identical-to-previous twin is excluded: it is last frame's rows again.
-- Distance from the last applied pick: translation in metres plus 0.05 m per degree of rotation. The weight: one degree of view rotation moves a point 2.9 m away by 5 cm, the depth of the cockpit and the hangar, so a degree counts as the translation it looks like at that depth.
-- Pick: the nearest candidate. Ties go to the chooser's order. Never a hold: every candidate is one of this frame's writes.
-- Re-anchor: when the nearest is farther than max(1 m, 3 x the previous step) from the last applied pick, AND the legacy pick is the same pose as last frame's (`samePose`: 1 mm, 0.1 deg), the legacy pick is taken. A real cut that leaves no old write behind is taken on its first frame; with the old write still present, see the hazard below.
+**The rule, as built** (`src\common\camera_nearest.h`, pure; applied in `chooseCameraRows` on the legacy track, after the tag decision). It is a veto on the legacy pick, not a replacement:
+- Distance: translation in metres plus 0.05 m per degree of rotation. The weight: one degree of view rotation moves a scene point 2.9 m away by 5 cm, the depth of the cockpit and the hangar, so a degree counts as the translation it looks like at that depth.
+- Threshold T = 0.05 m + 3 x the previous applied step: about 5 cm in a still hangar, about 1.70 m at 0.55 m a frame.
+- Veto: the legacy pick is applied unless its distance from the last applied pick exceeds T. Then the continuous write nearest the last applied pick takes its place. A normal pick never reaches T, so the veto never overrides it.
+- Re-anchor: when the legacy pick is the same pose as last frame's (samePose: 1 mm, 0.1 deg), it has held two frames, and it is beyond T, the legacy pick is taken even if an old-view write is still nearer. That is a real cut: a galaxy map or a camera switch.
+- Candidates: the frame's continuous writes (within 3 deg of the last applied rows), in the chooser's own order (ties go to it). The identical-to-previous twin is excluded: it is last frame's rows again.
+- Never a hold: every applied write is the legacy pick or one of this frame's continuous writes.
+- No measured step yet (one applied pick so far): the legacy pick stands. There is no basis for T, and without this rule the second frame's normal 0.6 m move would be vetoed.
 - Key off: the legacy pick is applied, the counts still run, and the state follows the applied rows.
 
-**Open hazards (for the flight).**
-1. The re-anchor needs the nearest write to be far. If the old view is still written and stays continuous (a galaxy map or camera switch that leaves the old view's write in place), the nearest stays the old view and the rule never re-anchors. The rig does not cover this case. The candidate amendment: test the legacy pick's distance from the last applied pick, not the nearest's, once the legacy pick has held two frames.
-2. The two eyes' writes are 6 cm apart and both continuous. Nearest-to-last can alternate between them when the step runs along the IPD axis. Check for 6 cm alternation in the flight's TCWR `pair=` marks.
+**Counts.** `temporal camera nearest: frames=.. differs_from_legacy=.. reanchors=.. max_dist_m=.. key=on|off`, every 30 s. `differs_from_legacy`: legacy picks the rule replaced with another write (counted with the key off too). `reanchors`: legacy picks taken as a cut. `max_dist_m`: the largest distance of a legacy pick from the last applied pick in the window, so it shows the size of the jumps that were there. TCAM choice flag `0x2000` = the rule replaced the legacy pick (key on). TCWR `pick=nearest`.
 
-**Counts.** `temporal camera nearest: frames=.. differs_from_legacy=.. reanchors=.. max_dist_m=.. key=on|off`, every 30 s. `differs_from_legacy`: frames whose nearest write is not the legacy pick (counted with the key off too). `reanchors`: frames where the legacy pick was taken as a cut. `max_dist_m`: the largest distance of a nearest write from the last applied pick in the window. TCAM choice flag `0x2000` = the rule took a write other than the legacy pick (key on). TCWR `pick=nearest`.
+**Rig.** `tools\temporal_test` section K, 27 checks, all pass:
+- The 0.19 m / 2.99 deg hangar excursion is vetoed to the view's own write.
+- The 0.55 m flight with ±5 cm jitter, and decoys at 89.6 m and 125 m as legacy picks on isolated frames: every applied pick is on the track, and the veto fires on the decoy frames only.
+- 1 deg counts as 5 cm: a 10 deg legacy pick (0.5 m) is vetoed to the 0.3 m write.
+- A far legacy pick is vetoed on its first frame and taken as a cut once it has held two frames.
+- Galaxy map: the old view keeps being written at the last applied pose; the legacy pick moves to a new stable pose 10 m away. Frame 1 is vetoed to the old view; frame 2 re-anchors to the new pose, though the old view is nearer; frame 3 is the legacy pick's own.
+- Threshold after a 0.55 m step: 1.2 m stands, 2.0 m is vetoed, and taken as a cut when held two frames.
+- Eye pair: the partner eye 6 cm lateral with ±5 cm jitter, the legacy pick alternating between the eyes on every frame. The applied pick is the legacy pick every frame, with zero overrides.
+- A 2 deg head turn with the legacy pick on the partner eye: the veto takes the chain's own write.
+- One applied pick is no step yet: a 0.61 m legacy pick stands; the second pick measures the step.
+- Key off applies the legacy pick, and the state follows the applied pose. The first frame takes the legacy pick.
+- The 30 s line's counts, format, buffer refusal and reset. Section H checks the TCWR `pick=nearest` mark and the parse of an old `rejected=` line.
 
-**Rig.** `tools\temporal_test` section K, 19 checks, all pass: the 0.19 m / 2.99 deg excursion is not chosen; the 0.55 m flight with 5 cm of jitter and the 89.6 m and 125 m writes offered stays on track with no re-anchor; 1 deg counts as 5 cm (10 deg is 0.5 m); the threshold after a 0.55 m step (1.2 m inside, 2.0 m outside); a far write on a first frame is not a cut, and a far write with the legacy pick held two frames is; key off applies the legacy pick; the state follows the applied pose; the first frame takes the legacy pick; the 30 s line. Section H checks the TCWR `pick=nearest` mark and the parse of an old `rejected=` line.
+**Open risk.** A head turn faster than about 1 deg a frame is beyond T on the rotation term alone (1 deg = 5 cm). The veto then fires on ordinary head motion in a still ship. The override is then the nearest write, usually the chain's own, but `differs_from_legacy` will show how often it happens. If that count is high on head turns, the weight or the base needs revisiting, not a key.
 
 **Keys (temporary; removal to be proposed at close, quoted):** `fix.camera_nearest` (default on, `[fix]`, `# ui: hidden`, VR; flat reads it off). `fix.camera_ipd_pair` (default off, parked).
 
-**Next flight.** Hangar and supercruise with `fix.camera_nearest = on` and `diag.camera_writes = on`. Expect `differs_from_legacy` on the rare legacy errors only, no 6 cm alternation between the eyes, no visible resets, and `reanchors` at 0 in steady flight. Then `fix.camera_nearest = off` as the control. For a galaxy-map toggle, check that the new camera is taken; if the old view stays written, hazard 1 is the cause.
+**Next flight.** Hangar and supercruise with `fix.camera_nearest = on` and `diag.camera_writes = on`. Expect `differs_from_legacy` on the rare legacy errors only, zero overrides on the eye pair, no visible resets, and `reanchors` at 0 in steady flight. Then `fix.camera_nearest = off` as the control. For a galaxy-map toggle: expect `reanchors` at 1 on the second frame of the new pose, and the new camera taken.
