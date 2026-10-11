@@ -4812,7 +4812,7 @@ void temporalPassConfigure(Config& cfg) {
     g_tdrwOn = cfg.getString("diag.temporal_draws", "off") == "on";
     // fix.hmd_camera_tag (temporary A/B; hmd_camera_tag.h): on picks the headset-stamped write when the frame has one. VR only: the flat
     // allow-list does not list it, so flat reads "off" and keeps today's pick.
-    g_tagKeyOn = cfg.getString("fix.hmd_camera_tag", "on") == "on";
+    g_tagKeyOn = cfg.getString("fix.hmd_camera_tag", "off") == "on";   // refuted 2026-10-11 (picks probe faces): off unless asked for
     // fix.camera_ipd_pair (temporary A/B; camera_ipd_pair.h): on applies the eye pair's rule ahead of the legacy chooser. VR only: the flat
     // allow-list does not list it, so flat reads "off" and its chooser is today's.
     g_ipdKeyOn = cfg.getString("fix.camera_ipd_pair", "on") == "on";
