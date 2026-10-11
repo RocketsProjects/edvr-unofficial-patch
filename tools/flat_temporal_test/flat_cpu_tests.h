@@ -403,6 +403,16 @@ inline int flatCpuTests() {
         expect(has(text, "engine motion hooks 0.020 ms (calls 1.0)"),
                "the render thread's engine motion hooks are the tees alone: the draw side, apply and patch are not counted twice");
         expect(has(text, "EDVR per frame total 0.020 ms"), "and the total is the same 0.020 ms, no draw side in it");
+        expect(has(text, "engine motion hooks by part (render thread, per clocked frame): emit 0.000 ms (calls 0.0)") && has(text, "tees 0.020 ms (calls 1.0)"),
+               "the render thread's hooks are also printed a part at a time: the tees hold the 0.020 ms, the first token names the list");
+        {   // The by-part tokens cover exactly the parts the hooks total folds, so they add up to it.
+            double folded = 0, listed = 0;
+            for (unsigned p = 0; p < emcpu::kParts; ++p)
+                if (flatcpu::emFolded(p) && emcpu::kInfo[p].clocked) folded += r.emRenderMs[p];
+            for (unsigned i = 0; i < flatcpu::kEmNameCount; ++i) listed += r.emRenderMs[flatcpu::kEmNames[i].part];
+            expect(nearly(folded, listed) && std::strncmp(flatcpu::kEmNames[0].name, "engine ", 7) == 0,
+                   "the by-part tokens cover exactly the parts the hooks total folds, and every name carries the 'engine ' they drop");
+        }
         expect(has(text, "engine emit 0.030 ms (calls 1.0)") && has(text, "engine copier 0.010 ms (calls 1.0)") &&
                has(text, "engine merge 0.006 ms (calls 1.0)") && has(text, "engine clear 0.004 ms (calls 1.0)"),
                "the emit, copier, merge and clear callbacks are on the other threads' line, per sampled frame");
