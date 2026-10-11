@@ -31,4 +31,9 @@ extern "C" __declspec(dllexport) __declspec(noinline) void hot_outer() {
     pad[0] = 1;
 }
 
+// A busy loop of the cold leaf only, for a second busy thread: its own top function is hot_spin_cold.
+extern "C" __declspec(dllexport) __declspec(noinline) void hot_cold_loop(volatile LONG* stop) {
+    while (!*stop) hot_spin_cold();
+}
+
 BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) { return TRUE; }

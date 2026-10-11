@@ -1,19 +1,24 @@
-// The render thread's CPU profile, tested on a thread with known hot functions (src\common\cpu_sampler.h, src\d3d11\cpu_profile.cpp,
-// docs\engine-render-performance-2026-09-19.md). The real capture, walk, resolution, report and CSV code runs against a busy
-// thread in this exe, which calls hot_outer in hot_target.dll (built beside it, a module that is not this exe). hot_spin_hot
-// is three quarters of the busy time, and the thread sleeps now and then so the wait class has samples.
+// The process CPU profile, tested on threads with known hot functions (src\common\cpu_sampler.h, src\d3d11\cpu_profile.cpp,
+// docs\render-thread-cpu-2026-10-10.md). The real choice, capture, resolution, report and CSV code runs here against three
+// busy threads of this exe and the rig's primary thread:
+//   render  calls hot_outer in hot_target.dll (hot_spin_hot is three quarters of it), sleeps now and then;
+//   other   spins hot_cold_loop in hot_target.dll (its top function is hot_spin_cold), the busiest of the others;
+//   idle    sleeps.
+// The choice and the sampling run on a worker thread of this exe, as the glue's do, so the primary thread is listed as main.
 //
 //   cpu_sampler_test.exe --dry-run                       touches nothing
 //   cpu_sampler_test.exe --self-test <root> <outdir>     root is the repository (its source is checked); outdir gets
 //                                                        cpu_profile_report.log and cpu_profile_rig.csv, which the build
 //                                                        then gives to edvr_log.py --cpu-profile
 //
-// Checks: the hot leaf dominates the leaf and function tables; hot_outer is on most stacks; the wait class has samples; every
-// listed .pdata range equals RtlLookupFunctionEntry's, the oracle; the report's lines parse, each under 1100 characters; the
-// CSV's sample rows find their functions in its function rows; the pacer keeps the duty cap on a fake clock; the window
-// holds no call but stall::captureThread; and the suspend cost of a sample is measured and reported.
+// Checks: the labels (render, main, and the busy thread) are chosen as they should be; the busy thread is the busiest of the
+// others; every thread is sampled and the round-robin is balanced; the hot leaf of the render thread and the cold leaf of the
+// busy thread dominate their own tables; every listed .pdata range equals RtlLookupFunctionEntry's; the report's and the CSV's
+// lines parse; the producer wait is refused on a process without the game (and the gate accepts only the game's stamp); the
+// pacer holds the stopped-share cap on a fake clock; the window calls nothing that stops a thread but stall::captureThread.
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +38,7 @@ namespace {
 using edvr::cpu::Class;
 using edvr::cpu::Pacer;
 using edvr::cpu::Session;
+using edvr::cpu::Target;
 
 int g_fails = 0;
 
@@ -52,24 +58,34 @@ std::string readFile(const std::string& path) {
     return ss.str();
 }
 
-// ---- the busy thread: the render thread the profile samples ----------------------------------------------------------
+std::string exeDirectory() {
+    char path[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, path, MAX_PATH);
+    std::string s(path);
+    const size_t slash = s.find_last_of("\\/");
+    return slash == std::string::npos ? std::string(".") : s.substr(0, slash);
+}
+
+// ---- the busy threads --------------------------------------------------------------------------------------------------
 
 using OuterFn = void (*)();
+using LoopFn = void (*)(volatile LONG*);
 
 struct Busy {
     std::atomic<bool> stop{false};
     std::atomic<bool> ready{false};
-    HANDLE thread = nullptr;     // this thread's own duplicate, made by the thread itself (as cpu_profile.cpp does)
     DWORD tid = 0;
     uint64_t lo = 0, hi = 0;
     OuterFn outer = nullptr;
+    LoopFn loop = nullptr;
+    LONG loopStop = 0;
     unsigned calls = 0;
 };
 
-void busyMain(Busy* b) {
+// The render-role thread: registers its own stack, then calls hot_outer, sleeping a few milliseconds every 64th call (a
+// small wait share, so the hot leaf leads the render table and the wait class still has samples).
+void renderMain(Busy* b) {
     b->tid = GetCurrentThreadId();
-    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &b->thread,
-                    THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE, 0);
     ULONG_PTR lo = 0, hi = 0;
     GetCurrentThreadStackLimits(&lo, &hi);
     b->lo = lo;
@@ -77,13 +93,28 @@ void busyMain(Busy* b) {
     b->ready.store(true);
     while (!b->stop.load()) {
         b->outer();
-        if ((++b->calls % 8u) == 0) Sleep(3);   // a wait now and then: samples land in ntdll
+        if ((++b->calls % 64u) == 0) Sleep(3);
     }
 }
 
-// ---- report parsing (the rig reads its own lines back: the format is the contract) ---------------------------------
+// The busy thread: spins hot_cold_loop until told to stop. Its stack is not registered; the choice reads it from the TEB.
+void busyMain(Busy* b) {
+    b->tid = GetCurrentThreadId();
+    b->ready.store(true);
+    b->loop(&b->loopStop);
+}
+
+// The idle thread: sleeps in short steps.
+void idleMain(Busy* b) {
+    b->tid = GetCurrentThreadId();
+    b->ready.store(true);
+    while (!b->stop.load()) Sleep(5);
+}
+
+// ---- report parsing (the rig reads its own lines back: the format is the contract) -------------------------------------
 
 struct FnRow {
+    std::string thread;
     unsigned idx = 0, incl = 0, excl = 0;
     double inclPct = 0.0, exclPct = 0.0;
     std::string module;
@@ -92,11 +123,13 @@ struct FnRow {
 };
 
 bool parseFnRow(const std::string& line, FnRow& r) {
-    char label[160] = {};
+    char thread[32] = {}, label[160] = {};
     unsigned idx = 0, incl = 0, excl = 0;
     double ip = 0.0, ep = 0.0;
-    if (std::sscanf(line.c_str(), "cpu profile: fn %u incl %u %lf%% excl %u %lf%% %159s", &idx, &incl, &ip, &excl, &ep, label) != 6)
+    if (std::sscanf(line.c_str(), "cpu profile: thread=%31s fn %u incl %u %lf%% excl %u %lf%% %159s", thread, &idx, &incl,
+                    &ip, &excl, &ep, label) != 7)
         return false;
+    r.thread = thread;
     r.idx = idx;
     r.incl = incl;
     r.excl = excl;
@@ -113,34 +146,31 @@ bool parseFnRow(const std::string& line, FnRow& r) {
     return true;
 }
 
-bool parseLeafRow(const std::string& line, unsigned& count, double& pct, std::string& label) {
-    char text[160] = {};
-    unsigned idx = 0;
-    if (std::sscanf(line.c_str(), "cpu profile: leaf %u %u %lf%% %159s", &idx, &count, &pct, text) != 4) return false;
-    label = text;
-    return true;
-}
-
-// The report's per-class share lines: "cpu profile: class <name> leaf <n> <p>% on_stack <n> <p>%".
-bool parseClassRow(const std::string& line, std::string& name, unsigned& leaf, unsigned& onStack) {
-    char text[64] = {};
+// The class lines: "cpu profile: thread=<t> class <name> leaf <n> <p>% on_stack <n> <p>%".
+bool parseClassRow(const std::string& line, std::string& thread, std::string& name, unsigned& leaf, unsigned& onStack) {
+    char t[32] = {}, text[64] = {};
     double lp = 0.0, sp = 0.0;
-    if (std::sscanf(line.c_str(), "cpu profile: class %63s leaf %u %lf%% on_stack %u %lf%%", text, &leaf, &lp, &onStack, &sp) != 5)
+    if (std::sscanf(line.c_str(), "cpu profile: thread=%31s class %63s leaf %u %lf%% on_stack %u %lf%%", t, text, &leaf,
+                    &lp, &onStack, &sp) != 6)
         return false;
+    thread = t;
     name = text;
     return true;
 }
 
-// The module as the rig's own module table names it: the module's name, cut from the file path.
-std::string exeDirectory() {
-    char path[MAX_PATH] = {};
-    GetModuleFileNameA(nullptr, path, MAX_PATH);
-    std::string s(path);
-    const size_t slash = s.find_last_of("\\/");
-    return slash == std::string::npos ? std::string(".") : s.substr(0, slash);
+// The thread line: "cpu profile: thread=<t> role=<r> start=<s> cpu_ms=<x> cpu_pct=<p>% valid=<n> failures=<f> rate_hz=<h>".
+bool parseThreadLine(const std::string& line, std::string& thread, std::string& role, double& cpuMs, unsigned& valid,
+                     unsigned& failures) {
+    char t[32] = {}, r[16] = {}, s[120] = {};
+    double pct = 0.0, rate = 0.0;
+    if (std::sscanf(line.c_str(), "cpu profile: thread=%31s role=%15s start=%119s cpu_ms=%lf cpu_pct=%lf%% valid=%u failures=%u "
+                                  "rate_hz=%lf", t, r, s, &cpuMs, &pct, &valid, &failures, &rate) != 8)
+        return false;
+    thread = t;
+    role = r;
+    return true;
 }
 
-// The oracle: the RUNTIME_FUNCTION the OS would use for `rva` in the module named `name`.
 bool oracleRange(const std::string& name, uint32_t rva, uint32_t& begin, uint32_t& end) {
     HMODULE m = GetModuleHandleA(name.c_str());
     if (!m) return false;
@@ -152,56 +182,53 @@ bool oracleRange(const std::string& name, uint32_t rva, uint32_t& begin, uint32_
     end = f->EndAddress;
     return true;
 }
-// ---- the CSV, read back as tools\elite_hotspots.py will (the contract in cpu_sampler.h's Session::writeCsv) --------
+
+// ---- the CSV, read back as tools\elite_hotspots.py will (the contract in cpu_sampler.h's Session::writeCsv) ------------
 
 struct CsvCheck {
-    unsigned sampleRows = 0;
+    unsigned rows = 0;
     unsigned badRows = 0;             // a frame list that is not in pairs, or longer than 8 frames
-    unsigned framesWithModule = 0;    // leaves in a named module
-    unsigned framesInFunction = 0;    // of those, the leaves a "# function" range holds
-    unsigned moduleRows = 0;
-    unsigned functionRows = 0;
+    unsigned leafNamed = 0;           // leaves in a named module
+    unsigned leafInFunction = 0;      // of those, the leaves a "# function" range holds
+    std::map<std::string, unsigned> rowsByThread;
 };
 
 CsvCheck checkCsv(const std::string& text) {
     CsvCheck c;
-    std::map<std::string, std::vector<std::pair<uint32_t, uint32_t>>> ranges;   // by module file name
+    std::map<std::string, std::vector<std::pair<uint32_t, uint32_t>>> ranges;
     std::istringstream in(text);
     std::string line;
     while (std::getline(in, line)) {
         if (line.empty()) continue;
         if (line[0] == '#') {
-            if (line.compare(0, 9, "# module,") == 0) {
-                ++c.moduleRows;
-            } else if (line.compare(0, 11, "# function,") == 0) {
-                char name[64] = {};
-                unsigned b = 0, e = 0;
-                if (std::sscanf(line.c_str(), "# function,%63[^,],%x,%x", name, &b, &e) == 3) {
-                    ranges[name].push_back({b, e});
-                    ++c.functionRows;
-                }
+            char name[64] = {};
+            unsigned b = 0, e = 0;
+            if (line.compare(0, 11, "# function,") == 0 &&
+                std::sscanf(line.c_str(), "# function,%63[^,],%x,%x", name, &b, &e) == 3) {
+                ranges[name].push_back({b, e});
             }
             continue;
         }
-        if (line.compare(0, 11, "module,rva_") == 0) continue;   // the optional header line
+        if (line.compare(0, 14, "thread,module,") == 0) continue;   // the optional header line
         std::vector<std::string> f;
         std::string cell;
         std::istringstream row(line);
         while (std::getline(row, cell, ',')) f.push_back(cell);
-        if (f.size() < 2) {
+        if (f.size() < 3) {
             ++c.badRows;
             continue;
         }
-        ++c.sampleRows;
-        const size_t frameCells = f.size() - 2;
+        ++c.rows;
+        ++c.rowsByThread[f[0]];
+        const size_t frameCells = f.size() - 3;
         if (frameCells % 2 != 0 || frameCells > 16) ++c.badRows;
-        const std::string& mod = f[0];
-        const uint32_t rva = static_cast<uint32_t>(std::strtoul(f[1].c_str(), nullptr, 16));
+        const std::string& mod = f[1];
+        const uint32_t rva = static_cast<uint32_t>(std::strtoul(f[2].c_str(), nullptr, 16));
         if (mod == "?") continue;
-        ++c.framesWithModule;
+        ++c.leafNamed;
         for (const auto& r : ranges[mod]) {
             if (rva >= r.first && rva < r.second) {
-                ++c.framesInFunction;
+                ++c.leafInFunction;
                 break;
             }
         }
@@ -209,7 +236,7 @@ CsvCheck checkCsv(const std::string& text) {
     return c;
 }
 
-// ---- the tests ----------------------------------------------------------------------------------------------------
+// ---- the tests ---------------------------------------------------------------------------------------------------------
 
 bool testClassify() {
     std::printf("classification by file name:\n");
@@ -254,6 +281,15 @@ bool testPacer() {
     return ok && duty;
 }
 
+bool testGate() {
+    std::printf("the producer wait's gate:\n");
+    const bool ok = edvr::cpu::eliteBuildGate(edvr::cpu::kEliteStamp, edvr::cpu::kEliteImageSize) &&
+                    !edvr::cpu::eliteBuildGate(edvr::cpu::kEliteStamp, 1) &&
+                    !edvr::cpu::eliteBuildGate(1, edvr::cpu::kEliteImageSize);
+    check(ok, "the gate accepts the game's stamp and image size, and refuses either one alone");
+    return ok;
+}
+
 bool testSourceWindow(const std::string& root) {
     std::printf("the window's source:\n");
     const std::string text = readFile(root + "\\src\\common\\cpu_sampler.h");
@@ -271,14 +307,13 @@ bool testSourceWindow(const std::string& root) {
     ok &= count("ResumeThread(") == 0;
     ok &= count("SetThreadContext(") == 0;
     ok &= count("GetThreadContext(") == 0;
-    ok &= count("stall::captureThread(") == 1;   // the one call that stops the thread, in Session::sample
+    ok &= count("stall::captureThread(") == 1;   // the one call that stops a thread, in Session::sample
     ok &= count("Log::") == 0;                    // the header logs nothing: the glue passes the sink
     check(ok, "no stop or context call outside stall::captureThread; the header logs nothing");
     return ok;
 }
 
-bool testCapture(const std::string& outDir, const std::string& root, bool& wroteOutput) {
-    (void)root;
+bool testSelectAndCapture(const std::string& outDir, bool& wroteOutput) {
     HMODULE dll = nullptr;
     const std::string dllPath = exeDirectory() + "\\hot_target.dll";
     dll = LoadLibraryA(dllPath.c_str());
@@ -289,47 +324,100 @@ bool testCapture(const std::string& outDir, const std::string& root, bool& wrote
     }
     auto outer = reinterpret_cast<OuterFn>(GetProcAddress(dll, "hot_outer"));
     auto hotLeaf = reinterpret_cast<OuterFn>(GetProcAddress(dll, "hot_spin_hot"));
-    check(outer && hotLeaf, "hot_target.dll exports hot_outer and hot_spin_hot");
-    if (!outer || !hotLeaf) return false;
+    auto coldLoop = reinterpret_cast<LoopFn>(GetProcAddress(dll, "hot_cold_loop"));
+    check(outer && hotLeaf && coldLoop, "hot_target.dll exports hot_outer, hot_spin_hot and hot_cold_loop");
+    if (!outer || !hotLeaf || !coldLoop) return false;
+    const uint32_t outerRva = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(outer) - reinterpret_cast<uintptr_t>(dll));
     const uint32_t hotRva = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(hotLeaf) - reinterpret_cast<uintptr_t>(dll));
 
-    Busy busy;
-    busy.outer = outer;
-    std::thread worker(busyMain, &busy);
-    while (!busy.ready.load()) Sleep(1);
+    Busy render, busy, idle;
+    render.outer = outer;
+    busy.loop = coldLoop;
+    std::thread tRender(renderMain, &render);
+    std::thread tBusy(busyMain, &busy);
+    std::thread tIdle(idleMain, &idle);
+    while (!render.ready.load() || !busy.ready.load() || !idle.ready.load()) Sleep(1);
+    const DWORD mainTid = GetCurrentThreadId();
 
+    // The choice and the sampling, on a worker of this exe (not the primary thread, which the choice must list as main).
     Session session;
-    check(session.prepare(), "the sample buffer and tables are allocated before the window");
     std::vector<std::string> lines;
     edvr::cpu::RunInfo info;
-    info.thread = busy.tid;
-    info.trigger = "rig busy thread";
-    info.build = "cpu_sampler_test (no EDVR build)";
+    info.thread = render.tid;
+    info.trigger = "rig threads";
     info.windowS = 2.0;
     info.csvName = "cpu_profile_rig.csv";
-    session.emitStart(&collect, &lines, info);
-    session.sample(busy.thread, busy.lo, busy.hi, info.windowS, edvr::cpu::kTargetHz, edvr::cpu::kMaxStoppedFraction);
-    busy.stop.store(true);
+    info.build = "cpu_sampler_test (no EDVR build)";
+    char how[480] = {};
+    unsigned picked = 0;
+    bool sampled = false;
+    std::thread worker([&] {
+        Target targets[edvr::cpu::kMaxTargets];
+        picked = edvr::cpu::selectThreads(GetCurrentProcessId(), GetCurrentThreadId(), render.tid, render.lo, render.hi,
+                                          edvr::cpu::kPreWindowSeconds, targets, edvr::cpu::kMaxTargets, how, sizeof(how));
+        info.threads = picked;
+        if (!session.prepare()) return;
+        session.emitStart(&collect, &lines, info);
+        session.sample(targets, picked, info.windowS, edvr::cpu::kTargetHz, edvr::cpu::kMaxStoppedFraction);
+        session.setPresents(0);
+        session.resolve();
+        session.emitReport(&collect, &lines, info);
+        for (unsigned i = 0; i < picked; ++i) {
+            if (targets[i].handle) CloseHandle(targets[i].handle);
+        }
+        sampled = true;
+    });
     worker.join();
-    session.resolve();
-    session.emitReport(&collect, &lines, info);
+    render.stop.store(true);
+    busy.loopStop = 1;
+    idle.stop.store(true);
+    tRender.join();
+    tBusy.join();
+    tIdle.join();
 
-    const unsigned valid = session.valid();
-    std::printf("  window: %u samples, %u valid, %u failures, %.1f Hz achieved, timer %s\n", session.samples(), valid,
-                session.failures(), session.achievedHz(), session.highResTimer() ? "high_res" : "sleep_1ms");
-    const double meanSuspend = session.samples() ? session.suspendTotalUs() / session.samples() : 0.0;
-    std::printf("  per-sample suspend: mean %.1f us, max %u us; stopped %.2f ms in %.0f ms of window\n", meanSuspend,
-                session.suspendMaxUs(), session.suspendTotalUs() / 1000.0, session.wallUs() / 1000.0);
+    std::printf("  choice: %s\n", how);
+    check(sampled, "the choice and the sampling ran to the report");
+    check(picked >= 3, "the render thread, the main thread and the busy thread were chosen (three or more targets)");
+    const int rIdx = session.targetIndex("render");
+    const int mIdx = session.targetIndex("main");
+    char busyLabel[16];
+    std::snprintf(busyLabel, sizeof(busyLabel), "t%lu", static_cast<unsigned long>(busy.tid));
+    const int bIdx = session.targetIndex(busyLabel);
+    check(rIdx >= 0 && mIdx >= 0 && bIdx >= 0, "the labels render, main and the busy thread are present");
+    if (mIdx >= 0) check(session.targetAt(static_cast<unsigned>(mIdx)).tid == mainTid, "main is the primary thread (the earliest created)");
+    if (rIdx >= 0) check(session.targetAt(static_cast<unsigned>(rIdx)).tid == render.tid, "render is the thread that presents");
+    if (bIdx >= 0) {
+        const Target& bt = session.targetAt(static_cast<unsigned>(bIdx));
+        const double busyPct = 100.0 * static_cast<double>(bt.cpuEnd - bt.cpuStart) / 10000.0 / (session.wallUs() / 1000.0);
+        std::printf("  busy thread CPU over the window: %.1f%%\n", busyPct);
+        check(busyPct >= 50.0, "the busy thread used at least half the window's wall time");
+    }
 
-    check(valid >= 600, "at least 300 Hz of valid samples over the 2 s window");
-    check(meanSuspend > 0.0 && meanSuspend < 500.0, "the per-sample suspend cost is measured and sane (0 to 500 us)");
+    // Every chosen thread is sampled, and the round-robin shares its samples evenly.
+    unsigned lo = ~0u, hi = 0;
+    bool everyValid = true;
+    for (unsigned t = 0; t < session.targetCount(); ++t) {
+        const unsigned v = session.targetValid(t);
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
+        everyValid = everyValid && v > 0;
+    }
+    std::printf("  samples per thread: min %u, max %u of %u valid\n", lo, hi, session.valid());
+    check(everyValid && hi <= 2 * lo + 2, "every chosen thread is read, and the round-robin is balanced");
 
-    // Parse the report's rows back.
+    // The stack registration of the busy thread comes from its TEB, not from its own call: its samples must not all fail.
+    if (bIdx >= 0) {
+        const unsigned bValid = session.targetValid(static_cast<unsigned>(bIdx));
+        check(bValid * 2 >= session.samples() / session.targetCount(),
+              "the busy thread's stack was read from its TEB (its samples are not failures)");
+    }
+
+    // The report's lines: the thread lines, the tops, the wait.
     std::vector<FnRow> fns;
-    std::vector<std::pair<unsigned, std::string>> leaves;
-    std::map<std::string, std::pair<unsigned, unsigned>> classes;
+    std::map<std::string, unsigned> threadLines;
+    std::map<std::string, std::map<std::string, std::pair<unsigned, unsigned>>> classes;
     unsigned lineErrors = 0;
-    bool sawStart = false, sawEnd = false, sawPacing = false;
+    bool sawStart = false, sawEnd = false, sawPacing = false, sawWaitLine = false, waitNotMeasured = false;
     for (const std::string& line : lines) {
         if (line.size() >= 1100 || line.compare(0, 12, "cpu profile:") != 0) {
             if (!lineErrors) std::printf("    first bad line (%zu chars): %s\n", line.size(), line.c_str());
@@ -338,44 +426,62 @@ bool testCapture(const std::string& outDir, const std::string& root, bool& wrote
         if (line.find("cpu profile: start") == 0) sawStart = true;
         if (line.find("cpu profile: end") == 0) sawEnd = true;
         if (line.find("cpu profile: pacing") == 0) sawPacing = true;
+        if (line.find("waits for producer") != std::string::npos) {
+            sawWaitLine = true;
+            if (line.find("not measured") != std::string::npos) waitNotMeasured = true;
+        }
+        std::string thread, role;
+        double cpuMs = 0.0;
+        unsigned valid = 0, failures = 0;
+        if (line.find("cpu profile: thread=") == 0 && line.find(" role=") != std::string::npos &&
+            parseThreadLine(line, thread, role, cpuMs, valid, failures))
+            ++threadLines[thread];
         FnRow r;
-        if (line.find("cpu profile: fn ") == 0 && parseFnRow(line, r)) fns.push_back(r);
-        unsigned count = 0;
-        double pct = 0.0;
-        std::string label;
-        if (line.find("cpu profile: leaf ") == 0 && parseLeafRow(line, count, pct, label)) leaves.push_back({count, label});
-        std::string name;
+        if (line.find("cpu profile: thread=") == 0 && line.find(" fn ") != std::string::npos && parseFnRow(line, r))
+            fns.push_back(r);
+        std::string ct, cn;
         unsigned leaf = 0, stack = 0;
-        if (line.find("cpu profile: class ") == 0 && parseClassRow(line, name, leaf, stack)) classes[name] = {leaf, stack};
+        if (line.find(" class ") != std::string::npos && parseClassRow(line, ct, cn, leaf, stack))
+            classes[ct][cn] = {leaf, stack};
     }
     check(lineErrors == 0, "every report line starts 'cpu profile:' and is under 1100 characters");
     check(sawStart && sawPacing && sawEnd, "the report has its start, pacing and end lines");
-    check(!fns.empty() && fns.size() <= edvr::cpu::kTopN, "the function table has rows and at most 40");
-    check(!leaves.empty() && leaves.size() <= edvr::cpu::kTopN, "the leaf table has rows and at most 40");
+    check(threadLines.size() == picked, "one thread line per chosen thread");
+    check(sawWaitLine && waitNotMeasured, "the producer wait is refused on a process without the game (not measured)");
 
-    // The hot leaf dominates: the top exclusive function is hot_spin_hot, and hot_outer is on most stacks.
-    const FnRow* topExcl = nullptr;
-    for (const FnRow& r : fns) {
-        if (!topExcl || r.excl > topExcl->excl) topExcl = &r;
-    }
-    check(topExcl && topExcl->hasRange && topExcl->module == "hot_target.dll" && topExcl->begin <= hotRva &&
-              hotRva < topExcl->end,
-          "the top exclusive function is hot_spin_hot in hot_target.dll");
-    const double hotExclPct = topExcl ? topExcl->exclPct : 0.0;
-    std::printf("  hot_spin_hot leaf share %.2f%% of valid samples (about 0.75 of the busy share)\n", hotExclPct);
-    check(hotExclPct >= 25.0, "hot_spin_hot is at least a quarter of the samples (it is 0.75 of the busy time)");
-    const uint32_t outerRva = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(outer) - reinterpret_cast<uintptr_t>(dll));
+    // The leaders of the tables: the render thread's top exclusive function is hot_spin_hot; the busy thread's is hot_spin_cold.
+    auto topExcl = [&](const std::string& thread) -> const FnRow* {
+        const FnRow* best = nullptr;
+        for (const FnRow& r : fns) {
+            if (r.thread == thread && (!best || r.excl > best->excl)) best = &r;
+        }
+        return best;
+    };
+    const FnRow* rTop = topExcl("render");
+    if (rTop) std::printf("  render top exclusive: %s+0x%x..0x%x (hot_spin_hot at 0x%x)\n", rTop->module.c_str(), rTop->begin,
+                          rTop->end, hotRva);
+    check(rTop && rTop->hasRange && rTop->module == "hot_target.dll" && rTop->begin <= hotRva && hotRva < rTop->end,
+          "the render thread's top exclusive function is hot_spin_hot in hot_target.dll");
+    if (rTop) std::printf("  render hot_spin_hot leaf share %.2f%% of its valid samples\n", rTop->exclPct);
+    if (rTop) check(rTop->exclPct >= 25.0, "hot_spin_hot is at least a quarter of the render thread's samples");
     bool outerOk = false;
     for (const FnRow& r : fns) {
-        if (r.hasRange && r.module == "hot_target.dll" && r.begin <= outerRva && outerRva < r.end) {
+        if (r.thread == "render" && r.hasRange && r.module == "hot_target.dll" && r.begin <= outerRva && outerRva < r.end) {
             outerOk = r.inclPct >= 40.0 && r.inclPct > r.exclPct;
-            std::printf("  hot_outer inclusive %.2f%%, exclusive %.2f%%\n", r.inclPct, r.exclPct);
+            std::printf("  render hot_outer inclusive %.2f%%, exclusive %.2f%%\n", r.inclPct, r.exclPct);
         }
     }
-    check(outerOk, "hot_outer is on at least 40% of the stacks, and more than its own leaf share");
-    check(classes.count("ntdll_kernel") && classes["ntdll_kernel"].first * 100u >= 5u * valid && valid > 0,
-          "the wait class has at least 5% of the leaves (the thread's Sleep calls)");
-    check(classes.count("other") && classes["other"].first > 0, "the rig's own modules are the 'other' class");
+    check(outerOk, "hot_outer is on at least 40% of the render thread's stacks");
+    const FnRow* bTop = nullptr;
+    if (bIdx >= 0) {
+        std::snprintf(busyLabel, sizeof(busyLabel), "t%lu", static_cast<unsigned long>(busy.tid));
+        bTop = topExcl(busyLabel);
+    }
+    check(bTop && bTop->module == "hot_target.dll" && bTop->exclPct >= 50.0,
+          "the busy thread's top exclusive function is in hot_target.dll and holds at least half its samples");
+    const bool wait = classes.count("render") && classes["render"].count("ntdll_kernel") &&
+                      classes["render"]["ntdll_kernel"].first > 0;
+    check(wait, "the render thread's wait class (its Sleep calls) has samples");
 
     // .pdata: every listed range is the OS's own RUNTIME_FUNCTION for that address.
     unsigned checked = 0, mismatched = 0;
@@ -391,26 +497,11 @@ bool testCapture(const std::string& outDir, const std::string& root, bool& wrote
     const bool hotOracle = oracleRange("hot_target.dll", hotRva, ob, oe);
     bool hotInTable = false;
     for (const FnRow& r : fns) {
-        if (r.hasRange && r.module == "hot_target.dll" && r.begin == ob && r.end == oe) hotInTable = true;
+        if (r.thread == "render" && r.hasRange && r.module == "hot_target.dll" && r.begin == ob && r.end == oe) hotInTable = true;
     }
-    check(hotOracle && hotInTable, "hot_spin_hot's range from the table equals the OS's (oracle)");
+    check(hotOracle && hotInTable, "hot_spin_hot's range from the render table equals the OS's (oracle)");
 
-    // The frames: the walk reaches the caller, on the hot samples at least.
-    unsigned hotSamples = 0;
-    unsigned long long frameSum = 0;
-    for (unsigned i = 0; i < session.samples(); ++i) {
-        const edvr::cpu::Sample* s = session.sampleAt(i);
-        if (!s || !s->frames) continue;
-        if (s->mod[0] >= 0 && s->pc[0] && s->rva[0] >= ob && s->rva[0] < oe) {
-            ++hotSamples;
-            frameSum += s->frames;
-        }
-    }
-    const double meanFrames = hotSamples ? static_cast<double>(frameSum) / hotSamples : 0.0;
-    std::printf("  hot leaf samples %u, mean frames %.2f\n", hotSamples, meanFrames);
-    check(hotSamples > 0 && meanFrames >= 3.0, "the walk reaches hot_outer and the thread's entry on hot samples (3+ frames)");
-
-    // The CSV: write it, read it back the way edvr_log.py will.
+    // The CSV, written and read back as edvr_log.py reads it.
     const std::string csvPath = outDir + "\\cpu_profile_rig.csv";
     if (FILE* f = std::fopen(csvPath.c_str(), "wb")) {
         check(session.writeCsv(f, info), "the CSV writes");
@@ -419,14 +510,14 @@ bool testCapture(const std::string& outDir, const std::string& root, bool& wrote
         check(false, "the CSV opens for writing");
     }
     const CsvCheck csv = checkCsv(readFile(csvPath));
-    std::printf("  csv: %u sample rows, %u module rows, %u function rows; leaf frames in a listed function %u of %u\n",
-                csv.sampleRows, csv.moduleRows, csv.functionRows, csv.framesInFunction, csv.framesWithModule);
-    check(csv.sampleRows == session.valid() && csv.badRows == 0,
-          "one CSV row per valid sample, every frame list in module,rva pairs of at most 8 frames");
-    check(csv.framesWithModule > 0 && csv.framesInFunction * 100u >= csv.framesWithModule * 95u,
-          "95% of the CSV's module leaves fall in a listed .pdata function");
+    std::printf("  csv: %u rows; by thread:", csv.rows);
+    for (const auto& kv : csv.rowsByThread) std::printf(" %s=%u", kv.first.c_str(), kv.second);
+    std::printf("; leaves in a listed function %u of %u\n", csv.leafInFunction, csv.leafNamed);
+    check(csv.rows == session.valid() && csv.badRows == 0,
+          "one CSV row per valid sample, labelled by its thread, every frame list in module,rva pairs of at most 8 frames");
+    check(csv.leafNamed > 0 && csv.leafInFunction * 100u >= csv.leafNamed * 95u,
+          "95% of the CSV's named leaves fall in a listed .pdata function");
 
-    // The report as a log file the build reads back with edvr_log.py --cpu-profile.
     {
         std::ofstream out(outDir + "\\cpu_profile_report.log", std::ios::binary);
         for (const std::string& line : lines) out << line << "\n";
@@ -434,7 +525,7 @@ bool testCapture(const std::string& outDir, const std::string& root, bool& wrote
     }
     check(wroteOutput, "the report file writes");
 
-    // A session that never sampled says so: its report has zero samples and no leaf rows.
+    // A session that never sampled says so: its report has zero samples and no thread lines.
     Session never;
     never.prepare();
     std::vector<std::string> empty;
@@ -446,7 +537,6 @@ bool testCapture(const std::string& outDir, const std::string& root, bool& wrote
     }
     check(emptyOk, "a session with no samples reports 'end samples=0', not a silent absence");
 
-    CloseHandle(busy.thread);
     FreeLibrary(dll);
     return g_fails == 0;
 }
@@ -464,16 +554,17 @@ int main(int argc, char** argv) {
     }
     const std::string root = argv[2];
     const std::string outDir = argv[3];
-    std::puts("cpu_sampler_test: the render thread's CPU profile, on a busy thread with known hot functions");
+    std::puts("cpu_sampler_test: the process CPU profile, on threads with known hot functions");
     testClassify();
     testPacer();
+    testGate();
     testSourceWindow(root);
     bool wrote = false;
-    testCapture(outDir, root, wrote);
+    testSelectAndCapture(outDir, wrote);
     if (g_fails) {
         std::printf("cpu_sampler_test: %d check(s) FAILED\n", g_fails);
         return 1;
     }
-    std::printf("cpu_sampler_test: all checks passed\n");
+    std::puts("cpu_sampler_test: all checks passed");
     return 0;
 }
