@@ -104,8 +104,14 @@ def check(lifecycle: str, vscreen: str) -> None:
     assert "if (g_introLifecycleRegistered)" in configure_dispatch
     assert "pluginRegistryRegisterLifecycle" not in configure_dispatch
 
-    for signature in ("void vScreenRefreshConfig()", "void installVScreenFixes("):
+    for signature, owner in (("void vScreenRefreshConfig()", "s"),
+                             ("void installVScreenFixes(", "g_state")):
         site = body(vscreen, signature)
+        depth_call = (f"depthProbeConfigure(cfg, {owner}->diagnosticsOwnerAllowed,\n"
+                      f"                            {owner}->temporalAAOwnerAllowed);")
+        depth_guard = (f"if ({owner}->diagnosticsOwnerAllowed || "
+                       f"{owner}->temporalAAOwnerAllowed)\n        {depth_call}")
+        assert site.count(depth_guard) == 1
         assert site.count("selectIntroVideoLifecycle()") == 1
         assert site.count("configureIntroLifecycleStage(kIntroLifecycleLoader, cfg,") == 1
         assert site.count("configureIntroLifecycleStage(kIntroLifecycleSplashDim, cfg,") == 1
@@ -118,7 +124,7 @@ def check(lifecycle: str, vscreen: str) -> None:
                 "configureIntroLifecycleStage(kIntroLifecyclePanel, cfg,",
                 "configureIntroVideoLifecycle(cfg)", "sharpenPassConfigure(cfg)",
                 "temporalPassConfigure(cfg)", "pluginRegistryConfigure(&cfg)",
-                "depthProbeConfigure(cfg)",
+                depth_guard,
                 "configureIntroLifecycleStage(kIntroLifecycleBackdrop, cfg,")
         for stage, fallback in (("Loader", "loaderPanelConfigure"),
                                 ("SplashDim", "splashDimConfigure"),
@@ -305,6 +311,19 @@ def self_test(lifecycle: str, vscreen: str) -> None:
         vscreen, "void installVScreenFixes(",
         "configureIntroLifecycleStage(kIntroLifecyclePanel, cfg,\n                                 introPanelConfigure);",
         "configureIntroLifecycleStage(kIntroLifecycleSplashDim, cfg,\n                                 splashDimConfigure);"))
+    for signature, owner in (("void vScreenRefreshConfig()", "s"),
+                             ("void installVScreenFixes(", "g_state")):
+        depth_call = (f"depthProbeConfigure(cfg, {owner}->diagnosticsOwnerAllowed,\n"
+                      f"                            {owner}->temporalAAOwnerAllowed);")
+        depth_guard = (f"if ({owner}->diagnosticsOwnerAllowed || "
+                       f"{owner}->temporalAAOwnerAllowed)\n        {depth_call}")
+        expect_rejected(f"{signature} depth discovery loses owner admission",
+                        lifecycle, replace_in_function(
+            vscreen, signature, depth_guard, f"if (false)\n        {depth_call}"))
+        expect_rejected(f"{signature} depth discovery loses TemporalAA input",
+                        lifecycle, replace_in_function(
+            vscreen, signature, depth_call,
+            depth_call.replace(f"{owner}->temporalAAOwnerAllowed);", "false);")))
     expect_rejected("panel/curve frame order", lifecycle, replace_in_function(
         vscreen, "void vScreenFrameBoundary()",
         "tkIntroPanel.run([&] {", "tkIntroCurve.run([&] {"))

@@ -819,6 +819,20 @@ bool unwrapComfortOwnerTick(std::string& compactBody,
     return true;
 }
 
+// Diagnostics admission is a cached device-owner read. Accept only these
+// exact wrappers around already budgeted ticks; any added work stays visible
+// in the residual presentFrameBoundary check below.
+bool unwrapDiagnosticsOwnerTick(std::string& compactBody,
+                                const std::string& tickExpression) {
+    const std::string exact = "if(diagnosticsOwnerAllowed())" + tickExpression;
+    const size_t at = compactBody.find(exact);
+    if (at == std::string::npos ||
+        compactBody.find(exact, at + exact.size()) != std::string::npos)
+        return false;
+    compactBody.replace(at, exact.size(), tickExpression);
+    return true;
+}
+
 int boundarySourceChecks(const std::string& root) {
     int bad = 0;
     auto verify = [&](bool ok, const char* what) {
@@ -881,6 +895,40 @@ int boundarySourceChecks(const std::string& root) {
     const bool comfortFssModeLatchOwned = unwrapComfortOwnerTick(body, comfortFssModeLatchTick);
     verify(comfortBoundaryOwned && comfortReclaimOwned && comfortFssModeLatchOwned,
            "cached Comfort owner conditions enclose exactly the budgeted exposure boundary, reclaim, and FSS mode-latch ticks");
+    const std::string cachedDiagnosticsOwner =
+        "booldiagnosticsOwnerAllowed()noexcept{"
+        "returng_state&&g_state->diagnosticsOwnerAllowed;}";
+    const std::string compactHook = withoutSpaces(hookText);
+    const size_t diagnosticsOwnerAt = compactHook.find(cachedDiagnosticsOwner);
+    verify(diagnosticsOwnerAt != std::string::npos &&
+               compactHook.find(cachedDiagnosticsOwner,
+                                diagnosticsOwnerAt + cachedDiagnosticsOwner.size()) ==
+                   std::string::npos,
+           "Diagnostics admission is only a cached device-state read outside tick budgets");
+    const std::string diagnosticsSchedulerTick =
+        "tkSchedulerProbe.run([]{"
+        "constuint32_tframeNo=static_cast<uint32_t>(g_state->frameCounter);"
+        "if(pluginRegistryHasLifecycle(plugins::kPluginDiagnostics)){"
+        "pluginRegistryFrameLifecycle(plugins::kPluginDiagnostics,frameNo);"
+        "}else{edvrDiagnosticsSchedulerFrame(edvrDiagnosticsSchedulerState(),frameNo);}});";
+    const std::string diagnosticsVtableTick =
+        "tkVtableWatch.run([]{vtableWatchRearm();"
+        "vtableWatchFrameTick(g_state->frameCounter);});";
+    const std::string diagnosticsHotkeysTick = "tkHotkeys.run(tickHotkeys);";
+    const std::string diagnosticsProbeCensusTick =
+        "tkProbeCensus.run([]{"
+        "g_state->bareContextHook.censusTick(\"probecontext\");});";
+    const bool diagnosticsSchedulerOwned =
+        unwrapDiagnosticsOwnerTick(body, diagnosticsSchedulerTick);
+    const bool diagnosticsVtableOwned =
+        unwrapDiagnosticsOwnerTick(body, diagnosticsVtableTick);
+    const bool diagnosticsHotkeysOwned =
+        unwrapDiagnosticsOwnerTick(body, diagnosticsHotkeysTick);
+    const bool diagnosticsProbeCensusOwned =
+        unwrapDiagnosticsOwnerTick(body, diagnosticsProbeCensusTick);
+    verify(diagnosticsSchedulerOwned && diagnosticsVtableOwned &&
+               diagnosticsHotkeysOwned && diagnosticsProbeCensusOwned,
+           "cached Diagnostics admission encloses exactly the scheduler, vtable-watch, hotkey, and probe-census ticks");
     {
         std::string injected = withoutSpaces(tickBody);
         const size_t tickAt = injected.find("tkExplorerCam.run(");
@@ -914,6 +962,32 @@ int boundarySourceChecks(const std::string& root) {
                    !unwrapComfortOwnerTick(comfortBroad, comfortReclaimTick) &&
                    !unwrapComfortOwnerTick(comfortFssBroad, comfortFssModeLatchTick),
                "Comfort owner-wrapper checks reject injected unbudgeted work and arbitrary tick callbacks");
+
+        const std::string exactHotkeys =
+            "if(diagnosticsOwnerAllowed())" + diagnosticsHotkeysTick;
+        std::string diagnosticsInjected = withoutSpaces(tickBody);
+        const size_t diagnosticsAt = diagnosticsInjected.find(exactHotkeys);
+        if (diagnosticsAt != std::string::npos)
+            diagnosticsInjected.insert(diagnosticsAt +
+                std::strlen("if(diagnosticsOwnerAllowed())"), "unbudgetedProbe();");
+        std::string diagnosticsBroad = withoutSpaces(tickBody);
+        const size_t broadDiagnosticsAt = diagnosticsBroad.find(exactHotkeys);
+        if (broadDiagnosticsAt != std::string::npos)
+            diagnosticsBroad.replace(broadDiagnosticsAt,
+                std::strlen("if(diagnosticsOwnerAllowed())"),
+                "if(diagnosticsOwnerAllowed()||otherOwnerAllowed())");
+        std::string diagnosticsWrongTick = withoutSpaces(tickBody);
+        const size_t wrongTickAt = diagnosticsWrongTick.find(exactHotkeys);
+        if (wrongTickAt != std::string::npos)
+            diagnosticsWrongTick.replace(wrongTickAt, exactHotkeys.size(),
+                "if(diagnosticsOwnerAllowed())tkEliteBinds.run(tickEliteBinds);");
+        verify(diagnosticsAt != std::string::npos &&
+                   broadDiagnosticsAt != std::string::npos &&
+                   wrongTickAt != std::string::npos &&
+                   !unwrapDiagnosticsOwnerTick(diagnosticsInjected, diagnosticsHotkeysTick) &&
+                   !unwrapDiagnosticsOwnerTick(diagnosticsBroad, diagnosticsHotkeysTick) &&
+                   !unwrapDiagnosticsOwnerTick(diagnosticsWrongTick, diagnosticsHotkeysTick),
+               "Diagnostics wrapper rejects unbudgeted work, broader admission, and a different tick");
     }
     // Every tick call out, then what is left.
     size_t pos = 0;

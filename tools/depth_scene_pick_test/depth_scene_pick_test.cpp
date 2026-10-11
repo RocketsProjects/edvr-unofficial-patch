@@ -18,6 +18,8 @@ namespace {
 unsigned checks = 0;
 std::string temporalMode = "dlss";
 bool eyeDepthCaptureOn = false;
+unsigned configStringReads = 0;
+unsigned configBoolReads = 0;
 
 void check(bool value, const char* message) {
     ++checks;
@@ -66,17 +68,23 @@ ID3D11Texture2D* scene(uint32_t width, uint32_t height, int eye, bool expected) 
 }  // namespace
 
 namespace edvr {
-ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext*,const void*,size_t,const char*,const char*) { std::abort(); }
+ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext*,const void*,size_t,const char*,const char*) {
+    std::fprintf(stderr, "FAIL: unexpected depth-probe GPU shader creation in scene-pick fixture\n");
+    std::fflush(stderr);
+    std::abort();
+}
 Log& Log::get() { static Log log; return log; }
 Log::~Log() = default;
 void Log::note(const char*, ...) {}
 
 Config& Config::get() { static Config config; return config; }
 std::string Config::getString(const char* key, const char* def) const {
+    ++configStringReads;
     if (!std::strcmp(key, "fix.temporal_aa")) return temporalMode;
     return def;
 }
 bool Config::getBool(const char* key, bool def) const {
+    ++configBoolReads;
     if (!std::strcmp(key, "advanced.eye_depth_capture")) return eyeDepthCaptureOn;
     return def;
 }
@@ -453,6 +461,97 @@ int runBenchmark() {
                    edvr::kMaxTargets - 1, "indices-30-31", frequency);
     return benchmarkChecksum == 0 ? 1 : 0;
 }
+
+void testDiagnosticsOwnerDepthProbe(ID3D11Device* device) {
+    auto& config = edvr::Config::get();
+    const std::string savedMode = temporalMode;
+    const bool savedCapture = eyeDepthCaptureOn;
+    const unsigned savedStringReads = configStringReads;
+    const unsigned savedBoolReads = configBoolReads;
+    check(edvr::g_targetCount == 0 && !edvr::depthProbeWanted(),
+          "Diagnostics depth-probe fixture starts after an exclusive clean shutdown");
+
+    const DepthTarget first = makeTarget(device, 96, 64);
+    const DepthTarget second = makeTarget(device, 96, 64);
+
+    // A live diagnostic-only capture is the positive control. With TAA off,
+    // the real module still reads its capture key and discovers a depth view.
+    temporalMode = "off";
+    eyeDepthCaptureOn = true;
+    configStringReads = configBoolReads = 0;
+    edvr::depthProbeConfigure(config, true, false);
+    check(edvr::depthProbeWanted() && edvr::g_diagnosticsAllowed &&
+              configStringReads == 0 && configBoolReads == 1,
+          "Diagnostics admitted with TAA absent reads its own capture key without reading the TAA key");
+    const auto captureDraws = edvr::g_drawsThisFrame;
+    const auto captureDsvDraws = edvr::g_drawsWithDsvThisFrame;
+    edvr::depthProbeNoteDraw(nullptr, first.view.Get(), false, false);
+    check(edvr::g_targetCount == 1 &&
+              edvr::g_drawsWithDsvThisFrame == captureDsvDraws + 1 &&
+              edvr::g_drawsThisFrame == captureDraws + 1,
+          "Diagnostics-only positive control discovers the actual WARP depth target");
+    edvr::depthProbeFrameBoundary(nullptr);
+
+    // Keep the same capture setting live while denying Diagnostics. The
+    // owner-aware configure route must not read either diagnostic or TAA
+    // config, and stale module state must not keep doing draw work.
+    const auto staleTargets = edvr::g_targetCount;
+    const auto staleDraws = edvr::g_drawsThisFrame;
+    const auto staleDsvDraws = edvr::g_drawsWithDsvThisFrame;
+    const auto staleScans = edvr::g_scenePickScans;
+    configStringReads = configBoolReads = 0;
+    edvr::depthProbeConfigure(config, false, false);
+    check(!edvr::depthProbeWanted() && !edvr::g_diagnosticsAllowed &&
+              configStringReads == 0 && configBoolReads == 0,
+          "Diagnostics and TAA absent skips both cold config reads despite a stale live diagnostic capture key");
+    const auto deniedLayoutDraws = edvr::g_layoutEyeDraws;
+    const auto deniedLayoutFrames = edvr::g_layoutFrames;
+    const bool deniedSummary = edvr::g_summaryNoted;
+    edvr::depthProbeNoteDraw(nullptr, second.view.Get(), false, false);
+    edvr::depthProbeFrameBoundary(nullptr);
+    const bool deniedSampleWanted =
+        edvr::depthProbeWantsSample(first.view.Get(), second.view.Get());
+    ID3D11Texture2D* absentScene = reinterpret_cast<ID3D11Texture2D*>(uintptr_t{1});
+    const bool absentSceneFound = edvr::depthProbeSceneDepth(96, 64, 0, &absentScene);
+    check(!deniedSampleWanted && !edvr::g_stagingInFlight &&
+              !absentSceneFound && absentScene == nullptr &&
+              edvr::g_targetCount == staleTargets &&
+              edvr::g_drawsThisFrame == staleDraws &&
+              edvr::g_drawsWithDsvThisFrame == staleDsvDraws &&
+              edvr::g_scenePickScans == staleScans,
+          "Diagnostics-denied stale capture performs no target discovery, draw accounting, or scene query");
+
+    edvr::depthProbeShutdown(false);
+    temporalMode = "dlss";
+    eyeDepthCaptureOn = false;
+    configStringReads = configBoolReads = 0;
+    edvr::depthProbeConfigure(config, false, true);
+    check(edvr::depthProbeWanted() && !edvr::g_diagnosticsAllowed &&
+              configStringReads == 1 && configBoolReads == 0,
+          "TAA-only control reads the temporal mode and does not read Diagnostics capture config");
+    draws(first, 8);
+    draws(second, 10);
+    edvr::depthProbeFrameBoundary(nullptr);
+    std::uint32_t coreDraws = 0;
+    ID3D11Texture2D* coreScene = nullptr;
+    const bool coreOutput = edvr::depthProbeDrawsAtSize(96, 64, &coreDraws) &&
+        coreDraws == 10 &&
+        (coreScene = scene(96, 64, 0, true)) != nullptr &&
+        (coreScene == first.texture.Get() || coreScene == second.texture.Get());
+    check(coreOutput && !edvr::g_diagnosticsAllowed &&
+              !edvr::depthProbeWantsSample(first.view.Get(), second.view.Get()) &&
+              !edvr::g_stagingInFlight &&
+              edvr::g_layoutEyeDraws == deniedLayoutDraws &&
+              edvr::g_layoutFrames == deniedLayoutFrames &&
+              edvr::g_summaryNoted == deniedSummary,
+          "TAA-owned depth discovery and scene output continue while Diagnostics layout/sample/report work stays absent");
+
+    edvr::depthProbeShutdown(false);
+    temporalMode = savedMode;
+    eyeDepthCaptureOn = savedCapture;
+    configStringReads = savedStringReads;
+    configBoolReads = savedBoolReads;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -767,11 +866,38 @@ int main(int argc, char** argv) {
             check(refs(screen.view.Get()) == screenRefs, "census: an evicted target's view is released");
         }
 
-        const uint32_t shutdownScan = edvr::g_scenePickScans;
-        edvr::depthProbeShutdown();
+        temporalMode = "dlss";
+        eyeDepthCaptureOn = false;
+        edvr::depthProbeConfigure(edvr::Config::get(), false, true);
         scene(100, 100, 0, false);
-        check(edvr::g_scenePickScans == shutdownScan + 1 && edvr::g_targetCount == 0,
-              "shutdown invalidates cached identities and empties the table");
+        check(edvr::depthProbeWanted() && edvr::g_scenePickCache.valid &&
+                  !edvr::g_scenePickCache.result && edvr::g_scenePickCache.w == 100 &&
+                  edvr::g_scenePickCache.h == 100,
+              "shutdown precondition: an admitted same-size scene query has a valid cached empty result");
+        const uint32_t shutdownScan = edvr::g_scenePickScans;
+        edvr::depthProbeShutdown(false);
+        scene(100, 100, 0, false);
+        check(edvr::g_scenePickScans == shutdownScan && edvr::g_targetCount == 0 &&
+                  !edvr::depthProbeWanted() && !edvr::g_scenePickCache.valid,
+              "shutdown denies the stale query without scanning and empties the target table");
+
+        const uint32_t deniedShutdownScan = edvr::g_scenePickScans;
+        temporalMode = "dlss";
+        eyeDepthCaptureOn = false;
+        edvr::depthProbeConfigure(edvr::Config::get(), false, true);
+        scene(100, 100, 0, false);
+        check(edvr::depthProbeWanted() &&
+                  edvr::g_scenePickScans == deniedShutdownScan + 1 &&
+                  edvr::g_targetCount == 0 && edvr::g_scenePickCache.valid &&
+                  !edvr::g_scenePickCache.result && edvr::g_scenePickCache.w == 100 &&
+                  edvr::g_scenePickCache.h == 100,
+              "after TAA owner re-admission a fresh scan finds no target, not the pre-shutdown cached query");
+        edvr::depthProbeShutdown(false);
+
+        std::puts("depth_scene_pick_test: diagnostics owner control entered");
+        std::fflush(stdout);
+        testDiagnosticsOwnerDepthProbe(device.Get());
+        std::puts("depth_scene_pick_test: diagnostics owner control completed");
 
         std::printf("depth_scene_pick_test: %u checks passed\n", checks);
         return 0;

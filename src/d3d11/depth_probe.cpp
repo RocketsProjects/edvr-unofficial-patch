@@ -96,6 +96,7 @@ int      g_lastDrawIdx = -1;
 // Bound to the published flag depthProbeWanted() reads (depth_probe.h), so
 // the name this file and its rig have always used reads and writes it.
 bool&    g_wanted = detail::g_depthProbeWanted;
+bool     g_diagnosticsAllowed = false;
 uint32_t g_distinctThisFrame = 0;
 uint32_t g_maxDistinct = 0;
 uint32_t g_eyeFrames = 0;   // frames that had at least one eye draw
@@ -513,14 +514,23 @@ void mapText(const GridStats& g, char* out, size_t n) {
 
 }  // namespace
 
-void depthProbeConfigure(Config& cfg) {
-    const std::string mode = cfg.getString("fix.temporal_aa", "off");
+void depthProbeConfigure(Config& cfg, bool diagnosticsAllowed,
+                         bool temporalAAAllowed) {
+    g_diagnosticsAllowed = diagnosticsAllowed;
+    const std::string mode = temporalAAAllowed
+        ? cfg.getString("fix.temporal_aa", "off") : std::string("off");
     // advanced.eye_depth_capture needs the scene pair too, and the flight
     // rig runs fix.temporal_aa off -- the capture lights the probe itself
     // rather than inherit the temporal pass's switch.
     invalidateScenePickCache();
-    g_wanted = (_stricmp(mode.c_str(), "off") != 0 && !mode.empty()) ||
-               cfg.getBool("advanced.eye_depth_capture", false);
+    const bool diagnosticCapture = diagnosticsAllowed &&
+        cfg.getBool("advanced.eye_depth_capture", false);
+    g_wanted = (temporalAAAllowed && _stricmp(mode.c_str(), "off") != 0 &&
+                !mode.empty()) || diagnosticCapture;
+    if (!diagnosticsAllowed) {
+        g_layoutTarget = g_layoutRecord = -1;
+        for (auto& record : g_layoutRecords) record = LayoutRecord{};
+    }
 }
 
 namespace {
@@ -591,7 +601,7 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
         ++g_eyeRtvDrawsThisFrame;
         // The layout census: what paints the eyes while a non-eye target is
         // the busiest (g_layoutTarget, chosen at the frame boundary).
-        if (g_layoutTarget >= 0) layoutNoteEyeDraw();
+        if (g_diagnosticsAllowed && g_layoutTarget >= 0) layoutNoteEyeDraw();
     }
     if (!dsv) return;
     ++g_drawsWithDsvThisFrame;
@@ -607,7 +617,8 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
     if (idx < 0) return;
     Target& t = g_targets[idx];
     ++t.drawsThisFrame;
-    if (idx == g_layoutTarget && ctx && (t.drawsThisFrame == 1 || (t.drawsThisFrame & 1023u) == 0))
+    if (g_diagnosticsAllowed && idx == g_layoutTarget && ctx &&
+        (t.drawsThisFrame == 1 || (t.drawsThisFrame & 1023u) == 0))
         layoutSample(ctx, t.drawsThisFrame == 1);
     // The temporal pass's camera latch: the frame's FIRST draw into the
     // scene pair's depth is drawn with the scene camera by construction,
@@ -905,7 +916,7 @@ void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
 }
 
 bool depthProbeWantsSample(void* current, void* next) {
-    if (!g_wanted || !current || current == next) return false;
+    if (!g_diagnosticsAllowed || !g_wanted || !current || current == next) return false;
     const int idx = findTarget(current);
     if (idx < 0) return false;
     Target& t = g_targets[idx];
@@ -935,7 +946,7 @@ bool depthProbeWantsSample(void* current, void* next) {
 }
 
 void depthProbeSample(ID3D11DeviceContext* ctx, void* dsvPtr) {
-    if (!g_wanted || !dsvPtr || !ctx) return;
+    if (!g_diagnosticsAllowed || !g_wanted || !dsvPtr || !ctx) return;
     const int idx = findTarget(dsvPtr);
     if (idx < 0) return;
     Target& t = g_targets[idx];
@@ -1012,7 +1023,7 @@ void depthProbeSample(ID3D11DeviceContext* ctx, void* dsvPtr) {
 }
 
 void depthProbeNoteClear(ID3D11DepthStencilView* dsv, float depth) {
-    if (!g_wanted || !dsv) return;
+    if (!g_diagnosticsAllowed || !g_wanted || !dsv) return;
     const int idx = findTarget(dsv);
     if (idx < 0) return;
     g_targets[idx].clearValue = depth;
@@ -1081,7 +1092,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
         t.drawsThisFrame = t.eyeRtvDrawsThisFrame = t.nullRtvDrawsThisFrame = 0;
         // Announced after a full frame of counting, so the line carries
         // the census rather than a zero.
-        if (t.announced || t.framesSeen < 2) continue;
+        if (!g_diagnosticsAllowed || t.announced || t.framesSeen < 2) continue;
         t.announced = true;
         Log::get().note(
             "depth probe: depth target #%d -- %ux%u, texture format %s (%d), "
@@ -1102,7 +1113,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     // The layout census's target for the frame beginning now: the busiest
     // depth target, when none of its draws had an eye-sized colour target
     // beside them (THE LAYOUT CENSUS above).
-    {
+    if (g_diagnosticsAllowed) {
         int busiest = -1;
         for (int i = 0; i < g_targetCount; ++i) {
             const Target& t = g_targets[i];
@@ -1118,7 +1129,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     // scene's draws moving between pairs of targets and dropping to a
     // cockpit-only pass for a minute, which one line at 120 frames could
     // never have shown.
-    if (g_summaryNoted && g_eyeFrames > 120 &&
+    if (g_diagnosticsAllowed && g_summaryNoted && g_eyeFrames > 120 &&
         (g_censusLastMs == 0 || elapsedMs(g_censusLastMs, kCensusIntervalMs))) {
         g_censusLastMs = stampMs();
         int order[kMaxTargets];
@@ -1233,7 +1244,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             layoutReset();
         }
     }
-    if (!g_summaryNoted && g_eyeFrames >= 120) {
+    if (g_diagnosticsAllowed && !g_summaryNoted && g_eyeFrames >= 120) {
         g_summaryNoted = true;
         if (g_targetCount == 0) {
             Log::get().note(
@@ -1280,7 +1291,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     // the reference held on its texture and the copy path -- after every
     // draw of the frame has been issued, whenever in the frame the depth
     // was written. Nothing is unbound for it: a copy is not a view.
-    if (!g_stagingInFlight && ctx && g_targetCount > 0 &&
+    if (g_diagnosticsAllowed && !g_stagingInFlight && ctx && g_targetCount > 0 &&
         (g_boundaryLastMs == 0 || elapsedMs(g_boundaryLastMs, kSampleIntervalMs))) {
         for (int tries = 0; tries < g_targetCount; ++tries) {
             const int idx = static_cast<int>(g_boundaryNext++ % static_cast<uint32_t>(g_targetCount));
@@ -1315,7 +1326,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             break;
         }
     }
-    if (g_stagingInFlight && ctx) {
+    if (g_diagnosticsAllowed && g_stagingInFlight && ctx) {
         // Both stagings were written in the same call; the second is ready
         // when the first is, and DO_NOT_WAIT on each keeps this a poll.
         float vals[2][256];
@@ -1393,9 +1404,9 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     }
 }
 
-void depthProbeShutdown() {
+void depthProbeShutdown(bool diagnosticsAllowed) {
     invalidateScenePickCache();
-    if (g_targetCount > 0) {
+    if (diagnosticsAllowed && g_targetCount > 0) {
         Log::get().note("depth probe: %d depth target(s) seen at the eye draws "
                         "this session.", g_targetCount);
     }
@@ -1410,6 +1421,8 @@ void depthProbeShutdown() {
     g_lastDsv = nullptr;
     g_lastDrawDsv = nullptr;
     g_lastDrawIdx = -1;
+    g_wanted = false;
+    g_diagnosticsAllowed = false;
 }
 
 }  // namespace edvr

@@ -621,6 +621,12 @@ unsigned count(const std::string& t, const char* needle) {
     for (size_t p = t.find(needle); p != std::string::npos; p = t.find(needle, p + 1)) ++n;
     return n;
 }
+std::string compactSource(const std::string& text) {
+    std::string compact;
+    for (char c : text)
+        if (c != ' ' && c != '\t' && c != '\r' && c != '\n') compact += c;
+    return compact;
+}
 // the text of the function whose definition line starts with `head`, up to the next line that starts a column-0 `}`
 std::string body(const std::string& t, const char* head) {
     const size_t s = t.find(head);
@@ -636,8 +642,31 @@ void sourcePins(const std::string& root) {
     const std::string bat = slurp(root, "build.bat");
     check(!ex.empty() && !op.empty() && !oh.empty() && !bat.empty(), "S12.sources: the glue sources are readable from the repository root");
     const std::string disp = body(ex, "void STDMETHODCALLTYPE hookedDispatch(");
-    check(count(disp, "if (objectProbeLedgerActive()) objectProbeNoteDispatch(self, x, y, z, ") == 2,
-          "S12.hook: both of hookedDispatch's paths (deferred and owner context) ask objectProbeLedgerActive() before calling the skin ledger");
+    const std::string compactDisp = compactSource(disp);
+    const char* const foreignGate =
+        "if(diagnosticsOwnerAllowed()&&objectProbeLedgerActive())"
+        "objectProbeNoteDispatch(self,x,y,z,true);";
+    const char* const ownerGate =
+        "if(diagnosticsOwnerAllowed()&&objectProbeLedgerActive())"
+        "objectProbeNoteDispatch(self,x,y,z,false);";
+    check(count(compactDisp, foreignGate) == 1 && count(compactDisp, ownerGate) == 1,
+          "S12.hook: deferred and owner dispatches require Diagnostics admission and an active ledger before recording");
+    std::string ownerBypass = compactDisp;
+    const size_t foreignAt = ownerBypass.find(foreignGate);
+    if (foreignAt != std::string::npos)
+        ownerBypass.replace(foreignAt,
+                            std::strlen("if(diagnosticsOwnerAllowed()&&"),
+                            "if(");
+    std::string ledgerBypass = compactDisp;
+    const size_t ownerAt = ledgerBypass.find(ownerGate);
+    if (ownerAt != std::string::npos)
+        ledgerBypass.replace(ownerAt,
+                             std::strlen("if(diagnosticsOwnerAllowed()&&objectProbeLedgerActive())"),
+                             "if(diagnosticsOwnerAllowed())");
+    check(foreignAt != std::string::npos && ownerAt != std::string::npos &&
+              count(ownerBypass, foreignGate) == 0 &&
+              count(ledgerBypass, ownerGate) == 0,
+          "S12.hook: source oracle rejects bypassing either Diagnostics admission or the active-ledger gate");
     check(count(ex, "objectProbeNoteDispatch(") == 2, "S12.hook: nothing else in the exposure hook calls the skin ledger");
     check(at(disp, "drawCensusDispatch(self, x, y, z, false") != std::string::npos &&
               at(disp, "objectProbeNoteDispatch(self, x, y, z, false)") > at(disp, "drawCensusDispatch(self, x, y, z, false") &&

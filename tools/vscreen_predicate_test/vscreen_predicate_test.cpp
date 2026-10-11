@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -20,6 +21,7 @@
 #include "../../src/common/config.h"
 #include "../../src/common/plugin_cost.h"
 #include "../../src/d3d11/vscreen.h"
+#include "../../src/d3d11/object_probe.h"
 #include "../../src/d3d11/ui_layer.h"
 #include "../../src/d3d11/ui_depth.h"
 #include "../../src/d3d11/binding_shadow.h"
@@ -42,8 +44,10 @@
 #include "../../src/d3d11/sunglare_fix.h"
 #include "../../src/d3d11/sunglare_nomination_observation.h"
 #include "../../src/d3d11/plugin_registry.h"
+#include "../../src/d3d11/menu.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/vtable_hook.h"
+#include "../../src/d3d11/device_hook.h"
 
 namespace {
 using LoaderGetIndexFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Buffer**,
@@ -326,7 +330,9 @@ bool visitCensus(ID3D11DeviceContext* context, char kind, std::uint32_t count,
                  const edvr::VScreenEyeCensusTestRule* rules,
                  std::uint32_t ruleCount, void* const srvs[4],
                  std::uint64_t vsHash, std::uint64_t seed, bool traced,
-                 edvr::VScreenPredicateTestResult* result) {
+                 edvr::VScreenPredicateTestResult* result,
+                 bool diagnosticsAllowed = true,
+                 bool temporalAAAllowed = true) {
     void* priorSrvs[4]{};
     for (std::uint32_t i = 0; i < 4; ++i)
         priorSrvs[i] = edvr::bindingGet(static_cast<edvr::BindSlot>(
@@ -334,7 +340,8 @@ bool visitCensus(ID3D11DeviceContext* context, char kind, std::uint32_t count,
     void* const priorVs = edvr::bindingGet(edvr::BindSlot::Vs);
     const std::uint64_t priorHash = edvr::bindingShaderHash(edvr::BindSlot::Vs);
     bool okay = edvr::vScreenEyeCensusPredicateTestVisit(
-        context, kind, count, rules, ruleCount, srvs, vsHash, seed, traced, result);
+        context, kind, count, rules, ruleCount, srvs, vsHash, seed, traced,
+        result, diagnosticsAllowed, temporalAAAllowed);
     for (std::uint32_t i = 0; i < 4; ++i)
         okay &= check(edvr::bindingGet(static_cast<edvr::BindSlot>(
                           static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i)) == priorSrvs[i],
@@ -2767,60 +2774,238 @@ bool testNvPrecedenceSubprocesses() {
     return true;
 }
 
-bool testOnFootOwnerLegacyGateRegistration() {
-    const auto checkInventory = [](bool cockpitAllowed, bool comfortAllowed,
-                                   bool introAllowed, bool onFootAllowed,
-                                   std::uint32_t expectedRows,
-                                   std::uint32_t expectedCockpit,
-                                   std::uint32_t expectedComfort,
-                                   std::uint32_t expectedIntro,
-                                   std::uint32_t expectedShared,
-                                   std::uint32_t expectedOnFoot,
-                                   const char* label) {
-        std::uint32_t rows = 0, cockpit = 0, comfort = 0, intro = 0,
-                      shared = 0, onFoot = 0;
-        const bool registered = edvr::vScreenLegacyGateRegistrationTest(
-            cockpitAllowed, comfortAllowed, introAllowed, onFootAllowed,
-            &rows, &cockpit, &comfort, &intro, &shared, &onFoot);
-        return check(registered && rows == expectedRows &&
-                         cockpit == expectedCockpit && comfort == expectedComfort &&
-                         intro == expectedIntro && shared == expectedShared &&
-                         onFoot == expectedOnFoot,
-                     label);
-    };
+bool testDiagnosticsOwnerLegacyGateRegistration() {
     bool okay = true;
-    okay &= checkInventory(false, false, false, false, 11, 0, 0, 0, 0, 0,
-                           "real legacy registry retains only eleven Core rows when every optional owner is absent");
-    okay &= checkInventory(true, false, false, false, 18, 6, 0, 0, 1, 0,
-                           "Cockpit-only admission restores six stored callbacks and shared glare");
-    okay &= checkInventory(false, true, false, false, 16, 0, 4, 0, 1, 0,
-                           "Comfort-only admission restores four stored callbacks and shared glare");
-    okay &= checkInventory(false, false, true, false, 16, 0, 0, 5, 0, 0,
-                           "Intro-only admission restores exactly five callbacks; shared curve service is tested separately");
-    okay &= checkInventory(false, false, false, true, 14, 0, 0, 0, 0, 3,
-                           "On-foot-only admission restores its exact three callbacks including panel-curve classification");
-    okay &= checkInventory(true, true, false, false, 22, 6, 4, 0, 1, 0,
-                           "Cockpit-plus-Comfort retains exact callbacks with Intro and On-foot absent");
-    okay &= checkInventory(true, false, true, false, 23, 6, 0, 5, 1, 0,
-                           "Cockpit-plus-Intro keeps exact callbacks and shared glare");
-    okay &= checkInventory(true, false, false, true, 21, 6, 0, 0, 1, 3,
-                           "Cockpit-plus-On-foot keeps exact callbacks and shared glare");
-    okay &= checkInventory(false, true, true, false, 21, 0, 4, 5, 1, 0,
-                           "Comfort-plus-Intro keeps shared glare with exact callback counts");
-    okay &= checkInventory(false, true, false, true, 19, 0, 4, 0, 1, 3,
-                           "Comfort-plus-On-foot keeps shared glare with exact callback counts");
-    okay &= checkInventory(false, false, true, true, 19, 0, 0, 5, 0, 3,
-                           "Intro-plus-On-foot has exact separate curve and On-foot callback registrations");
-    okay &= checkInventory(true, true, true, false, 27, 6, 4, 5, 1, 0,
-                           "three owners admit exact callbacks while On-foot stays absent");
-    okay &= checkInventory(true, true, false, true, 25, 6, 4, 0, 1, 3,
-                           "Cockpit, Comfort and On-foot admit exact callbacks while Intro stays absent");
-    okay &= checkInventory(true, false, true, true, 26, 6, 0, 5, 1, 3,
-                           "Cockpit, Intro and On-foot admit exact callbacks while Comfort stays absent");
-    okay &= checkInventory(false, true, true, true, 24, 0, 4, 5, 1, 3,
-                           "Comfort, Intro and On-foot admit exact callbacks while Cockpit stays absent");
-    okay &= checkInventory(true, true, true, true, 30, 6, 4, 5, 1, 3,
-                           "all owners restore exact family callbacks and the unchanged thirty-row table");
+    for (unsigned mask = 0; mask < 64; ++mask) {
+        const bool cockpit = (mask & 1u) != 0;
+        const bool comfort = (mask & 2u) != 0;
+        const bool intro = (mask & 4u) != 0;
+        const bool onFoot = (mask & 8u) != 0;
+        const bool diagnostics = (mask & 16u) != 0;
+        const bool temporalAA = (mask & 32u) != 0;
+        std::uint32_t rows = 0, gotCockpit = 0, gotComfort = 0, gotIntro = 0;
+        std::uint32_t glare = 0, gotOnFoot = 0, gotDiagnostics = 0, temporalShared = 0;
+        const bool registered = edvr::vScreenLegacyGateRegistrationTest(
+            cockpit, comfort, intro, onFoot, diagnostics, temporalAA,
+            &rows, &gotCockpit, &gotComfort, &gotIntro, &glare, &gotOnFoot,
+            &gotDiagnostics, &temporalShared);
+        const std::uint32_t expectedRows = 2u + (cockpit ? 6u : 0u) +
+            (comfort ? 4u : 0u) + (intro ? 5u : 0u) + (onFoot ? 3u : 0u) +
+            ((cockpit || comfort) ? 1u : 0u) + (diagnostics ? 7u : 0u) +
+            ((diagnostics || temporalAA) ? 2u : 0u);
+        const bool exact = registered && rows == expectedRows &&
+            gotCockpit == (cockpit ? 6u : 0u) &&
+            gotComfort == (comfort ? 4u : 0u) &&
+            gotIntro == (intro ? 5u : 0u) &&
+            glare == ((cockpit || comfort) ? 1u : 0u) &&
+            gotOnFoot == (onFoot ? 3u : 0u) &&
+            gotDiagnostics == (diagnostics ? 7u : 0u) &&
+            temporalShared == ((diagnostics || temporalAA) ? 2u : 0u);
+        if (!exact) {
+            std::fprintf(stderr,
+                "Diagnostics owner registry mismatch mask=%u rows=%u expected=%u "
+                "callbacks=%u/%u/%u glare=%u onfoot=%u diagnostics=%u temporal-shared=%u\n",
+                mask, rows, expectedRows, gotCockpit, gotComfort, gotIntro,
+                glare, gotOnFoot, gotDiagnostics, temporalShared);
+        }
+        okay &= check(exact,
+            "actual legacy registry preserves exact callback inventory across all 64 owner combinations");
+    }
+    return okay;
+}
+
+struct DiagnosticsOwnerHostFixture final {
+    const wchar_t* scratchParent = nullptr;
+    edvr::DiagnosticsOwnerHostTestResult result{};
+    bool hostRan = false;
+    int ownerA = 0;
+    int ownerB = 0;
+};
+
+void diagnosticsOwnerFixtureActionA(void*) {}
+void diagnosticsOwnerFixtureActionB(void*) {}
+
+void runDiagnosticsOwnerHostWithSeededActions(void* opaque) {
+    auto* const fixture = static_cast<DiagnosticsOwnerHostFixture*>(opaque);
+    if (!fixture) return;
+    edvr::menuRegisterAction("fixture-preserve-a", "fixture-hint-a",
+                             &diagnosticsOwnerFixtureActionA, &fixture->ownerA);
+    edvr::menuRegisterAction("fixture-preserve-b", "fixture-hint-b",
+                             &diagnosticsOwnerFixtureActionB, &fixture->ownerB);
+    fixture->hostRan = edvr::deviceHookDiagnosticsOwnerTest(
+        fixture->scratchParent, &fixture->result);
+}
+
+bool testDiagnosticsOwnerDeviceHookHost() {
+    wchar_t scratchParent[MAX_PATH]{};
+    const DWORD chars = GetModuleFileNameW(nullptr, scratchParent, MAX_PATH);
+    wchar_t* const separator = chars && chars < MAX_PATH
+        ? std::wcsrchr(scratchParent, L'\\') : nullptr;
+    if (!separator) return check(false, "Diagnostics host fixture locates its workspace-owned scratch parent");
+    separator[1] = L'\0';
+    if (wcscat_s(scratchParent, L"diagnostics-owner-fixture-temp") != 0 ||
+        !CreateDirectoryW(scratchParent, nullptr))
+        return check(false, "Diagnostics host fixture creates a clean workspace-owned scratch parent");
+
+    DiagnosticsOwnerHostFixture fixture{};
+    fixture.scratchParent = scratchParent;
+    edvr::MenuActionRegistryTestSnapshot registry{};
+    const bool transaction = edvr::menuTestActionRegistryTransaction(
+        &runDiagnosticsOwnerHostWithSeededActions, &fixture, &registry);
+    const BOOL parentRemoved = RemoveDirectoryW(scratchParent);
+    const auto& result = fixture.result;
+    const bool passed = transaction && fixture.hostRan && parentRemoved &&
+                     registry.during == registry.before + 2 &&
+                     registry.after == registry.before && registry.restored &&
+                     result.deniedCoreToggleBound &&
+                     result.deniedDiagnosticHotkeysBound == 0 &&
+                     result.deniedDiagnosticActionsAdded == 0 &&
+                     !result.deniedFlatCaptureCreatedDirectory &&
+                     !result.deniedFlatCaptureCreatedFile &&
+                     result.allowedCoreToggleBound &&
+                     result.allowedDiagnosticHotkeysBound == 3 &&
+                     result.allowedDiagnosticActionsAdded == 4 &&
+                     result.allowedFlatCaptureCreatedDirectory &&
+                     result.allowedFlatCaptureCreatedFile &&
+                     result.actionRegistryRestored &&
+                     result.temporaryArtifactsCleaned;
+    if (!passed)
+        std::fprintf(stderr,
+                     "DIAGNOSTICS_HOST_DETAIL transaction=%u host=%u parent_removed=%u registry=%llu/%llu/%llu restored=%u denied=%u,%u,%u,%u,%u allowed=%u,%u,%u,%u,%u actions_restored=%u artifacts_cleaned=%u\n",
+                     transaction ? 1u : 0u, fixture.hostRan ? 1u : 0u,
+                     parentRemoved ? 1u : 0u,
+                     static_cast<unsigned long long>(registry.before),
+                     static_cast<unsigned long long>(registry.during),
+                     static_cast<unsigned long long>(registry.after),
+                     registry.restored ? 1u : 0u,
+                     result.deniedCoreToggleBound ? 1u : 0u,
+                     result.deniedDiagnosticHotkeysBound,
+                     result.deniedDiagnosticActionsAdded,
+                     result.deniedFlatCaptureCreatedDirectory ? 1u : 0u,
+                     result.deniedFlatCaptureCreatedFile ? 1u : 0u,
+                     result.allowedCoreToggleBound ? 1u : 0u,
+                     result.allowedDiagnosticHotkeysBound,
+                     result.allowedDiagnosticActionsAdded,
+                     result.allowedFlatCaptureCreatedDirectory ? 1u : 0u,
+                     result.allowedFlatCaptureCreatedFile ? 1u : 0u,
+                     result.actionRegistryRestored ? 1u : 0u,
+                     result.temporaryArtifactsCleaned ? 1u : 0u);
+    return check(passed,
+                 "real device-hook Diagnostics denial preserves seeded unrelated menu actions and the Core toggle, skips diagnostic bindings/actions/files, and admitted controls prove all three host paths");
+}
+
+bool testDiagnosticsOwnerDeniedObjectProbe(
+    ID3D11Device* device, ID3D11DeviceContext* context) {
+    if (!device || !context)
+        return check(false, "Diagnostics object-probe fixture has a real WARP device/context");
+
+    auto& config = edvr::Config::get();
+    const bool savedObjectProbe = config.getBool("advanced.object_probe", false);
+    const bool savedEyeDepthCapture = config.getBool("advanced.eye_depth_capture", false);
+    const bool savedCullCapture = config.getBool("advanced.cull_gate_capture", false);
+    const std::string savedTemporalMode = config.getString("fix.temporal_aa", "off");
+    ID3D11ShaderResourceView* priorSrvRaw = nullptr;
+    context->VSGetShaderResources(33, 1, &priorSrvRaw);
+    ComPtr<ID3D11ShaderResourceView> priorSrv;
+    priorSrv.Attach(priorSrvRaw);
+    const auto savedResourceAttempts = g_resourceAttempts;
+    const auto savedGetResource = g_originalGetResource;
+
+    bool okay = check(!edvr::objectProbeWantsDraws() &&
+                          !edvr::objectProbeLedgerActive(),
+                      "Diagnostics object-probe fixture starts with an exclusive clean module state");
+    ComPtr<ID3D11Buffer> pool;
+    ComPtr<ID3D11ShaderResourceView> poolSrv;
+    D3D11_BUFFER_DESC poolDesc{};
+    poolDesc.ByteWidth = 336;
+    poolDesc.Usage = D3D11_USAGE_DEFAULT;
+    poolDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    poolDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    poolDesc.StructureByteStride = 336;
+    HRESULT hr = device->CreateBuffer(&poolDesc, nullptr, &pool);
+    okay &= check(SUCCEEDED(hr) && pool,
+                  "WARP creates a real 336-byte object-probe pool candidate");
+    if (pool) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+        viewDesc.Format = DXGI_FORMAT_UNKNOWN;
+        viewDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        viewDesc.Buffer.NumElements = 1;
+        hr = device->CreateShaderResourceView(pool.Get(), &viewDesc, &poolSrv);
+    }
+    okay &= check(SUCCEEDED(hr) && poolSrv,
+                  "WARP creates the actual structured-buffer SRV used by objectProbeOnEyeDraw");
+
+    if (okay && poolSrv) {
+        ID3D11ShaderResourceView* raw = poolSrv.Get();
+        context->VSSetShaderResources(33, 1, &raw);
+        edvr::Config::get().set("advanced.object_probe", "1");
+        edvr::Config::get().set("advanced.eye_depth_capture", "0");
+        edvr::Config::get().set("advanced.cull_gate_capture", "0");
+        edvr::Config::get().set("fix.temporal_aa", "off");
+        edvr::objectProbeConfigure(config, true, false);
+        edvr::objectProbeFrameBoundary(context); // primes the real bounded t33 discovery query.
+        edvr::VTableHook resourceHook;
+        const bool hookReady = hookResource(resourceHook, poolSrv.Get());
+        okay &= check(hookReady,
+                      "object-probe WARP GetResource query counter installs on the real candidate SRV");
+        constexpr auto objectSite = static_cast<std::uint16_t>(
+            edvr::draw_ladder::SiteId::kObjectProbe);
+        edvr::VScreenPredicateTestResult result{};
+        if (hookReady) g_resourceAttempts = 0;
+        const bool deniedVisited = edvr::vScreenPredicateTestVisit(
+            objectSite, context, context, 0, false, true, &result,
+            true, true, 'N', 6, 1, 0, 0, 0,
+            true, true, false, false, true);
+        okay &= check(deniedVisited && result.token.valid() &&
+                           result.siteResult.outcome == edvr::draw_ladder::SiteOutcome::Observed &&
+                          edvr::objectProbeWantsDraws() && hookReady &&
+                          g_resourceAttempts == 0,
+                      "Diagnostics-denied real VScreen object visitor leaves stale active module state intact but performs no candidate resource query");
+
+        if (hookReady) g_resourceAttempts = 0;
+        const bool diagnosticsVisited = edvr::vScreenPredicateTestVisit(
+            objectSite, context, context, 0, false, true, &result,
+            true, true, 'N', 6, 1, 0, 0, 0,
+            true, true, true, false, true);
+        okay &= check(diagnosticsVisited && result.token.valid() &&
+                           result.siteResult.outcome == edvr::draw_ladder::SiteOutcome::Observed &&
+                          hookReady && g_resourceAttempts > 0,
+                      "Diagnostics-admitted actual visitor reaches objectProbeOnEyeDraw and proves its WARP resource-query counter");
+        if (hookReady) resourceHook.uninstall();
+
+        // The same discovery path is shared with Temporal AA. Clear the
+        // Diagnostics module state, then make only the TAA owner live.
+        edvr::objectProbeShutdown();
+        edvr::Config::get().set("advanced.object_probe", "0");
+        edvr::Config::get().set("fix.temporal_aa", "on");
+        edvr::objectProbeConfigure(config, false, true);
+        edvr::objectProbeFrameBoundary(context);
+        edvr::VTableHook temporalResourceHook;
+        const bool temporalHookReady = hookResource(temporalResourceHook, poolSrv.Get());
+        okay &= check(temporalHookReady,
+                      "TAA-owned object discovery reinstalls the connected WARP query counter");
+        if (temporalHookReady) g_resourceAttempts = 0;
+        const bool temporalVisited = edvr::vScreenPredicateTestVisit(
+            objectSite, context, context, 0, false, true, &result,
+            true, true, 'N', 6, 1, 0, 0, 0,
+            true, true, false, true, true);
+        okay &= check(temporalVisited && result.token.valid() &&
+                           result.siteResult.outcome == edvr::draw_ladder::SiteOutcome::Observed &&
+                          temporalHookReady && g_resourceAttempts > 0,
+                      "Diagnostics absent with Temporal AA present preserves shared object discovery in the real visitor");
+        if (temporalHookReady) temporalResourceHook.uninstall();
+        edvr::objectProbeShutdown();
+        context->VSSetShaderResources(33, 1, priorSrv.GetAddressOf());
+    }
+
+    config.set("advanced.object_probe", savedObjectProbe ? "1" : "0");
+    config.set("advanced.eye_depth_capture", savedEyeDepthCapture ? "1" : "0");
+    config.set("advanced.cull_gate_capture", savedCullCapture ? "1" : "0");
+    config.set("fix.temporal_aa", savedTemporalMode.c_str());
+    g_resourceAttempts = savedResourceAttempts;
+    g_originalGetResource = savedGetResource;
+    if (edvr::objectProbeWantsDraws() || edvr::objectProbeLedgerActive())
+        edvr::objectProbeShutdown();
     return okay;
 }
 
@@ -4284,6 +4469,21 @@ int main(int argc, char** argv) {
         {
             edvr::VTableHook resourceHook;
             okay &= check(srv && hookResource(resourceHook, srv), "hook real SRV GetResource slot seven");
+            edvr::VScreenEyeCensusTestRule deniedRule{};
+            deniedRule.kind = 'N';
+            deniedRule.count = 3;
+            deniedRule.filters[0] = {kFilterSize, 64, 32};
+            g_resourceAttempts = 0;
+            okay &= check(visitCensus(immediate, 'N', 3, &deniedRule, 1,
+                                      srvs, 0, 8, true, &eyeResult, false, true) &&
+                              eyeResult.token.valid() &&
+                              eyeResult.siteResult.outcome == SiteOutcome::Declined &&
+                              eyeResult.censusSkippedAfter == 8 &&
+                              g_resourceAttempts == 0 &&
+                              edvr::draw_ladder_trace::eyeCensusFactCountForTest(eyeResult.token) == 0,
+                          "Diagnostics-absent EyeCensus visitor keeps its trace token but skips stale rule/resource work while TAA remains admitted");
+
+            g_resourceAttempts = 0;
             okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 4, true, &eyeResult) &&
                               eyeResult.siteResult.outcome == SiteOutcome::Declined &&
                               readEyeCensus(eyeResult, &eyeFact) &&
@@ -4832,7 +5032,9 @@ int main(int argc, char** argv) {
         okay &= testIntroOwnerDeniedVisitor(device, immediate);
         okay &= testOnFootOwnerDeniedPanelCurve(device, immediate);
         okay &= testOnFootOwnerDeniedFootprint(device, immediate);
-        okay &= testOnFootOwnerLegacyGateRegistration();
+        okay &= testDiagnosticsOwnerLegacyGateRegistration();
+        okay &= testDiagnosticsOwnerDeviceHookHost();
+        okay &= testDiagnosticsOwnerDeniedObjectProbe(device, immediate);
         for (std::uint32_t i = 0; i < 4; ++i)
             edvr::bindingSet(static_cast<edvr::BindSlot>(
                                  static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i), nullptr);

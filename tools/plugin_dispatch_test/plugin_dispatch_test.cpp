@@ -1582,6 +1582,151 @@ void testIntroStartupAdmissionSnapshot() {
           "malformed published Intro decision fails closed");
 }
 
+void testDiagnosticsTemporalStartupAdmissionPolicy() {
+    using namespace edvr::plugin_selection;
+    using namespace edvr::plugin_selection::admission_v1;
+    using namespace edvr::plugin_selection::admission_v1::test_seam;
+
+    // The generated catalog currently has no selectable groups. This ready
+    // eight-row catalog exercises the shared policy algorithm only; it is not
+    // a published wire decision or a runtime-admission claim.
+    GroupV1 readyGroups[edvr::plugins::kPluginCount]{};
+    for (std::uint32_t i = 0; i < edvr::plugins::kPluginCount; ++i) {
+        readyGroups[i] = {i,
+            edvr::plugins::kVrProfileBit | edvr::plugins::kFlatProfileBit,
+            edvr::plugins::kVrProfileBit | edvr::plugins::kFlatProfileBit};
+    }
+    const std::uint8_t fingerprint[32] = {0x13, 0x37, 0x42};
+    constexpr std::uint32_t kFixtureSchema = 2;
+    CatalogViewV1 readyCatalog{readyGroups, edvr::plugins::kPluginCount,
+                               kFixtureSchema, fingerprint};
+    const auto makeDecision = [&](std::uint32_t selectedMask) {
+        PluginSelectionSnapshotV1 snapshot{};
+        snapshot.structSize = sizeof(snapshot);
+        snapshot.abiVersion = kPluginSelectionSnapshotVersionV1;
+        snapshot.recordState = static_cast<std::uint32_t>(
+            PluginSelectionSnapshotStateV1::Supported);
+        snapshot.installedProfile = snapshot.recordProfile =
+            static_cast<std::uint32_t>(PluginSelectionProfileV1::Vr);
+        snapshot.recordSchemaVersion = 1;
+        snapshot.recordCatalogSchemaVersion =
+            snapshot.compiledCatalogSchemaVersion = kFixtureSchema;
+        snapshot.recordedPluginMask = selectedMask;
+        std::memcpy(snapshot.catalogFingerprint, fingerprint,
+                    sizeof(snapshot.catalogFingerprint));
+        return decideWithCatalog(S_OK, &snapshot,
+            PluginSelectionProfileV1::Vr, 0x12345000u, readyCatalog);
+    };
+    constexpr std::uint32_t diagnosticsBit =
+        1u << edvr::plugins::kPluginDiagnostics;
+    constexpr std::uint32_t temporalAaBit =
+        1u << edvr::plugins::kPluginTemporalAa;
+    constexpr std::uint32_t introBit = 1u << edvr::plugins::kPluginIntro;
+
+    const DecisionV1 diagnosticsOnly = makeDecision(diagnosticsBit);
+    const auto diagnosticsDecision = edvr::introStartupAdmissionWithCatalog(
+        diagnosticsOnly, true, readyCatalog);
+    const bool diagnosticsAllowed = ownerAllowedForStartupWithCatalog(
+        diagnosticsOnly, edvr::plugins::kPluginDiagnostics, readyCatalog);
+    const bool temporalAaAllowed = ownerAllowedForStartupWithCatalog(
+        diagnosticsOnly, edvr::plugins::kPluginTemporalAa, readyCatalog);
+    check(diagnosticsOnly.mode == static_cast<std::uint32_t>(Mode::AdmittedSelection) &&
+              selectedWithCatalog(diagnosticsOnly, edvr::plugins::kPluginDiagnostics,
+                                  readyCatalog) &&
+              !selectedWithCatalog(diagnosticsOnly, edvr::plugins::kPluginTemporalAa,
+                                   readyCatalog) &&
+              diagnosticsDecision.strictModeSelection &&
+              !diagnosticsDecision.strictSelection && diagnosticsAllowed &&
+              !temporalAaAllowed &&
+              edvr::strictAdmissionNeedsVScreenHooks(
+                  diagnosticsDecision, diagnosticsAllowed, temporalAaAllowed),
+          "controlled strict Diagnostics-only selection keeps the shared startup path awake");
+
+    const DecisionV1 temporalAaOnly = makeDecision(temporalAaBit);
+    const auto temporalAaDecision = edvr::introStartupAdmissionWithCatalog(
+        temporalAaOnly, true, readyCatalog);
+    const bool temporalOnlyDiagnosticsAllowed = ownerAllowedForStartupWithCatalog(
+        temporalAaOnly, edvr::plugins::kPluginDiagnostics, readyCatalog);
+    const bool temporalOnlyAllowed = ownerAllowedForStartupWithCatalog(
+        temporalAaOnly, edvr::plugins::kPluginTemporalAa, readyCatalog);
+    check(temporalAaOnly.mode == static_cast<std::uint32_t>(Mode::AdmittedSelection) &&
+              selectedWithCatalog(temporalAaOnly, edvr::plugins::kPluginTemporalAa,
+                                  readyCatalog) &&
+              !selectedWithCatalog(temporalAaOnly, edvr::plugins::kPluginDiagnostics,
+                                   readyCatalog) &&
+              temporalAaDecision.strictModeSelection &&
+              !temporalAaDecision.strictSelection && !temporalOnlyDiagnosticsAllowed &&
+              temporalOnlyAllowed &&
+              edvr::strictAdmissionNeedsVScreenHooks(
+                  temporalAaDecision, temporalOnlyDiagnosticsAllowed,
+                  temporalOnlyAllowed),
+          "controlled strict Temporal-AA-only selection keeps the shared startup path awake");
+
+    const DecisionV1 introOnly = makeDecision(introBit);
+    const auto introDecision = edvr::introStartupAdmissionWithCatalog(
+        introOnly, true, readyCatalog);
+    const bool introDiagnosticsAllowed = ownerAllowedForStartupWithCatalog(
+        introOnly, edvr::plugins::kPluginDiagnostics, readyCatalog);
+    const bool introTemporalAllowed = ownerAllowedForStartupWithCatalog(
+        introOnly, edvr::plugins::kPluginTemporalAa, readyCatalog);
+    check(introDecision.strictSelection && introDecision.strictModeSelection &&
+              introDecision.ownerAllowed && !introDiagnosticsAllowed &&
+              !introTemporalAllowed &&
+              !edvr::strictAdmissionNeedsVScreenHooks(
+                  introDecision, introDiagnosticsAllowed, introTemporalAllowed),
+          "strict Intro-only selection retains Intro startup without waking the Diagnostics/Temporal-AA exception");
+
+    const DecisionV1 strictNone = makeDecision(0);
+    const auto noneDecision = edvr::introStartupAdmissionWithCatalog(
+        strictNone, true, readyCatalog);
+    check(strictNone.mode == static_cast<std::uint32_t>(Mode::AdmittedSelection) &&
+              !noneDecision.strictModeSelection && !noneDecision.ownerAllowed &&
+              !edvr::strictAdmissionNeedsVScreenHooks(noneDecision, false, false),
+          "an admitted empty selection does not wake an ownerless VScreen path");
+
+    const auto generated = contract();
+    PluginSelectionSnapshotV1 current{};
+    current.structSize = sizeof(current);
+    current.abiVersion = kPluginSelectionSnapshotVersionV1;
+    current.recordState = static_cast<std::uint32_t>(
+        PluginSelectionSnapshotStateV1::Supported);
+    current.installedProfile = current.recordProfile =
+        static_cast<std::uint32_t>(PluginSelectionProfileV1::Vr);
+    current.recordSchemaVersion = 1;
+    current.recordCatalogSchemaVersion = current.compiledCatalogSchemaVersion =
+        generated.catalogSchemaVersion;
+    std::memcpy(current.catalogFingerprint, generated.catalogFingerprint,
+                sizeof(current.catalogFingerprint));
+    const DecisionV1 generatedLegacy = decide(S_OK, &current,
+        PluginSelectionProfileV1::Vr, 0x12345000u);
+    const auto legacy = edvr::introStartupAdmission(generatedLegacy, true);
+    check(generated.supportedProfileMask == 0 &&
+              generatedLegacy.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
+              legacy.ownerAllowed && !legacy.strictSelection &&
+              !legacy.strictModeSelection &&
+              ownerAllowedForStartup(generatedLegacy,
+                                     edvr::plugins::kPluginDiagnostics) &&
+              ownerAllowedForStartup(generatedLegacy,
+                                     edvr::plugins::kPluginTemporalAa) &&
+              !edvr::strictAdmissionNeedsVScreenHooks(legacy, true, true),
+          "real generated empty catalog remains Legacy-compatible and supplies no strict-positive runtime evidence");
+
+    const auto failedQuery = edvr::introStartupAdmissionWithCatalog(
+        diagnosticsOnly, false, readyCatalog);
+    DecisionV1 malformed = diagnosticsOnly;
+    malformed.reserved[0] = 1;
+    const auto malformedDecision = edvr::introStartupAdmissionWithCatalog(
+        malformed, true, readyCatalog);
+    check(!failedQuery.ownerAllowed && !failedQuery.strictSelection &&
+              !failedQuery.strictModeSelection &&
+              !edvr::strictAdmissionNeedsVScreenHooks(failedQuery, true, true) &&
+              !malformedDecision.ownerAllowed &&
+              !malformedDecision.strictModeSelection &&
+              !edvr::strictAdmissionNeedsVScreenHooks(
+                  malformedDecision, true, true),
+          "failed and malformed snapshots fail closed even when cached Diagnostics and Temporal-AA owner flags are present");
+}
+
 void pilotAndDiagnosticsLifecycleAdmission() {
     constexpr uint32_t kCockpit = edvr::plugins::kPluginCockpitVisuals;
     constexpr uint32_t kDiagnostics = edvr::plugins::kPluginDiagnostics;
@@ -1711,6 +1856,7 @@ int main(int argc, char** argv) {
     scannerComfortLifecycleDispatch();
     comfortOwnerDeniedLifecycleFallbacks();
     testIntroStartupAdmissionSnapshot();
+    testDiagnosticsTemporalStartupAdmissionPolicy();
     pilotAndDiagnosticsLifecycleAdmission();
     std::printf("PASS: plugin dispatch (%u checks)\n", checks);
     return 0;

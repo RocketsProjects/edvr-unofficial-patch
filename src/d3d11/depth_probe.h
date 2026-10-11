@@ -43,7 +43,8 @@ namespace edvr {
 class Config;
 
 // Reads fix.temporal_aa: the probe is wanted while the pass is.
-void depthProbeConfigure(Config& cfg);
+void depthProbeConfigure(Config& cfg, bool diagnosticsAllowed = true,
+                         bool temporalAAAllowed = true);
 
 // EVERY draw on the owner context, with the depth-stencil view bound for
 // it (the binding shadow's Dsv0, which may be null), whether the colour
@@ -177,7 +178,7 @@ bool depthProbeCurrentSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye,
 // the head). 0 until the census has settled.
 uint32_t depthProbeSceneDraws();
 
-void depthProbeShutdown();
+void depthProbeShutdown(bool diagnosticsAllowed = true);
 
 // The view format that reads the depth channel of a texture of this
 // format, and the typeless format an owned copy of it must have. UNKNOWN

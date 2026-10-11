@@ -4,6 +4,12 @@
 
 #include <array>
 
+namespace edvr {
+// The isolated DirectInput rig omits device_hook.cpp; its config path is not
+// testing Diagnostics admission or the input probe.
+bool diagnosticsOwnerAllowed() noexcept { return false; }
+}
+
 using namespace edvr;
 
 namespace {

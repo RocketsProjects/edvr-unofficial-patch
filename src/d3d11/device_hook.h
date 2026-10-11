@@ -77,6 +77,30 @@ bool comfortOwnerAllowed() noexcept;
 // On-foot panel admission is sampled once after deviceHook.commit. This getter
 // reads the immutable cached decision; it never calls the transport query.
 bool onFootPanelOwnerAllowed() noexcept;
+// Diagnostics admission is sampled once at ensureState() construction; this
+// getter reads that immutable cache and never invokes the admission transport.
+bool diagnosticsOwnerAllowed() noexcept;
+// Temporal-AA admission is sampled once after deviceHook.commit(). Its scene
+// discovery consumers read this cache without consulting the transport.
+bool temporalAAOwnerAllowed() noexcept;
+struct DiagnosticsOwnerHostTestResult {
+    bool deniedCoreToggleBound = false;
+    uint32_t deniedDiagnosticHotkeysBound = 0;
+    uint32_t deniedDiagnosticActionsAdded = 0;
+    bool deniedFlatCaptureCreatedDirectory = false;
+    bool deniedFlatCaptureCreatedFile = false;
+    bool allowedCoreToggleBound = false;
+    uint32_t allowedDiagnosticHotkeysBound = 0;
+    uint32_t allowedDiagnosticActionsAdded = 0;
+    bool allowedFlatCaptureCreatedDirectory = false;
+    bool allowedFlatCaptureCreatedFile = false;
+    bool actionRegistryRestored = false;
+    bool temporaryArtifactsCleaned = false;
+};
+// Internal same-TU source-test seam. Exercises the real owner-gated host
+// hotkey/action/capture paths and restores process-local test state.
+bool deviceHookDiagnosticsOwnerTest(const wchar_t* scratchParent,
+                                   DiagnosticsOwnerHostTestResult* out);
 // Manually armed flat producer probe only. Saves exact creation bytes by hash;
 // false is explicitly missing evidence, never permission to infer a shader.
 bool captureFlatProbeShader(char stage, uint64_t hash);

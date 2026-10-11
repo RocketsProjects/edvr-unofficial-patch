@@ -1151,6 +1151,44 @@ void curveBoundaryControls(const std::string& rt) {
     check(pristine, "control: with no edit every curved-route pin of the route's source holds (the controls above are the only way one fails)");
 }
 
+bool censusEyePinned(const std::string& vs) {
+    const std::string census = functionBody(vs, "__declspec(noinline) void cameraCensusEyeDraw(");
+    const std::string wanted = functionBody(vs, "bool diagVrCameraCensusWanted() {");
+    const std::string draw = functionBody(vs, "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(");
+    const char* gate = "if (g_state->diagnosticsOwnerAllowed && g_vrWorldWants &&\n"
+                       "                diagVrCameraCensusWanted()) cameraCensusEyeDraw(self);";
+    return !census.empty() && census.find("0x5C36AF051B98B9F1ull") != std::string::npos &&
+           census.find("0xCFE84157BC76E921ull") != std::string::npos &&
+           census.find("vrCameraCensusEyeDraw(self,") != std::string::npos &&
+           wanted.find("return diagnosticsOwnerPresent() && vrCameraCensusWanted();") != std::string::npos &&
+           draw.find(gate) != std::string::npos &&
+           before(draw, "if(self==g_state->ownerCtx) {", gate) &&
+           count(vs, "cameraCensusEyeDraw(self)") == 1;
+}
+
+void censusEyeControls(const std::string& vs) {
+    struct Flip { const char* name; const char* from; const char* to; };
+    const Flip flips[] = {
+        {"owner context", "if(self==g_state->ownerCtx) {",
+         "if(self!=g_state->ownerCtx) {"},
+        {"owner admission", "if (g_state->diagnosticsOwnerAllowed && g_vrWorldWants &&\n",
+         "if (g_vrWorldWants &&\n"},
+        {"route watch", "if (g_state->diagnosticsOwnerAllowed && g_vrWorldWants &&\n",
+         "if (g_state->diagnosticsOwnerAllowed &&\n"},
+        {"census key", "diagVrCameraCensusWanted()) cameraCensusEyeDraw(self);",
+         "true) cameraCensusEyeDraw(self);"},
+        {"helper admission", "return diagnosticsOwnerPresent() && vrCameraCensusWanted();",
+         "return vrCameraCensusWanted();"},
+    };
+    for (const Flip& flip : flips) {
+        const std::string changed = replaceOnce(vs, flip.from, flip.to);
+        std::string label = std::string("census control: ") + flip.name + " has one source anchor";
+        check(!changed.empty(), label.c_str());
+        label = std::string("census control: removing ") + flip.name + " breaks the eye pin";
+        check(!changed.empty() && !censusEyePinned(changed), label.c_str());
+    }
+}
+
 void sourcePins() {
     if (g_root.empty()) { check(false, "source pins: the repo root was not given (vr_world_route_test --self-test <root>)"); return; }
     const std::string vs = readFile("src\\d3d11\\vscreen.cpp");
@@ -1300,13 +1338,11 @@ void sourcePins() {
     // vscreen.cpp). The boundary's pins are a function of the route's text, held by flipped copies (curveBoundaryControls).
     for (const CurvePin& p : curveBoundaryPins(rt)) check(p.ok, p.what);
     curveBoundaryControls(rt);
-    // The census's eye draw: the screen composite's own shader pair, read only with the census key on.
-    const std::string census = functionBody(vs, "__declspec(noinline) void cameraCensusEyeDraw(");
-    check(!census.empty() && census.find("0x5C36AF051B98B9F1ull") != std::string::npos && census.find("0xCFE84157BC76E921ull") != std::string::npos &&
-              census.find("vrCameraCensusEyeDraw(self,") != std::string::npos &&
-              vs.find("if (g_vrWorldWants && vrCameraCensusWanted()) cameraCensusEyeDraw(self);") != std::string::npos &&
-              count(vs, "cameraCensusEyeDraw(self)") == 1,
-          "census: the screen composite tells the census its eye, behind one flag test (the route's watch flag, true while the census is wanted)");
+    // The composite tells the census its eye only in the owning draw context, with Diagnostics admitted,
+    // the route watching, and the census key wanted. Each gate has an independent source mutation control.
+    check(censusEyePinned(vs),
+          "census: the owning screen composite tells the census its eye once, behind Diagnostics admission, the route watch flag, and the census key");
+    censusEyeControls(vs);
     // The layer-only door is asked twice an eye and sequence (the temporal door, then the sharpen pass): the 5 s line's
     // door-layer-only counts an eye once, or it would read twice eye-takes on a healthy flight.
     const std::string door = functionBody(rt, "bool vrWorldRouteDoorLayerOnly(");

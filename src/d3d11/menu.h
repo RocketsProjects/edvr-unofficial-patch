@@ -29,6 +29,7 @@
 // compute composite the openvr half calls at the door.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 struct ID3D11Device;
@@ -72,6 +73,20 @@ bool menuTakeConfigPollRequest();
 // things that otherwise need a hotkey bound.
 typedef void (*MenuActionFn)(void* user);
 void menuRegisterAction(const char* label, const char* hint, MenuActionFn fn, void* user);
+
+// Internal source-test seam: run a visitor against the actual action registry,
+// then restore its exact prior contents. This never clears pre-existing Core
+// or other-owner actions.
+struct MenuActionRegistryTestSnapshot {
+    size_t before = 0;
+    size_t during = 0;
+    size_t after = 0;
+    bool restored = false;
+};
+typedef void (*MenuActionRegistryTestVisit)(void* user);
+bool menuTestActionRegistryTransaction(MenuActionRegistryTestVisit visit,
+                                       void* user,
+                                       MenuActionRegistryTestSnapshot* out);
 
 void menuShutdown();
 

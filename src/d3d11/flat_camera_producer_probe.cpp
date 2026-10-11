@@ -1,4 +1,5 @@
 #include "flat_camera_producer_probe.h"
+#include "device_hook.h"
 
 #include <windows.h>
 
@@ -371,6 +372,7 @@ void standDown(const char* why) {
 } // namespace
 
 void flatCameraProducerProbeFrame(uint64_t frame) {
+    if (!edvr::diagnosticsOwnerAllowed()) return;
     g_frame.store(frame, std::memory_order_release);
     if (!runtimeFlatProfile()) { standDown("the flat profile is off"); return; }
     const bool wanted = Config::get().getBool("advanced.flat_camera_producer_probe", false); // "0" and "false" are off; this arms game-code patching

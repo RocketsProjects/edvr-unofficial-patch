@@ -229,7 +229,10 @@ bool vScreenPredicateTestVisit(std::uint16_t siteId,
                                std::uint32_t frameNo = 0,
                                std::uint32_t fssJumpFrame = 0,
                                bool introAllowed = true,
-                               bool onFootAllowed = true) noexcept;
+                               bool onFootAllowed = true,
+                               bool diagnosticsAllowed = true,
+                               bool temporalAAAllowed = true,
+                               bool eyeTarget = false) noexcept;
 
 // Run the real VScreen composite-tail and frame-boundary footprint owner path
 // with a per-call cached On-foot decision. The production draw/tick callbacks
@@ -243,20 +246,24 @@ bool vScreenFootprintOwnerTestVisit(
 // registry while counting successful subscriptions and actual callback calls.
 bool vScreenLegacyGateRegistrationTest(
     bool cockpitAllowed, bool comfortAllowed, bool introAllowed,
-    bool onFootAllowed,
+    bool onFootAllowed, bool diagnosticsAllowed, bool temporalAAAllowed,
     std::uint32_t* registeredCount,
     std::uint32_t* cockpitCallbacks,
     std::uint32_t* comfortCallbacks,
     std::uint32_t* introCallbacks,
     std::uint32_t* sharedGlareCallbacks,
-    std::uint32_t* onFootCallbacks) noexcept;
+    std::uint32_t* onFootCallbacks,
+    std::uint32_t* diagnosticsCallbacks,
+    std::uint32_t* temporalSharedCallbacks) noexcept;
 
 bool vScreenEyeCensusPredicateTestVisit(
     ID3D11DeviceContext* context, char kind, std::uint32_t count,
     const VScreenEyeCensusTestRule* rules, std::uint32_t ruleCount,
     void* const psSrvs[4], std::uint64_t heldVsHash,
     std::uint64_t censusSkippedSeed, bool traceEnabled,
-    VScreenPredicateTestResult* result) noexcept;
+    VScreenPredicateTestResult* result,
+    bool diagnosticsAllowed = true,
+    bool temporalAAAllowed = true) noexcept;
 
 bool vScreenLoaderPanelPredicateTestVisit(
     ID3D11DeviceContext* context, void* renderTargetView,

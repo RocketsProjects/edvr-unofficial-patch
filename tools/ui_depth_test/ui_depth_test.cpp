@@ -35,7 +35,11 @@ void Log::note(const char*, ...) {}
 // ui_depth.cpp's UI content census reads this (objectProbeLedgerActive,
 // object_probe.h) to gate its per-draw logging; driven directly below,
 // the way g_holoDepthOn and the rest of detail:: already are on this page.
-namespace detail { bool g_objectProbeOn = false; bool g_objectProbeLedgerOn = false; }
+namespace detail {
+bool g_objectProbeOn = false;
+bool g_objectProbeLedgerOn = false;
+bool g_objectProbeDiagnosticsAllowed = true;
+}
 int64_t qpcNow() { LARGE_INTEGER t;QueryPerformanceCounter(&t);return t.QuadPart; }
 int64_t qpcFrequency() { LARGE_INTEGER t;QueryPerformanceFrequency(&t);return t.QuadPart; }
 int guardFilter(unsigned long, const char*) { return EXCEPTION_EXECUTE_HANDLER; }

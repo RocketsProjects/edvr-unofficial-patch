@@ -38,6 +38,7 @@ namespace edvr {
 namespace detail {
 bool g_objectProbeOn = false;
 bool g_objectProbeLedgerOn = false;
+bool g_objectProbeDiagnosticsAllowed = false;
 }  // namespace detail
 
 namespace {
@@ -52,6 +53,8 @@ constexpr int      kRing = 6;            // the ledger's per-frame pool copies, 
 constexpr uint32_t kAbsentFrames = 600;  // frames with the probe on and no pool before saying so
 
 bool     g_verbose = false;   // advanced.object_probe: the absent-pool note
+bool     g_diagnosticsAllowed = false;
+bool     g_temporalAAAllowed = false;
 bool     g_wasOn = false;
 uint32_t g_checksLeft = 0;
 uint64_t g_checkMs = 0;
@@ -1320,16 +1323,35 @@ void poll(ID3D11DeviceContext* ctx) {
 
 }  // namespace
 
-void objectProbeConfigure(Config& cfg) {
+void objectProbeConfigure(Config& cfg, bool diagnosticsAllowed,
+                          bool temporalAAAllowed) {
     // The pool's recognition runs with fix.temporal_aa (as it always has, so
     // an eye run's ledger finds the pool already known on its first frame)
     // or with advanced.object_probe, which also prints the absent-pool note.
     // The per-object motion estimate it once also fed retired 2026-09-23
     // (see the header comment); nothing is copied outside an armed run.
-    g_verbose = cfg.getBool("advanced.object_probe", false);
-    g_eyeDepthCapture.configure(cfg.getBool("advanced.eye_depth_capture", false));
-    cullGateProbe.configure(cfg.getBool("advanced.cull_gate_capture", false));
-    detail::g_objectProbeOn = g_verbose || temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
+    g_diagnosticsAllowed = diagnosticsAllowed;
+    g_temporalAAAllowed = temporalAAAllowed;
+    detail::g_objectProbeDiagnosticsAllowed = diagnosticsAllowed;
+    if (!diagnosticsAllowed) {
+        // A stale test seed or an earlier configuration must not keep a
+        // Diagnostics ledger alive through the shared Temporal-AA observer.
+        detail::g_objectProbeLedgerOn = false;
+        if (cullGateProbe.armed()) closeGateProbe();
+        g_gateRun = false;
+        g_skin.reset();
+        ledgerRelease();
+        objectClassificationProbe.reset();
+    }
+    g_verbose = diagnosticsAllowed &&
+        cfg.getBool("advanced.object_probe", false);
+    g_eyeDepthCapture.configure(diagnosticsAllowed &&
+        cfg.getBool("advanced.eye_depth_capture", false));
+    cullGateProbe.configure(diagnosticsAllowed &&
+        cfg.getBool("advanced.cull_gate_capture", false));
+    const bool temporalDiscovery = temporalAAAllowed &&
+        temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
+    detail::g_objectProbeOn = g_verbose || temporalDiscovery;
 }
 
 void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,
@@ -1605,7 +1627,7 @@ void objectProbeNoteEarlyDraw(ID3D11DeviceContext* ctx, char kind, uint32_t coun
 }
 
 void objectProbeArmLedger(const wchar_t* stamp) {
-    if (detail::g_objectProbeLedgerOn) return;
+    if (!g_diagnosticsAllowed || detail::g_objectProbeLedgerOn) return;
     wcsncpy_s(g_ledgerStamp, 16, stamp ? stamp : L"000000", _TRUNCATE);
     g_ledgerFrame0 = g_frame + 1;   // this frame's draws get their copy at the next boundary
     g_ledgerLastFrame = g_ledgerFrame0 + static_cast<uint32_t>(kLedgerFrames) - 1u;
@@ -1661,7 +1683,7 @@ void objectProbeLedgerMark(int k) {
 void objectProbeShutdown() {
     // A skin ledger the window never closed on still reports what it holds (pending copies are abandoned, the
     // dump files are not written): "fewer frames arrived" must not read as silence.
-    if (g_skin.armed() && !g_skin.finished()) {
+    if (g_diagnosticsAllowed && g_skin.armed() && !g_skin.finished()) {
         std::string stamp;
         for (const wchar_t* p = g_ledgerStamp; *p; ++p) stamp += static_cast<char>(*p < 128 ? *p : '?');
         g_skin.noteForeign(g_skinForeign.load(std::memory_order_relaxed));
@@ -1675,7 +1697,10 @@ void objectProbeShutdown() {
     releasePool();
     detail::g_objectProbeLedgerOn = false;
     detail::g_objectProbeOn = false;
+    detail::g_objectProbeDiagnosticsAllowed = false;
     g_wasOn = false;
+    g_diagnosticsAllowed = false;
+    g_temporalAAAllowed = false;
 }
 
 }  // namespace edvr

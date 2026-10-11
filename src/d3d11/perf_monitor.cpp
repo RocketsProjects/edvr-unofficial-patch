@@ -801,6 +801,7 @@ void writeFreezeSummary(const char* reason, bool final) {
 // "EDVR code on the stack: yes" is the expected answer), the counts and the worst list -- without waiting for a
 // real freeze. It stops the game on purpose; it is not a feature, and a value above 0 is logged when it is read.
 void freezeTestTick() {
+    if (!diagnosticsOwnerAllowed()) return;
     State& s = g_s;
     if (s.freezeTestDone) return;
     if (!s.freezeTestRead) {
@@ -830,6 +831,7 @@ void freezeTestTick() {
 // (slow_regime.h), and `edvr_log.py --freezes` reads them. It slows the game on purpose; it is not a feature, and a
 // value above 0 is logged when it is read. The schedule is slow_test.h's; the runtime half only obeys the request.
 void slowTestTick() {
+    if (!diagnosticsOwnerAllowed()) return;
     State& s = g_s;
     if (s.slowTest.done()) return;
     if (!s.slowTestRead) {
@@ -1886,7 +1888,7 @@ const CloseObserverRegistration g_closeObserverRegistration;
 void perfMonitorShutdown() {
     State& s = g_s;
     writeFreezeSummary("shutdown", true);
-    stallWatchShutdown();
+    if (diagnosticsOwnerAllowed()) stallWatchShutdown();
     s.nativeHistory.clear();
     if (s.adapter3) {
         s.adapter3->Release();

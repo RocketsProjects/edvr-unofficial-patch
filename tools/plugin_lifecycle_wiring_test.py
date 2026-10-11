@@ -44,6 +44,7 @@ SLICE_PATHS = {
     "registry_header": ROOT / "src/d3d11/plugin_registry.h",
     "explorer_owner_gate": ROOT / "src/d3d11/explorer_cam_owner_gate.h",
     "explorer_fixture": ROOT / "tools/explorer_cam_test/explorer_cam_test.cpp",
+    "diagnostics_owner_gate": ROOT / "src/d3d11/diagnostics_owner_gate.h",
     "cockpit_owner_gate": ROOT / "src/d3d11/cockpit_visuals_owner_gate.h",
     "intro_owner_gate": ROOT / "src/d3d11/intro_owner_gate.h",
     "comfort_owner_gate": ROOT / "src/d3d11/comfort_owner_gate.h",
@@ -335,6 +336,7 @@ def check_module_slices(sources: dict[str, str]) -> None:
     relay = sources["relay_host"]
     vscreen = sources["vscreen"]
     device = sources["device"]
+    diagnostics_owner_gate = sources["diagnostics_owner_gate"]
     registry = sources["registry"]
     registry_header = sources["registry_header"]
     build = sources["build"]
@@ -403,6 +405,11 @@ def check_module_slices(sources: dict[str, str]) -> None:
 
     if "const EdvrPluginLifecycleOps& schedulerLifecycleOps();" not in scheduler_h:
         raise AssertionError("Diagnostics private header must expose the scheduler lifecycle record")
+    diagnostics_gate = body(
+        diagnostics_owner_gate,
+        "bool runDiagnosticsOwned(bool ownerAllowed, Callback&& callback)")
+    ordered(diagnostics_gate, "if (!ownerAllowed) return false;",
+            "std::forward<Callback>(callback)();", "return true;")
     sched_config = body(scheduler, "void configure(void* rawConfig)")
     ordered(sched_config, "if (!rawConfig) return;", "edvrDiagnosticsSchedulerConfigure(",
             "getBool(\"advanced.scheduler_probe\", false)")
@@ -420,18 +427,112 @@ def check_module_slices(sources: dict[str, str]) -> None:
         if site.count("configureSchedulerLifecycle(cfg)") != 1:
             raise AssertionError(f"{sig} must configure Diagnostics at the former scheduler probe position")
     sched_config_host = body(vscreen, "void configureSchedulerLifecycle(Config& cfg)")
-    ordered(sched_config_host, "pluginRegistryRegisterLifecycle(",
-            "pluginRegistryConfigureLifecycle(", "return;",
+    ordered(sched_config_host,
+            "if (!g_state || !g_state->diagnosticsOwnerAllowed) return;",
+            "pluginRegistryRegisterLifecycle(",
+            "pluginRegistryConfigureLifecycle(",
+            "        return;\n    }\n    edvrDiagnosticsSchedulerConfigure(",
             "edvrDiagnosticsSchedulerConfigure(edvrDiagnosticsSchedulerState(),")
     sched_shutdown_host = body(vscreen, "void shutdownSchedulerLifecycle()")
-    ordered(sched_shutdown_host, "pluginRegistryHasLifecycle(",
-            "pluginRegistryShutdownLifecycle(", "return;",
+    ordered(sched_shutdown_host,
+            "if (!g_state || !g_state->diagnosticsOwnerAllowed) return;",
+            "pluginRegistryHasLifecycle(",
+            "pluginRegistryShutdownLifecycle(",
+            "        return;\n    }\n    edvrDiagnosticsSchedulerShutdown(",
             "edvrDiagnosticsSchedulerShutdown(edvrDiagnosticsSchedulerState())")
     device_tick = body(device, "tkSchedulerProbe.run([] {")
-    ordered(device_tick, "g_state->frameCounter", "pluginRegistryHasLifecycle(",
+    scheduler_tick = body(device, "void presentFrameBoundary()")
+    ordered(scheduler_tick, "if (diagnosticsOwnerAllowed()) tkSchedulerProbe.run([] {",
+            "pluginRegistryHasLifecycle(",
             "pluginRegistryFrameLifecycle(", "} else {", "edvrDiagnosticsSchedulerFrame(")
     if "schedulerStackProbe" in device_tick or "SchedulerStackProbe" in device_tick:
         raise AssertionError("core Present host must dispatch Diagnostics through scalar lifecycle callbacks")
+    if "if (diagnosticsOwnerAllowed()) tkSchedulerProbe.run([] {" not in scheduler_tick:
+        raise AssertionError("Diagnostics scheduler tick and direct fallback must be unreachable without cached ownership")
+
+    device_state = body(device, "struct State {")
+    if "bool diagnosticsOwnerAllowed = false;" not in device_state:
+        raise AssertionError("device Diagnostics owner cache must default to denied")
+    device_startup = body(device, "State& ensureState()")
+    ordered(device_startup,
+            "g_state->diagnosticsOwnerAllowed =",
+            "plugin_admission_transport::ownerAllowedForStartup(",
+            "configureDiagnosticHotkeys();",
+            "registerDiagnosticMenuActions();")
+    diag_hotkeys = body(device, "void configureDiagnosticHotkeys() {")
+    ordered(diag_hotkeys,
+            'getString("hotkey.toggle_exposure", "SCROLLLOCK")',
+            "if (!s.diagnosticsOwnerAllowed) return;",
+            'getString("hotkey.dump_camera", "PAUSE")',
+            'getString("hotkey.dump_draws", runtimeFlatProfile() ? "NUMLOCK" : "")',
+            'getString("hotkey.dump_eyes", "")')
+    menu_register = body(device, "void registerDiagnosticMenuActions() {")
+    if "if (!g_state || !g_state->diagnosticsOwnerAllowed) return;" not in menu_register:
+        raise AssertionError("Diagnostics menu actions, including marker, must remain absent without owner admission")
+    flat_capture = body(device, "bool captureFlatProbeShader(char stage, uint64_t hash)")
+    if "if (!diagnosticsOwnerAllowed() || !g_state || !runtimeFlatProfile()" not in flat_capture:
+        raise AssertionError("flat diagnostic shader capture must require Diagnostics ownership")
+    flat_lookup = body(device, "bool flatProbeShaderLookup(char stage, uint64_t hash,")
+    if "diagnosticsOwnerAllowed" in flat_lookup or \
+            "s.flatProbeShaders.find(std::make_pair(stage, hash))" not in flat_lookup:
+        raise AssertionError("Core flat renderer shader lookup must retain its cache path independent of Diagnostics")
+
+    vscreen_state = body(vscreen, "struct State {")
+    if "bool diagnosticsOwnerAllowed = false;" not in vscreen_state:
+        raise AssertionError("vScreen Diagnostics owner cache must default to denied")
+    install_startup = body(vscreen, "void installVScreenFixes(")
+    owner_snapshot = "const bool diagnosticsAllowed = diagnosticsOwnerAllowed();"
+    owner_cache = "g_state->diagnosticsOwnerAllowed = diagnosticsAllowed;"
+    if install_startup.count(owner_snapshot) != 1 or install_startup.count(owner_cache) != 1:
+        raise AssertionError("vScreen startup must cache the published Diagnostics owner exactly once")
+    ordered(install_startup, owner_snapshot, "if (!wantVoid && scale == 1.0f &&",
+            owner_cache, "readCensusSkip(cfg,",
+            "configureSchedulerLifecycle(cfg)")
+    if install_startup.count("configureSchedulerLifecycle(cfg)") != 1:
+        raise AssertionError("vScreen startup must configure the Diagnostics lifecycle once")
+    refresh = body(vscreen, "void vScreenRefreshConfig()")
+    if "diagnosticsOwnerAllowed()" in refresh or \
+            "s->diagnosticsOwnerAllowed" not in refresh:
+        raise AssertionError("vScreen reload must reuse its cached Diagnostics admission without a second query")
+    if refresh.count("configureSchedulerLifecycle(cfg)") != 1:
+        raise AssertionError("vScreen reload must configure the Diagnostics lifecycle once")
+    census_reader = body(vscreen, "void readCensusSkip(Config& cfg, State* s)")
+    ordered(census_reader, "if (!s || !s->diagnosticsOwnerAllowed) return;",
+            'cfg.getString("advanced.census_skip"')
+    if census_reader.count('cfg.getString("advanced.census_skip"') != 1:
+        raise AssertionError("denied Diagnostics owner must not read census configuration")
+    for gate in (
+            "EDVR_GATE_DIAGNOSTICS(census_skip_count, s->censusSkipCount != 0)",
+            "EDVR_GATE_DIAGNOSTICS(census_skip_ranges, s->censusSkipRangeCount != 0)",
+            "EDVR_GATE_DIAGNOSTICS(census_skip_off, s->censusSkipOffCount != 0)",
+            "EDVR_GATE_DIAGNOSTICS(census_quad_skip_armed, s->quadSkipArmed)",
+            "EDVR_GATE_DIAGNOSTICS(census_auto, s->censusAutoW != 0)"):
+        if vscreen.count(gate) != 1:
+            raise AssertionError(f"Diagnostics census legacy gate must be owner-filtered exactly once: {gate}")
+    if "if (s->diagnosticsOwnerAllowed || s->temporalAAOwnerAllowed)\n        depthProbeConfigure(cfg, s->diagnosticsOwnerAllowed," not in body(
+            vscreen, "void vScreenRefreshConfig()") or \
+            "if (g_state->diagnosticsOwnerAllowed || g_state->temporalAAOwnerAllowed)\n        depthProbeConfigure(cfg, g_state->diagnosticsOwnerAllowed," not in body(
+                vscreen, "void installVScreenFixes("):
+        raise AssertionError("shared depth discovery must run for either admitted Diagnostics or TemporalAA owner")
+    if "if (s->diagnosticsOwnerAllowed || s->temporalAAOwnerAllowed)\n        objectProbeConfigure(cfg, s->diagnosticsOwnerAllowed," not in body(
+            vscreen, "void vScreenRefreshConfig()") or \
+            "if (g_state->diagnosticsOwnerAllowed || g_state->temporalAAOwnerAllowed)\n        objectProbeConfigure(cfg, g_state->diagnosticsOwnerAllowed," not in body(
+                vscreen, "void installVScreenFixes("):
+        raise AssertionError("shared object discovery must run for either admitted Diagnostics or TemporalAA owner")
+    sched_config = body(vscreen, "void configureSchedulerLifecycle(Config& cfg)")
+    ordered(sched_config,
+            "if (!g_state || !g_state->diagnosticsOwnerAllowed) return;",
+            "pluginRegistryRegisterLifecycle(",
+            "pluginRegistryConfigureLifecycle(",
+            "        return;\n    }\n    edvrDiagnosticsSchedulerConfigure(",
+            'cfg.getBool("advanced.scheduler_probe", false)')
+    sched_shutdown = body(vscreen, "void shutdownSchedulerLifecycle()")
+    ordered(sched_shutdown,
+            "if (!g_state || !g_state->diagnosticsOwnerAllowed) return;",
+            "pluginRegistryHasLifecycle(",
+            "pluginRegistryShutdownLifecycle(",
+            "        return;\n    }\n    edvrDiagnosticsSchedulerShutdown(",
+            "edvrDiagnosticsSchedulerShutdown(edvrDiagnosticsSchedulerState())")
     relay_feed = body(scheduler_hook, "void schedulerRelayFeed(")
     ordered(relay_feed, "slot->load(std::memory_order_acquire)",
             "if(probe)probe->noteEntry(target,static_cast<uintptr_t>(entryRsp))")
@@ -844,22 +945,55 @@ def check_module_slices(sources: dict[str, str]) -> None:
             "decision.size" in intro_admission_reader or \
             "ownerAllowedForStartup(" in intro_admission_reader:
         raise AssertionError("Intro reader must make one exact Decision query and hand exact S_OK status to the pure admission helper")
-    intro_decision_helper = body(intro_owner_gate, "inline IntroStartupAdmission introStartupAdmission(")
+    intro_decision_helper = body(
+        intro_owner_gate, "inline IntroStartupAdmission introStartupAdmissionWithValidators(")
     ordered(intro_decision_helper, "if (!querySucceeded) return {};",
-            "plugin_selection::admission_v1::ownerAllowedForStartup(",
-            "decision, plugins::kPluginIntro", "result.strictSelection = result.ownerAllowed &&",
+            "result.ownerAllowed = ownerAllowed(decision);",
+            "result.strictSelection = result.ownerAllowed &&",
             "Mode::AdmittedSelection")
-    if "decision.size" in intro_decision_helper or \
-            "decision.version" in intro_decision_helper:
-        raise AssertionError("Intro helper must delegate wire validation to the authoritative pure owner rule")
+    strict_mode_start = intro_decision_helper.find("if (decision.mode ==")
+    strict_mode_end = intro_decision_helper.find("result.strictModeSelection = true;", strict_mode_start)
+    strict_mode_gate = intro_decision_helper[strict_mode_start:strict_mode_end]
+    ordered(strict_mode_gate, "Mode::AdmittedSelection", "isSelected(decision, i)")
+    production_intro_adapter = body(
+        intro_owner_gate, "inline IntroStartupAdmission introStartupAdmission(")
+    if "bool strictModeSelection = false;" not in intro_owner_gate or \
+            "introStartupAdmissionWithValidators(" not in production_intro_adapter or \
+            "plugin_selection::admission_v1::ownerAllowedForStartup(" not in production_intro_adapter or \
+            "plugin_selection::admission_v1::selected(d, i)" not in production_intro_adapter:
+        raise AssertionError("production strict-mode decision must reuse the validated Intro owner/selection algorithm")
+    if "#ifdef EDVR_SELECTION_ADMISSION_TEST" not in intro_owner_gate or \
+            "introStartupAdmissionWithValidators(" not in intro_owner_gate or \
+            "ownerAllowedForStartupWithCatalog(" not in intro_owner_gate or \
+            "selectedWithCatalog(d, i, catalog)" not in intro_owner_gate:
+        raise AssertionError("closed-catalog test adapter must share the production strict-selection algorithm")
     ordered(startup, "readIntroStartupAdmission();", "Config& cfg = Config::get();")
     if startup.count("readIntroStartupAdmission()") != 1 or \
             "const IntroStartupAdmission introAdmission = readIntroStartupAdmission();" not in startup or \
             "const bool introOwnerAllowed = introAdmission.ownerAllowed;" not in startup or \
             "g_state->introOwnerAllowed = introOwnerAllowed;" not in startup:
         raise AssertionError("Intro admission must be sampled once and cached before its configuration")
-    if "!introAdmission.strictSelection &&" not in startup:
-        raise AssertionError("only strict Intro admission may keep the dormant-hook path awake")
+    dormant_start = startup.find("if (!wantVoid && scale == 1.0f &&")
+    dormant_end = startup.find("// Preserve the existing retry path", dormant_start)
+    if dormant_start < 0 or dormant_end < 0:
+        raise AssertionError("vScreen dormant transport-only decision scope is missing")
+    dormant_condition = startup[dormant_start:dormant_end]
+    owner_snapshots = (
+        "const bool diagnosticsAllowed = diagnosticsOwnerAllowed();",
+        "const bool temporalAAOwnerAllowed = edvr::temporalAAOwnerAllowed();",
+        "const bool strictSelectedVScreenOwner = strictAdmissionNeedsVScreenHooks(\n"
+        "        introAdmission, diagnosticsAllowed, temporalAAOwnerAllowed);",
+    )
+    if any(startup.count(token) != 1 or startup.find(token) > dormant_start
+           for token in owner_snapshots):
+        raise AssertionError("D and Temporal-AA owner decisions must be cached once before dormant startup selection")
+    if "!introAdmission.strictSelection &&" not in dormant_condition or \
+            "!strictSelectedVScreenOwner &&" not in dormant_condition:
+        raise AssertionError("dormant startup must preserve Intro strict-selection semantics and the strict D/TAA bypass")
+    strict_helper = body(sources["intro_owner_gate"],
+                         "inline bool strictAdmissionNeedsVScreenHooks(")
+    ordered(strict_helper, "admission.strictModeSelection &&",
+            "(diagnosticsOwnerAllowed || temporalAAOwnerAllowed)")
     intro_registration = body(vscreen, "void selectIntroVideoLifecycle()")
     if "runIntroOwned(g_state && g_state->introOwnerAllowed" not in intro_registration or \
             "g_introLifecycleRegistered = ensureIntroVideoLifecycle();" not in body(
@@ -1401,20 +1535,26 @@ def check_module_slices(sources: dict[str, str]) -> None:
             "                              &deniedScanner, true, false, 'X', 6, 1, 5, 6)" not in
             vscreen_predicate_fixture):
         raise AssertionError("FSS panel real visitor must pass Comfort denied to its owner gate")
-    if "testOnFootOwnerLegacyGateRegistration()" not in vscreen_predicate_fixture or \
-            "okay &= testOnFootOwnerLegacyGateRegistration();" not in vscreen_predicate_fixture:
-        raise AssertionError("actual legacy registry owner-filter fixture is missing or not invoked")
-    gate_fixture = body(vscreen_predicate_fixture, "bool testOnFootOwnerLegacyGateRegistration()")
-    for token in ("checkInventory(false, false, false, false, 11, 0, 0, 0, 0, 0",
-                  "checkInventory(true, false, false, false, 18, 6, 0, 0, 1, 0",
-                  "checkInventory(false, true, false, false, 16, 0, 4, 0, 1, 0",
-                  "checkInventory(false, false, true, false, 16, 0, 0, 5, 0, 0",
-                  "checkInventory(false, false, false, true, 14, 0, 0, 0, 0, 3",
-                  "checkInventory(true, false, true, true, 26, 6, 0, 5, 1, 3",
-                  "checkInventory(false, true, true, true, 24, 0, 4, 5, 1, 3",
-                  "checkInventory(true, true, true, true, 30, 6, 4, 5, 1, 3"):
+    if "testDiagnosticsOwnerLegacyGateRegistration()" not in vscreen_predicate_fixture or \
+            "okay &= testDiagnosticsOwnerLegacyGateRegistration();" not in vscreen_predicate_fixture:
+        raise AssertionError("actual 64-combination owner registry fixture is missing or not invoked")
+    gate_fixture = body(vscreen_predicate_fixture,
+                        "bool testDiagnosticsOwnerLegacyGateRegistration()")
+    for token in (
+            "for (unsigned mask = 0; mask < 64; ++mask)",
+            "(mask & 1u) != 0", "(mask & 2u) != 0", "(mask & 4u) != 0",
+            "(mask & 8u) != 0", "(mask & 16u) != 0", "(mask & 32u) != 0",
+            "cockpit, comfort, intro, onFoot, diagnostics, temporalAA,",
+            "2u + (cockpit ? 6u : 0u)",
+            "(comfort ? 4u : 0u)", "(intro ? 5u : 0u)",
+            "(onFoot ? 3u : 0u)", "((cockpit || comfort) ? 1u : 0u)",
+            "(diagnostics ? 7u : 0u)",
+            "((diagnostics || temporalAA) ? 2u : 0u)",
+            "gotDiagnostics == (diagnostics ? 7u : 0u)",
+            "temporalShared == ((diagnostics || temporalAA) ? 2u : 0u)",
+            "actual legacy registry preserves exact callback inventory across all 64 owner combinations"):
         if token not in gate_fixture:
-            raise AssertionError(f"real owner-filter registration fixture lost {token}")
+            raise AssertionError(f"64-combination owner registry fixture lost {token}")
     intro_visitor_fixture = body(vscreen_predicate_fixture,
                                  "bool testIntroOwnerDeniedVisitor(")
     for token in ("SiteId::kIntroPanelClaim", "SiteId::kIntroCurveObserve",
@@ -1552,7 +1692,7 @@ def check_onfoot_boundary(sources: dict[str, str]) -> None:
     fixture = sources["vscreen_predicate_fixture"]
     for token in ("testOnFootOwnerDeniedPanelCurve(device, immediate);",
                   "testOnFootOwnerDeniedFootprint(device, immediate);",
-                  "testOnFootOwnerLegacyGateRegistration();"):
+                  "testDiagnosticsOwnerLegacyGateRegistration();"):
         if token not in fixture:
             raise AssertionError(f"real WARP On-foot denial/admission fixture is not invoked: {token}")
     distance_fixture = body(fixture, "bool testPanelDistanceApiTransaction(")
@@ -1708,6 +1848,68 @@ def self_test_slices(sources: dict[str, str]) -> None:
     changed["device"] = replace_body(changed["device"], "tkSchedulerProbe.run([] {",
         "pluginRegistryFrameLifecycle(", "/* registry frame omitted */")
     expect_slice("Diagnostics Present frame dispatch", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "bool diagnosticsOwnerAllowed = false;",
+        "bool diagnosticsOwnerAllowed = true;")
+    expect_slice("Diagnostics owner cache defaults to denied", changed)
+
+    changed = dict(sources)
+    changed["diagnostics_owner_gate"] = once(changed["diagnostics_owner_gate"],
+        "if (!ownerAllowed) return false;", "if (ownerAllowed) return false;")
+    expect_slice("Diagnostics shared callback wrapper returns before absent-owner work", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "if (!s.diagnosticsOwnerAllowed) return;",
+        "/* Diagnostics hotkey read gate omitted */")
+    expect_slice("Diagnostics dump hotkeys are not read without owner admission", changed)
+
+    changed = dict(sources)
+    changed["device"] = replace_body(changed["device"],
+        "bool captureFlatProbeShader(char stage, uint64_t hash)",
+        "if (!diagnosticsOwnerAllowed() || !g_state || !runtimeFlatProfile()",
+        "if (!g_state || !runtimeFlatProfile()")
+    expect_slice("flat diagnostic shader capture remains owner-gated", changed)
+
+    changed = dict(sources)
+    changed["device"] = replace_body(changed["device"],
+        "bool flatProbeShaderLookup(char stage, uint64_t hash,",
+        "if (!g_state || !hash || !data || !bytes ||",
+        "if (!diagnosticsOwnerAllowed() || !g_state || !hash || !data || !bytes ||")
+    expect_slice("Core flat renderer lookup stays live without Diagnostics", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = replace_body(changed["vscreen"],
+        "void configureSchedulerLifecycle(Config& cfg)",
+        "if (!g_state || !g_state->diagnosticsOwnerAllowed) return;",
+        "/* Diagnostics lifecycle/fallback owner gate omitted */")
+    expect_slice("Diagnostics lifecycle and direct fallback require owner admission", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "if (diagnosticsOwnerAllowed()) tkSchedulerProbe.run([] {",
+        "tkSchedulerProbe.run([] {")
+    expect_slice("Diagnostics scheduler frame fallback is owner-gated", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = replace_body(changed["vscreen"],
+        "void vScreenRefreshConfig()",
+        "depthProbeConfigure(cfg, s->diagnosticsOwnerAllowed,",
+        "depthProbeConfigure(cfg, diagnosticsOwnerAllowed(),")
+    expect_slice("vScreen reload reuses the cached Diagnostics admission", changed)
+
+    for gate, name in (
+            ("EDVR_GATE_DIAGNOSTICS(census_skip_count, s->censusSkipCount != 0)", "census_skip_count"),
+            ("EDVR_GATE_DIAGNOSTICS(census_skip_ranges, s->censusSkipRangeCount != 0)", "census_skip_ranges"),
+            ("EDVR_GATE_DIAGNOSTICS(census_skip_off, s->censusSkipOffCount != 0)", "census_skip_off"),
+            ("EDVR_GATE_DIAGNOSTICS(census_quad_skip_armed, s->quadSkipArmed)", "census_quad_skip_armed"),
+            ("EDVR_GATE_DIAGNOSTICS(census_auto, s->censusAutoW != 0)", "census_auto")):
+        changed = dict(sources)
+        changed["vscreen"] = once(changed["vscreen"], gate, gate.replace(
+            "EDVR_GATE_DIAGNOSTICS", "EDVR_GATE_STATE", 1))
+        expect_slice(f"{name} legacy census row requires Diagnostics owner", changed)
 
     changed = dict(sources)
     changed["relay_host"] = replace_body(changed["relay_host"],
@@ -2057,9 +2259,9 @@ def self_test_slices(sources: dict[str, str]) -> None:
 
     changed = dict(sources)
     changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],
-        "okay &= testOnFootOwnerLegacyGateRegistration();",
+        "okay &= testDiagnosticsOwnerLegacyGateRegistration();",
         "/* actual registry fixture omitted */")
-    expect_slice("actual owner-filtered registry callback fixture is invoked", changed)
+    expect_slice("actual 64-combination owner-filtered registry fixture is invoked", changed)
 
     changed = dict(sources)
     changed["intro_owner_gate"] = once(changed["intro_owner_gate"],
@@ -2081,7 +2283,32 @@ def self_test_slices(sources: dict[str, str]) -> None:
     changed = dict(sources)
     changed["vscreen"] = once(changed["vscreen"],
         "!introAdmission.strictSelection &&", "!introOwnerAllowed &&")
-    expect_slice("only strict admitted Intro may bypass preserved Legacy dormancy", changed)
+    expect_slice("Intro strict-selection remains distinct from owner admission", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "const bool diagnosticsAllowed = diagnosticsOwnerAllowed();",
+        "const bool diagnosticsAllowed = false;")
+    expect_slice("Diagnostics admission is snapshotted before dormant startup selection", changed)
+
+    changed = dict(sources)
+    changed["intro_owner_gate"] = once(changed["intro_owner_gate"],
+        "if (decision.mode == static_cast<std::uint32_t>(\n"
+        "            plugin_selection::admission_v1::Mode::AdmittedSelection)) {",
+        "if (decision.mode != static_cast<std::uint32_t>(\n"
+        "            plugin_selection::admission_v1::Mode::AdmittedSelection)) {")
+    expect_slice("D/TAA dormancy bypass requires a valid admitted strict selection", changed)
+
+    changed = dict(sources)
+    changed["intro_owner_gate"] = once(changed["intro_owner_gate"],
+        "(diagnosticsOwnerAllowed || temporalAAOwnerAllowed)",
+        "(diagnosticsOwnerAllowed && temporalAAOwnerAllowed)")
+    expect_slice("either strict-selected D or TAA owner keeps its startup path", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "!strictSelectedVScreenOwner &&", "strictSelectedVScreenOwner &&")
+    expect_slice("only strict-selected D/TAA ownership bypasses transport-only startup", changed)
 
     changed = dict(sources)
     changed["vscreen"] = once(changed["vscreen"],

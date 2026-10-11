@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <condition_variable>
@@ -3993,6 +3994,32 @@ void menuRegisterAction(const char* label, const char* hint, MenuActionFn fn, vo
     a.user = user;
     g_actions.push_back(a);
     if (g_s.configured && g_s.developer) buildPages();
+}
+
+bool menuTestActionRegistryTransaction(MenuActionRegistryTestVisit visit, void* user,
+                                       MenuActionRegistryTestSnapshot* out) {
+    if (!visit || !out) return false;
+    const std::vector<Action> saved = g_actions;
+    const bool configured = g_s.configured;
+    const bool developer = g_s.developer;
+    out->before = saved.size();
+    // Keep the test visitor from rebuilding the live pages while it measures
+    // registry insertion. Restore these exact flags before returning.
+    g_s.configured = false;
+    g_s.developer = false;
+    visit(user);
+    out->during = g_actions.size();
+    g_actions = saved;
+    g_s.configured = configured;
+    g_s.developer = developer;
+    out->after = g_actions.size();
+    out->restored = g_actions.size() == saved.size() &&
+        std::equal(g_actions.begin(), g_actions.end(), saved.begin(),
+            [](const Action& a, const Action& b) {
+                return a.label == b.label && a.hint == b.hint &&
+                       a.fn == b.fn && a.user == b.user;
+            });
+    return true;
 }
 
 bool menuTakeConfigPollRequest() {

@@ -1,4 +1,5 @@
 #include "input_gate.h"
+#include "device_hook.h"
 
 #include <atomic>
 #include <cstdio>
@@ -1375,7 +1376,8 @@ uint32_t inputGateFilterData(DiObjectData* data, uint32_t count, bool priv, uint
 void inputGateConfigure(Config& cfg) {
     const std::string kb = cfg.getString("menu.keyboard", "private");
     g_privateWanted = _stricmp(kb.c_str(), "shared") != 0;
-    g_probe = cfg.getBool("advanced.input_probe", false);
+    g_probe = edvr::diagnosticsOwnerAllowed() &&
+              cfg.getBool("advanced.input_probe", false);
     const std::string key = cfg.getString("hotkey.menu", "F8");
     uint32_t mods = 0;
     const int vk = key.empty() ? 0 : virtualKeyFromName(key.c_str(), &mods);

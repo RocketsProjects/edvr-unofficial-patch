@@ -41,7 +41,11 @@ std::string g_lastLog;
 // ui_depth.cpp's UI content census reads this (objectProbeLedgerActive,
 // object_probe.h) to gate its per-draw logging; this rig never arms an
 // eye run, so it stays false -- object_probe.cpp itself is not linked in.
-namespace detail { bool g_objectProbeOn = false; bool g_objectProbeLedgerOn = false; }
+namespace detail {
+bool g_objectProbeOn = false;
+bool g_objectProbeLedgerOn = false;
+bool g_objectProbeDiagnosticsAllowed = false;
+}
 Log& Log::get() { static Log instance; return instance; }
 Log::~Log() = default;
 // Unlike tools\ui_depth_test's no-op stub, this one FORMATS the message:

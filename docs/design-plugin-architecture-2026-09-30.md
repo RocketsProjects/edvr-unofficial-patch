@@ -12,22 +12,15 @@
   implementations, generated config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `99476a02` incorporated in this checkpoint.
-  Sampler startup is `752c7412`; dormant admission is `d9c42281`.
-  Performance's startup gates pass full offline validation (169 jobs):
-  `build/full-performance-absence-offline-20261010-r2.log` (`57716674`).
-  Explorer Cam startup/tick/shutdown gates pass focused and full builds:
-  `build/full-explorer-absence-offline-20261011-r3.log` (receipt `faeff569`).
-  Cockpit's eight-family boundaries pass full offline validation:
-  `build/full-cockpit-absence-offline-20261011-r2.log` (receipt `1ba4e55b`).
-  Comfort's startup and native absence boundaries pass full offline validation:
-  `build/full-comfort-absence-offline-20261011-r4.log` (receipt `bcd91fc6`).
-  Intro's startup/subscription/callback gates pass full offline validation:
-  `build/full-intro-absence-offline-20261011-r2.log` (receipt `09b71d3e`).
-  On-foot startup/subscription/callback gates pass full offline validation:
-  `build/full-onfoot-absence-offline-20261011-r3.log` (receipt `a8122006`).
-- **Module progress:** six owners pass offline. Temporal AA and Diagnostics
-  remain. Selections unavailable; runtime absence/order open.
+- **Current integration:** main `99476a02` incorporated. Performance,
+  Explorer Cam, Cockpit, Comfort, Intro and On-foot pass full offline
+  validation; their per-owner receipts remain in the dated journal.
+  Diagnostics startup/callback/capture gates pass full offline validation:
+  `build/full-diagnostics-absence-offline-20261011-r9.log` (receipt `5cdd1948`).
+- **Module progress:** seven owners pass offline. Temporal AA remains.
+  Selections unavailable; runtime absence/order open.
+  Final source audit found an Intro loading-dim ownership gap; its repair
+  follows with the Temporal-AA migration.
 - **Offline evidence:** FSS site 1 has a frozen selector oracle, v16 facts,
   seven-base-fact capacity and terminal X/6 fixtures. Capture uses consumed
   values; unarmed paths build no payload. Caught faults after matching reads
@@ -5265,3 +5258,79 @@ Availability remains closed and strict selected-profile startup has not been
 flown. Diagnostics and Temporal AA remain staged work. Steam installation is
 held; no DLL promotion, live settings edit, flight or feature-to-main merge
 occurred.
+
+### 2026-10-11 — Diagnostics startup, callbacks and capture absence
+
+Diagnostics admission is cached in device-hook initialization before its
+settings, bindings and actions. Its 38 keys remain owned by Diagnostics; Core
+exposure toggling, menu configuration, input forwarding and capture remain
+available. The host fixture exercises the real three dump bindings and four
+menu actions, plus real Flat shader-file capture. Denial creates no capture
+directory or file; admission creates both, and the fixture removes its own
+artifacts and restores the prior action registry and effective settings. Two
+distinct unrelated fixture actions make the registry preservation check
+nonempty; nested registration adds zero actions when denied and four when
+admitted, and both transactions restore their exact prior contents.
+
+The existing thirty-row draw registry now separates seven Diagnostics rows and
+two shared Diagnostics-or-Temporal-AA rows. Its fixture checks all sixty-four
+owner combinations. Object/depth discovery remains available to Temporal AA
+while Diagnostics sampling, ledger and capture work remain isolated. A minimal
+cached Temporal-AA admission bit supports this shared boundary; its full owner
+migration follows. The actual WARP visitor and depth rigs cover stale active
+state under denial and separate admitted controls.
+
+The host fixture now binds Diagnostics hotkeys under the VR profile and
+switches to Flat only while exercising real shader captures. Its isolated UI
+and hologram object-probe stubs receive the Diagnostics owner bit: UI is
+admitted for ledger controls, while hologram remains denied. The source oracle
+recognizes exactly four pure-cache Diagnostics guards around fault-budgeted
+ticks; injected-work, wrong-callback and broader-condition mutations are
+negative controls. These fixture and oracle corrections do not weaken
+production guards.
+
+Skin-ledger dispatch and Intro depth-call pins now connect owner/ledger and
+owner/order checks to exact source boundaries, with mutation anchors covering
+bypasses. Focused native validation passes the gate rig's 315 checks and the
+skin-ledger rig's 79 checks, its 60-check fixture, and its mutation harness.
+The Intro source-order self-test also passes.
+
+The route census pin now requires the owning context, Diagnostics admission,
+route watch and census key together, retaining its shader pair and single eye
+call. Five bypass mutations are rejected; the focused rig passes 284 checks and
+its 94-mutation self-test. A concurrent full-run terrain-worker assertion
+failed once; its unchanged binary passes all 28 T5 checks in isolation. That
+rig links the checkerboard worker directly and cannot enter Diagnostics
+admission. The full suite remains the acceptance gate for the worker.
+
+The depth fixture now seeds a valid cache before shutdown, verifies denial
+performs no scan and invalidates that cache, then explicitly re-admits TAA and
+requires a fresh empty scan. Its TAA-only control keeps the returned scene
+texture borrowed, matching the production API. Correcting an extra fixture
+Release removes the silent exit; focused validation passes all 237 checks.
+
+The source review caught five census adapters still using an unowned macro
+despite Diagnostics row ownership. They now check the cached owner and count
+their own family callbacks. Review also found that strict Diagnostics-only or
+Temporal-AA-only startup could take the dormant-hook return when Core GPU
+timing was off. The existing validated admission sample now preserves that
+return for Legacy while keeping hooks awake for the strict admitted owners. The
+controlled-catalog policy fixtures and source mutations cover the repaired
+decision using the production validation algorithm. The generated catalog still
+has no selectable profiles; these controls do not claim a selected-profile XR
+launch.
+
+Flat shader bytes and lookup remain available to the renderer independently of
+Diagnostics capture. Scheduler lifecycle and direct fallback, probes, census,
+freeze/slow triggers, context experiments and dump work are owner-gated. Two
+isolated input-gate fixtures have admitted getter stubs because their link
+recipes omit device-hook; the actual host-denial fixture links production
+device-hook and menu objects.
+
+Full R9 passes all 169 jobs, both production DLLs, the config contract,
+exports and the self-contained installer resources:
+`build/full-diagnostics-absence-offline-20261011-r9.log`, receipt `5cdd1948`.
+
+Availability stays closed. Runtime absence/order and final matched CPU/GPU
+acceptance remain open. Steam installation remains held; no DLL promotion, live
+settings edit, flight or feature-to-main merge occurred.

@@ -35,7 +35,8 @@ namespace edvr {
 class Config;
 
 // advanced.object_probe, live.
-void objectProbeConfigure(Config& cfg);
+void objectProbeConfigure(Config& cfg, bool diagnosticsAllowed = true,
+                          bool temporalAAAllowed = true);
 
 // For the draw chain's early-return list: true while the probe is on.
 //
@@ -44,6 +45,7 @@ void objectProbeConfigure(Config& cfg);
 namespace detail {
 extern bool g_objectProbeOn;
 extern bool g_objectProbeLedgerOn;
+extern bool g_objectProbeDiagnosticsAllowed;
 }  // namespace detail
 inline bool objectProbeWantsDraws() {
     return detail::g_objectProbeOn || detail::g_objectProbeLedgerOn;
@@ -60,7 +62,10 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
 // Visible draws routed before the normal eye-draw hook (particle billboards).
 // The caller establishes that the target is an eye. Record the original
 // shader in an active ledger, without probing its unrelated instance pool.
-inline bool objectProbeLedgerActive() { return detail::g_objectProbeLedgerOn; }
+inline bool objectProbeLedgerActive() {
+    return detail::g_objectProbeDiagnosticsAllowed &&
+           detail::g_objectProbeLedgerOn;
+}
 // One compute Dispatch, before it is forwarded, while an eye run's ledger is armed (the skin ledger,
 // skin_ledger.h: the palette chain's inputs). Ask objectProbeLedgerActive() first; this returns at its first line
 // when unarmed or outside the run's 20 frames. `foreign` marks a deferred context.

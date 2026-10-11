@@ -2001,7 +2001,7 @@ exit /b 0
 echo [edvr] === plugin_dispatch_test.exe ===
 if not exist "%OBJ%\plugindispatch" mkdir "%OBJ%\plugindispatch"
 cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\plugindispatch\\" ^
+    /D_CRT_SECURE_NO_WARNINGS /DEDVR_SELECTION_ADMISSION_TEST /Fo"%OBJ%\plugindispatch\\" ^
     /Fe"%BUILD%\plugin_dispatch_test.exe" "tools\plugin_dispatch_test\plugin_dispatch_test.cpp" ^
     "src\d3d11\plugin_registry.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" "src\common\guard.cpp" ^
     "src\common\plugin_selection_admission.cpp" ^

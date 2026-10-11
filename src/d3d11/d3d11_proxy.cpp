@@ -529,8 +529,9 @@ HookMode contextHookModeFor(ID3D11DeviceContext* ctx) {
     // the field keeps needing and this file keeps not having: a rig where one
     // mode is fatal can pick the other for itself, in a text file, without a
     // build.
-    const std::string want =
-        Config::get().getString("advanced.context_hook_mode", "auto");
+    const std::string want = edvr::diagnosticsOwnerAllowed()
+        ? Config::get().getString("advanced.context_hook_mode", "auto")
+        : "auto";
     HookMode mode = probed;
     const char* forced = nullptr;
     if (_stricmp(want.c_str(), "shared") == 0 ||

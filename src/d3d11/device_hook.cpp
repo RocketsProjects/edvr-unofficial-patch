@@ -45,6 +45,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "explorer_cam_owner_gate.h"
 #include "on_foot_panel_owner_gate.h"
 #include "comfort_owner_gate.h"
+#include "diagnostics_owner_gate.h"
 #include "plugin_registry.h"
 #include "plugin_admission_transport.h"
 #include "../plugins/comfort/comfort_lifecycle.h"
@@ -181,8 +182,10 @@ typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSwapChainForHwnd)(
 struct State {
     // Published once after the device hook commit, before Comfort config or
     // lifecycle work can reach a device or Present callback.
+    bool diagnosticsOwnerAllowed = false;
     bool comfortOwnerAllowed = false;
     bool onFootPanelOwnerAllowed = false;
+    bool temporalAAOwnerAllowed = false;
     VTableHook deviceHook;
     VTableHook swapChainHook;
     VTableHook factoryHook;
@@ -274,6 +277,7 @@ struct State {
     // that changes one re-resolves it and one that does not says nothing: the
     // settings menu's Hotkeys page writes them while the game runs.
     std::string toggleKeyText, dumpKeyText, censusKeyText, eyesKeyText;
+    bool        toggleKeyBound = false;
     bool        diagnosticKeysBound = false;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings; they give the FSS mode latch its frame-exact edges.
@@ -487,6 +491,7 @@ constexpr size_t kFlipTimelineAnchorSlot = 12;
 // is the runtime's in every mode) and, in the probe modes where no installer
 // runs at all, the bare probe hook's.
 void armFlipTimeline(Config& cfg, void** table, size_t span, const char* who) {
+    if (!diagnosticsOwnerAllowed()) return;
     if (!cfg.getBool("advanced.vtable_flip_timeline", false)) return;
     if (!table || span <= kFlipTimelineAnchorSlot) {
         Log::get().note(
@@ -1541,7 +1546,7 @@ void presentFrameBoundary() {
     });
     // The scheduler stack probe's report tick, same call site and the
     // same one-atomic-load-when-off cost.
-    tkSchedulerProbe.run([] {
+    if (diagnosticsOwnerAllowed()) tkSchedulerProbe.run([] {
         const uint32_t frameNo = static_cast<uint32_t>(g_state->frameCounter);
         if (pluginRegistryHasLifecycle(plugins::kPluginDiagnostics)) {
             pluginRegistryFrameLifecycle(plugins::kPluginDiagnostics, frameNo);
@@ -1556,7 +1561,7 @@ void presentFrameBoundary() {
     // timeline's drain ran at all -- in exactly the sessions the
     // instruments exist for. Both are no-ops when nothing is armed, and the
     // tick publishes the frame number whether or not anything is.
-    tkVtableWatch.run([] {
+    if (diagnosticsOwnerAllowed()) tkVtableWatch.run([] {
         vtableWatchRearm();
         vtableWatchFrameTick(g_state->frameCounter);
     });
@@ -1571,7 +1576,7 @@ void presentFrameBoundary() {
     tkToggleKey.run([] {
         if (g_state->toggleKey.pressed()) toggleExposureFix();
     });
-    tkHotkeys.run(tickHotkeys);
+    if (diagnosticsOwnerAllowed()) tkHotkeys.run(tickHotkeys);
     tkEliteBinds.run(tickEliteBinds);
     // The game's own journal, polled about once a second: it states the
     // boundaries EDVR used to infer -- gameplay starting (LoadGame) and
@@ -1736,7 +1741,8 @@ void presentFrameBoundary() {
         // entire purpose is to ask what the runtime does to the context's
         // table were therefore the sessions that reported nothing about it.
         // No-op unless a probe actually installed.
-        tkProbeCensus.run([] { g_state->bareContextHook.censusTick("probe context"); });
+        if (diagnosticsOwnerAllowed())
+            tkProbeCensus.run([] { g_state->bareContextHook.censusTick("probe context"); });
         // The device capability log's closing count, once the game's format-support
         // queries have gone quiet (format_support_log.h). Its own tick, apart from the
         // reclaim passes: a diagnostic's faults must not stand a repair down.
@@ -1784,7 +1790,8 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // The stall sampler's heartbeat (stall_watch.h): the render thread has just presented. A relaxed store and a
     // compare; the first call starts the watchdog thread, or says that advanced.freeze_location turned it off.
     // frameCounter is the frame this Present ended, the number the long-frame lines call "frame".
-    stallWatchBeat(presentT1, g_state->frameCounter);
+    if (diagnosticsOwnerAllowed())
+        stallWatchBeat(presentT1, g_state->frameCounter);
     // The graphics memory watch (vram_watch.h): this process's GPU memory against the OS's budget for it, a line
     // on a clock, under pressure and at each crossing. One compare of two integers per frame; the OS is asked once
     // a second. Here because this is the one hook the VR and the flat profile share.
@@ -2023,18 +2030,22 @@ bool initializeComfortStartup(State& state) {
 // The Instruments page's rows: the same functions the diagnostic hotkeys
 // fire, reachable from a headset with no key bound.
 void menuActionDumpCamera(void*) {
+    if (!diagnosticsOwnerAllowed()) return;
     dumpCameraRing("the settings menu");
     temporalPassDumpHistory("the settings menu");
 }
 void menuActionCensus(void*) {
+    if (!diagnosticsOwnerAllowed()) return;
     drawCensusRequest();
     quadProbeRequest();
     perfMonitorNoteEvent(kEvCensus);
 }
 void menuActionDumpEyes(void*) {
+    if (!diagnosticsOwnerAllowed()) return;
     temporalPassArmEyeDump();
 }
 void menuActionMarker(void*) {
+    if (!diagnosticsOwnerAllowed()) return;
     static uint32_t n = 0;
     Log::get().note("----- marker %u, from the settings menu -----", ++n);
 }
@@ -2085,7 +2096,6 @@ std::string hotkeyDescribe(const Hotkey& k) {
 void configureDiagnosticHotkeys() {
     if (!g_state) return;
     State& s = *g_state;
-    const bool first = !s.diagnosticKeysBound;
     struct Item {
         Hotkey*      key;
         std::string* applied;
@@ -2095,9 +2105,31 @@ void configureDiagnosticHotkeys() {
         const char*  unboundNote;   // said when it is set to something that binds nothing
         const char*  detail;        // what a press does, said with the bind
     };
+    auto apply = [](Item& it, bool first) {
+        if (!first && *it.applied == it.value) return;
+        const std::string before = hotkeyDescribe(*it.key);
+        *it.applied = it.value;
+        it.key->setBinding(it.value.c_str());
+        if (it.key->bound()) {
+            Log::get().note(
+                "hotkey: %s key %s: %s.%s Prefer a bare key for the diagnostic instruments -- chords on the "
+                "Pause/ScrollLock cluster can reach Windows as a different key entirely.",
+                it.what, first ? "bound" : "changed", hotkeyDescribe(*it.key).c_str(), it.detail);
+        } else if (!it.value.empty() && it.unboundNote) {
+            Log::get().note("%s", it.unboundNote);
+        } else if (!first) {
+            Log::get().note("hotkey: %s key cleared (was %s); %s is off until it is bound again.", it.what,
+                            before.c_str(), it.dotted);
+        }
+    };
+    Item toggleItem{
+        &s.toggleKey, &s.toggleKeyText, Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK"),
+        "hotkey.toggle_exposure", "brightness fix toggle", nullptr, ""};
+    apply(toggleItem, !s.toggleKeyBound);
+    s.toggleKeyBound = true;
+    if (!s.diagnosticsOwnerAllowed) return;
+    const bool first = !s.diagnosticKeysBound;
     Item items[] = {
-        {&s.toggleKey, &s.toggleKeyText, Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK"),
-         "hotkey.toggle_exposure", "brightness fix toggle", nullptr, ""},
         {&s.dumpKey, &s.dumpKeyText, Config::get().getString("hotkey.dump_camera", "PAUSE"),
          "hotkey.dump_camera", "camera history", nullptr, ""},
         // Empty default: the census is chased-bug instrumentation, and an unbound key is how
@@ -2118,29 +2150,39 @@ void configureDiagnosticHotkeys() {
          "(the settings menu's row still can).",
          " Both eyes go to edvr_logs\\eyes as BMP on each press, one hitch each."},
     };
-    for (Item& it : items) {
-        if (!first && *it.applied == it.value) continue;
-        const std::string before = hotkeyDescribe(*it.key);
-        *it.applied = it.value;
-        it.key->setBinding(it.value.c_str());
-        if (it.key->bound()) {
-            Log::get().note(
-                "hotkey: %s key %s: %s.%s Prefer a bare key for the diagnostic instruments -- chords on the "
-                "Pause/ScrollLock cluster can reach Windows as a different key entirely.",
-                it.what, first ? "bound" : "changed", hotkeyDescribe(*it.key).c_str(), it.detail);
-        } else if (!it.value.empty() && it.unboundNote) {
-            Log::get().note("%s", it.unboundNote);
-        } else if (!first) {
-            Log::get().note("hotkey: %s key cleared (was %s); %s is off until it is bound again.", it.what,
-                            before.c_str(), it.dotted);
-        }
-    }
+    for (Item& it : items) apply(it, first);
     s.diagnosticKeysBound = true;
+}
+
+void registerDiagnosticMenuActions() {
+    if (!g_state || !g_state->diagnosticsOwnerAllowed) return;
+    menuRegisterAction("Dump the camera history now",
+                       "The PAUSE key's job: the last ten seconds of viewpoint history to the log.",
+                       &menuActionDumpCamera, nullptr);
+    menuRegisterAction("Take a draw census and quad probe",
+                       "The dump_draws key's job: every draw into the eyes for a few frames.",
+                       &menuActionCensus, nullptr);
+    menuRegisterAction("Write a marker line to the graphics log",
+                       "So a moment you noticed can be found in the log afterwards.",
+                       &menuActionMarker, nullptr);
+    menuRegisterAction("Dump both eyes as seen",
+                       "The dump_eyes key's job: the treated frame, both eyes, to edvr_logs\\eyes as BMP.",
+                       &menuActionDumpEyes, nullptr);
+}
+
+void registerDiagnosticMenuActionsTestVisit(void*) {
+    registerDiagnosticMenuActions();
 }
 
 State& ensureState() {
     if (!g_state) {
         g_state = new State();
+        // The proxy's INIT_ONCE published the immutable startup candidate
+        // before this first device callback. Sample Diagnostics before any
+        // Diagnostics-owned configuration, binding, or action registration.
+        g_state->diagnosticsOwnerAllowed =
+            plugin_admission_transport::ownerAllowedForStartup(
+                plugins::kPluginDiagnostics);
         // Before any hotkey is bound: a binding primes its edge latch from the
         // device it is read from.
         hotkeySetNonKeyboardReader(&nonKeyboardHotkeyHeld);
@@ -2153,18 +2195,7 @@ State& ensureState() {
         // The settings menu, read here for install and on vScreen's reload
         // path for live changes; its Instruments page gets the diagnostic
         // keys' functions as rows.
-        menuRegisterAction("Dump the camera history now",
-                           "The PAUSE key's job: the last ten seconds of viewpoint history to the log.",
-                           &menuActionDumpCamera, nullptr);
-        menuRegisterAction("Take a draw census and quad probe",
-                           "The dump_draws key's job: every draw into the eyes for a few frames.",
-                           &menuActionCensus, nullptr);
-        menuRegisterAction("Write a marker line to the graphics log",
-                           "So a moment you noticed can be found in the log afterwards.",
-                           &menuActionMarker, nullptr);
-        menuRegisterAction("Dump both eyes as seen",
-                           "The dump_eyes key's job: the treated frame, both eyes, to edvr_logs\\eyes as BMP.",
-                           &menuActionDumpEyes, nullptr);
+        registerDiagnosticMenuActions();
         menuConfigure(Config::get());
         // The settings menu's Elite panel keys, after the FSS keys and
         // OUTSIDE the block above: unconditional, so the disabled case logs
@@ -2190,8 +2221,16 @@ bool onFootPanelOwnerAllowed() noexcept {
     return g_state && g_state->onFootPanelOwnerAllowed;
 }
 
+bool diagnosticsOwnerAllowed() noexcept {
+    return g_state && g_state->diagnosticsOwnerAllowed;
+}
+
+bool temporalAAOwnerAllowed() noexcept {
+    return g_state && g_state->temporalAAOwnerAllowed;
+}
+
 bool captureFlatProbeShader(char stage, uint64_t hash) {
-    if (!g_state || !runtimeFlatProfile() || !hash ||
+    if (!diagnosticsOwnerAllowed() || !g_state || !runtimeFlatProfile() || !hash ||
         (stage != 'v' && stage != 'p' && stage != 'c' && stage!='h' && stage!='d' && stage!='g')) return false;
     auto& s = *g_state;
     std::lock_guard<std::mutex> lock(s.flatProbeShaderMutex);
@@ -2211,6 +2250,108 @@ bool captureFlatProbeShader(char stage, uint64_t hash) {
         static_cast<unsigned long long>(bytes.size()), unsigned(result.bytes), unsigned(result.existed),
         unsigned(result.error), s.flatProbeShaderDrops);
     return result.success;
+}
+
+bool deviceHookDiagnosticsOwnerTest(const wchar_t* scratchParent,
+                                   DiagnosticsOwnerHostTestResult* out) {
+    if (!scratchParent || !*scratchParent || !out) return false;
+    *out = {};
+
+    wchar_t tempDir[MAX_PATH]{};
+    const DWORD parentAttrs = GetFileAttributesW(scratchParent);
+    if (parentAttrs == INVALID_FILE_ATTRIBUTES || !(parentAttrs & FILE_ATTRIBUTE_DIRECTORY))
+        return false;
+    std::wstring tempPrefix = scratchParent;
+    if (tempPrefix.back() != L'\\' && tempPrefix.back() != L'/') tempPrefix += L'\\';
+    if (!GetTempFileNameW(tempPrefix.c_str(), L"edv", 0, tempDir)) return false;
+    if (!DeleteFileW(tempDir)) {
+        DeleteFileW(tempDir);
+        return false;
+    }
+
+    const RuntimeProfile savedProfile = g_runtimeProfile;
+    State* const savedState = g_state;
+    // Preserve and exercise the real VR hotkeys before Flat's config allowlist
+    // hides all but dump_draws. Shader capture itself requires Flat.
+    g_runtimeProfile = RuntimeProfile::LegacyVr;
+    State fixture{};
+    g_state = &fixture;
+    fixture.shaderDumpDir = tempDir;
+    fixture.flatProbeShaders[std::make_pair('v', 0xD1A6000000000001ull)] =
+        {0x44, 0x58, 0x42, 0x43};
+    const std::wstring dumpPath = std::wstring(tempDir) +
+        L"\\vs_D1A6000000000001.dxbc";
+
+    Config& cfg = Config::get();
+    const std::string savedToggle = cfg.getString("hotkey.toggle_exposure", "SCROLLLOCK");
+    const std::string savedDumpCamera = cfg.getString("hotkey.dump_camera", "PAUSE");
+    const std::string savedDumpDraws = cfg.getString("hotkey.dump_draws", "");
+    const std::string savedDumpEyes = cfg.getString("hotkey.dump_eyes", "");
+    cfg.set("hotkey.toggle_exposure", "F9");
+    cfg.set("hotkey.dump_camera", "F10");
+    cfg.set("hotkey.dump_draws", "F11");
+    cfg.set("hotkey.dump_eyes", "F12");
+
+    const auto boundDiagnosticCount = [](const State& state) {
+        return static_cast<uint32_t>(state.dumpKey.bound()) +
+               static_cast<uint32_t>(state.censusKey.bound()) +
+               static_cast<uint32_t>(state.eyesKey.bound());
+    };
+    fixture.diagnosticsOwnerAllowed = false;
+    configureDiagnosticHotkeys();
+    out->deniedCoreToggleBound = fixture.toggleKey.bound();
+    out->deniedDiagnosticHotkeysBound = boundDiagnosticCount(fixture);
+    MenuActionRegistryTestSnapshot deniedActions{};
+    const bool deniedRegistryRan = menuTestActionRegistryTransaction(
+        &registerDiagnosticMenuActionsTestVisit, nullptr, &deniedActions);
+    out->deniedDiagnosticActionsAdded = deniedRegistryRan &&
+        deniedActions.during >= deniedActions.before
+            ? static_cast<uint32_t>(deniedActions.during - deniedActions.before) : UINT32_MAX;
+    g_runtimeProfile = RuntimeProfile::Flat;
+    const bool deniedCapture = captureFlatProbeShader('v', 0xD1A6000000000001ull);
+    g_runtimeProfile = RuntimeProfile::LegacyVr;
+    const DWORD deniedDirAttrs = GetFileAttributesW(tempDir);
+    out->deniedFlatCaptureCreatedDirectory = deniedDirAttrs != INVALID_FILE_ATTRIBUTES &&
+        (deniedDirAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    out->deniedFlatCaptureCreatedFile = deniedCapture ||
+        GetFileAttributesW(dumpPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+
+    fixture.diagnosticsOwnerAllowed = true;
+    configureDiagnosticHotkeys();
+    out->allowedCoreToggleBound = fixture.toggleKey.bound();
+    out->allowedDiagnosticHotkeysBound = boundDiagnosticCount(fixture);
+    MenuActionRegistryTestSnapshot allowedActions{};
+    const bool allowedRegistryRan = menuTestActionRegistryTransaction(
+        &registerDiagnosticMenuActionsTestVisit, nullptr, &allowedActions);
+    out->allowedDiagnosticActionsAdded = allowedRegistryRan &&
+        allowedActions.during >= allowedActions.before
+            ? static_cast<uint32_t>(allowedActions.during - allowedActions.before) : UINT32_MAX;
+    g_runtimeProfile = RuntimeProfile::Flat;
+    const bool allowedCapture = captureFlatProbeShader('v', 0xD1A6000000000001ull);
+    g_runtimeProfile = RuntimeProfile::LegacyVr;
+    const DWORD allowedDirAttrs = GetFileAttributesW(tempDir);
+    out->allowedFlatCaptureCreatedDirectory = allowedDirAttrs != INVALID_FILE_ATTRIBUTES &&
+        (allowedDirAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    out->allowedFlatCaptureCreatedFile = allowedCapture &&
+        GetFileAttributesW(dumpPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+    out->actionRegistryRestored = deniedRegistryRan && allowedRegistryRan &&
+        deniedActions.restored && allowedActions.restored &&
+        deniedActions.after == deniedActions.before &&
+        allowedActions.after == allowedActions.before;
+
+    cfg.set("hotkey.toggle_exposure", savedToggle.c_str());
+    cfg.set("hotkey.dump_camera", savedDumpCamera.c_str());
+    cfg.set("hotkey.dump_draws", savedDumpDraws.c_str());
+    cfg.set("hotkey.dump_eyes", savedDumpEyes.c_str());
+    DeleteFileW(dumpPath.c_str());
+    const DWORD cleanupAttrs = GetFileAttributesW(tempDir);
+    const bool removed = cleanupAttrs == INVALID_FILE_ATTRIBUTES ||
+        RemoveDirectoryW(tempDir) != FALSE;
+    out->temporaryArtifactsCleaned = removed &&
+        GetFileAttributesW(tempDir) == INVALID_FILE_ATTRIBUTES;
+    g_state = savedState;
+    g_runtimeProfile = savedProfile;
+    return true;
 }
 
 bool flatProbeShaderLookup(char stage, uint64_t hash, const uint8_t** data, size_t* bytes) {
@@ -2517,7 +2658,8 @@ void hookDevice(ID3D11Device* device) {
         return;
     }
     if (s.sentinel->trippedOnStartup() &&
-        !sentinelCfg.getBool("advanced.ignore_sentinel", false)) {
+        (!s.diagnosticsOwnerAllowed ||
+         !sentinelCfg.getBool("advanced.ignore_sentinel", false))) {
         // Cleared here, so a false trip costs one session rather than every
         // future launch -- the same bargain the compositor hook struck, and for
         // the same reason: quitting from the menu before the confirmation looks
@@ -2561,9 +2703,10 @@ void hookDevice(ID3D11Device* device) {
     }
     breadcrumb("gfx: arming d3d11 hooks");
 
-    s.shaderDump = sentinelCfg.getBool("advanced.glare_shader_dump", false);
+    s.shaderDump = s.diagnosticsOwnerAllowed &&
+        sentinelCfg.getBool("advanced.glare_shader_dump", false);
     s.shaderDumpDir = sentinelCfg.logDir() + L"\\shaders";
-    if (runtimeFlatProfile())
+    if (s.diagnosticsOwnerAllowed && runtimeFlatProfile())
         Log::get().note("flat shader capture: armed targets=%u stages=VS,PS directory=%ls; watching successful creations, one attempt per exact stage/hash per device; absent attempted lines mean no capture attempt", unsigned(kFlatShaderCaptureCount), s.shaderDumpDir.c_str());
     if (s.shaderDump) {
         Log::get().note("shader dump ARMED: every vertex and pixel shader "
@@ -2649,6 +2792,12 @@ void hookDevice(ID3D11Device* device) {
     s.onFootPanelOwnerAllowed =
         plugin_admission_transport::ownerAllowedForStartup(
             plugins::kPluginOnFootPanel);
+    // Temporal-AA owns depth-scene discovery independently of Diagnostics.
+    // Publish one immutable post-commit decision for the native providers and
+    // vScreen; do not infer ownership from fix.temporal_aa.
+    s.temporalAAOwnerAllowed =
+        plugin_admission_transport::ownerAllowedForStartup(
+            plugins::kPluginTemporalAa);
     runComfortOwned(s.comfortOwnerAllowed, [&] {
         fssResConfigure(sentinelCfg);
     });
@@ -2766,8 +2915,9 @@ void hookDevice(ID3D11Device* device) {
     // implementation the runtime has moved on from, and still no EDVR code runs
     // inside any context method. Run the two and the answer is arithmetic.
     {
-        const std::string probe =
-            sentinelCfg.getString("advanced.context_hook_probe", "off");
+        const std::string probe = s.diagnosticsOwnerAllowed
+            ? sentinelCfg.getString("advanced.context_hook_probe", "off")
+            : "off";
         const bool wantSwap = _stricmp(probe.c_str(), "swap") == 0;
         const bool wantLive = _stricmp(probe.c_str(), "live") == 0;
         if (wantSwap || wantLive) {
@@ -3186,7 +3336,7 @@ void shutdownDeviceHooks() {
     // this, a probe session's page would be left read-only after EDVR had gone,
     // which is not a thing to do to a process. Idempotent: the second call sees
     // no armed watch and returns.
-    vtableWatchStop();
+    if (diagnosticsOwnerAllowed()) vtableWatchStop();
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.
     if (onFootPanelOwnerAllowed()) revertVScreenModeResolution();

@@ -95,14 +95,15 @@ A_FOREIGN_RET = ("    if (foreign) {\n"
                  "    }\n")
 A_MAGIC = "static const char kMagic[8] = {'E', 'D', 'V', 'R', 'S', 'K', 'N', '1'};"
 A_HDR = "u32(1u); u32(kFrames); u32(frame0_); u32(paletteCount_);"
-A_HOOK_FOREIGN = "        if (objectProbeLedgerActive()) objectProbeNoteDispatch(self, x, y, z, true);   // the skin ledger: one bool unarmed\n"
+A_HOOK_FOREIGN = ("        if (diagnosticsOwnerAllowed() && objectProbeLedgerActive())\n"
+                  "            objectProbeNoteDispatch(self, x, y, z, true);   // the skin ledger: one bool unarmed\n")
 A_NOTE_HEAD = ("void objectProbeNoteDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y, uint32_t z, bool foreign) {\n"
                "    if (!detail::g_objectProbeLedgerOn || !ctx) return;\n")
 A_ARM_RESET = "    g_skin.reset();   // its report went out above; a run that never reported is said at shutdown\n"
 A_WRITE_CALL = "    writeSkinLedger(dir, \"window closed\");\n"
 A_POOL_SWAP = "        std::vector<uint8_t>().swap(g_ledgerPool[i]);\n"
 A_WHOLE = "g_palette[i], g_paletteBytes[i], g_paletteBytes[i]);"
-A_SHUTDOWN = "    if (g_skin.armed() && !g_skin.finished()) {\n        std::string stamp;"
+A_SHUTDOWN = "    if (g_diagnosticsAllowed && g_skin.armed() && !g_skin.finished()) {\n        std::string stamp;"
 A_KEEPREAD = "ledgerRead(ctx, c, into, what == 0 ? 0u : kLedgerBonesMax)"
 A_RELEASE = "    skinReleaseCopies();        // the in-flight copies go with the pool they were learned on (counted as lost by the run)\n"
 A_BAT_VERIFY = "python \"tools\\skin_palette_check.py\" --verify-fixture \"%OBJ%\\skinledger\\fixture\" || exit /b 1\n"

@@ -30,6 +30,9 @@ class InlineExecutor final : public edvr::openxr::ImmediateExecutor {
 
 namespace edvr {
 void perfMonitorNoteEvent(unsigned, double) {}
+// This isolated menu rig compiles input_gate.cpp without device_hook.cpp;
+// keep its unrelated input-probe path dormant.
+bool diagnosticsOwnerAllowed() noexcept { return false; }
 // The production definition lives in flat_compute_readback.cpp, which this
 // focused WARP rig does not link.
 thread_local bool g_flatComputeInternal = false;

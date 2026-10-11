@@ -235,7 +235,7 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
     if (g_vrWorldInternal) { g_state->realDispatchIndirect(self, args, off); return; }   // the world route's own (vr_world_route.h)
     gpuFrameCommand(self);
     State* s = g_state;
-    if (drawCensusArmed()) {
+    if (diagnosticsOwnerAllowed() && drawCensusArmed()) {
         drawCensusDispatch(self, 0, 0, 0, foreignContext(self), args, off);
     }
     if (!foreignContext(self)) s->computeThisFrame = true;
@@ -274,8 +274,10 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
         // middle could hide. Every read the census makes is off `self`, so
         // the record is honest for any context; only the fixes and probes
         // below stay owner-only.
-        if (drawCensusArmed()) drawCensusDispatch(self, x, y, z, true, nullptr, 0);
-        if (objectProbeLedgerActive()) objectProbeNoteDispatch(self, x, y, z, true);   // the skin ledger: one bool unarmed
+        if (diagnosticsOwnerAllowed() && drawCensusArmed())
+            drawCensusDispatch(self, x, y, z, true, nullptr, 0);
+        if (diagnosticsOwnerAllowed() && objectProbeLedgerActive())
+            objectProbeNoteDispatch(self, x, y, z, true);   // the skin ledger: one bool unarmed
         s->realDispatch(self, x, y, z);
         return;
     }
@@ -287,10 +289,12 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // other census hook strikes. Recording, not classification: this line
     // exists because the FSS body could legally be built by a compute writer
     // and no capture before 2026-08-25 could have seen it.
-    if (drawCensusArmed()) drawCensusDispatch(self, x, y, z, false, nullptr, 0);
+    if (diagnosticsOwnerAllowed() && drawCensusArmed())
+        drawCensusDispatch(self, x, y, z, false, nullptr, 0);
     // The skin ledger (skin_ledger.h) reads the palette chain's inputs here, before the game's dispatch runs: an
     // armed eye run only, one bool load otherwise, and what it copies is the game's own state, untouched.
-    if (objectProbeLedgerActive()) objectProbeNoteDispatch(self, x, y, z, false);
+    if (diagnosticsOwnerAllowed() && objectProbeLedgerActive())
+        objectProbeNoteDispatch(self, x, y, z, false);
     // F2 (the second skin, VR only): the palette chain's dispatch feeds the identity join before the game's dispatch runs. One atomic load
     // when the feature is off; the shader test is a lookup kept by shader object.
     if (engineVelocitySkinWanted() && skinChainBound()) engineVelocityNoteChainDispatch(self, x);
@@ -379,7 +383,7 @@ void exposureConfigure(Config& cfg) {
     // census's ch= column), comma separated; "ch:" prefixes tolerated since
     // that is how the column spells them. Refused whole on any parse doubt,
     // the census_skip discipline.
-    {
+    if (diagnosticsOwnerAllowed()) {
         const std::string spec =
             cfg.getString("advanced.census_skip_dispatch", "");
         if (spec.length() < sizeof(s->dispatchSkipSpec) &&
