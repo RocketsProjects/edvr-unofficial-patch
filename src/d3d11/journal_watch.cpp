@@ -85,6 +85,8 @@ struct Published {
     bool     gameplay = false;
     uint32_t disembarks = 0;
     uint32_t embarks = 0;
+    uint32_t docks = 0;       // journal Docked lines (the state dump's clock; no other reader)
+    uint32_t undocks = 0;     // journal Undocked lines
     // When a jump tunnel MAY be on screen: armed at StartJump, cleared by
     // the event that resolves it (FSDJump for hyperspace, SupercruiseEntry
     // for the other branch -- StartJump fires for both, and telling them
@@ -135,6 +137,8 @@ struct Visible {
     std::atomic<bool>     gameplay{false};
     std::atomic<uint32_t> disembarks{0};
     std::atomic<uint32_t> embarks{0};
+    std::atomic<uint32_t> docks{0};
+    std::atomic<uint32_t> undocks{0};
     std::atomic<uint64_t> jumpArmedMs{0};
     std::atomic<bool>     fsdJumpKnown{false};
     std::atomic<bool>     fsdJumpLive{false};
@@ -165,6 +169,8 @@ void applyPublished(const Published& p) {
     g_v.gameplay.store(p.gameplay, kRelaxed);
     g_v.disembarks.store(p.disembarks, kRelaxed);
     g_v.embarks.store(p.embarks, kRelaxed);
+    g_v.docks.store(p.docks, kRelaxed);
+    g_v.undocks.store(p.undocks, kRelaxed);
     g_v.jumpArmedMs.store(p.jumpArmedMs, kRelaxed);
     g_v.fsdJumpKnown.store(p.fsdJumpKnown, kRelaxed);
     g_v.fsdJumpLive.store(p.fsdJumpLive, kRelaxed);
@@ -353,6 +359,10 @@ void onEvent(Session& s, const char* name, uint32_t len) {
         ++s.pub.disembarks;
     } else if (len == 6 && memcmp(name, "Embark", 6) == 0) {
         ++s.pub.embarks;
+    } else if (len == 6 && memcmp(name, "Docked", 6) == 0) {
+        ++s.pub.docks;
+    } else if (len == 8 && memcmp(name, "Undocked", 8) == 0) {
+        ++s.pub.undocks;
     } else if (len == 8 && memcmp(name, "Shutdown", 8) == 0) {
         // The game is leaving. Gameplay ends with it; a relaunch gets a new
         // journal and a fresh LoadGame.
@@ -995,6 +1005,8 @@ bool journalSupercruise() { return journalWatchActive() && peek(g_v.supercruise)
 bool journalGameplay() { return !runtimeFlatProfile() && peek(g_v.gameplay); }
 uint32_t journalDisembarks() { return runtimeFlatProfile() ? 0u : peek(g_v.disembarks); }
 uint32_t journalEmbarks() { return runtimeFlatProfile() ? 0u : peek(g_v.embarks); }
+uint32_t journalDocks() { return runtimeFlatProfile() ? 0u : peek(g_v.docks); }
+uint32_t journalUndocks() { return runtimeFlatProfile() ? 0u : peek(g_v.undocks); }
 
 bool journalInJumpTunnel() {
     if (runtimeFlatProfile()) return false;

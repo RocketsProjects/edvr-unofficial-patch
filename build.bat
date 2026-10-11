@@ -554,6 +554,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\vertex_resync_hook.cpp" ^
     "src\d3d11\sun_pass_probe.cpp" ^
     "src\d3d11\shadow_gate_probe.cpp" ^
+    "src\d3d11\state_dump_probe.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -1592,6 +1593,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: shadow gate probe test build failed & exit /b 1 )
 "%BUILD%\shadow_gate_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_state_dump_test
+echo [edvr] === state_dump_test.exe ===
+REM The state dump's pure half (src\d3d11\state_dump_core.h, TEMPORARY, docs\concourse-culling-2026-10-11.md, M2): the reader table
+REM and its pinned prologue (a one-byte change refused), the capped byte diff and its offsets, the counter deltas (a reset is no
+REM event), the change text, the CSV row and header (equal field counts), and the start and event lines. No DLL and no game.
+if not exist "%OBJ%\statedump" mkdir "%OBJ%\statedump"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\statedump\\" ^
+    /Fe"%BUILD%\state_dump_test.exe" "tools\state_dump_test\state_dump_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: state dump test build failed & exit /b 1 )
+"%BUILD%\state_dump_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_vr_camera_census_test

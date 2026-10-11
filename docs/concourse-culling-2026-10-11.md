@@ -4,15 +4,15 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 
 ## Status
 
-- **State:** analysis and design only. Branch `claude/concourse-cull-design` from `claude/station-interior-design` (76c08530). Nothing fixed, flown or merged.
+- **State:** analysis and design; the M2 state dump is built on `claude/shadow-gate-probe` (which merges this doc), not installed, not flown. Nothing fixed. M1 is blocked on draw identity (see Measurement).
 - **Primary: sealed hangar.** Docked, pad lowered, doors closed. Submit only the hangar cell and suppress the sun. Blocked on storage of pad and door state (P9).
 - **Secondary: closed panes.** Seated inside a station (doors open, or flying inside). Cull the SocialSpace (concourse) records and replace the bay windows with mirror-like opaque glass (stage 1, Sean's decision). Impostor is a later stage only.
 - **Concourse:** the SocialSpace sub-area under StationInteriorHub, created at station load (P1).
 - **Triggers now:** seated = Status Flags bits 24-26 or Flags2 bits 1-2 (EDVR `journalSeatedFromFlags`). Disembark = journal Disembark with SRV, Taxi and Multicrew false (P5). Status OnFoot lags about 6 s, so it is not a restore trigger.
 - **Ruled out:** Status.json as the sealed signal; ToggleCockpitRender as a render switch; InteriorStateChangeActivity as a switch (P7).
 - **Open:** pad and door storage (P9); cell radius; pane draw hashes and ownership; env slot numbers; player_location read path (P10).
-- **Next flight, no engine change:** M1 record-attributed census, then M2 storage dump.
-- **Probe keys:** none added. **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
+- **Next flight, no engine change:** M2 (one 600-frame capture around one pad cycle and one door cycle) and M3 (an open-pad outpost). The M1 draw link is the open item.
+- **Probe keys (TEMPORARY):** `hotkey.state_dump` (unbound by default) and `diag.state_dump = off`. **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
 
 ## Proven
 
@@ -91,6 +91,25 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 - **M2. Storage and timing.** Dump the LandingPad object and the lighting object at +0x240 across one pad cycle and one door cycle. Find the bytes that change and log them per frame beside the dock-state name. Measure the release lead (state edge to first door motion) and the lag (journal Disembark line to first on-foot frame).
 - **M3. Outposts.** Dock at an open-pad outpost. Log NoHangarPresent, the dock state and PadRetraction. The gate must stay false.
 - **Flight tests:** sealed hangar with the cull on and off (draws, frame time); the door-open transition watched for pops with the release at the state edge; the pane look at 50-150 m against the screenshot framing; disembark restore against the Disembark journal line.
+
+### Built, 2026-10-11 (branch `claude/shadow-gate-probe`; build green; not installed, not flown)
+
+**M1, blocked: no draw-side record identity.** The record side is known: `primaryIdentity` (`src/d3d11/engine_velocity_emit.h:413`) takes `record = lod - 0x210` from the builder's nibble argument and reads `context = rec+0x290` and `node = rec+0x18`. The draw side has no record: the primary copy scatters every native rigid record into one private pool (`engine_velocity_primary_copy.h`, `apply`), keyed by target address (`g_emissions`), so a draw is an offset into that pool and not a record. Two routes in the spec do not hold. The DrawIndexed return address is not attributed anywhere (`draw_census*` has no return-address code), and a return address is shared by every record that issues that draw. The thread-local-around-the-builder route does not hold either: the builder emits items and draws nothing. Next step, unverified: in the census, map a draw's bound vertex buffer and its start index to the pool target and from there to the emission (`g_emissions`). That needs one capture showing that the rigid draws bind the private pool and at what offsets.
+
+**M2, built: `hotkey.state_dump` and `diag.state_dump` (`src/d3d11/state_dump_probe.cpp`, `state_dump_core.h`, rig `tools/state_dump_test`).** Four CodeHook detours on the docking-state readers, with the pinned six bytes `40 53 48 83 EC 20` (push rbx; sub rsp,20h, the same in all four) and six stolen:
+
+| RVA | Reader | Forwarded | Returned |
+|---|---|---|---|
+| 0x12C3C20 | calls `[obj+0x88]` on rcx | rcx | RAX (AL code) |
+| 0x12CAF80 | same shape | rcx | RAX |
+| 0x12CADE0 | same shape | rcx | RAX |
+| 0x12CB320 | same shape | rcx | RAX |
+
+The probe never calls the getters. Per owned frame, at the Present tick (under its own `BoundaryTick`), it records: the journal's cumulative Docked, Undocked, Disembark and Embark counts (`journalDocks`/`journalUndocks` are new in `journal_watch.cpp`; the other two exist); the Status.json Flags and Flags2 words (`journalRawStatus`); for each reader, its AL code, its call count and its object; and for each distinct object the readers name (up to four tracks), the bytes that changed in its first 0x400 bytes, in the 0x40 bytes at +0x340, and in the 0x100 bytes behind the pointer at +0x240. Every read is SEH-guarded. Output: `edvr_logs\state_dump_<stamp>.csv` (one row per frame, 23 columns, the changes as `A<obj>.obj+0xOFF:WW>NN`), and `state dump:` lines for each event (a counter moved, a reader's code changed, a new object, bytes changed) and a done line. The capture is 600 frames.
+
+What the flight must settle: which reader object is the LandingPad and which holds the lighting properties (the +0x240 region); what the reader codes mean (the readers branch on the getter's bool, and the codes are the observed AL values); and whether NoHangarPresent appears in any reader code (P6 says it is written by 0x12C0F11, which the readers do not call).
+
+**M3, flight step at an open-pad outpost (no new code).** Dock at an outpost whose pad is open. Press `hotkey.state_dump`, then raise the pad and lower it within the 600 frames. In the dump, read the reader codes and objects, the Flags and Flags2 words, the journal Docked event, and the pad fields (the +0x240 region and the bytes that change with the raise and lower). NoHangarPresent is not one of the four reader codes. Observing it directly needs the writer 0x12C0F11's function entry, which is not yet identified; until then the step reports the codes the readers return, and the gate in A stays false only if the reader codes say so.
 
 ## Open items
 
