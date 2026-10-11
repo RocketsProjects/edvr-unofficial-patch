@@ -12,7 +12,7 @@
   implementations, generated config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `d78d9d85` incorporated in this checkpoint.
+- **Current integration:** main `f9609927` incorporated in this checkpoint.
   Sampler startup is `752c7412`; dormant admission is `d9c42281`.
   Performance's four startup absence gates pass the full 169-job gate:
   `build/full-performance-absence-offline-20261010-r2.log`
