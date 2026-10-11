@@ -11,6 +11,7 @@
 #include "treatment_cases.h"
 #include "frame_end_overlap_cases.h"
 #include "frame_cycle_cases.h"
+#include "wait_lead_cases.h"
 #include "frequency_cases.h"
 #include "visibility_cases.h"
 #include "steam_identity_cases.h"
@@ -662,6 +663,7 @@ int selfTest() {
   edvr::openxr::test::runFrameEndOverlapCases(check);
   edvr::openxr::test::runSubmissionStatsCases(check);
   edvr::openxr::test::runFrameCycleCases(check);
+  edvr::openxr::test::runWaitLeadCases(check);
   {
     OwnerService cycleOwner;RenderThreadDispatcher cycleDispatcher(cycleOwner);RenderRoute cycleRoute{cycleDispatcher};
     auto cycleHost=std::make_unique<NativeRuntimeHost>(cycleOwner,cycleDispatcher,cycleRoute);

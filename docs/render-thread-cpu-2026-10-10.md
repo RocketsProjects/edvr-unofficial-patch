@@ -2,7 +2,7 @@
 
 ## Status
 
-*Opened 2026-10-10. Analysis only; no C++ changed. Update this block when this doc changes.*
+*Opened 2026-10-10. The analysis was made with no C++ changed. The wait-lead instrument (the one C++ change, native_wait_lead and native_long_cycle_1x) is on branch claude/render-cpu-waitlead; see the Journal. Update this block when this doc changes.*
 
 - **State:** source read at HEAD d78d9d85 (v0.19.1 and 44 later commits). The flight is v0.19.0, build 6AC9BAC9 (`module_init` line). Between them, native_runtime_host.h (+22), device_hook.cpp (+35) and vscreen.cpp (+42) gained only a projection-notice hook, a terrain-cover poll, log-only SSAA lines, a space-dust skip (vscreen.cpp:2013) and flat-only census blocks. The submit, wait, frame-end and producer-copy code is unchanged. Line numbers below are HEAD's.
 - **Flight:** AMD RX 9070 XT, SteamVR through EDVR's OpenXR runtime, 2604x2644 per eye, 90 Hz, AA off, station hangar. Logs: openxr pid 5252 (215541), gfx 215539. Not run through `tools\edvr_log.py --expect-build`; the build line was checked by hand.
@@ -12,7 +12,7 @@
 - **Finding 4, windows 1-3 are not EDVR-limited.** Game work there is 1.0-1.5 ms, the render thread idles about 8 ms a frame, and misses still occur. Their tail sits after Submit (Elite's Present and after), not in EDVR's ~1.2 ms.
 - **Open hypotheses**, each with its discriminating signature:
   - H1, EDVR work tips the frame over. Signature: missed cycles have cycle minus next_wait above one period. Partly visible now; the 2x long-cycle threshold hides 1-2 period misses.
-  - H2, OpenXR pacing starts the frame later. Signature: per wait return, lead = predictedDisplayTime minus the return time, shrinking as EDVR work grows. NOT LOGGED.
+  - H2, OpenXR pacing starts the frame later. Signature: per wait return, lead = predictedDisplayTime minus the return time, shrinking as EDVR work grows. LOGGED on branch claude/render-cpu-waitlead (native_wait_lead), NOT FLOWN.
   - H3, GPU limits windows 3 and 7 (gpu_frametime 10.5 and 8.0 ms). Signature: late cycles that coincide with real-Present blocking. Not yet seen; post2wait p95 is 4.3-4.7 ms in those windows.
   - H4, producer AcquireSync costs about 0.2 ms uncontended (a fixed handshake, not a wait). Signature: a timestamp before and after the call, with an immediate return. Current p99 0.44 ms, so a real wait is unlikely. NOT SPLIT.
   - H5, most of the 0.36 ms draw-hook cost is EDVR reissues. Signature: first-call versus reissue split. NOT SPLIT.
@@ -24,10 +24,10 @@
   - ruled out: a subscription gate as new work, because draw_gate.h (2026-09-22) already exists and vscreen.cpp:1960 reads it.
   - ruled out: the owner rendezvous as a cost, because it measured 10-60 us (perf review, 2026-09-14), and queue delay agrees here.
 - **Next flight** (same hangar, one build from HEAD with `build.bat` run and tests passing):
-  1. Per wait return: `wait_lead_ms` = predictedDisplayTime minus the return time, in QPC, on native_frame_cycle_window. Settles H2.
-  2. Long-cycle threshold from 2x to 1.0x period, with `work_ms` = cycle minus next_wait_roundtrip. Settles H1 against H2.
-  3. Separate timestamps around producer AcquireSync (H4) and first-call versus reissue draw time (H5).
-  No cut until items 1 and 2 show which side limits the frame.
+  1. Built on branch `claude/render-cpu-waitlead` (SHA in the 2026-10-10 entry below, not merged, not installed): per 30 s window, `native_wait_lead` (lead of predictedDisplayTime over each game wait return, frame work to xrEndFrame, late frames split by cause) and `native_long_cycle_1x` (cycles between 1x+0.5 ms and 2x period, with the work split). Settles H2 against H1 by the rule in the entry below. Read both lines in one flight.
+  2. The 1.0x census is done as item 1's `native_long_cycle_1x` line, not as a change to `native_long_cycle`, which keeps its 2x threshold.
+  3. Separate timestamps around producer AcquireSync (H4) and first-call versus reissue draw time (H5), still not split.
+  No cut until item 1 shows which side limits the frame.
 
 ## Evidence
 
@@ -106,3 +106,31 @@ Not recommended:
 - The log is v0.19.0; the code is HEAD. The submit and wait logic is unchanged, but measure on HEAD before cutting.
 - The 2x long-cycle threshold means misses of one or two periods are not logged per cycle. Their composition is inferred from window percentiles.
 - gpu_frametime is per window and the nine windows disagree (0.75 to 10.55 ms), so the GPU cannot be ruled out in windows 3 and 7.
+
+## Journal
+
+### 2026-10-10: wait-lead instrument (branch claude/render-cpu-waitlead, not merged, not installed)
+
+Added, always on, no config key. The arithmetic is src\openxr\wait_lead_stats.h (header only). The host hooks it in three places: the owner's game wait return in waitPoses (real begins only, so not a turbo-synthesized frame), the xrEndFrame call (endFrameReturned, background frames excluded), and reportFrameCycles, which drains it at each frame-cycle window and so shares the 30 s window with native_frame_cycle_window. Lead converts predictedDisplayTime with xrConvertTimeToWin32PerformanceCounterKHR, loaded optionally with the existing convertTime; a missing entry point leaves lead at na and late still counts. The arithmetic fallback the request allowed does not give a lead: the only clock-to-XrTime calibration the code has (estimateNow) is set at the same wait, so the lead would be zero. Not implemented.
+
+Lines, one pair per 30 s frame-cycle window:
+
+    native_wait_lead,window=N,lead_p5/p50/p95=a/b/c,work_p50/p95/p99=d/e/f,late=K,late_short_lead=A,late_long_work=B,period_ms=P,frames=F,dropped=D
+    native_long_cycle_1x,window=N,period_ms=P,count=C,cycle_p50=X,work_p50=W,work_ge_period=G,work_lt_period=L
+
+Definitions (also in the header comment):
+- Per game frame N: lead = predictedDisplayTime (QPC us) minus the wait's return; work = the start of N's xrEndFrame call minus that return; cycle = the next game wait's return minus this one's.
+- late: the next game wait's predicted time skipped a period past N's, round((pred_next - pred_N) / period) - 1 >= 1. Same arithmetic as the late_frames counter, attributed to the frame it is about. Known only at the next wait, so a frame is committed then. late=K counts frames; late_frames counts skipped periods, so the two differ when a frame skips two.
+- late_short_lead: late and lead < period - W50, W50 the window's work p50. The runtime gave less than a period minus a typical frame's work.
+- late_long_work: late and work > lead. A frame can be in both. A late frame with no converted lead counts in late only.
+- native_long_cycle_1x: cycles with period + 0.5 ms < cycle < 2 periods. work_ge_period: that frame's work is at least a period. work_lt_period: its work is under a period, so the cycle grew after xrEndFrame or in the wait.
+- Not counted: loading frames, synthesized deferred frames, failed waits. The lines come only from the caller-thread path; a direct owner call drains nothing (as with native_frame_cycle_window). frames=F is the committed count; dropped=D counts frames past the 8192 capacity (about 90 s at 90 Hz). na: no sample in the window.
+
+How to read it. The thresholds are the rule above; the expected values are not known yet, so the first clean window (late=0) sets the baseline lead p50.
+- H1, EDVR work tips the frame over: late_long_work takes most of the late frames, and most of the census is work_ge_period.
+- H2, the runtime starts the frame late: late_short_lead takes most of the late frames, lead p50 sits well under a period in windows that miss, and most of the census is work_lt_period.
+- Late frames with both splits at zero: the miss is not in this frame's own lead or work. Look after Present (edvr_after_real_present, after_single_present).
+
+Verification on this branch: wait_lead_cases.h (24 checks: steady, a short-lead late frame, a long-lead late frame, jitter, the census split, pending and no-end, unconverted lead, capacity, empty window, and the line format parsed back) passes, and `tools\edvr_log.py --self-test` covers parse_wait_lead and parse_long_cycle_1x. Full build.bat green (receipt written). Cost, measured on the desk: 16 ns per QueryPerformanceCounter read, 28 ns per frame of bookkeeping including the window drain (about 0.05 ms per 30 s window to build the report). The per-frame runtime call, xrConvertTimeToWin32PerformanceCounterKHR, is not measured here; it needs a headset session.
+
+Next flight: the same hangar, a build from this branch (or from main once merged, which is not done here), read native_wait_lead and native_long_cycle_1x per window alongside native_frame_cycle_phase. One flight with the build line checked (`tools\edvr_log.py --expect-build HEAD`) first.
