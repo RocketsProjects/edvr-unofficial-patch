@@ -23,8 +23,10 @@ void sealedTrialInstall(bool flatProfile);
 void sealedTrialToggle(const char* trigger, uint32_t frame);
 // A press of hotkey.sealed_trial_smaller (dir -1) or hotkey.sealed_trial_larger (dir +1): one rung while the trial is on.
 void sealedTrialStep(int dir, const char* trigger, uint32_t frame);
-// The render thread's per-frame tick: the 5-second line while the trial is on.
+// The render thread's per-frame tick: the 5-second line while the trial is on, and the kept-records report's frames.
 void sealedTrialFrame(uint32_t frame);
+// A press of hotkey.sealed_trial_report: arms one frame of the kept-records report (the trial must be on).
+void sealedTrialReportRequest(const char* trigger, uint32_t frame);
 
 // Whether the trial is on (one atomic load).
 bool sealedTrialOn() noexcept;

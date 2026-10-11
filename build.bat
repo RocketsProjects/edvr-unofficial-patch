@@ -558,6 +558,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\store_hook.cpp" ^
     "src\d3d11\sealed_trial.cpp" ^
     "src\d3d11\look_probe.cpp" ^
+    "src\d3d11\view_source.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -1637,6 +1638,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: location scan test build failed & exit /b 1 )
 "%BUILD%\location_scan_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_view_source_test
+echo [edvr] === view_source_test.exe ===
+REM The view-source core (src\d3d11\view_source_core.h, TEMPORARY): which view the aim comes from, and the pose read from the three 3x4
+REM rows (the sanity refusals too). And the kept-records report's core (src\d3d11\kept_report_core.h): why a record is kept, the bounded
+REM top lists, the counts and the seventeen-field rows. No DLL and no game.
+if not exist "%OBJ%\viewsource" mkdir "%OBJ%\viewsource"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\viewsource\\" ^
+    /Fe"%BUILD%\view_source_test.exe" "tools\view_source_test\view_source_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: view source test build failed & exit /b 1 )
+"%BUILD%\view_source_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_state_dump_test

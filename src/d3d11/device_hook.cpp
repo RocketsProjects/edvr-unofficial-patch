@@ -296,6 +296,9 @@ struct State {
     std::string sealedTrialSmallerKeyText;
     Hotkey sealedTrialLargerKey;
     std::string sealedTrialLargerKeyText;
+    // The kept-records report of the sealed-hangar trial (TEMPORARY; sealed_trial.h): one frame, while the trial is on. Unbound by default.
+    Hotkey sealedTrialReportKey;
+    std::string sealedTrialReportKeyText;
     // The look probe's key (TEMPORARY; look_probe.h). Unbound by default.
     Hotkey lookProbeKey;
     std::string lookProbeKeyText;
@@ -1380,6 +1383,9 @@ void tickHotkeys() {
         sealedTrialStep(-1, "hotkey.sealed_trial_smaller", static_cast<uint32_t>(g_state->frameCounter));
     if (g_state->sealedTrialLargerKey.pressed())
         sealedTrialStep(+1, "hotkey.sealed_trial_larger", static_cast<uint32_t>(g_state->frameCounter));
+    // The kept-records report (TEMPORARY; sealed_trial.h): a press captures one frame while the trial is on.
+    if (g_state->sealedTrialReportKey.pressed())
+        sealedTrialReportRequest("hotkey.sealed_trial_report", static_cast<uint32_t>(g_state->frameCounter));
     // The look probe (TEMPORARY; look_probe.h): a press arms one capture of the next frame.
     if (g_state->lookProbeKey.pressed()) lookProbeRequest("hotkey.look_probe");
     // The two keys above are gated on focus like the others, and said nothing when a press was refused for it.
@@ -2137,6 +2143,11 @@ void configureDiagnosticHotkeys() {
          "hotkey.sealed_trial_larger", "sealed trial larger",
          "hotkey: sealed_trial_larger is set but bound nothing, so the trial's radius cannot be stepped larger by key this session.",
          " Steps the sealed-hangar trial's radius one rung larger (80, 60, 40, 30, 20, 15, 10 m) while the trial is on (temporary probe)."},
+        // TEMPORARY, the sealed-hangar trial's kept-records report (sealed_trial.h): a press captures one frame while the trial is on.
+        {&s.sealedTrialReportKey, &s.sealedTrialReportKeyText, Config::get().getString("hotkey.sealed_trial_report", ""),
+         "hotkey.sealed_trial_report", "sealed trial report",
+         "hotkey: sealed_trial_report is set but bound nothing, so the kept-records report cannot be started by key this session.",
+         " Writes the kept-records report for one frame of the sealed-hangar trial (temporary probe): edvr_logs\\sealed_kept_<stamp>.csv."},
         // TEMPORARY, the look probe (look_probe.h): a press arms one capture. Empty is off.
         {&s.lookProbeKey, &s.lookProbeKeyText, Config::get().getString("hotkey.look_probe", ""),
          "hotkey.look_probe", "look probe",

@@ -87,26 +87,28 @@ int main(int argc, char** argv) {
         w.evalNs = 2500000;   // 2.5 ms
         w.faults = 0;
         char line[400];
-        se::formatWindow(line, sizeof(line), w, 80.0f);
+        se::formatWindow(line, sizeof(line), w, 80.0f, "eye rows");
         const std::string s = line;
         check(s.find("window 5 s culled=12 kept=3 kept_unjudged=1 sun_pairs_skipped=40") != std::string::npos,
               "the window line carries the counts");
         check(s.find("eval_ms=2.500") != std::string::npos && s.find("radius_m=80.0") != std::string::npos,
               "the window line carries the time and the radius");
-        se::formatWindow(line, sizeof(line), w, 60.0f);
+        se::formatWindow(line, sizeof(line), w, 60.0f, "explorer cam");
         check(std::string(line).find("radius_m=60.0") != std::string::npos, "a window at 60 m says so");
+        check(std::string(line).find("view source = explorer cam") != std::string::npos, "a window names its view source");
     }
 
     // --- The toggle line, on and off, with and without a camera.
     {
         char line[400];
         const float c[3] = {1.0f, 2.0f, 3.0f};
-        se::formatToggle(line, sizeof(line), true, 4242, 80.0f, c, true);
-        check(std::string(line).find("on at frame 4242 (radius 80.0 m; camera (1.0,2.0,3.0)") != std::string::npos,
-              "the on line names the frame, radius and camera");
-        se::formatToggle(line, sizeof(line), true, 7, 80.0f, c, false);
+        se::formatToggle(line, sizeof(line), true, 4242, 80.0f, c, true, "vscreen");
+        check(std::string(line).find("on at frame 4242 (radius 80.0 m; view source = vscreen; camera (1.0,2.0,3.0)") !=
+                  std::string::npos,
+              "the on line names the frame, radius, view source and camera");
+        se::formatToggle(line, sizeof(line), true, 7, 80.0f, c, false, "eye rows");
         check(std::string(line).find("camera unknown") != std::string::npos, "the on line says when the camera is unknown");
-        se::formatToggle(line, sizeof(line), false, 9, 80.0f, c, true);
+        se::formatToggle(line, sizeof(line), false, 9, 80.0f, c, true, "eye rows");
         check(std::string(line) == "sealed trial: off at frame 9", "the off line");
     }
 

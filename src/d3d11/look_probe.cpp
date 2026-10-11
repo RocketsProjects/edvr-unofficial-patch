@@ -24,6 +24,7 @@
 #include "look_probe_core.h"
 #include "occlusion_census.h"
 #include "store_hook.h"
+#include "view_source.h"
 
 namespace edvr {
 namespace {
@@ -51,11 +52,13 @@ uint32_t g_readTicks = 0;     // Present ticks spent reading (render thread)
 uintptr_t g_imageBase = 0;    // the module base, for the vtable RVAs (set at install)
 
 // The camera ray, computed once per collection by the first store call.
-std::atomic<bool> g_rayTried{false};
+std::atomic<uint32_t> g_aimTries{0};   // store calls that tried to read the view's pose this collection (the rows can be chosen part-way through a frame)
 std::atomic<bool> g_rayOk{false};
 float g_eye[3] = {};
 float g_fwd[3] = {};
 float g_nearM = 0.0f, g_farM = 0.0f;
+const char* g_viewName = "";          // the view the aim came from: explorer cam | eye rows | vscreen | origin | frustum fallback
+float g_originGapM = -1.0f;           // the rows' distance from the render context's view 0 origin (-1: unknown)
 
 struct Cand {
     uintptr_t address = 0, bucket = 0, bucketBase = 0;
@@ -64,6 +67,17 @@ struct Cand {
     uint64_t vtableRva = 0, nodeVtableRva = 0;
 };
 Cand g_cands[kMaxCandidates];
+// Every record the store writes in the collected frame, kept raw (address, bucket, centre, radius; bounded). The ray test runs when the
+// report is written, against the frame's ray, so records written before the view's pose was readable are not lost.
+constexpr uint32_t kMaxRaw = 8192;
+constexpr uint32_t kAimTries = 64;
+struct Raw {
+    uintptr_t address = 0, bucket = 0;
+    float centre[3] = {};
+    float radius = -1.0f;   // negative: not read
+};
+Raw g_raw[kMaxRaw];
+std::atomic<uint32_t> g_rawN{0}, g_rawOverflow{0};
 std::atomic<uint32_t> g_candN{0}, g_candOverflow{0}, g_recScanned{0};
 
 struct DrawEntry {
@@ -144,11 +158,9 @@ const char* phaseName(int p) {
     }
 }
 
-// The camera and its frustum, from the main view of the bucket's render context. False when any read fails or the frustum
-// has no opposite near and far pair (the records are then not aimed, and the report says so).
-bool computeRay(uintptr_t bucket) noexcept {
-    uintptr_t ctx = 0;
-    if (!bucket || !readVal(&ctx, bucket) || !ctx) return false;
+// The fallback aim: the main view's frustum planes (ctx + 0x40 + 0x30). Used only when the view's rows give no pose. Sanity: the eye must sit
+// between a near plane 1 cm to 50 m away and a far plane 20 m to 1000 km away; anything else is refused and the records are not aimed.
+bool frustumRay(uintptr_t ctx) noexcept {
     const uintptr_t view = ctx + kCtxView0;
     float eye[3] = {};
     uint64_t planesAt = 0;
@@ -170,11 +182,39 @@ bool computeRay(uintptr_t bucket) noexcept {
     float fwd[3] = {};
     float nearM = 0.0f, farM = 0.0f;
     if (!look::forwardFromPlanes(planes, n, eye, fwd, &nearM, &farM)) return false;
+    if (!(nearM >= 0.01f && nearM <= 50.0f) || !(farM >= 20.0f && farM <= 1.0e6f)) return false;
     std::memcpy(g_eye, eye, sizeof(eye));
     std::memcpy(g_fwd, fwd, sizeof(fwd));
     g_nearM = nearM;
     g_farM = farM;
     return true;
+}
+
+// The camera for the aim: the view's rows first (the explorer cam, the vscreen on foot, or the eye rows, whichever is rendering), and the
+// frustum only when the rows give no pose. g_viewName says which one was used, and the summary repeats it.
+bool computeRay(uintptr_t bucket) noexcept {
+    uintptr_t ctx = 0;
+    if (!bucket || !readVal(&ctx, bucket) || !ctx) {
+        g_viewName = "origin";
+        return false;
+    }
+    view::Resolved v;
+    view::resolveView(ctx, &v);
+    g_originGapM = v.originGapM;
+    if (v.poseOk) {
+        std::memcpy(g_eye, v.pose.pos, sizeof(g_eye));
+        std::memcpy(g_fwd, v.pose.fwd, sizeof(g_fwd));
+        g_nearM = 0.0f;
+        g_farM = 0.0f;
+        g_viewName = view::sourceName(v.source);
+        return true;
+    }
+    if (frustumRay(ctx)) {
+        g_viewName = "frustum fallback";
+        return true;
+    }
+    g_viewName = view::sourceName(v.source);
+    return false;
 }
 
 // The rasterizer, blend and depth-stencil clones: the draw's own state with the one change that makes the duplicate safe.
@@ -406,13 +446,58 @@ void resetCollection() {
     g_probedN.store(0, std::memory_order_relaxed);
     g_drawOverflow.store(0, std::memory_order_relaxed);
     g_probeFails.store(0, std::memory_order_relaxed);
-    g_rayTried.store(false, std::memory_order_relaxed);
+    g_aimTries.store(0, std::memory_order_relaxed);
+    g_rawN.store(0, std::memory_order_relaxed);
+    g_rawOverflow.store(0, std::memory_order_relaxed);
     g_rayOk.store(false, std::memory_order_relaxed);
 }
 
 // The CSV and the summary line. The CSV holds the records nearest the ray first, then the draws that cover the centre (the
 // last kMaxDraws of them in issue order: later draws are the ones that end up on screen).
+// The ray test over the frame's raw records: the records whose sphere the ray meets within range. Each hit's identity (child count,
+// vtable, node, base) is read here, while the frame's records are still in memory. The hits are sorted by writeReport.
+void collectHits() {
+    g_candN.store(0, std::memory_order_relaxed);
+    g_candOverflow.store(0, std::memory_order_relaxed);
+    if (!g_rayOk.load(std::memory_order_acquire)) return;
+    const uint32_t nRaw = std::min(g_rawN.load(std::memory_order_relaxed), kMaxRaw);
+    for (uint32_t i = 0; i < nRaw; ++i) {
+        const Raw& r = g_raw[i];
+        if (!(r.radius > 0.0f) || !std::isfinite(r.radius) || !std::isfinite(r.centre[0]) || !std::isfinite(r.centre[1]) ||
+            !std::isfinite(r.centre[2]))
+            continue;
+        float t = 0.0f;
+        if (!look::rayHitsSphere(g_eye, g_fwd, r.centre, r.radius, look::kRangeM, &t)) continue;
+        const uint32_t have = std::min(g_candN.load(std::memory_order_relaxed), kMaxCandidates);
+        bool dup = false;
+        for (uint32_t k = 0; k < have && !dup; ++k) dup = g_cands[k].address == r.address;
+        if (dup) continue;
+        const uint32_t k = g_candN.fetch_add(1, std::memory_order_relaxed);
+        if (k >= kMaxCandidates) {
+            g_candOverflow.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        Cand& cd = g_cands[k];
+        cd.address = r.address;
+        cd.bucket = r.bucket;
+        cd.radius = r.radius;
+        cd.t = t;
+        const float dx = r.centre[0] - g_eye[0], dy = r.centre[1] - g_eye[1], dz = r.centre[2] - g_eye[2];
+        cd.dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        uintptr_t base = 0;
+        if (readVal(&base, r.bucket + kBucketBase)) cd.bucketBase = base;
+        uint64_t children = 0;
+        if (readVal(&children, r.address + kRecChildCount)) cd.childCount = static_cast<uint32_t>(children);
+        uint64_t vt = 0;
+        if (readVal(&vt, r.address)) cd.vtableRva = vt >= g_imageBase ? vt - g_imageBase : vt;
+        uint64_t node = 0, nodeVt = 0;
+        if (readVal(&node, r.address + kRecNode) && node && readVal(&nodeVt, static_cast<uintptr_t>(node)))
+            cd.nodeVtableRva = nodeVt >= g_imageBase ? nodeVt - g_imageBase : nodeVt;
+    }
+}
+
 void writeReport() {
+    collectHits();
     const uint32_t nCand = std::min(g_candN.load(std::memory_order_relaxed), kMaxCandidates);
     const uint32_t nDraws = std::min(g_drawN.load(std::memory_order_relaxed), kMaxDrawEntries);
     std::vector<Cand> cands(g_cands, g_cands + nCand);
@@ -492,6 +577,7 @@ void writeReport() {
     s.frame = g_frame;
     s.trigger = g_trigger.c_str();
     s.forwardKnown = g_rayOk.load(std::memory_order_acquire);
+    s.viewSource = g_viewName;
     for (int k = 0; k < 3; ++k) {
         s.forward[k] = g_fwd[k];
         s.eye[k] = g_eye[k];
@@ -507,9 +593,12 @@ void writeReport() {
     char line[640];
     look::formatSummary(line, sizeof(line), s);
     Log::get().note("%s", line);
-    if (s.forwardKnown)
-        Log::get().note("look probe: the far plane is %.1f m from the eye and the near plane %.3f m; the forward is taken "
-                        "from the far plane.", static_cast<double>(g_farM), static_cast<double>(g_nearM));
+    if (s.forwardKnown && g_farM > 0.0f)
+        Log::get().note("look probe: the frustum fallback is aiming: the far plane is %.1f m from the eye and the near plane %.3f m.",
+                        static_cast<double>(g_farM), static_cast<double>(g_nearM));
+    if (s.forwardKnown && g_originGapM >= 0.0f)
+        Log::get().note("look probe: view source = %s; its rows are %.3f m from the render context's view 0 origin (the frames agree "
+                        "when this is small).", s.viewSource, static_cast<double>(g_originGapM));
     if (s.drawsCovering > look::kMaxDraws)
         Log::get().note("look probe: %u draws cover the centre; the last %u in issue order are listed.", s.drawsCovering,
                         look::kMaxDraws);
@@ -557,9 +646,9 @@ void finishCollecting(uint32_t frame) {
     g_readTicks = 0;
     pollQueries();
     const uint32_t nDraws = std::min(g_drawN.load(std::memory_order_relaxed), kMaxDrawEntries);
-    Log::get().note("look probe: frame %u collected: %u records written by the store, %u on the ray; %u draws, %u centre "
+    Log::get().note("look probe: frame %u collected: %u records written by the store, %u kept for the ray test; %u draws, %u centre "
                     "tests issued; reading back.", frame + 1, g_recScanned.load(std::memory_order_relaxed),
-                    std::min(g_candN.load(std::memory_order_relaxed), kMaxCandidates), nDraws,
+                    std::min(g_rawN.load(std::memory_order_relaxed), kMaxRaw), nDraws,
                     g_probedN.load(std::memory_order_relaxed));
     if (outstandingQueries() == 0) finishReport();
 }
@@ -614,38 +703,22 @@ bool lookProbeWantsDraws() noexcept {
 void lookProbeAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
     if (g_phase.load(std::memory_order_acquire) != kCollecting || !record) return;
     g_recScanned.fetch_add(1, std::memory_order_relaxed);
-    if (!g_rayTried.exchange(true, std::memory_order_acq_rel)) g_rayOk.store(computeRay(bucket), std::memory_order_release);
-    if (!g_rayOk.load(std::memory_order_acquire)) return;
-    float c[3] = {};
-    float r = 0.0f;
-    if (!readMem(c, record + kRecCentre, sizeof(c)) || !readVal(&r, record + kRecRadius)) return;
-    if (!std::isfinite(r) || !(r > 0.0f) || !std::isfinite(c[0]) || !std::isfinite(c[1]) || !std::isfinite(c[2])) return;
-    float t = 0.0f;
-    if (!look::rayHitsSphere(g_eye, g_fwd, c, r, look::kRangeM, &t)) return;
-    const uint32_t have = std::min(g_candN.load(std::memory_order_relaxed), kMaxCandidates);
-    for (uint32_t k = 0; k < have; ++k)
-        if (g_cands[k].address == record) return;
-    const uint32_t k = g_candN.fetch_add(1, std::memory_order_relaxed);
-    if (k >= kMaxCandidates) {
-        g_candOverflow.fetch_add(1, std::memory_order_relaxed);
+    // The frame's aim: the first store call that can read a pose fixes it; up to kAimTries calls try.
+    if (!g_rayOk.load(std::memory_order_acquire) && g_aimTries.load(std::memory_order_relaxed) < kAimTries) {
+        g_aimTries.fetch_add(1, std::memory_order_relaxed);
+        g_rayOk.store(computeRay(bucket), std::memory_order_release);
+    }
+    const uint32_t k = g_rawN.fetch_add(1, std::memory_order_relaxed);
+    if (k >= kMaxRaw) {
+        g_rawOverflow.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    Cand& cd = g_cands[k];
-    cd.address = record;
-    cd.bucket = bucket;
-    cd.radius = r;
-    cd.t = t;
-    const float dx = c[0] - g_eye[0], dy = c[1] - g_eye[1], dz = c[2] - g_eye[2];
-    cd.dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-    uintptr_t base = 0;
-    if (readVal(&base, bucket + kBucketBase)) cd.bucketBase = base;
-    uint32_t children = 0;
-    if (readVal(&children, record + kRecChildCount)) cd.childCount = children;
-    uint64_t vt = 0;
-    if (readVal(&vt, record)) cd.vtableRva = vt >= g_imageBase ? vt - g_imageBase : vt;
-    uint64_t node = 0, nodeVt = 0;
-    if (readVal(&node, record + kRecNode) && node && readVal(&nodeVt, static_cast<uintptr_t>(node)))
-        cd.nodeVtableRva = nodeVt >= g_imageBase ? nodeVt - g_imageBase : nodeVt;
+    Raw& raw = g_raw[k];
+    raw.address = record;
+    raw.bucket = bucket;
+    raw.radius = -1.0f;
+    if (readMem(raw.centre, record + kRecCentre, sizeof(raw.centre)) && readVal(&raw.radius, record + kRecRadius)) return;
+    raw.radius = -1.0f;
 }
 
 void lookProbeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances, LookReplayFn replay,

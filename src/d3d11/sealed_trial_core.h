@@ -77,28 +77,29 @@ struct Window {
 
 // "sealed trial: window 5 s culled=.. kept=.. kept_unjudged=.. sun_pairs_skipped=.. eval_ms=.. faults=.. radius_m=..". The
 // radius is the one the window ran at (a step closes the window of the old radius first).
-inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM) noexcept {
+// The view the rule's sphere was centred on is named at the end: "view source = explorer cam" (or eye rows, vscreen, origin).
+inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, const char* viewSource) noexcept {
     return std::snprintf(out, cap,
                          "sealed trial: window %llu s culled=%llu kept=%llu kept_unjudged=%llu sun_pairs_skipped=%llu "
-                         "eval_ms=%.3f faults=%llu radius_m=%.1f",
+                         "eval_ms=%.3f faults=%llu radius_m=%.1f view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
                          static_cast<unsigned long long>(w.kept), static_cast<unsigned long long>(w.keptUnknown),
                          static_cast<unsigned long long>(w.sunSkipped), static_cast<double>(w.evalNs) / 1.0e6,
-                         static_cast<unsigned long long>(w.faults), static_cast<double>(radiusM));
+                         static_cast<unsigned long long>(w.faults), static_cast<double>(radiusM), viewSource);
 }
 
 // "sealed trial: on at frame F (radius R m; camera (x,y,z) or unknown; the sun pair is skipped; records outside the sphere
 // lose every view; records containing the camera are kept)" and the matching off line.
 inline int formatToggle(char* out, size_t cap, bool on, uint32_t frame, float radiusM, const float camera[3],
-                        bool cameraKnown) noexcept {
+                        bool cameraKnown, const char* viewSource) noexcept {
     if (!on) return std::snprintf(out, cap, "sealed trial: off at frame %u", frame);
     if (!cameraKnown)
-        return std::snprintf(out, cap, "sealed trial: on at frame %u (radius %.1f m; camera unknown: nothing is culled "
-                                       "until the view array is read)", frame, static_cast<double>(radiusM));
+        return std::snprintf(out, cap, "sealed trial: on at frame %u (radius %.1f m; view source = %s; camera unknown: nothing is "
+                                       "culled until the view is read)", frame, static_cast<double>(radiusM), viewSource);
     return std::snprintf(out, cap,
-                         "sealed trial: on at frame %u (radius %.1f m; camera (%.1f,%.1f,%.1f); the sun pair is skipped; "
-                         "records outside the sphere lose every view; records containing the camera are kept)",
-                         frame, static_cast<double>(radiusM), static_cast<double>(camera[0]),
+                         "sealed trial: on at frame %u (radius %.1f m; view source = %s; camera (%.1f,%.1f,%.1f); the sun pair is "
+                         "skipped; records outside the sphere lose every view; records containing the camera are kept)",
+                         frame, static_cast<double>(radiusM), viewSource, static_cast<double>(camera[0]),
                          static_cast<double>(camera[1]), static_cast<double>(camera[2]));
 }
 

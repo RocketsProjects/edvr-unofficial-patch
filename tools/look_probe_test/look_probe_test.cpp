@@ -235,6 +235,7 @@ int main(int argc, char** argv) {
         Summary s;
         s.frame = 812;
         s.trigger = "hotkey.look_probe";
+        s.viewSource = "eye rows";
         s.forwardKnown = true;
         s.forward[2] = 1.0f;
         s.eye[0] = 1.5f;
@@ -250,6 +251,7 @@ int main(int argc, char** argv) {
         const int n = formatSummary(line, sizeof(line), s);
         const std::string text(line, n > 0 ? static_cast<size_t>(n) : 0);
         check(text.find("forward=(0.0000,0.0000,1.0000)") != std::string::npos, "summary: known forward printed");
+        check(text.find("view source = eye rows") != std::string::npos, "summary: the view source is named");
         check(text.find("covering the centre=9 listed=9 csv=look_probe_x.csv") != std::string::npos,
               "summary: draw counts and the csv name");
         s.forwardKnown = false;

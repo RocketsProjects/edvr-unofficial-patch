@@ -129,6 +129,7 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         std::strcmp(key, "hotkey.sealed_trial") == 0 ||
         std::strcmp(key, "hotkey.sealed_trial_smaller") == 0 ||
         std::strcmp(key, "hotkey.sealed_trial_larger") == 0 ||
+        std::strcmp(key, "hotkey.sealed_trial_report") == 0 ||
         std::strcmp(key, "diag.sealed_trial_radius_m") == 0 ||
         std::strcmp(key, "hotkey.look_probe") == 0 ||
         std::strcmp(key, "fix.render_sharpness") == 0 ||
