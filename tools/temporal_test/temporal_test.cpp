@@ -21,6 +21,7 @@
 #include "../../src/common/hmd_camera_tag.h"
 #include "../../src/common/camera_writes.h"
 #include "../../src/common/camera_ipd_pair.h"
+#include "../../src/common/camera_jump_guard.h"
 #include <chrono>
 #include <stdexcept>
 #include "../../src/common/temporal_mode.h"
@@ -1339,6 +1340,159 @@ int main() {
               ip::applyPick(true, ip::Pick::Rule) == ip::Pick::Rule && ip::applyPick(true, ip::Pick::Hold) == ip::Pick::Hold,
               "ipd pair key: off applies the legacy chooser's pick for every chain pick; on applies the chain's");
         check(ip::samePose(D, D) && !ip::samePose(D, P), "ipd pair: samePose is true for one pose and false for the partner");
+    }
+    // K. THE CAMERA JUMP GUARD (camera_jump_guard.h, 2026-10-11): the one-frame excursion is replaced by the view candidate; steady motion and a
+    // constant-velocity flight pass; a jump with nothing passing is taken as a real change; a persisting jump is taken after kReplaceLimit replaced
+    // frames; the alternates in their own order; the applied pose after a replacement is the candidate's; key off leaves the legacy track; the line.
+    {
+        namespace jg = edvr::jumpguard;
+        const float kDeg = 3.14159265f / 180.0f;
+        // rigid [R(yaw) | t], row-major 3x4
+        auto mkPose = [](float yaw, float x, float y, float z, float out[12]) {
+            const float c = std::cos(yaw), s = std::sin(yaw);
+            const float r[12] = {c, 0, s, x, 0, 1, 0, y, -s, 0, c, z};
+            std::memcpy(out, r, sizeof(r));
+        };
+        // the applied history: before, then prev (the last applied pose)
+        auto seed = [](jg::Guard& g, const float before[12], const float prev[12]) {
+            jg::commit(g, before, false);
+            jg::commit(g, prev, false);
+        };
+        float V0[12];
+        mkPose(0.4f, 0.10f, 1.60f, -0.30f, V0);
+        // A. The excursion: 0.19 m and 2.99 deg from a still view. The view's own write (0.5 mm off) is the replacement.
+        {
+            jg::Guard g;
+            seed(g, V0, V0);
+            float exc[12], view[12];
+            mkPose(0.4f + 2.99f * kDeg, 0.29f, 1.60f, -0.30f, exc);
+            mkPose(0.4f, 0.1005f, 1.60f, -0.30f, view);
+            const float* alts[1] = {view};
+            const jg::Decision d = jg::decide(g, exc, alts, 1);
+            check(d.rejected && d.alt == 0, "jump guard: the 0.19 m / 2.99 deg excursion is rejected and replaced by the view candidate");
+            checkNear(d.jumpM, 0.19f, 1e-4f, "jump guard: the rejected jump is the 0.19 m translation");
+            check(jg::applied(true, d) == 0 && jg::applied(false, d) == -1,
+                  "jump guard key: on applies the view candidate; off applies the legacy pick");
+            jg::commit(g, view, true);
+            check(std::memcmp(g.chain.pose, view, sizeof(view)) == 0 && g.replaceRun == 1,
+                  "jump guard: the applied pose after a replacement is the candidate's, and the replaced run counts it");
+            float view2[12];
+            mkPose(0.4f, 0.1006f, 1.60f, -0.30f, view2);
+            const jg::Decision next = jg::decide(g, view2, nullptr, 0);
+            check(!next.rejected && next.alt == -1, "jump guard: the view's next frame passes and the run ends");
+            jg::commit(g, view2, false);
+            check(g.replaceRun == 0, "jump guard: a frame applied without a replacement resets the run");
+        }
+        // B. Steady head motion passes: 5 mm and 0.2 deg a frame, and a constant-velocity 4 cm a frame.
+        {
+            jg::Guard g;
+            float b[12], p[12], l[12];
+            mkPose(0.4f, 0.095f, 1.60f, -0.30f, b);
+            mkPose(0.4f + 0.2f * kDeg, 0.10f, 1.60f, -0.30f, p);
+            mkPose(0.4f + 0.4f * kDeg, 0.105f, 1.60f, -0.30f, l);
+            seed(g, b, p);
+            const jg::Decision d = jg::decide(g, l, nullptr, 0);
+            check(!d.rejected && d.alt == -1, "jump guard: steady head motion (5 mm, 0.2 deg a frame) passes untouched");
+            float b2[12], p2[12], l2[12];
+            mkPose(0.4f, 0.02f, 1.60f, -0.30f, b2);
+            mkPose(0.4f, 0.06f, 1.60f, -0.30f, p2);
+            mkPose(0.4f, 0.10f, 1.60f, -0.30f, l2);
+            jg::Guard g2;
+            seed(g2, b2, p2);
+            const jg::Decision d2 = jg::decide(g2, l2, nullptr, 0);
+            check(!d2.rejected, "jump guard: a 4 cm a frame step at constant velocity passes (it continues the step)");
+        }
+        // C. A 300 m-a-frame flight passes at constant velocity; the same flight with the camera turned 10 deg in a frame is rejected, and the
+        //    view (300 m, still on the flight's track) replaces it.
+        {
+            float x0[12], x1[12], x2[12], x2turn[12], xv[12];
+            mkPose(0.4f, 0.0f, 1.60f, -0.30f, x0);
+            mkPose(0.4f, 300.0f, 1.60f, -0.30f, x1);
+            mkPose(0.4f, 600.0f, 1.60f, -0.30f, x2);
+            mkPose(0.4f + 10.0f * kDeg, 600.0f, 1.60f, -0.30f, x2turn);
+            mkPose(0.4f, 300.0005f, 1.60f, -0.30f, xv);
+            jg::Guard g;
+            seed(g, x0, x1);
+            const jg::Decision flight = jg::decide(g, x2, nullptr, 0);
+            check(!flight.rejected, "jump guard: a 300 m-a-frame flight passes (constant velocity, no replacement)");
+            const float* alts[1] = {xv};
+            const jg::Decision turn = jg::decide(g, x2turn, alts, 1);
+            check(turn.rejected && turn.alt == 0, "jump guard: the same flight with a 10 deg turn in the frame is rejected and the on-track view replaces it");
+        }
+        // D. A real camera change: 10 m away, no candidate passes (none offered, or only one that also jumps). It is taken, and the next frame
+        //    measures from it.
+        {
+            float far[12], farAlt[12];
+            mkPose(0.4f, 10.10f, 1.60f, -0.30f, far);
+            mkPose(0.4f, 10.1005f, 1.60f, -0.30f, farAlt);
+            jg::Guard g;
+            seed(g, V0, V0);
+            const jg::Decision none = jg::decide(g, far, nullptr, 0);
+            check(none.rejected && none.alt == -1, "jump guard: a real change with no candidate is rejected and the legacy pick is taken");
+            checkNear(none.jumpM, 10.0f, 1e-3f, "jump guard: the real change's jump is its 10 m translation");
+            const float* jumpy[1] = {farAlt};
+            const jg::Decision still = jg::decide(g, far, jumpy, 1);
+            check(still.rejected && still.alt == -1 && !jg::passes(farAlt, g.chain),
+                  "jump guard: a candidate that also jumps and does not continue is not a replacement");
+            jg::commit(g, far, false);
+            const jg::Decision after = jg::decide(g, far, nullptr, 0);
+            check(!after.rejected, "jump guard: the next frame measures from the new camera and passes");
+        }
+        // E. A persisting jump: after kReplaceLimit replaced frames the same excursion is taken as a real change; one short of it is still replaced.
+        {
+            float exc[12], view[12];
+            mkPose(0.4f + 2.99f * kDeg, 0.29f, 1.60f, -0.30f, exc);
+            mkPose(0.4f, 0.1005f, 1.60f, -0.30f, view);
+            const float* alts[1] = {view};
+            jg::Guard g;
+            seed(g, V0, V0);
+            for (uint32_t i = 0; i + 1 < jg::kReplaceLimit; ++i) jg::commit(g, V0, true);
+            const jg::Decision short1 = jg::decide(g, exc, alts, 1);
+            check(short1.rejected && short1.alt == 0, "jump guard: a jump one frame short of the limit is still replaced");
+            jg::commit(g, V0, true);
+            const jg::Decision taken = jg::decide(g, exc, alts, 1);
+            check(taken.rejected && taken.alt == -1, "jump guard: a jump that persists kReplaceLimit replaced frames is taken as a real change");
+        }
+        // F. The alternates in the chooser's order: the first that passes; none passing gives the legacy pick.
+        {
+            float exc[12], bad[12], good1[12], good2[12];
+            mkPose(0.4f + 2.99f * kDeg, 0.29f, 1.60f, -0.30f, exc);
+            mkPose(0.4f, 0.60f, 1.60f, -0.30f, bad);
+            mkPose(0.4f, 0.1002f, 1.60f, -0.30f, good1);
+            mkPose(0.4f, 0.1001f, 1.60f, -0.30f, good2);
+            jg::Guard g;
+            seed(g, V0, V0);
+            const float* order1[3] = {bad, good1, good2};
+            check(jg::decide(g, exc, order1, 3).alt == 1, "jump guard: the first passing alternate in the chooser's order is taken");
+            const float* order2[2] = {bad, bad};
+            check(jg::decide(g, exc, order2, 2).alt == -1, "jump guard: no passing alternate leaves the legacy pick");
+        }
+        // G. The 30 s line: the counts, passed_through as frames minus replaced, max_jump_m over the rejected jumps, the key, and a small buffer refused.
+        {
+            jg::Stats s;
+            jg::Decision a;
+            a.rejected = true;
+            a.alt = 0;
+            a.jumpM = 0.19f;
+            jg::Decision b;
+            jg::Decision c;
+            c.rejected = true;
+            c.jumpM = 10.0f;
+            jg::note(s, a);
+            jg::note(s, b);
+            jg::note(s, c);
+            check(s.frames == 3 && s.rejected == 2 && s.replaced == 1, "jump guard 30 s line: frames, rejected and replaced count the verdicts");
+            char rep[240];
+            const int rl = jg::formatReport(rep, sizeof(rep), s, true);
+            check(rl > 0 && std::strcmp(rep, "temporal camera jump guard: frames=3 rejected=2 replaced=1 passed_through=2 key=on "
+                                             "max_jump_m=10.000") == 0,
+                  "jump guard 30 s line: the counts, passed_through, key and max_jump_m, in the logged format");
+            check(jg::formatReport(rep, sizeof(rep), s, false) > 0 && std::strstr(rep, "key=off") != nullptr,
+                  "jump guard 30 s line: key off is printed as key=off");
+            check(jg::formatReport(rep, 30, s, true) == 0, "jump guard 30 s line: a buffer too small is refused, not truncated");
+            jg::resetWindow(s);
+            check(s.frames == 0 && s.rejected == 0 && s.replaced == 0 && s.maxJumpM == 0.0f, "jump guard 30 s line: the window resets");
+        }
     }
     if (g_fails) {
         printf("\nTEMPORAL TEST FAILED (%d)\n", g_fails);

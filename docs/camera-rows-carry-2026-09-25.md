@@ -2,10 +2,11 @@
 
 ## Status
 
-*Last updated 2026-10-11 (eye pair): the eye-pair rule is built on `claude/vr-camera-ipd-pair` (NOT flown, NOT merged). The continuity
-fix is PARKED on `claude/vr-camera-continuity` (not for merge); the per-write diagnostic `diag.camera_writes` is on `claude/vr-camera-writes`, NOT flown.*
+*Last updated 2026-10-11 (jump guard): `claude/hangar-test-3` adds `fix.camera_jump_guard` (built, NOT flown, NOT merged). The eye-pair rule is PARKED
+(default off). The continuity fix is PARKED on `claude/vr-camera-continuity`; `diag.camera_writes` is on `claude/vr-camera-writes`, NOT flown.*
 
-- **2026-10-11 (built, NOT flown; `claude/vr-camera-ipd-pair`):** `fix.camera_ipd_pair = on` (temporary, `[fix]`, hidden). An eye camera is a candidate with a partner at its translation plus the runtime eye offset (right eye = reference; logged offset (-0.0606,0,0) m). No pair: hold 3 frames, then the legacy chooser behind a 3 cm backstop. Rig: 42 new checks pass. Entry at the end.
+- **2026-10-11 (built, NOT flown; `claude/hangar-test-3`):** `fix.camera_jump_guard = on` (temporary, `[fix]`, hidden, VR). A legacy pick that jumps over 3 cm without continuing the step is replaced by the next-best passing candidate; never a hold. Rig: section K. Entry at the end.
+- **2026-10-11 (PARKED, default off):** `fix.camera_ipd_pair` is off in code and `edvr.ini`. Its counts still run; the applied pick is the legacy chooser's.
 - **2026-10-11 (REFUTED as built):** `fix.hmd_camera_tag` picks probe faces, not the headset camera: it stamps every write made inside coordinator `0x594B60` (100-200 a frame), and eye dump 085301 has the pick wrong on 10 of 16 frames. The symptom is path-2 static-world pixels (hangar walls, elevator shaft).
 - **2026-10-11 (built, NOT flown):** `diag.camera_writes = on` logs every camera-block write for the Pause dump's TCWR lines (entry at the end; temporary key, removal proposed at close). Next: hangar, `diag.camera_writes = on`, `diag.temporal_draws = off`, `fix.hmd_camera_tag = off`, Pause when the panels reset; then the offline read.
 - **2026-10-11 (open, census):** `diag.temporal_draws` (default off) asks whether a view-pose draw exists each frame, and whether its VS hash or projection identifies it.
@@ -487,5 +488,31 @@ The `rot=` field is an addition to the spec: T and R are the rows' only when rot
 2. Which property separates it from the probe faces? Test the projection first: a cube face has a 90 degree frustum (P0 = P5 = 1 when symmetric), while the headset's eye does not, so compare each candidate's P0 and P5 with the TCWRE expectation. If that does not separate them, test the stack's RVAs for a common caller, then the object pointer.
 
 Refute: if the drawn write's P0 and P5 do not match the TCWRE expectation, the projection is not the eye's signature.
+
+## 2026-10-11 -- IPD rule parked; the jump guard (`fix.camera_jump_guard`), built, NOT flown (`claude/hangar-test-3`)
+
+**The IPD rule is parked (default off, in code and `edvr.ini`).** Why: the rule picks the newest of many repeated eye writes, which is likely a one-frame lag. With it on, the draw and the pick differed by 1-10 mm on 14% of frames, and the blur was seen. Its counts still run with the key off, and the applied pick is the legacy chooser's. The key, its code and its counters stay for the record.
+
+**The guard, as built** (`src\common\camera_jump_guard.h`, pure; reuses the backstop's `departs` and `continuesStep` from `camera_ipd_pair.h`; chooser in `chooseCameraRows`, after the legacy pick and the tag decision):
+- The legacy pick is judged against the last applied pose. A translation more than 3 cm from it that does not continue the previous step (constant velocity, within 1 cm plus 5% of the step, and 0.5 deg) is rejected.
+- A rejected pick takes the first alternate, in the chooser's own order, that passes the same test. The alternates are this frame's continuous writes (within 3 deg of the last applied rows), bound object first, then the latest.
+- No passing alternate: the legacy pick is taken at once (a real change).
+- Never a hold: the guard only returns one of the frame's writes. The identical-to-previous twin is not an alternate, since it is last frame's rows again.
+- A jump that persists `kReplaceLimit = 3` replaced frames in a row is taken (see below).
+- Key on: the alternate is applied and marked `0x2000` in TCAM. Key off: the legacy pick is applied, the guard still counts, and its state follows the applied rows.
+
+**Deviations from the spec, for Sean to decide:**
+1. *Persistence limit (added).* The spec as written replaces a jump with any passing candidate, without end. The chooser keeps writing the view's own camera, and that write stays continuous with the applied rows. So a real change that persists, such as the galaxy map, would hold the old camera for good. The limit takes the jump after three replaced frames, as the backstop's `kBackstopLimit` does for the IPD rule. Remove it with `kReplaceLimit` if the flight shows it is never needed.
+2. *Twins excluded.* A write identical to last frame's rows is not an alternate. Taking it would re-commit the previous rows, which is the carried-zero class.
+3. *Rotation-only excursions are not caught.* The test is translation-based, as the spec says. The second excursion (f14857, 2.94 deg) is logged with its angle only; if its translation was under 3 cm, the guard passes it. If it still shows, the next step is an angular test, and that needs its own rig case.
+4. *IPD interaction.* The guard runs on the legacy pick. If the parked rule is switched on and applies a rule pick, the guard's state takes the rule's rows. The IPD chain's own legacy input is the pick before the guard. Neither matters while the rule is off.
+
+**Counts.** `temporal camera jump guard: frames=.. rejected=.. replaced=.. passed_through=.. key=on|off max_jump_m=..` every 30 s. `frames` = legacy picks judged. `rejected` = translation jump failed the test (includes real changes). `replaced` = a passing alternate existed. `passed_through` = frames minus replaced (applied unchanged, real changes among them). `max_jump_m` = largest rejected jump in the window. The counts run with the key off too, so the control run shows what the guard would have done.
+
+**Rig.** `tools\temporal_test` section K: the 0.19 m / 2.99 deg excursion replaced by the view candidate (and the applied pose is the candidate's); steady motion (5 mm, 0.2 deg a frame) and a constant-velocity 4 cm step pass; a 300 m-a-frame flight passes, and the same flight with a 10 deg turn is replaced; a real change with no passing alternate is taken and the next frame passes; a jump that persists `kReplaceLimit` frames is taken; the first passing alternate in order; key off applies the legacy pick; the 30 s line's format, buffer refusal and window reset.
+
+**Keys (temporary; removal to be proposed at close, quoted):** `fix.camera_ipd_pair` (default off, parked). `fix.camera_jump_guard` (default on, `[fix]`, `# ui: hidden`, VR; flat reads it off).
+
+**Next flight.** Hangar, `fix.camera_jump_guard = on` and `diag.camera_writes = on`, Pause when a panel resets. Expect `replaced` only on the excursion frames, `passed_through` on nearly all others, and no visible resets. Then `fix.camera_jump_guard = off` as the control: the same `rejected` count, `replaced` still counted, and the excursion frames back. In supercruise and on foot: `rejected` should be near zero in steady flight; a galaxy-map toggle should show `rejected` for at most three frames of replacement and then the change taken.
 
 Temporary key: `diag.camera_writes` goes when this arc closes; its removal is proposed here and needs Sean's word before it is made (Scope control).
