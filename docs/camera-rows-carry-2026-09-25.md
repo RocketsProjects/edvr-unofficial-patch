@@ -2,9 +2,10 @@
 
 ## Status
 
-*Last updated 2026-10-11 (camera writes): the continuity fix is PARKED on `claude/vr-camera-continuity`
-(not for merge); the per-write diagnostic `diag.camera_writes` is built on `claude/vr-camera-writes`, NOT flown.*
+*Last updated 2026-10-11 (eye pair): the eye-pair rule is built on `claude/vr-camera-ipd-pair` (NOT flown, NOT merged). The continuity
+fix is PARKED on `claude/vr-camera-continuity` (not for merge); the per-write diagnostic `diag.camera_writes` is on `claude/vr-camera-writes`, NOT flown.*
 
+- **2026-10-11 (built, NOT flown; `claude/vr-camera-ipd-pair`):** `fix.camera_ipd_pair = on` (temporary, `[fix]`, hidden). An eye camera is a candidate with a partner at its translation plus the runtime eye offset (right eye = reference; logged offset (-0.0606,0,0) m). No pair: hold 3 frames, then the legacy chooser behind a 3 cm backstop. Rig: 42 new checks pass. Entry at the end.
 - **2026-10-11 (REFUTED as built):** `fix.hmd_camera_tag` picks probe faces, not the headset camera: it stamps every write made inside coordinator `0x594B60` (100-200 a frame), and eye dump 085301 has the pick wrong on 10 of 16 frames. The symptom is path-2 static-world pixels (hangar walls, elevator shaft).
 - **2026-10-11 (built, NOT flown):** `diag.camera_writes = on` logs every camera-block write for the Pause dump's TCWR lines (entry at the end; temporary key, removal proposed at close). Next: hangar, `diag.camera_writes = on`, `diag.temporal_draws = off`, `fix.hmd_camera_tag = off`, Pause when the panels reset; then the offline read.
 - **2026-10-11 (open, census):** `diag.temporal_draws` (default off) asks whether a view-pose draw exists each frame, and whether its VS hash or projection identifies it.
@@ -411,6 +412,38 @@ Branch `claude/vr-camera-hmd-tag`, from `claude/vr-camera-source-trace` e1d7c4c9
 - The coordinator also calls `0x6BE790`, `0x5919E0` and `0x5875B0` inside the scope. A camera-block Unmap made there on the same thread would be stamped too. A wrong stamp shows as `disagree` and as TDRW rows that differ from the view.
 - The chooser runs at the frame's first treat. A stamp written after that is not seen this frame, as with the legacy pick.
 - The hook's last-call fields are per call, not per frame: `last_frame` reads the frame the chooser was on, which can lag the game's frame by one.
+
+## 2026-10-11 -- the eye pair, `fix.camera_ipd_pair` (built, NOT flown)
+
+Branch `claude/vr-camera-ipd-pair`, from `claude/vr-camera-writes` 46805658. Full `build.bat` green (receipt 0485a988...); `--dll-only` and the push are in the git log. Not merged, not installed.
+
+**Evidence (flight log `edvr_gfx_20261011_091619`, station hangar, `diag.camera_writes` on).** About 147 camera-block writes a frame, all into one constant-buffer object, from one thread, inside the camera coordinator, with the same projection. The coordinator tag is refuted (it picks probe faces, above). Each frame has the view pose D and a partner P at exactly 0.0606 m along D's -col0 axis (the first column of the rotation), with rotation under 0.2 deg (148 of 148 pairs). That is the other eye at a 60.6 mm IPD. The probe-face rotations (90/120/180 deg about the same position), a pose 10.2 m away and one 10.1 to 10.7 m away at about 178 deg never have a partner. The legacy chooser was right on 869 of 871 frames. It missed two one-frame excursions (f11797: 0.19 m, 2.99 deg; f14857: 2.94 deg), which pass its rotation-only gate. Those are the two DLSS history resets.
+
+**The runtime offset (the IPD source).** The d3d11 half already receives the runtime's eye-to-head: `native_temporal.cpp` `begin()` copies it into `s->eyes`, and `treat()` now also calls `edvrTemporalAaNoteEyeToHead(eye, s->eyes[eye])` per eye. `offsetFromEyes` applies the game's S*E*S (the transform `GetEyeToHeadTransform` hands Elite, `canted_display.h`), then `o = R_right^T (t_left - t_right)`: the left eye's place in the right eye's own axes. |o| is the IPD, and the angle between the two eyes' rotations is the cant. Logged once per session: `temporal ipd pair: runtime eye offset = (x,y,z) m, |ipd| = .. mm, canting = .. deg (...)`. For a parallel 60.6 mm pair, o = (-0.0606, 0, 0).
+
+**The rule** (`src\common\camera_ipd_pair.h`, `scanPairs`, run on the chooser's own candidates: the rotation writes of the frame in `g_rowsRing`):
+- Candidate D is a reference when some P, P != D, has translation within 2 mm of `T_D + R_D o` and rotation relative to D within 0.3 deg. Reference = right eye. The left eye as a candidate fails, so each pair counts once.
+- Several references: the one nearest the previous chosen pose (its translation), else the latest clock.
+- No pair: hold the previous pose for up to 3 frames. From the 4th frame the legacy chooser takes the frame (one episode log line), and its candidate goes through the backstop: a jump of more than 3 cm that does not continue the previous step (constant velocity, 1 cm plus 5% of the step, 0.5 deg) is rejected, which holds. A jump that persists for 3 frames is taken on the 4th. A pair returning ends the episode.
+- The chooser keeps its own pick until the rule decides. With `fix.camera_ipd_pair = off` the chain still runs and counts, but the applied pick is the legacy chooser's: the rows, pick and TCAM for each frame are unchanged.
+
+**Keys (temporary; removal to be proposed at close, quoted):** `fix.camera_ipd_pair` (default on, `[fix]`, `# ui: hidden`). Flat reads `off` (the key is not on the flat allow-list).
+
+**Instruments.**
+- `temporal ipd pair: frames=.. paired=.. held=.. legacy_fallback=.. episodes=.. disagree_with_legacy=.. ipd_mm=.. pair_err_mm p50/max=.. key=on|off backstop=..` every 30 s. The counts run with the key off too, so the control run says what the rule would have done.
+- TCWR: `pair=1|0` per write (in a pair this frame, chosen or not); `pick=ipd` for the rule's reference (printed ahead of the older pickers).
+- TCAM `cf` bit `0x800` = chosen by the pair; `0x1000` = held. Legend updated.
+
+**Rig.** `tools\temporal_test`, 42 new checks, all pass (`TEMPORAL TEST PASSED`): the offset from 60.6 mm eyes (-0.0606, 0, 0) and |ipd| 60.6 mm; P = D - 0.0606 m * col0 from the physical model; the steady pair chosen, the right eye as reference; a 90-degree probe with the same translation rejected; the 0.19 m / 2.99 deg excursion rejected, and held alone; a camera 10 m away rejected; two pairs resolved by nearest; three holds then the legacy episode, logged once; the pair returning ends it; backstop with the rule off rejects the excursion, takes a persisting jump on the 4th frame and a constant-velocity step at once; a canted 68 mm headset: |ipd| 68 mm and 5 deg of cant from the runtime, the pair found on the relative-cant branch (it fails on identity); the 30 s line's text and buffer refusal; key off applies the legacy pick; samePose. The key-off chooser's byte identity is by construction (`applyPick`), and the flight control checks it.
+
+**Decisions the flight should check.**
+- The rotation test accepts D's rotation (the logged case) **or** the runtime's relative cant (rows that carry it). The spec said identity only; without the second branch a canted headset would hold every frame.
+- The backstop persists a jump after 3 rejections. The spec's backstop alone would have held the galaxy map (or any real camera change) forever.
+- A hold commits the previous rows again, so the world path sees a zero camera delta for up to 3 frames. That is the carried-zero class the H2 entry convicted. It is capped at 3 frames; watch for resets on holds. If they show, a hold should mark the frame invalid instead.
+- `fix.hmd_camera_tag` (refuted, default on) still shapes the legacy fallback, as it does today.
+- The chooser runs at the first treat. A pair whose second write lands after that is not seen this frame, as with the legacy pick.
+
+**Next flight.** Hangar, with `fix.camera_ipd_pair = on` and `diag.camera_writes = on`; Pause when a panel resets. Expect `paired` on about every frame, `ipd_mm` 60.6 (the runtime's value), `held` only on excursion-like frames, and no visible resets. Then `fix.camera_ipd_pair = off` as the control. Also a short check in supercruise and on foot (the backstop and the fallback are what those exercise).
 
 **Next flight** (hangar, the same docked scene as 2026-10-11 055853; Pause on visible resets):
 1. `fix.hmd_camera_tag = on`, `diag.temporal_draws = on`. Expect: `hook=live`; `per_frame` about 1.00; `frames_with_stamp` about all frames; `chosen_by_tag` about all frames; `disagree` nonzero only on the one-frame excursion frames (the 0x2000 origin-step frames); no visible resets on Pause.

@@ -33,6 +33,7 @@
 #include "../common/temporal_census.h"   // the per-draw census's ring and TDRW format (diag.temporal_draws)
 #include "../common/hmd_camera_tag.h"    // the headset camera tag: the stamp, the chooser's pick and the 30 s line (fix.hmd_camera_tag)
 #include "../common/camera_writes.h"     // the camera writes diagnostic: the per-write ring, TCWR lines and the 20 s line (diag.camera_writes)
+#include "../common/camera_ipd_pair.h"   // the camera IPD pair: the runtime's eye offset, the partner test, the hold and backstop chain (fix.camera_ipd_pair)
 #include "hmd_camera_tag_hook.h"         // the coordinator hook's state and frame, for the 30 s line
 #include "depth_probe.h"
 #include "luma_probe.h"
@@ -2155,6 +2156,8 @@ enum CameraChoiceFlag : uint32_t {
     kChoiceRefollow       = 1u << 8,
     kChoiceBoundLatchRows = 1u << 9,
     kChoiceByTag          = 1u << 10,   // the pick is the headset-stamped write (fix.hmd_camera_tag on, a stamp this frame)
+    kChoiceByIpd          = 1u << 11,   // the pick is the IPD pair's reference (fix.camera_ipd_pair on, a pair this frame)
+    kChoiceIpdHold        = 1u << 12,   // the IPD pair held the previous frame's rows: no pair this frame (up to 3 frames)
 };
 enum CameraDrawFlag : uint32_t {
     kDrawSeen             = 1u << 0,
@@ -2222,6 +2225,24 @@ int64_t       g_tagWindowTicks = 0;
 uint32_t      g_hmdRowsFrame = ~0u;
 bool          g_hmdRowsValid = false;
 float         g_hmdRows[12] = {};
+// The camera IPD pair (fix.camera_ipd_pair; camera_ipd_pair.h): the key (VR; flat reads it off), both eyes' runtime eye-to-head (noted per treat), the
+// chain that holds, falls back and backstops, the last applied pick (for a held frame), the 30 s window and the once-per-session offset line. With
+// the key off the chain still runs and counts; only the applied pick stays the legacy chooser's.
+bool                 g_ipdKeyOn = false;
+float                g_ipdEyes[2][12] = {};
+bool                 g_ipdEyeNoted[2] = {};
+bool                 g_ipdOffsetNoted = false;
+ipdpair::Chain       g_ipdChain;
+ipdpair::Stats       g_ipdStats;
+int64_t              g_ipdWindowTicks = 0;
+struct IpdApplied {
+    bool valid = false;
+    float rows[12] = {};
+    float proj[2] = {};
+    uint32_t observedSeq = 0;
+    const void* buf = nullptr;
+};
+IpdApplied           g_ipdApplied;     // the last pick applied from the ring: a held frame applies it again
 // The camera writes diagnostic (diag.camera_writes; camera_writes.h): the key, the per-write ring and its mutex (shared with the draw hook and the
 // Pause dump), the 20 s line's window and cost, the exe's image range for the stack's RVAs, and the once-per-eye expected projection. Temporary,
 // default off: every hook checks the key before any work.
@@ -2483,18 +2504,109 @@ void chooseCameraRows() {
         g_rowsChoice.flags |= kChoiceByTag;
     }
     pick = dec.pick;
-    if (pick >= 0) {
+    // The IPD pair (camera_ipd_pair.h): the frame's candidates are the rotation writes this chooser sees, and the runtime's offset between the
+    // eyes says which two of them are the eyes. The chain holds, falls back and backstops; its pick is applied only with the key on.
+    const int legacyPick = pick;
+    ipdpair::Offset off;
+    if (g_ipdEyeNoted[0] && g_ipdEyeNoted[1]) off = ipdpair::offsetFromEyes(g_ipdEyes);
+    if (off.valid) {
+        g_ipdStats.ipdKnown = true;
+        g_ipdStats.ipdM = off.ipdM;
+        if (!g_ipdOffsetNoted) {
+            g_ipdOffsetNoted = true;
+            Log::get().note("temporal ipd pair: runtime eye offset = (%+.5f,%+.5f,%+.5f) m, |ipd| = %.2f mm, canting = %.2f deg "
+                            "(the reference is the right eye; the partner sits at this offset in the reference's own axes). key=%s",
+                            static_cast<double>(off.o[0]), static_cast<double>(off.o[1]), static_cast<double>(off.o[2]),
+                            static_cast<double>(off.ipdM * 1000.0f), static_cast<double>(off.cantDeg), g_ipdKeyOn ? "on" : "off");
+        }
+    }
+    const float* candRows[kRowsRing];
+    uint32_t candSeq[kRowsRing];
+    int candIdx[kRowsRing];
+    uint8_t inPair[kRowsRing] = {};
+    int candN = 0;
+    for (int i = 0; i < kRowsRing; ++i) {
+        const RowsWrite& w = g_rowsRing[i];
+        if (!w.valid || w.frame != g_rowsFrame) continue;
+        candIdx[candN] = i;
+        candRows[candN] = w.rows;
+        candSeq[candN] = w.seq;
+        ++candN;
+    }
+    ipdpair::Scan scan;
+    if (off.valid && candN > 0) scan = ipdpair::scanPairs(candRows, candSeq, candN, off.o, off.rel,
+                                                          g_ipdChain.havePose ? g_ipdChain.pose : nullptr, inPair);
+    if (g_camWritesOn && off.valid) {
+        std::lock_guard<std::mutex> lock(g_camMutex);
+        for (int i = 0; i < candN; ++i)
+            if (inPair[i]) camwrites::markPair(g_camRing, g_rowsFrame, g_rowsRing[candIdx[i]].observedSeq);
+    }
+    const float* ruleRows = scan.ref >= 0 ? candRows[scan.ref] : nullptr;
+    const float* legacyRows = legacyPick >= 0 ? g_rowsRing[legacyPick].rows : nullptr;
+    const ipdpair::Verdict v = ipdpair::decideFrame(g_ipdChain, off.valid, ruleRows, legacyRows);
+    ipdpair::Stats& st = g_ipdStats;
+    ++st.frames;
+    if (ruleRows) {
+        ++st.paired;
+        if (st.errN < ipdpair::kErrSamples) st.errs[st.errN++] = scan.transErrM;
+        if (scan.transErrM > st.errMax) st.errMax = scan.transErrM;
+        if (legacyRows && !ipdpair::samePose(ruleRows, legacyRows)) ++st.disagree;
+    }
+    if (v.pick == ipdpair::Pick::Hold) ++st.held;
+    if (v.pick == ipdpair::Pick::Legacy && !ruleRows) ++st.legacyFallback;
+    if (v.backstop) ++st.backstop;
+    if (v.episodeStart) {
+        ++st.episodes;
+        Log::get().note("temporal ipd pair: no eye pair for %u frames; the legacy chooser takes the frame (episode %u, the rule's pick returns "
+                        "with the pair). key=%s", ipdpair::kHoldLimit, v.episode, g_ipdKeyOn ? "on" : "off");
+    }
+    if (v.episodeEnd) Log::get().note("temporal ipd pair: the eye pair is back; the episode ends. key=%s", g_ipdKeyOn ? "on" : "off");
+    const ipdpair::Pick applied = ipdpair::applyPick(g_ipdKeyOn, v.pick);
+    auto applyRing = [&](int idx) {
         g_rowsChoice.flags |= kChoiceValid;
-        g_rowsChoice.selectedResource = g_rowsRing[pick].buf;
-        g_rowsChoice.selectedSeq = g_rowsRing[pick].observedSeq;
-        memcpy(g_rowsChoice.selectedRows, g_rowsRing[pick].rows, sizeof(g_rowsChoice.selectedRows));
-        memcpy(g_rowsChoice.selectedProj, g_rowsRing[pick].proj, sizeof(g_rowsChoice.selectedProj));
-        memcpy(g_curRows, g_rowsRing[pick].rows, sizeof(g_curRows));
-        g_curProj[0] = g_rowsRing[pick].proj[0];
-        g_curProj[1] = g_rowsRing[pick].proj[1];
+        g_rowsChoice.selectedResource = g_rowsRing[idx].buf;
+        g_rowsChoice.selectedSeq = g_rowsRing[idx].observedSeq;
+        memcpy(g_rowsChoice.selectedRows, g_rowsRing[idx].rows, sizeof(g_rowsChoice.selectedRows));
+        memcpy(g_rowsChoice.selectedProj, g_rowsRing[idx].proj, sizeof(g_rowsChoice.selectedProj));
+        memcpy(g_curRows, g_rowsRing[idx].rows, sizeof(g_curRows));
+        g_curProj[0] = g_rowsRing[idx].proj[0];
+        g_curProj[1] = g_rowsRing[idx].proj[1];
         g_curValid = true;
-        g_curRowsBound = g_boundSeen && g_rowsRing[pick].buf == g_boundBuf;
+        g_curRowsBound = g_boundSeen && g_rowsRing[idx].buf == g_boundBuf;
         if (g_curRowsBound) g_rowsChoice.flags |= kChoiceSelectedBound;
+        memcpy(g_ipdApplied.rows, g_rowsRing[idx].rows, sizeof(g_ipdApplied.rows));
+        g_ipdApplied.proj[0] = g_rowsRing[idx].proj[0];
+        g_ipdApplied.proj[1] = g_rowsRing[idx].proj[1];
+        g_ipdApplied.observedSeq = g_rowsRing[idx].observedSeq;
+        g_ipdApplied.buf = g_rowsRing[idx].buf;
+        g_ipdApplied.valid = true;
+    };
+    if (applied == ipdpair::Pick::Rule) {
+        pick = candIdx[scan.ref];
+        g_rowsChoice.flags |= kChoiceByIpd;
+        if (g_camWritesOn) {
+            std::lock_guard<std::mutex> lock(g_camMutex);
+            camwrites::markPick(g_camRing, g_rowsFrame, g_rowsRing[pick].observedSeq, camwrites::kPickIpd);
+        }
+    }
+    if (applied == ipdpair::Pick::Hold) {
+        g_rowsChoice.flags |= kChoiceIpdHold;
+        if (g_ipdApplied.valid) {
+            g_rowsChoice.flags |= kChoiceValid;
+            g_rowsChoice.selectedResource = g_ipdApplied.buf;
+            g_rowsChoice.selectedSeq = g_ipdApplied.observedSeq;
+            memcpy(g_rowsChoice.selectedRows, g_ipdApplied.rows, sizeof(g_rowsChoice.selectedRows));
+            memcpy(g_rowsChoice.selectedProj, g_ipdApplied.proj, sizeof(g_rowsChoice.selectedProj));
+            memcpy(g_curRows, g_ipdApplied.rows, sizeof(g_curRows));
+            g_curProj[0] = g_ipdApplied.proj[0];
+            g_curProj[1] = g_ipdApplied.proj[1];
+            g_curValid = true;
+            g_curRowsBound = g_boundSeen && g_ipdApplied.buf == g_boundBuf;
+            if (g_curRowsBound) g_rowsChoice.flags |= kChoiceSelectedBound;
+        }
+    } else if (pick >= 0) {
+        // The rule's reference (applied as Rule), else the legacy pick: with the key off, or with no rule pick, today's chooser's own pick.
+        applyRing(pick);
     }
 }
 
@@ -4541,7 +4653,8 @@ void temporalPassDumpHistory(const char* trigger) {
     Log::get().note(
         "TCAM legend: choice flags 1 valid,2 bound seen,4 bound write observed,8 selected bound,"
         "10 continuous,20 identical-to-previous twin present,40 twin fallback,80 resync,100 refollow,"
-        "200 bound rows valid, 400 chosen by the headset tag (fix.hmd_camera_tag). Draw flags 1 eligible draw seen,2 mapped write observed,4 rows valid,"
+        "200 bound rows valid, 400 chosen by the headset tag (fix.hmd_camera_tag), 800 chosen by the IPD pair (fix.camera_ipd_pair), "
+        "1000 held by the IPD pair (no pair this frame; the previous rows kept). Draw flags 1 eligible draw seen,2 mapped write observed,4 rows valid,"
         "8 previous draw rows valid,10 same resource,20 same observed write,40 same rows,80 selection later. "
         "Rows are literal scene rows; their origin is not assumed to be headset centre or eye pose. "
         "Detailed rows follow for the newest %zu of %zu eye calls; %zu older calls retain TEMP only.",
@@ -4652,8 +4765,9 @@ void temporalPassDumpHistory(const char* trigger) {
             camwrites::kPerFrame);
         Log::get().note(
             "TCWR legend, continued: stk = exe return addresses as RVAs, innermost first, pick = the chooser that took it (legacy = today's "
-            "chooser, tag = the headset tag's latest stamp, both, or - for neither), drawn = 1 when an eye's scene draw this frame saw it as "
-            "its object's latest write, rot = the rows were a rotation.");
+            "chooser, tag = the headset tag's latest stamp, both, or - for neither; ipd = the IPD pair's reference, printed ahead of the others), "
+            "drawn = 1 when an eye's scene draw this frame saw it as its object's latest write, rot = the rows were a rotation, pair = 1 when the "
+            "write is in an IPD pair this frame (the reference or its partner, chosen or not).");
         size_t lines = 0, kept = 0;
         for (size_t k = 0; k < order.size(); ++k) {
             const size_t need = 1 + snap[order[k]].n;
@@ -4699,6 +4813,9 @@ void temporalPassConfigure(Config& cfg) {
     // fix.hmd_camera_tag (temporary A/B; hmd_camera_tag.h): on picks the headset-stamped write when the frame has one. VR only: the flat
     // allow-list does not list it, so flat reads "off" and keeps today's pick.
     g_tagKeyOn = cfg.getString("fix.hmd_camera_tag", "on") == "on";
+    // fix.camera_ipd_pair (temporary A/B; camera_ipd_pair.h): on applies the eye pair's rule ahead of the legacy chooser. VR only: the flat
+    // allow-list does not list it, so flat reads "off" and its chooser is today's.
+    g_ipdKeyOn = cfg.getString("fix.camera_ipd_pair", "on") == "on";
     // diag.camera_writes (camera_writes.h): temporary, default off. VR only: the flat allow-list does not list it, so flat reads "off".
     const bool camOn = cfg.getString("diag.camera_writes", "off") == "on";
     if (camOn != g_camWritesOn) {
@@ -5215,11 +5332,13 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
 
 void temporalPassHmdTagTick();   // the 30 s line, defined with the census line below
 void temporalPassCamWritesTick(); // the camera writes' 20 s line, defined after it
+void temporalPassIpdPairTick();   // the IPD pair's 30 s line, defined after it
 void temporalPassFrameBoundary() {
     g_eyeFinalClock.boundary(g_eyeFinalRun.armed);
     if (!detail::g_temporalPassWantedFssChrome) return;
     temporalPassHmdTagTick();
     temporalPassCamWritesTick();
+    temporalPassIpdPairTick();
     for (int eye = 0; eye < 2; ++eye) {
         if (g_rigidDraw[eye].seen && g_rigidDraw[eye].frame == g_rowsFrame) {
             g_prevRigidDraw[eye] = g_rigidDraw[eye];
@@ -5643,6 +5762,22 @@ void temporalPassCamWritesTick() {
     g_camWinFrame = g_rowsFrame;
 }
 
+// The IPD pair's 30 s line (camera_ipd_pair.h), on a clock of its own, read at the frame boundary like the headset tag's. Printed with the key
+// off too: the counts run either way, so the line says what the rule would have done.
+void temporalPassIpdPairTick() {
+    const int64_t now = qpcNow();
+    const int64_t freq = qpcFrequency();
+    if (g_ipdWindowTicks == 0) {
+        g_ipdWindowTicks = now;
+        return;
+    }
+    if (freq <= 0 || now - g_ipdWindowTicks < 30 * freq) return;
+    g_ipdWindowTicks = now;
+    char line[480];
+    if (ipdpair::formatReport(line, sizeof(line), g_ipdStats, g_ipdKeyOn) > 0) Log::get().note("%s", line);
+    ipdpair::resetWindow(g_ipdStats);
+}
+
 bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,
                             uint32_t* resets) {
     if (g_dlaaTreats == 0) return false;
@@ -5888,4 +6023,11 @@ extern "C" __declspec(dllexport) void edvrTemporalAaNoteHead(int eye, const floa
                                                              const float* nowPose,
                                                              const float* eyeOffset) {
     edvr::temporalPassNoteHead(eye, prevPose, nowPose, eyeOffset);
+}
+
+// The runtime's eye-to-head for this eye (temporal_pass.h): the located transform, as native_temporal.cpp holds it each treat.
+extern "C" void edvrTemporalAaNoteEyeToHead(int eye, const float* eyeToHead) {
+    if (eye < 0 || eye > 1 || !eyeToHead) return;
+    memcpy(edvr::g_ipdEyes[eye], eyeToHead, sizeof(edvr::g_ipdEyes[eye]));
+    edvr::g_ipdEyeNoted[eye] = true;
 }

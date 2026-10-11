@@ -298,4 +298,8 @@ __declspec(dllexport) void* edvrTemporalAa(void* srcTex, int eye,
 __declspec(dllexport) void edvrTemporalAaNoteHead(int eye, const float* prevPose,
                                                   const float* nowPose,
                                                   const float* eyeOffset);
+
+// This eye's runtime eye-to-head transform (3x4 row-major, the located one, before the game's S*E*S), noted before each treat from
+// native_temporal.cpp. The IPD pair rule reads both eyes (camera_ipd_pair.h). Not exported: the native door is the only caller.
+void edvrTemporalAaNoteEyeToHead(int eye, const float* eyeToHead);
 }

@@ -20,6 +20,7 @@
 #include "../../src/common/temporal_census.h"
 #include "../../src/common/hmd_camera_tag.h"
 #include "../../src/common/camera_writes.h"
+#include "../../src/common/camera_ipd_pair.h"
 #include <chrono>
 #include <stdexcept>
 #include "../../src/common/temporal_mode.h"
@@ -892,6 +893,7 @@ int main() {
             w.rot = true;
             w.pick = cw::kPickLegacy | cw::kPickTag;
             w.drawn = true;
+            w.pair = true;
             w.stkN = 3u;
             w.stk[0] = 0x2869068u;
             w.stk[1] = 0x594B60u;
@@ -904,22 +906,28 @@ int main() {
             cw::Parsed p;
             const bool parsed = cw::parseWrite(line, p);
             check(len > 0 && parsed && p.frame == 9u && p.seq == 4242u && p.obj == 0xABCDEF0u && p.off == 0u && p.len == 3775u &&
-                  p.tid == 1234u && p.co == 2u && p.rot && p.drawn && std::strcmp(p.pick, "both") == 0 && p.stkN == 3u &&
+                  p.tid == 1234u && p.co == 2u && p.rot && p.drawn && p.pair && std::strcmp(p.pick, "both") == 0 && p.stkN == 3u &&
                   p.stk[0] == 0x2869068u && p.stk[1] == 0x594B60u && p.stk[2] == 1u && p.T[1] == -2.0f && p.T[2] == 3.25f &&
                   p.R[0] == 1.0f && p.P[0] == 0.5f && p.P[6] == 12.5f,
                   "camera writes format: a TCWR line parses back to its clock, object, bytes, thread, depth, rows, stack, picks and projection");
             const char* pp = std::strstr(line, "P=(");
             int commas = 0;
             if (pp) for (const char* c = pp; *c && *c != ')'; ++c) if (*c == ',') ++commas;
-            check(pp && commas == 6 && std::strstr(line, " stk=2869068,594B60,1 pick=both drawn=1 rot=1") != nullptr,
-                  "camera writes format: seven P floats, then the stack in hex, then pick, drawn and rot");
+            check(pp && commas == 6 && std::strstr(line, " stk=2869068,594B60,1 pick=both drawn=1 rot=1 pair=1") != nullptr,
+                  "camera writes format: seven P floats, then the stack in hex, then pick, drawn, rot and pair");
+            cw::Write ipdW;
+            ipdW.pick = cw::kPickIpd | cw::kPickLegacy;
+            char ipdLine[640] = {};
+            check(cw::formatWrite(ipdLine, sizeof(ipdLine), 9u, ipdW) > 0 && std::strstr(ipdLine, " pick=ipd drawn=0 rot=0 pair=0") != nullptr &&
+                  std::strcmp(cw::pickName(cw::kPickIpd), "ipd") == 0 && std::strcmp(cw::pickName(cw::kPickTag), "tag") == 0,
+                  "camera writes format: a write the IPD pair chose prints pick=ipd ahead of the older pickers");
             check(cw::formatWrite(line, 60, 9u, w) == 0, "camera writes format: a line that does not fit its buffer is refused, not truncated");
             cw::Write e;
             e.stkN = 0;
             e.pick = 0;
             char empty[640] = {};
             check(cw::formatWrite(empty, sizeof(empty), 9u, e) > 0 && cw::parseWrite(empty, p) && p.stkN == 0u &&
-                  std::strcmp(p.pick, "-") == 0 && !p.drawn && !p.rot && std::strstr(empty, " stk=- pick=- drawn=0 rot=0") != nullptr,
+                  std::strcmp(p.pick, "-") == 0 && !p.drawn && !p.rot && !p.pair && std::strstr(empty, " stk=- pick=- drawn=0 rot=0 pair=0") != nullptr,
                   "camera writes format: no stack and no pick print as - and parse back");
             check(!cw::parseWrite("TCWR f9 s4 nonsense", p), "camera writes parse: a malformed line is refused");
             char head[96] = {};
@@ -1097,6 +1105,240 @@ int main() {
         dI.hmd = false;
         const int tlen0 = edvr::census::formatDraw(tl, sizeof(tl), 3u, 0, 0u, dI);
         check(tlen0 > 0 && std::strstr(tl, "rows=1 hmd=0 T=("), "census: a TDRW line without the stamp is hmd=0");
+    }
+    // J. THE CAMERA IPD PAIR (camera_ipd_pair.h, 2026-10-11): the runtime offset, the partner test, the nearest reference, the hold, the legacy
+    // fallback, the backstop and the 30 s line. The rows are the physical model: the head's pose composed with each eye's game-convention
+    // eye-to-head (the logged pair's relation, P = D - 0.0606 m * col0, falls out of it). The chooser itself (temporal_pass.cpp) is exercised by the flight.
+    {
+        namespace ip = edvr::ipdpair;
+        const float kPi = 3.14159265f;
+        // rigid [R(yaw theta) | t], row-major 3x4
+        auto mk = [](float theta, float tx, float ty, float tz, float out[12]) {
+            const float c = std::cos(theta), s = std::sin(theta);
+            const float r[12] = {c, 0, s, tx, 0, 1, 0, ty, -s, 0, c, tz};
+            std::memcpy(out, r, sizeof(r));
+        };
+        // out = a * b for rigid 3x4s
+        auto compose = [](const float a[12], const float b[12], float out[12]) {
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    float s = 0.0f;
+                    for (int k = 0; k < 3; ++k) s += a[i * 4 + k] * b[k * 4 + j];
+                    out[i * 4 + j] = s;
+                }
+                float t = a[i * 4 + 3];
+                for (int k = 0; k < 3; ++k) t += a[i * 4 + k] * b[k * 4 + 3];
+                out[i * 4 + 3] = t;
+            }
+        };
+        float head[12];
+        mk(0.4f, 0.10f, 1.60f, -0.30f, head);
+        // The runtime's located eye-to-head: OpenVR's left eye at -IPD/2 on x, right at +IPD/2, no cant. IPD 60.6 mm.
+        const float locL[12] = {1, 0, 0, -0.0303f, 0, 1, 0, 0, 0, 0, 1, 0};
+        const float locR[12] = {1, 0, 0, 0.0303f, 0, 1, 0, 0, 0, 0, 1, 0};
+        float eyes[2][12];
+        std::memcpy(eyes[0], locL, sizeof(locL));
+        std::memcpy(eyes[1], locR, sizeof(locR));
+        const ip::Offset off = ip::offsetFromEyes(eyes);
+        check(off.valid, "ipd pair offset: two eye-to-head transforms at 60.6 mm give a valid runtime offset");
+        checkNear(off.o[0], -0.0606f, 1e-5f, "ipd pair offset: the left eye sits -60.6 mm on the reference's own x (the logged relation)");
+        checkNear(off.o[1], 0.0f, 1e-6f, "ipd pair offset: no y component without cant");
+        checkNear(off.o[2], 0.0f, 1e-6f, "ipd pair offset: no z component without cant");
+        checkNear(off.ipdM * 1000.0f, 60.6f, 1e-3f, "ipd pair offset: |ipd| = 60.6 mm");
+        checkNear(off.cantDeg, 0.0f, 1e-3f, "ipd pair offset: no canting on a parallel pair");
+        float gl[12], gr[12], D[12], P[12];
+        ip::gameEyeToHead(locL, gl);
+        ip::gameEyeToHead(locR, gr);
+        compose(head, gr, D);   // the right eye: the reference
+        compose(head, gl, P);   // the left eye: its partner
+        checkNear(P[3], D[3] - 0.0606f * D[0], 1e-5f, "ipd pair physics: P = D - 0.0606 m * col0 (x)");
+        checkNear(P[7], D[7] - 0.0606f * D[4], 1e-5f, "ipd pair physics: P = D - 0.0606 m * col0 (y)");
+        checkNear(P[11], D[11] - 0.0606f * D[8], 1e-5f, "ipd pair physics: P = D - 0.0606 m * col0 (z)");
+
+        // The steady pair is chosen, the reference being the right eye (index 1 here), whatever the order of the writes.
+        const float* rows2[2] = {P, D};
+        const uint32_t seq2[2] = {1u, 2u};
+        uint8_t inP[8] = {};
+        const ip::Scan s1 = ip::scanPairs(rows2, seq2, 2, off.o, off.rel, nullptr, inP);
+        check(s1.ref == 1 && s1.partner == 0 && s1.families == 1 && inP[0] && inP[1],
+              "ipd pair: the steady pair is chosen, the right eye as the reference, its partner marked");
+        checkNear(s1.transErrM, 0.0f, 1e-5f, "ipd pair: the steady pair's translation residual is zero");
+
+        // A probe face: the same translation, 90 degrees about the same axis, no partner. Rejected.
+        float probe[12];
+        mk(0.4f + kPi / 2.0f, D[3], D[7], D[11], probe);
+        const float* rows3[3] = {P, D, probe};
+        const uint32_t seq3[3] = {1u, 2u, 3u};
+        uint8_t inP3[8] = {};
+        const ip::Scan s2 = ip::scanPairs(rows3, seq3, 3, off.o, off.rel, nullptr, inP3);
+        check(s2.ref == 1 && inP3[2] == 0, "ipd pair: a probe-face write with the same translation and no partner is rejected");
+        const float* rows6[1] = {probe};
+        const ip::Scan s6 = ip::scanPairs(rows6, seq3, 1, off.o, off.rel, nullptr, nullptr);
+        check(s6.ref == -1 && s6.families == 0, "ipd pair: a probe face alone forms no pair family");
+
+        // The 0.19 m / 2.99 deg excursion: no partner. Rejected beside the steady pair; alone it leaves the frame with no pair (held below).
+        float exc[12];
+        mk(0.4f + 2.99f * kPi / 180.0f, D[3] + 0.19f, D[7], D[11], exc);
+        const float* rows4[3] = {P, D, exc};
+        uint8_t inP4[8] = {};
+        const ip::Scan s3 = ip::scanPairs(rows4, seq3, 3, off.o, off.rel, nullptr, inP4);
+        check(s3.ref == 1 && inP4[2] == 0, "ipd pair: the 0.19 m / 2.99 deg excursion, with no partner, is rejected");
+        const float* rowsE[1] = {exc};
+        const ip::Scan s4 = ip::scanPairs(rowsE, seq3, 1, off.o, off.rel, nullptr, nullptr);
+        check(s4.ref == -1, "ipd pair: the excursion alone leaves no pair");
+        {
+            ip::Chain c;
+            (void)ip::decideFrame(c, true, D, D);
+            const ip::Verdict hv = ip::decideFrame(c, true, nullptr, exc);
+            check(hv.pick == ip::Pick::Hold && !hv.backstop && std::memcmp(c.pose, D, sizeof(D)) == 0,
+                  "ipd pair: a frame whose only candidate is the excursion is held: the previous rows stand");
+        }
+
+        // A camera 10 m away, facing about 178 degrees: no partner. Rejected.
+        float far[12];
+        mk(0.4f + 178.0f * kPi / 180.0f, D[3], D[7], D[11] + 10.1f, far);
+        const float* rows5[3] = {P, D, far};
+        uint8_t inP5[8] = {};
+        const ip::Scan s5 = ip::scanPairs(rows5, seq3, 3, off.o, off.rel, nullptr, inP5);
+        check(s5.ref == 1 && inP5[2] == 0, "ipd pair: a camera 10 m away is rejected");
+
+        // Two pairs in one frame: the one nearest the previous pose wins; with no previous pose, the latest clock.
+        float headB[12], DB[12], PB[12];
+        mk(0.4f, 5.10f, 1.60f, -0.30f, headB);
+        compose(headB, gr, DB);
+        compose(headB, gl, PB);
+        const float* rows7[4] = {P, D, PB, DB};
+        const uint32_t seq7[4] = {1u, 2u, 3u, 4u};
+        const ip::Scan s7near = ip::scanPairs(rows7, seq7, 4, off.o, off.rel, D, nullptr);
+        check(s7near.families == 2 && s7near.ref == 1, "ipd pair: two pairs, the one nearest the previous pose (pair A) is the reference");
+        const ip::Scan s7late = ip::scanPairs(rows7, seq7, 4, off.o, off.rel, nullptr, nullptr);
+        check(s7late.ref == 3, "ipd pair: two pairs with no previous pose, the latest clock (pair B) is the reference");
+
+        // The hold, the legacy fallback after three holds, and the episode's start and end.
+        {
+            ip::Chain c;
+            const ip::Verdict first = ip::decideFrame(c, true, D, D);
+            check(first.pick == ip::Pick::Rule && c.havePose, "ipd pair chain: the first pair is taken");
+            ip::Verdict h1 = ip::decideFrame(c, true, nullptr, D), h2 = ip::decideFrame(c, true, nullptr, D), h3 = ip::decideFrame(c, true, nullptr, D);
+            check(h1.pick == ip::Pick::Hold && h2.pick == ip::Pick::Hold && h3.pick == ip::Pick::Hold && c.holdRun == 3,
+                  "ipd pair chain: three frames without a pair are held");
+            const ip::Verdict fb = ip::decideFrame(c, true, nullptr, D);
+            check(fb.pick == ip::Pick::Legacy && fb.episodeStart && fb.episode == 1u,
+                  "ipd pair chain: the fourth frame without a pair falls back to the legacy chooser, starting episode 1 once");
+            const ip::Verdict fb2 = ip::decideFrame(c, true, nullptr, D);
+            check(fb2.pick == ip::Pick::Legacy && !fb2.episodeStart, "ipd pair chain: the episode is logged once, not each frame");
+            const ip::Verdict back = ip::decideFrame(c, true, D, D);
+            check(back.pick == ip::Pick::Rule && back.episodeEnd && c.holdRun == 0 && !c.inEpisode,
+                  "ipd pair chain: a pair returning ends the episode and the rule's pick resumes");
+        }
+
+        // The backstop with no runtime offset (the rule off): the 0.19 m excursion is rejected and held; a jump that persists is taken on
+        // the fourth frame; a jump that continues the previous step is taken at once.
+        {
+            ip::Chain c;
+            c.havePose = true;
+            std::memcpy(c.pose, D, sizeof(D));
+            const ip::Verdict b1 = ip::decideFrame(c, false, nullptr, exc);
+            check(b1.pick == ip::Pick::Hold && b1.backstop && std::memcmp(c.pose, D, sizeof(D)) == 0,
+                  "backstop, rule off: the 0.19 m / 2.99 deg excursion is rejected and the previous rows stand");
+            (void)ip::decideFrame(c, false, nullptr, exc);
+            (void)ip::decideFrame(c, false, nullptr, exc);
+            const ip::Verdict b4 = ip::decideFrame(c, false, nullptr, exc);
+            check(b4.pick == ip::Pick::Legacy && !b4.backstop,
+                  "backstop: a jump that persists for three frames is taken on the fourth (a real camera change is not held forever)");
+        }
+        {
+            float before[12], cand[12];
+            std::memcpy(before, D, sizeof(D));
+            before[3] -= 0.5f;
+            std::memcpy(cand, D, sizeof(D));
+            cand[3] += 0.5f;   // the step 0.5 m: a jump over 3 cm, continuing the previous step by constant velocity
+            ip::Chain c;
+            c.havePose = true;
+            c.havePrev = true;
+            std::memcpy(c.before, before, sizeof(before));
+            std::memcpy(c.pose, D, sizeof(D));
+            const ip::Verdict cv = ip::decideFrame(c, false, nullptr, cand);
+            check(cv.pick == ip::Pick::Legacy && !cv.backstop, "backstop: a jump that continues the previous step by constant velocity is taken");
+            float off2[12];
+            std::memcpy(off2, D, sizeof(D));
+            off2[3] += 0.2f;   // a jump with no step behind it
+            ip::Chain c2;
+            c2.havePose = true;
+            c2.havePrev = true;
+            std::memcpy(c2.before, D, sizeof(D));
+            std::memcpy(c2.pose, D, sizeof(D));
+            const ip::Verdict nv = ip::decideFrame(c2, false, nullptr, off2);
+            check(nv.pick == ip::Pick::Hold && nv.backstop, "backstop: a jump with no step behind it is rejected");
+        }
+
+        // A canted headset, 68 mm: the runtime's offset finds the pair, its cant included. The rows are the physical model; the partner's
+        // rotation differs from the reference's by the cant, so the relative-rotation branch is the one that passes.
+        {
+            const float cant = 2.5f * kPi / 180.0f;
+            float cL[12], cR[12];
+            mk(cant, -0.034f, 0.0f, 0.0f, cL);
+            mk(-cant, 0.034f, 0.0f, 0.0f, cR);
+            float ce[2][12];
+            std::memcpy(ce[0], cL, sizeof(cL));
+            std::memcpy(ce[1], cR, sizeof(cR));
+            const ip::Offset co = ip::offsetFromEyes(ce);
+            check(co.valid, "ipd pair, canted 68 mm: the runtime offset is valid");
+            checkNear(co.ipdM * 1000.0f, 68.0f, 1e-2f, "ipd pair, canted: |ipd| = 68 mm, from the runtime offset");
+            checkNear(co.cantDeg, 5.0f, 0.02f, "ipd pair, canted: the cant is 5 deg between the two eyes (2 x 2.5)");
+            check(std::fabs(co.o[2]) > 0.002f, "ipd pair, canted: the offset has a z component (the cant rotates it into the reference's axes)");
+            float cgl[12], cgr[12], cD[12], cP[12], ch[12];
+            mk(0.25f, 0.10f, 1.60f, -0.30f, ch);
+            ip::gameEyeToHead(cL, cgl);
+            ip::gameEyeToHead(cR, cgr);
+            compose(ch, cgr, cD);
+            compose(ch, cgl, cP);
+            const float* rowsC[2] = {cP, cD};
+            const uint32_t seqC[2] = {1u, 2u};
+            const ip::Scan sc = ip::scanPairs(rowsC, seqC, 2, co.o, co.rel, nullptr, nullptr);
+            check(sc.ref == 1 && sc.partner == 0, "ipd pair, canted: the pair is found from the runtime offset, cant and all");
+            check(ip::isPartner(cD, cP, co.o, co.rel) && !ip::isPartner(cD, cP, co.o, ip::kIdentity3),
+                  "ipd pair, canted: the partner passes on the relative cant and would fail on identity alone");
+        }
+        // A zero transform is no offset.
+        {
+            float z2[2][12] = {};
+            const ip::Offset zo = ip::offsetFromEyes(z2);
+            check(!zo.valid, "ipd pair offset: two zero transforms are no offset (the rule cannot run)");
+        }
+        // The 30 s line: the counts, the IPD, the residual's p50 and max, the key, and the backstop count. Too small a buffer is refused.
+        {
+            ip::Stats st;
+            st.frames = 10;
+            st.paired = 7;
+            st.held = 2;
+            st.legacyFallback = 1;
+            st.episodes = 1;
+            st.disagree = 3;
+            st.backstop = 1;
+            st.ipdKnown = true;
+            st.ipdM = 0.0606f;
+            st.errN = 3;
+            st.errs[0] = 0.001f;
+            st.errs[1] = 0.002f;
+            st.errs[2] = 0.003f;
+            st.errMax = 0.003f;
+            char rep[480];
+            const int rl = ip::formatReport(rep, sizeof(rep), st, true);
+            check(rl > 0 && std::strcmp(rep,
+                  "temporal ipd pair: frames=10 paired=7 held=2 legacy_fallback=1 episodes=1 disagree_with_legacy=3 ipd_mm=60.60 "
+                  "pair_err_mm p50/max=2.000/3.000 key=on backstop=1") == 0,
+                  "ipd pair 30 s line: the counts, ipd_mm, the residual's p50 and max, key and backstop, in the logged format");
+            check(ip::formatReport(rep, 20, st, true) == 0, "ipd pair 30 s line: a buffer too small is refused, not truncated");
+            ip::resetWindow(st);
+            check(st.frames == 0 && st.errN == 0 && st.ipdKnown && st.ipdM > 0.06f,
+                  "ipd pair 30 s line: the window resets its counts and keeps the runtime's IPD");
+        }
+        // The key: applied picks are the legacy's with the key off, whatever the chain decided. The chain still counts.
+        check(ip::applyPick(false, ip::Pick::Rule) == ip::Pick::Legacy && ip::applyPick(false, ip::Pick::Hold) == ip::Pick::Legacy &&
+              ip::applyPick(true, ip::Pick::Rule) == ip::Pick::Rule && ip::applyPick(true, ip::Pick::Hold) == ip::Pick::Hold,
+              "ipd pair key: off applies the legacy chooser's pick for every chain pick; on applies the chain's");
+        check(ip::samePose(D, D) && !ip::samePose(D, P), "ipd pair: samePose is true for one pose and false for the partner");
     }
     if (g_fails) {
         printf("\nTEMPORAL TEST FAILED (%d)\n", g_fails);

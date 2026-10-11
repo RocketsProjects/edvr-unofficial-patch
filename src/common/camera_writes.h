@@ -26,6 +26,7 @@ constexpr int kStack = 6;            // exe return addresses kept per write, inn
 constexpr size_t kDumpLines = 6000;  // the Pause dump's cap, newest frames first
 constexpr uint8_t kPickLegacy = 1u;  // the write today's chooser picked this frame
 constexpr uint8_t kPickTag = 2u;     // the write the headset tag names: the latest stamped write this frame
+constexpr uint8_t kPickIpd = 4u;     // the write the IPD pair rule chose this frame (camera_ipd_pair.h); printed as "ipd" ahead of the others
 constexpr int kProjIndex[7] = {0, 2, 5, 6, 10, 11, 14};
 
 struct Write {
@@ -36,7 +37,8 @@ struct Write {
     uint32_t tid = 0;          // the writing thread
     uint32_t co = 0;           // the camera coordinator's depth on that thread (hmd_camera_tag.h)
     bool rot = false;          // the rows were a rotation; T and R are zero otherwise
-    uint8_t pick = 0;          // kPickLegacy | kPickTag
+    uint8_t pick = 0;          // kPickLegacy | kPickTag | kPickIpd
+    bool pair = false;         // the write is in an IPD pair this frame: a reference or its partner (camera_ipd_pair.h), whether or not chosen
     bool drawn = false;        // an eye's scene draw this frame observed this write as the object's latest
     uint32_t stkN = 0;
     uint32_t stk[kStack] = {}; // exe RVAs, innermost first
@@ -126,6 +128,14 @@ inline bool markPick(Ring& ring, uint32_t frame, uint32_t seq, uint8_t bit) {
     return true;
 }
 
+// Marks the write with clock seq as a member of an IPD pair this frame (camera_ipd_pair.h). False when it has no record this frame.
+inline bool markPair(Ring& ring, uint32_t frame, uint32_t seq) {
+    Write* w = findWrite(ring, frame, seq);
+    if (!w) return false;
+    w->pair = true;
+    return true;
+}
+
 // Marks the write with clock seq as observed by an eye's scene draw (the draw's CB object's latest write before the draw).
 inline bool markDrawn(Ring& ring, uint32_t frame, uint32_t seq) {
     Write* w = findWrite(ring, frame, seq);
@@ -147,6 +157,7 @@ inline int rvasInRange(const void* const* frames, int n, uintptr_t base, size_t 
 }
 
 inline const char* pickName(uint8_t p) {
+    if (p & kPickIpd) return "ipd";
     switch (p & 3u) {
         case 1u: return "legacy";
         case 2u: return "tag";
@@ -182,8 +193,8 @@ inline int formatWrite(char* buf, size_t n, uint32_t frame, const Write& w) {
         }
     }
     if (m <= 0 || static_cast<size_t>(len) + 40 >= n) return 0;
-    m = std::snprintf(buf + len, n - static_cast<size_t>(len), " pick=%s drawn=%d rot=%d",
-                      pickName(w.pick), w.drawn ? 1 : 0, w.rot ? 1 : 0);
+    m = std::snprintf(buf + len, n - static_cast<size_t>(len), " pick=%s drawn=%d rot=%d pair=%d",
+                      pickName(w.pick), w.drawn ? 1 : 0, w.rot ? 1 : 0, w.pair ? 1 : 0);
     if (m <= 0 || static_cast<size_t>(len + m) >= n) return 0;
     return len + m;
 }
@@ -201,7 +212,7 @@ struct Parsed {
     uint32_t stk[kStack] = {};
     uint32_t stkN = 0;
     char pick[8] = {};
-    bool drawn = false, rot = false;
+    bool drawn = false, rot = false, pair = false;
 };
 
 // Parses one TCWR line (formatWrite's format). False when a field is missing or malformed.
@@ -245,13 +256,14 @@ inline bool parseWrite(const char* line, Parsed& out) {
             break;
         }
     }
-    int drawn = -1, rot = -1;
+    int drawn = -1, rot = -1, pair = -1;
     char pick[8] = {};
-    const int tail = std::sscanf(p, " pick=%7s drawn=%d rot=%d", pick, &drawn, &rot);
-    if (tail != 3) return false;
+    const int tail = std::sscanf(p, " pick=%7s drawn=%d rot=%d pair=%d", pick, &drawn, &rot, &pair);
+    if (tail != 4) return false;
     std::memcpy(out.pick, pick, sizeof(out.pick));
     out.drawn = drawn != 0;
     out.rot = rot != 0;
+    out.pair = pair != 0;
     if (out.stkN > static_cast<uint32_t>(kStack)) out.stkN = static_cast<uint32_t>(kStack);
     return true;
 }

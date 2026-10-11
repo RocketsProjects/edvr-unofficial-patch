@@ -52,6 +52,8 @@ extern "C" void edvrTemporalAaNoteHead(int eye,const float* previous,const float
   note={};note.eye=unsigned(eye);note.head=previous&&current&&offset;
   if(note.head){std::memcpy(note.previousHead,previous,48);std::memcpy(note.currentHead,current,48);std::memcpy(note.offset,offset,12);}
 }
+// The IPD pair's eye transform note (temporal_pass.cpp; camera_ipd_pair.h): the chooser is not linked into this rig.
+extern "C" void edvrTemporalAaNoteEyeToHead(int,const float*) {}
 extern "C" void* edvrTemporalAa(void* source,int eye,const float*,const float* now,const float* previous,
     float jx,float jy,const float* delta,const float* translation,const float* swapped,float nearZ,float farZ,
     float headDeg,int,float,float,unsigned outW,unsigned outH,unsigned flags) {
