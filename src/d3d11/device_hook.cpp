@@ -80,6 +80,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
+#include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR; TEMPORARY, advanced.terrain_cull_cover)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
 #include "boundary_tick.h"   // one fault budget per frame-boundary tick
 #include "vscreen.h"
@@ -1619,6 +1620,8 @@ void presentFrameBoundary() {
             vScreenRefreshConfig();
             // The vertex-buffer resync's 60 s count and its ten-minute heartbeat: it needs no vScreen State, so it is asked here, after the reload, in both profiles.
             vertexResyncPoll(stampMs());
+            // The terrain cull cover's live key (advanced.terrain_cull_cover) and its 60 s census, after the reload so a hand edit lands within the second.
+            terrainCullCoverPoll(stampMs());
             // The four diagnostic keys follow the file too (the menu's Hotkeys page).
             configureDiagnosticHotkeys();
             g_state->fssModeLatchWanted =
@@ -2843,6 +2846,9 @@ void hookDevice(ID3D11Device* device) {
             // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): a CodeHook on Frontier's input-assembler flush, once, in BOTH profiles -- the stale
             // cache is the game's, not VR's. A build that is not 332841 is one log line and nothing patched.
             vertexResyncInstall();
+            // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, VR only (a flat session says it is
+            // inert). TEMPORARY with advanced.terrain_cull_cover. A build that is not 332841 is scanned for the call site; anything short of one match is one log line.
+            terrainCullCoverInstall(runtimeFlatProfile());
 
             // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
             // own commit writes two dozen entries of this table in the shared
@@ -3166,6 +3172,7 @@ void shutdownDeviceHooks() {
     uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
     vrSsaaHoldShutdown();    // the Supersampling hold's loader slot, back to the game's
     vertexResyncShutdown();  // the vertex-buffer resync's session line (the hook itself stays; the game's process exit says the line through Log::setExitLine)
+    terrainCullCoverShutdown();  // the terrain cull cover's open window (the hook stays, as the resync's does)
     shutdownGlitchFrameFix();
     transitionFlashEyeBaseShutdown();
     shutdownVScreenFixes();

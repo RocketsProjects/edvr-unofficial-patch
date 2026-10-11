@@ -82,6 +82,9 @@ namespace edvr{
 void edgeBlackSample(ID3D11Device*,ID3D11Texture2D*,int eye,uint64_t seq,const uint32_t region[4],bool flipU,bool,const float*){
   ++edgeBlackSamples;if(eye>=0&&eye<2)++edgeBlackEyeSeen[eye];edgeBlackLastSeq=seq;edgeBlackLastFlipU=flipU;std::memcpy(edgeBlackLastRegion,region,16);}
 void edgeBlackClose(){++edgeBlackCloses;}}
+// The terrain cull cover (src/d3d11/terrain_cull_cover_hook.cpp, docs/terrain-culling.md), which begin() tells the frusta the game is handed: recorded here, asserted below.
+unsigned coverNotes=0;float coverLast[2][4]{};
+namespace edvr{void terrainCullCoverNoteFrusta(const float f[2][4]){++coverNotes;std::memcpy(coverLast,f,sizeof(coverLast));}}
 // The served floor's NGX query (dlaa.cpp), shaped the way the flights'
 // modes lines read (edvr_gfx_20260923_153446.log line 435): quality,
 // balanced and performance take half the output up to the output, ultra
@@ -271,6 +274,7 @@ void run(){
   ID3D11Device* warmDev=reinterpret_cast<ID3D11Device*>(1);unsigned long warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target before any channel is acquired");
   Device d;auto source=d.texture();auto t=acquire(d,11);auto f=frame(11,1);auto p=begin(t,f);
+  check(coverNotes>=1&&std::memcmp(coverLast,f.frusta,sizeof(coverLast))==0,"the terrain cull cover is told the frusta the game is handed (the begun frame's, as given)");
   warmDev=nullptr;warmThread=0;
   check(edvr::nativeTemporalWarmTarget(&warmDev,&warmThread)&&warmDev==d.device.Get()&&warmThread==GetCurrentThreadId(),
       "warm target names the acquiring thread and device");

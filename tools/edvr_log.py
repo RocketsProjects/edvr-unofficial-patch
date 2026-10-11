@@ -9,6 +9,7 @@
     python tools/edvr_log.py --target frontier --tally vh --frame 1
     python tools/edvr_log.py --target steam --tally pose
     python tools/edvr_log.py --target steam --tally edge
+    python tools/edvr_log.py --target frontier --tally cover
     python tools/edvr_log.py --target frontier --tally periodic --expect-build HEAD
     python tools/edvr_log.py --target frontier --tally periodic --window-ms 250
     python tools/edvr_log.py --target frontier --tally periodic --infer-runs
@@ -75,6 +76,10 @@ judge the texture Elite SUBMITS (before any EDVR pass) on a 128 x 128 grid per e
 the listed events (eye, frame, time, size, centre, region, whether the cluster touches the grid edge, head speed) and the totals, with events per 4 minutes to set against
 the pilot's count of flashes. Events at about the pilot's rate mean the black is in Elite's own image; none while flashes are seen means it is added after EDVR submits
 (docs\terrain-culling.md). Exit 1 when the log has no such line.
+
+--tally cover tables the terrain cull cover (TEMPORARY, advanced.terrain_cull_cover): the `terrain cull cover:` lines in the GRAPHICS log (the hook live or inert, each change of the live
+key, the first four calls with their in and out aspect and vFOV, a count every 60 s) per mode, and joins the edge-black 60 s summaries to the mode in force, so a flight's off and on
+segments can be compared by region per minute. Exit 1 when the log has no such line.
 
 --tally periodic answers one question about one flight: which periodic work
 coincides with long frames. It reads the graphics log and the runtime log
@@ -1223,6 +1228,181 @@ def print_edge_black_tally(parsed):
           "IN Elite's own image (H-image; border=0 events are black shapes floating inside the view with terrain around them, the signature of tiles generated or selected late, "
           "H-gen-edge). No events while the pilot sees flashes means the black is added after EDVR submits (H-after). Black-start points are black now, lit before and still "
           "black: a horizon or a dark object moving in, the control that is not a flash.")
+    return 0
+
+
+# --tally cover: the terrain cull cover (src/d3d11/terrain_cull_cover_core.h writes every line; tools\terrain_cover_test holds tools\terrain_cover_fixture.log, which this script's
+# --self-test reads, to exactly what the production hook writes). TEMPORARY with advanced.terrain_cull_cover (docs\terrain-culling.md, 2026-10-10). In the GRAPHICS log:
+#
+#   terrain cull cover: hook live at exe+0x443E800 (<how found>)          or   terrain cull cover: inert: <why>
+#   terrain cull cover: on|off (<what>)                                     at the start and on every change of the live key
+#   terrain cull cover: call N of 4: in aspect A vfov V deg -> out aspect A' vfov V' deg (widened|unchanged); T=t H=h; mode on|off     the first four calls
+#   terrain cull cover: S s: mode on|off calls N widened W; last in aspect A vfov V deg -> out aspect A' vfov V' deg; T=t H=h              every 60 s, and at a change
+#
+# The report joins them with the edge-black watch's 60 s summaries (`edge black:`, same log): each summary goes to the mode in force at its start and at its end, or to `mixed` when
+# a change fell inside it, so the flight's off and on segments can be compared by region per minute.
+
+COVER_LIVE_RE = re.compile(r"terrain cull cover: hook live at exe\+0x(?P<rva>[0-9A-F]+) \((?P<how>.*)\)\s*$")
+COVER_INERT_RE = re.compile(r"terrain cull cover: inert: (?P<why>.*?)\s*$")
+COVER_MODE_RE = re.compile(r"terrain cull cover: (?P<mode>on|off) \((?P<what>.*)\)\s*$")
+COVER_CALL_RE = re.compile(r"terrain cull cover: call (?P<n>\d+) of (?P<of>\d+): in aspect (?P<ia>[0-9.]+) vfov (?P<iv>[0-9.]+) deg -> out aspect (?P<oa>[0-9.]+) vfov (?P<ov>[0-9.]+) deg "
+                           r"\((?P<what>widened|unchanged)\); (?:T=(?P<t>[0-9.]+) H=(?P<h>[0-9.]+)|T=n/a H=n/a); mode (?P<mode>on|off)\s*$")
+COVER_WINDOW_RE = re.compile(r"terrain cull cover: (?P<secs>\d+) s: mode (?P<mode>on|off) calls (?P<calls>\d+) widened (?P<widened>\d+); "
+                             r"(?:last in aspect (?P<ia>[0-9.]+) vfov (?P<iv>[0-9.]+) deg -> out aspect (?P<oa>[0-9.]+) vfov (?P<ov>[0-9.]+) deg|last in n/a -> out n/a); "
+                             r"(?:T=(?P<t>[0-9.]+) H=(?P<h>[0-9.]+)|T=n/a H=n/a)\s*$")
+
+
+def _cover_clock(line, state):
+    """The graphics log's wall clock of a line in milliseconds, unwrapped across midnight (state is a one-item list holding the last clock and the day offset), or None."""
+    m = GFX_STAMP_RE.match(line)
+    if not m:
+        return None
+    ms = ((int(m.group(1)) * 60 + int(m.group(2))) * 60 + int(m.group(3))) * 1000 + int(m.group(4))
+    last, day = state[0], state[1]
+    if last is not None and ms + day < last - 12 * 3600 * 1000:
+        day += 24 * 3600 * 1000
+    state[0], state[1] = ms + day, day
+    return ms + day
+
+
+def parse_cover(text):
+    """Every `terrain cull cover:` line and every `edge black:` summary, in order. Returns a dict: live (rva, how) or None, inert (the reason) or None, modes (a list of
+    (clock ms or None, "on"/"off")), calls (dicts: n, mode, widened, in (aspect, vfov deg), out (...), tanV, tanH), windows (dicts: ms, secs, mode, calls, widened, last
+    ((in aspect, in vfov, out aspect, out vfov) or None), tanV, tanH), edge (dicts: ms, secs, events, region (7), transient), clocked (every cover line had a clock)."""
+    out = {"live": None, "inert": None, "modes": [], "calls": [], "windows": [], "edge": [], "clocked": True}
+    state = [None, 0]
+    for line in text.splitlines():
+        ms = _cover_clock(line, state)
+        if "terrain cull cover:" in line:
+            if ms is None:
+                out["clocked"] = False
+            m = COVER_CALL_RE.search(line)
+            if m:
+                out["calls"].append({"n": int(m.group("n")), "mode": m.group("mode"), "widened": m.group("what") == "widened",
+                                     "in": (float(m.group("ia")), float(m.group("iv"))), "out": (float(m.group("oa")), float(m.group("ov"))),
+                                     "tanV": float(m.group("t")) if m.group("t") else None, "tanH": float(m.group("h")) if m.group("h") else None})
+                continue
+            m = COVER_WINDOW_RE.search(line)
+            if m:
+                last = (float(m.group("ia")), float(m.group("iv")), float(m.group("oa")), float(m.group("ov"))) if m.group("ia") else None
+                out["windows"].append({"ms": ms, "secs": int(m.group("secs")), "mode": m.group("mode"), "calls": int(m.group("calls")), "widened": int(m.group("widened")),
+                                       "last": last, "tanV": float(m.group("t")) if m.group("t") else None, "tanH": float(m.group("h")) if m.group("h") else None})
+                continue
+            m = COVER_LIVE_RE.search(line)
+            if m:
+                out["live"] = (m.group("rva"), m.group("how"))
+                continue
+            m = COVER_INERT_RE.search(line)
+            if m:
+                out["inert"] = m.group("why")
+                continue
+            m = COVER_MODE_RE.search(line)
+            if m:
+                out["modes"].append((ms, m.group("mode")))
+            continue
+        m = EDGE_WINDOW_RE.search(line)
+        if m:
+            c = _edge_counts(m)
+            out["edge"].append({"ms": ms, "secs": int(m.group("secs")), "events": c["events"], "region": c["region"], "transient": c["transient"]})
+    return out
+
+
+def _cover_mode_at(modes, ms):
+    """The mode in force at clock `ms`: the last mode line at or before it, or None (no clock, or before the first line)."""
+    if ms is None:
+        return None
+    mode = None
+    for t, m in modes:
+        if t is not None and t <= ms:
+            mode = m
+    return mode
+
+
+def tally_cover(parsed):
+    """The --tally cover numbers. segments: per mode, the windows' seconds, calls and widened calls. edge: the edge-black summaries bucketed by the mode in force at their start
+    and end (on, off, mixed when a change fell inside, unknown when no clock says): seconds, events, per-region events and transient points."""
+    segments = {"on": {"secs": 0, "calls": 0, "widened": 0, "windows": 0}, "off": {"secs": 0, "calls": 0, "widened": 0, "windows": 0}}
+    for w in parsed["windows"]:
+        s = segments[w["mode"]]
+        s["secs"] += w["secs"]
+        s["calls"] += w["calls"]
+        s["widened"] += w["widened"]
+        s["windows"] += 1
+    buckets = {k: {"secs": 0, "windows": 0, "events": 0, "region": [0] * 7, "transient": 0} for k in ("on", "off", "mixed", "unknown")}
+    for e in parsed["edge"]:
+        a = _cover_mode_at(parsed["modes"], None if e["ms"] is None else e["ms"] - e["secs"] * 1000 + 1)
+        b = _cover_mode_at(parsed["modes"], e["ms"])
+        key = a if (a is not None and a == b) else ("unknown" if a is None and b is None else "mixed")
+        k = buckets[key]
+        k["secs"] += e["secs"]
+        k["windows"] += 1
+        k["events"] += e["events"]
+        k["region"] = [x + y for x, y in zip(k["region"], e["region"])]
+        k["transient"] += e["transient"]
+    return {"segments": segments, "edge": buckets}
+
+
+def print_cover_tally(parsed):
+    """The --tally cover report. Returns the process exit code: 1 when the log has no `terrain cull cover:` line."""
+    if parsed["live"] is None and parsed["inert"] is None and not parsed["modes"] and not parsed["windows"] and not parsed["calls"]:
+        print("[edvr] no `terrain cull cover:` lines in this log: a build without the terrain cull cover (the hook says it is live or inert at startup), or the graphics log of "
+              "another run -- this tally reads --tag gfx.")
+        return 1
+    r = tally_cover(parsed)
+    if parsed["live"] is not None:
+        print("[edvr] terrain cull cover: hook live at exe+0x%s (%s)" % parsed["live"])
+    if parsed["inert"] is not None:
+        print("[edvr] terrain cull cover: inert: %s" % parsed["inert"])
+    if parsed["live"] is None and parsed["inert"] is None:
+        print("[edvr] no `hook live` or `inert` line in this log (a log cut at the front?).")
+    if not parsed["clocked"]:
+        print("[edvr] some `terrain cull cover:` lines carry no wall clock, so the edge-black join below cannot place them.")
+    print("[edvr] tally cover: %d mode line(s), %d window line(s), %d first-call line(s)" % (len(parsed["modes"]), len(parsed["windows"]), len(parsed["calls"])))
+    for c in parsed["calls"]:
+        print("   call %d: in aspect %.4f vfov %.2f deg -> out aspect %.4f vfov %.2f deg (%s); T=%s H=%s; mode %s" % (
+            c["n"], c["in"][0], c["in"][1], c["out"][0], c["out"][1], "widened" if c["widened"] else "unchanged",
+            "%.4f" % c["tanV"] if c["tanV"] is not None else "n/a", "%.4f" % c["tanH"] if c["tanH"] is not None else "n/a", c["mode"]))
+    print("%-5s %8s %10s %9s %10s %9s" % ("mode", "windows", "minutes", "calls", "calls/s", "widened"))
+    for mode in ("on", "off"):
+        s = r["segments"][mode]
+        if not s["windows"]:
+            continue
+        print("%-5s %8d %10.1f %9d %10.1f %8.1f%%" % (mode, s["windows"], s["secs"] / 60.0, s["calls"], s["calls"] / s["secs"] if s["secs"] else 0.0,
+                                                       100.0 * s["widened"] / s["calls"] if s["calls"] else 0.0))
+    if parsed["windows"]:
+        last = [w for w in parsed["windows"] if w["last"] is not None]
+        if last:
+            w = last[-1]
+            print("[edvr] the last call seen: in aspect %.4f vfov %.2f deg -> out aspect %.4f vfov %.2f deg; T=%s H=%s." % (
+                w["last"][0], w["last"][1], w["last"][2], w["last"][3], "%.4f" % w["tanV"] if w["tanV"] is not None else "n/a", "%.4f" % w["tanH"] if w["tanH"] is not None else "n/a"))
+    have_edge = any(b["windows"] for b in r["edge"].values())
+    if have_edge:
+        print("edge-black summaries by the cover's mode (region counts: outer-bottom/-middle/-top, inner-bottom/-middle/-top, centre):")
+        print("%-8s %8s %8s %8s %8s  %-26s %9s %9s" % ("mode", "windows", "minutes", "events", "per min", "regions", "outer", "bottom"))
+        for key in ("off", "on", "mixed", "unknown"):
+            b = r["edge"][key]
+            if not b["windows"]:
+                continue
+            minutes = b["secs"] / 60.0
+            outer = b["region"][0] + b["region"][1] + b["region"][2]
+            bottom = b["region"][0] + b["region"][3]
+            print("%-8s %8d %8.1f %8d %8.2f  %-26s %9d %9d" % (key, b["windows"], minutes, b["events"], b["events"] / minutes if minutes else 0.0, "/".join(str(v) for v in b["region"]),
+                                                              outer, bottom))
+        off, on = r["edge"]["off"], r["edge"]["on"]
+        if off["secs"] and on["secs"] and off["events"]:
+            ratio = (on["events"] / (on["secs"] / 60.0)) / (off["events"] / (off["secs"] / 60.0))
+            print("[edvr] events per minute with the cover on are %.0f%% of those with it off (%d events over %.1f min on, %d over %.1f min off)." % (
+                100.0 * ratio, on["events"], on["secs"] / 60.0, off["events"], off["secs"] / 60.0))
+        elif off["secs"] and on["secs"]:
+            print("[edvr] no edge-black events with the cover off, so there is nothing for it to clear in this log (%d on, %.1f min on, %.1f min off)." % (on["events"], on["secs"] / 60.0, off["secs"] / 60.0))
+        if r["edge"]["mixed"]["windows"]:
+            print("[edvr] %d edge-black summary(ies) straddled a change of the key and are not counted on either side." % r["edge"]["mixed"]["windows"])
+    else:
+        print("[edvr] no `edge black:` summaries in this log to join (the watch writes one every 60 s, zeros included).")
+    print("[edvr] How to read it: with the cover live the hook is called about twice a frame in VR (180 a second at 90 Hz, 144 at 72 Hz) with the eye's own aspect and vFOV as the in-values, "
+          "and `widened` is about all of them while on (an asymmetric frustum) and none while off. The comparison is the edge-black events per minute, off against on, over segments of "
+          "about the same length in the same flight: a clear drop in the outer regions (and the bottom on a Quest 3) says the centred cull was the source of what the watch counts; "
+          "no change says it was not, and the black is in tiles Elite generates late.")
     return 0
 
 
@@ -10128,9 +10308,10 @@ def main(argv=None):
                     help="print only lines matching this regular expression")
     ap.add_argument("--tail", type=int, default=None,
                     help="print only the last N lines (after --grep)")
-    ap.add_argument("--tally", choices=["vh", "periodic", "pose", "edge"], default=None,
+    ap.add_argument("--tally", choices=["vh", "periodic", "pose", "edge", "cover"], default=None,
                     help="aggregate instead of dumping: pose tables the `pose gap:` "
                          "lines of the runtime log by caller; "
+                         "cover tables the `terrain cull cover:` lines of the graphics log and joins them with the edge-black summaries by the cover's mode; "
                          "edge tables the `edge black:` lines of the graphics log (the black "
                          "transients the watch found in the texture Elite submits); "
                          "vh counts eye-texture "
@@ -10362,6 +10543,8 @@ def main(argv=None):
         return print_pose_tally(text)
     if args.tally == "edge":
         return print_edge_black_tally(parse_edge_black(text))
+    if args.tally == "cover":
+        return print_cover_tally(parse_cover(text))
     if args.tally:
         return print_vh_tally(text, args.frame)
 
@@ -10817,6 +11000,8 @@ def self_test():
     if not self_test_pose_arrival():
         ok = False
     if not self_test_edge_black():
+        ok = False
+    if not self_test_cover():
         ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
@@ -11479,6 +11664,156 @@ def self_test_edge_black():
         rc, out = run(["--dir", logs, "--tally", "edge"])
         if rc != 1 or "no `edge black:` lines in this log" not in out:
             fail("a log with no edge black line -> rc %d:\n%s" % (rc, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
+COVER_FIXTURE = "terrain_cover_fixture.log"
+
+
+def self_test_cover():
+    """--tally cover on tools\\terrain_cover_fixture.log (which tools\\terrain_cover_test holds to exactly what the production hook writes for the scripted session: the hook live
+    at the known build's address, the mode on, the first four calls on the cropped Crystal Super (aspect 1.0344 -> 1.2186, vFOV 91.65 unchanged), then ten minutes at 180 calls a
+    second: on for 150 s, off for 150 s, on for 300 s, the windows closed at each change), then on a flight log with edge-black summaries interleaved, and on lines altered to
+    break each thing the report depends on. Returns ok."""
+    ok = True
+
+    def fail(message):
+        nonlocal ok
+        print("self_test_cover: %s" % message)
+        ok = False
+
+    import contextlib
+    import io
+    import shutil
+    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), COVER_FIXTURE)
+    if not os.path.isfile(fixture):
+        fail("the fixture %s is missing beside this script" % COVER_FIXTURE)
+        return False
+    text = read_text(fixture)
+    p = parse_cover(text)
+    if p["live"] != ("443E800", "PE stamp 1788384820 and image size 104894464 are build 332841's; the callee's head and the call site at exe+0x4455FDD verified") or p["inert"] is not None \
+            or not p["clocked"]:
+        fail("the hook-live line parsed to %r (inert %r, clocked %r)" % (p["live"], p["inert"], p["clocked"]))
+    if p["modes"] != [(36003000, "on"), (36153000, "off"), (36303000, "on")]:
+        fail("the mode lines parsed to %r" % (p["modes"],))
+    if len(p["calls"]) != 4 or p["calls"][0] != {"n": 1, "mode": "on", "widened": True, "in": (1.0344, 91.65), "out": (1.2186, 91.65), "tanV": 1.0293, "tanH": 1.2543} \
+            or [c["n"] for c in p["calls"]] != [1, 2, 3, 4]:
+        fail("the first-call lines parsed to %r" % (p["calls"],))
+    ws = p["windows"]
+    if [w["secs"] for w in ws] != [60, 60, 30, 60, 60, 30, 60, 60, 60, 60, 60] or [w["mode"] for w in ws] != ["on"] * 3 + ["off"] * 3 + ["on"] * 5 \
+            or [w["calls"] for w in ws][:3] != [10800, 10800, 5400] or [w["widened"] for w in ws] != [10800, 10800, 5400, 0, 0, 0, 10800, 10800, 10800, 10800, 10800] \
+            or ws[0]["last"] != (1.0344, 91.65, 1.2186, 91.65) or ws[3]["last"] != (1.0344, 91.65, 1.0344, 91.65) or (ws[0]["tanV"], ws[0]["tanH"]) != (1.0293, 1.2543) or ws[0]["ms"] != 36063000:
+        fail("the window lines parsed to %r" % ([(w["ms"], w["secs"], w["mode"], w["calls"], w["widened"]) for w in ws],))
+    r = tally_cover(p)
+    if r["segments"] != {"on": {"secs": 450, "calls": 81000, "widened": 81000, "windows": 8}, "off": {"secs": 150, "calls": 27000, "widened": 0, "windows": 3}}:
+        fail("the mode segments -> %r" % (r["segments"],))
+    # An n/a window and an unknown-tangent call.
+    na = "[10:00:09.000] terrain cull cover: 60 s: mode off calls 0 widened 0; last in n/a -> out n/a; T=n/a H=n/a\n[10:00:09.001] terrain cull cover: call 1 of 4: in aspect 1.0344 vfov 91.65 deg -> out aspect 1.0344 vfov 91.65 deg (unchanged); T=n/a H=n/a; mode on\n"
+    q = parse_cover(na)
+    if len(q["windows"]) != 1 or q["windows"][0]["last"] is not None or q["windows"][0]["tanV"] is not None or len(q["calls"]) != 1 or q["calls"][0]["tanV"] is not None or q["calls"][0]["widened"]:
+        fail("an n/a window or an unknown-tangent call parsed to %r" % (q,))
+    if parse_cover("[00:00:00.001] pose slot: tid 1 mode next calls 0\n[00:00:00.002] edge black: closed -- totals for the run: frames 1 eyes-sampled 2 events 0 (outer-bottom 0, outer-middle 0, outer-top 0, "
+                   "inner-bottom 0, inner-middle 0, inner-top 0, centre 0) largest 0 points; transient points total 0; black-start points (black now, lit before, still black) 0; samples lost 0\n") \
+            != {"live": None, "inert": None, "modes": [], "calls": [], "windows": [], "edge": [], "clocked": True}:
+        fail("lines of other instruments parsed as cover lines")
+    inert = parse_cover("[10:00:00.100] terrain cull cover: inert: the flat profile has no stereo frustum to cover; nothing was patched\n")
+    if inert["inert"] != "the flat profile has no stereo frustum to cover; nothing was patched" or inert["live"] is not None:
+        fail("the inert line parsed to %r" % (inert,))
+    # A flight log: the edge-black watch's 60 s summaries (every 60 s from 10:00:30, 2 events a window with the cover on, 6 with it off) merged by clock into the fixture.
+    def edge_line(ms, events):
+        bottom = max(events - 1, 0)
+        top = events - bottom
+        c = (36000000 + ms)
+        stamp = "[%02d:%02d:%02d.%03d]" % (c // 3600000 % 24, c // 60000 % 60, c // 1000 % 60, c % 1000)
+        return ("%s edge black: 60 s: frames 5400 eyes-sampled 10800 events %d (outer-bottom %d, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top %d, centre 0) "
+                "largest 12 points; transient points total %d; black-start points (black now, lit before, still black) 0; samples lost 0" % (stamp, events, bottom, top, events * 12))
+
+    def clock_ms(line):
+        m = GFX_STAMP_RE.match(line)
+        return ((int(m.group(1)) * 60 + int(m.group(2))) * 60 + int(m.group(3))) * 1000 + int(m.group(4))
+    edge = [edge_line(30000 + 60000 * k, 6 if 153000 <= 30000 + 60000 * k < 303000 else 2) for k in range(10)]
+    flight_lines = sorted(text.splitlines() + edge, key=clock_ms)
+    flight = "\n".join(flight_lines) + "\n"
+    fp = parse_cover(flight)
+    fr = tally_cover(fp)
+    want = {"on": (6, 360, 12, [6, 0, 0, 0, 0, 6, 0]), "off": (1, 60, 6, [5, 0, 0, 0, 0, 1, 0]), "mixed": (3, 180, 10, [7, 0, 0, 0, 0, 3, 0]), "unknown": (0, 0, 0, [0] * 7)}
+    got = {k: (v["windows"], v["secs"], v["events"], v["region"]) for k, v in fr["edge"].items()}
+    if len(fp["edge"]) != 10 or got != want:
+        fail("the edge-black summaries by mode -> %r, want %r" % (got, want))
+    # No mode line before the first summary: unknown; a summary with no clock: unknown too.
+    unclocked = parse_cover("edge black: 60 s: frames 1 eyes-sampled 2 events 3 (outer-bottom 3, outer-middle 0, outer-top 0, inner-bottom 0, inner-middle 0, inner-top 0, centre 0) largest 1 points; "
+                            "transient points total 3; black-start points (black now, lit before, still black) 0; samples lost 0\n[10:00:03.000] terrain cull cover: on (x)\n")
+    uu = tally_cover(unclocked)["edge"]
+    if uu["unknown"]["windows"] != 1 or uu["unknown"]["events"] != 3 or uu["on"]["windows"]:
+        fail("an edge summary with no clock -> %r" % (uu,))
+    # Midnight: the clock keeps counting.
+    mid = parse_cover("[23:59:30.000] terrain cull cover: on (x)\n[00:00:30.000] terrain cull cover: 60 s: mode on calls 1 widened 1; last in n/a -> out n/a; T=n/a H=n/a\n")
+    if mid["windows"][0]["ms"] - mid["modes"][0][0] != 60000:
+        fail("a log across midnight -> %r %r" % (mid["modes"], mid["windows"]))
+    # Through main(), on a directory the tool discovers on its own: the graphics log is the default.
+    head = "[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-09 12:00:00 UTC\n"
+    tmp = tempfile.mkdtemp(prefix="edvr_cover_selftest_")
+    try:
+        logs = os.path.join(tmp, "edvr_logs")
+        os.makedirs(logs)
+
+        def run(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        name = os.path.join(logs, "edvr_gfx_20261010_100000.log")
+        with open(name, "wb") as f:
+            f.write((head + flight).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "cover"])
+        for want_line in ("[edvr] terrain cull cover: hook live at exe+0x443E800 (PE stamp 1788384820 and image size 104894464 are build 332841's; the callee's head and the call site at exe+0x4455FDD verified)",
+                          "[edvr] tally cover: 3 mode line(s), 11 window line(s), 4 first-call line(s)",
+                          "   call 1: in aspect 1.0344 vfov 91.65 deg -> out aspect 1.2186 vfov 91.65 deg (widened); T=1.0293 H=1.2543; mode on",
+                          "mode   windows    minutes     calls    calls/s   widened",
+                          "on           8        7.5     81000      180.0    100.0%",
+                          "off          3        2.5     27000      180.0      0.0%",
+                          "[edvr] the last call seen: in aspect 1.0344 vfov 91.65 deg -> out aspect 1.2186 vfov 91.65 deg; T=1.0293 H=1.2543.",
+                          "mode      windows  minutes   events  per min  regions                        outer    bottom",
+                          "off             1      1.0        6     6.00  5/0/0/0/0/1/0                      5         5",
+                          "on              6      6.0       12     2.00  6/0/0/0/0/6/0                      6         6",
+                          "mixed           3      3.0       10     3.33  7/0/0/0/0/3/0                      7         7",
+                          "[edvr] events per minute with the cover on are 33% of those with it off (12 events over 6.0 min on, 6 over 1.0 min off).",
+                          "[edvr] 3 edge-black summary(ies) straddled a change of the key and are not counted on either side.",
+                          "[edvr] How to read it: with the cover live the hook is called about twice a frame in VR"):
+            if want_line not in out:
+                fail("--tally cover output lacks %r:\n%s" % (want_line, out))
+        if rc != 0:
+            fail("--tally cover exited %d" % rc)
+        # The fixture alone: no edge-black summaries to join.
+        with open(name, "wb") as f:
+            f.write((head + text).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "cover"])
+        if rc != 0 or "no `edge black:` summaries in this log to join" not in out or "off          3        2.5     27000      180.0      0.0%" not in out:
+            fail("the fixture alone -> rc %d:\n%s" % (rc, out))
+        # Edge summaries but no event with the cover off: nothing to clear, said so.
+        quiet_edge = [edge_line(30000 + 60000 * k, 0) for k in range(10)]
+        quiet = "\n".join(sorted(text.splitlines() + quiet_edge, key=clock_ms)) + "\n"
+        with open(name, "wb") as f:
+            f.write((head + quiet).encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "cover"])
+        if rc != 0 or "no edge-black events with the cover off, so there is nothing for it to clear in this log" not in out:
+            fail("edge summaries with no event with the cover off -> rc %d:\n%s" % (rc, out))
+        # Inert: the reason is the report.
+        with open(name, "wb") as f:
+            f.write((head + "[10:00:00.100] terrain cull cover: inert: the PE stamp 5 is not build 332841's and the signature scan of the 99 KB code section found no call site\n").encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "cover"])
+        if rc != 0 or "[edvr] terrain cull cover: inert: the PE stamp 5 is not build 332841's and the signature scan of the 99 KB code section found no call site" not in out \
+                or "tally cover: 0 mode line(s), 0 window line(s), 0 first-call line(s)" not in out:
+            fail("an inert log -> rc %d:\n%s" % (rc, out))
+        # No cover line at all: exit 1.
+        with open(name, "wb") as f:
+            f.write((head + "[10:00:00.100] pose gap: tid 1 calls 1\n").encode("utf-8"))
+        rc, out = run(["--dir", logs, "--tally", "cover"])
+        if rc != 1 or "no `terrain cull cover:` lines in this log" not in out:
+            fail("a log with no cover line -> rc %d:\n%s" % (rc, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return ok

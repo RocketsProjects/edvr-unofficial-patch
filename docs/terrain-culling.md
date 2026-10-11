@@ -2,62 +2,59 @@
 
 ## Status
 
-- **State (2026-10-10).** The head-pose fix is CLOSED and ships as behaviour (no key, no
-  write to the game): Elite's "now" requests (return RVA 0x4E3881, prediction under 5 ms)
-  are answered at the latest frame's display time PLUS its period (`next`); no frame, a
-  stale one, no period, an overflow or a reference change: now + prediction (a counted
-  fallback). Before it that pose was 41 to 44 ms old, up to 4.1 deg, r +0.98 with head
-  speed; `next` ended the gaze-switch squares. Model and evidence: "Status detail".
-- **Not shipped:** the latch-bypass patch (RVA 0x4E36EE), `advanced.cull_pose`,
-  `HandedOutPoses` (branches claude/cull-pose-next-frame, claude/cull-display-direct-bypass).
-  **Removed (2026-10-09):** the terrain guard and its six keys, `advanced.cull_probe`; the
-  FOV trim is untouched. **Separate:** the flight-4 boarding crash is Elite's allocator.
-- **Ruled out** (evidence under "Status detail"): a static frustum deficit, the fov getter
-  as the culler's input, the 09-23 "same +19.4% ask" premise, H3, the union model, H2,
-  FUN_13ACC40 as the consumer. **UNRELIABLE:** the 09-23 "culler follows `GetProjectionRaw`".
-- **OPEN: quick black flashes over flat planet ground.** Quest 3 via VD (72, 90 Hz; a
-  v0.19.0 field report likewise) and the Crystal Super since its 2026-09-23 Pimax Play FOV
-  crop. At the outer corners of either eye, several per 4 min, never in flat mode, predates
-  EDVR's temporal work, no frame synthesis. The pilot now also sees black shapes FLOATING
-  INSIDE the view with terrain around them, in varying shapes (square, diamond, parallelogram).
-- **Ruled out (f24ca5d0, Q3 via VD 72 Hz, log edvr_openxr_20261010_171008_107_23432):** the
-  pose timing (H-late, H-stale, H-overshoot, H-mix). From 17:13: 0 late frames, 0 fallbacks,
-  each calling thread in one class every frame, so next = slot (the 282 stale fallbacks fell
-  in the load minute). "Several flashes in each segment" alike under next, slot and arrival.
-- **THE RENDERED FIELD DECIDES.** Sean flew the Crystal Super, same f24ca5d0, log
-  edvr_openxr_20261010_173409_735_33536 (17:34-17:37, 5424 x 5356 per eye), Pimax Play crop
-  REMOVED: no flashes over flat ground. Uncropped (m00 0.781, m11 0.791, m02 -0.194; about
-  103 x 103 deg): none. Cropped since 09-23 (0.939, 0.971; 93 x 92 deg): flashes. Quest 3 via
-  VD Godlike (0.903, 0.835, m12 -0.193; 94 x 99 deg): flashes. The crop kept the Pimax
-  vertically symmetric, so symmetry is not the discriminator; the SIZE of the field is.
-- **Hypotheses (corrected 2026-10-10 after the pilot saw shapes float).** **Leading,
-  H-gen-edge:** tiles entering the view at its edge during a head turn are generated or
-  selected a few frames late and travel inward while missing. At 103 x 103 that edge sits
-  in the lens periphery, where nothing is seen clearly; in a field cropped inside the clear
-  area (93 x 92, VD's Quest 3) the late tiles are in plain view; flat ground has the largest
-  tiles. **H-after** (reprojection shows the image's own edge, black beyond it, at a corner)
-  is WEAKENED: an exposed edge cannot float. The split: is the black in the image Elite
-  SUBMITS (**H-image**; H-gen-edge is its late-tile form) or added after EDVR submits?
-- **BUILT, not flown (claude/cull-late-frames): the edge-black watch, always on.** Per
-  eye-frame, on the texture Elite submits (stage game, before any EDVR pass): a 128 x 128
-  point-sampled grid (max of R, G, B; two cells are ~1.5 deg on a 48 px/deg eye) from a
-  compute shader, read back 4 frames deep without waiting. TRANSIENT BLACK: under 0.004
-  (code 0-1 of 255; R8G8B8A8 read as code/255, the texture's own encoding) in frame f, over
-  0.03 (code 8+) in f-1 and f+1, or lit, black, black, lit. EVENT: 3+ touching transient
-  points in an eye-frame, with points, cells, centre, region (outer/inner by eye, thirds),
-  border touch (0 = inside the view), head speed. Graphics log: `edge black:` start line,
-  first 60 events, a summary every 60 s (zeros too), a closing line; `python
-  tools\edvr_log.py --tally edge`. Cost: judgement 25-28 us per eye-frame (rig, render
-  thread), a 64 KB copy and Map; the log's `periodic work: edge_black` line has the figure.
-- **THE FLIGHT (next):** the same flat low flight on the CROPPED Crystal Super (or Quest 3),
-  the pilot counting flashes over a segment of known length. Game-stage events at about the
-  pilot's count = H-image (border=0 events = H-gen-edge); zero events while flashes are seen
-  = H-after. Black-start points are the control (a horizon moving in), not flashes.
-- **Remedy if H-gen-edge** (not built): a margin so Elite prepares terrain beyond what it
-  shows, either (a) widening only what the terrain culler reads (the old guard's route,
-  never proved; the watch gives an objective count to test it) or (b) rendering a margin
-  beyond the cropped field and cropping it (certain, costs pixels).
-- **Temporary key:** `advanced.cull_pose_timing = next | slot | arrival` (default next), removed at close.
+- **State (2026-10-10).** Two causes. (1) CLOSED, ships (no key): Elite's "now" head-pose
+  requests (return RVA 0x4E3881) are answered at the latest frame's display time PLUS its
+  period (`next`); that pose was 41-44 ms old, up to 4.1 deg (Status detail). It is not the
+  cause of the flashes below (pose timing ruled out, f24ca5d0 flight). (2) READ today, fix
+  BUILT, NOT FLOWN: Elite culls planet terrain against a CENTRED frustum.
+- **READ (build 332841; analysis\decomp\verify_20261010_tiles_*).** The draw-list builder
+  0x4462E80 calls 0x4455A40 (call at 0x4463A83), one record per render view. For a main view
+  it loads the eye camera's aspect [r14+0x70] (the recommended W/H, the fov getter's out[0])
+  and vFOV [r14+0x90] (atan|t|+atan|b|, out[1]) and calls 0x443E800 (the ONLY caller, call at
+  0x4456007; args 5, 6 at [rsp+0x28], [rsp+0x30]). It halves the vFOV (0.5 at 0x4DDF878),
+  takes b = atan(aspect * tan a), writes four planes through the eye, +-a and +-b about the
+  camera Z axis: no margin. The test 0x445BA40 -> 0x445A1C0 culls a patch box against them
+  with no epsilon; LOD uses another box (0x44597B0); the image uses the projection matrix.
+- **So** an asymmetric eye is under-covered on its wide side by ~5 deg (down too on the Quest
+  3): cropped Crystal Super cull +-45.83 v / +-46.80 h vs an outer edge of 51.44; uncropped
+  +-51.67 / +-52.02 vs 56.82; Quest 3 via VD +-49.50 / +-47.78 vs 54.00 outward, 55.00 down.
+  A patch drops only when its WHOLE box lies in the band: rare at rest, common as patches
+  slide through it on a turn; flat ground has the largest (shapes that float). The uncropped
+  field (103 x 103 deg, no flashes, log ..._173409_735_33536) has the band in the lens
+  periphery; the cropped 93 x 92 and VD's 94 x 99 put it in plain view.
+- **OVERTURNED:** "a static frustum deficit (the centred-cull models, H-cam included) is ruled
+  out because a steady head shows no squares" (Status detail, 10-09). Round 4's "the camera
+  groups cannot move an eye camera's frustum" holds for the RENDERED frustum, not this
+  consumer. H-after (a reprojection edge) is weakened: it cannot float.
+- **THE FIX (TEMPORARY `advanced.terrain_cull_cover = on | off`, default on, live in a second;
+  src\d3d11\terrain_cull_cover_*, tools\terrain_cover_test):** a CodeHook at 0x443E800 that
+  changes ONLY args 5 and 6. T, H = the largest vertical, horizontal tangent over both eyes of
+  the frusta handed to the game; a = max(vFOV/2, atan T), b = max(atan(aspect * tan(vFOV/2)),
+  atan H); vFOV' = 2a, aspect' = tan b / tan a. Never narrows; unchanged for key off, no
+  tangents yet (flat, before a frame), non-finite or out-of-range input. VR only. Gate: PE
+  stamp 1788384820, size 104894464, head bytes and call site; another stamp: scan .text for
+  the call-site signature, one match with the same head, else inert. Log: `terrain cull cover:
+  hook live at exe+0x443E800 (..)` or `inert: <why>`, `on|off (..)` at start and each change,
+  the first 4 calls (in -> out), `60 s: mode .. calls N widened W`; `--tally cover` tables them.
+- **THE FLIGHT (next):** cropped Crystal Super (crop on) or Quest 3, low over flat ground with
+  head turns: ~4 min `terrain_cull_cover = off`, then ~4 min `on` (edit edvr.ini in the game
+  folder; live), the pilot counting flashes per segment. Read `--tally cover`: ~2 calls a
+  frame (180 a second at 90 Hz) with the eye's own in-values, widened = all while on; and the
+  edge-black events by region (outer, and bottom on the Quest 3) per minute, off vs on. Events
+  that stay with it on are not the cull: tiles Elite generates late; then H-gen-edge, H-after.
+- **BUILT, not flown: the edge-black watch, always on** (claude/cull-late-frames). Per
+  eye-frame on the texture Elite submits (before any EDVR pass): a 128 x 128 point-sampled
+  grid (max R, G, B) from a compute shader, read back 4 frames deep. TRANSIENT BLACK: under
+  0.004 (code 0-1 of 255) in frame f, over 0.03 in f-1 and f+1 (or lit, black, black, lit).
+  EVENT: 3+ touching points in an eye-frame (region, border touch, head speed). Graphics log:
+  `edge black:` events, a summary every 60 s, `--tally edge`. Judgement 25-28 us per eye-frame.
+- **Ruled out** (Status detail): the fov getter as the culler's input, the 09-23 "+19.4% ask"
+  premise, H3, the union model, H2, FUN_13ACC40; the pose timing (H-late, H-stale,
+  H-overshoot, H-mix; f24ca5d0, Q3 via VD, alike under next, slot, arrival). **UNRELIABLE:**
+  the 09-23 "culler follows `GetProjectionRaw`". **Not shipped:** the latch-bypass patch
+  (RVA 0x4E36EE), `advanced.cull_pose`. **Removed (10-09):** the old terrain guard and its six
+  keys, `advanced.cull_probe`. **Separate:** the flight-4 boarding crash is Elite's allocator.
+- **Temporary keys:** `advanced.terrain_cull_cover`, `advanced.cull_pose_timing`; both go at close.
 
 ## The bug in short
 
@@ -102,12 +99,16 @@ culler follows the report, not the optics.
   display time (`display`); no engine patch, no extra pixels, no tuning.** The
   latched-pose bypass is not needed. The old guard (render inflation + crop,
   ~6% GPU at h=0.25/v=0) was a margin covering this lag. Ruled out: a static
-  frustum deficit (squares need head motion). Dated entries at the bottom.
+  frustum deficit (squares need head motion) -- **OVERTURNED 2026-10-10: the centred
+  cull is READ (the last entry).** Dated entries at the bottom.
 - **Pilot report 2026-10-09 (Crystal Super, Pimax OpenXR):** the squares show
   only on descent into a landable planet, come and go with head movement as the
   gaze switches, and fill in quickly once the head is steady. **Ruled out on this
   rig:** a static frustum deficit (the centred-cull models, H-cam included),
-  because a steady head shows no squares. The 447de48f steady-view protocol
+  because a steady head shows no squares. **OVERTURNED 2026-10-10:** the centred
+  cull is READ at 0x443E800, and a patch drops only when its whole box lies in the
+  uncovered band, which is rare at rest and happens as patches slide through it
+  during turns (the last entry). The 447de48f steady-view protocol
   (`cull_probe = measure | cycle | mono`, `--tally cull`) cannot see a lag and
   was NOT flown; its counter, census and mono observers stay available.
 - **Round 6, READ** (build 332841; `analysis\decomp\verify_20261009_cull6_*`).
@@ -742,7 +743,8 @@ it directly.
   the per-axis symmetric superset. Every other asker, the render-target
   allocation first, is told what it was, bit for bit. The log says it once per
   change: `cull probe: <group> also told aspect A' (true A) at the fov getter`.
-- H-cam (INFERRED): the culler is a centred frustum built from the camera's
+- H-cam (INFERRED; READ in outline 2026-10-10, consumer 0x443E800 and not FUN_13ACC40):
+  the culler is a centred frustum built from the camera's
   (aspect, vFOV) fields. It fits the old guard flying with v=0: that guard's
   horizontal widening reached the game as a bigger render size, i.e. aspect.
   FUN_13ACC40, which builds a double-precision view-projection from those
@@ -815,7 +817,9 @@ between the windows (the 10-09 entry above). UNRELIABLE: nothing is built on it.
 - The probe's eye groups (all, camera, ui, and the aspect lie with them) cannot
   be expected to move an eye camera's frustum, which does not use those values.
   If H-cam holds, the carrier is another camera, and the mono camera is the one
-  that exists.
+  that exists. **2026-10-10:** true of the RENDERED frustum; the cull's centred frustum
+  is built in 0x443E800 from the eye camera's own aspect and vFOV ([r14+0x70],
+  [r14+0x90] at the call site 0x4455FDD), which the probe groups did not reach.
 
 **What the test build does.** `advanced.cull_probe = mono` and the cycle's last
 window multiply the mono camera's aspect by 1.30. `all` keeps its meaning
@@ -1130,3 +1134,84 @@ first suspect); a few events and many flashes is a threshold question (check `bl
 old guard's route (removed 2026-10-09, never proved: the watch now gives an objective count of black events to test it against), or (b) render a margin beyond the cropped field
 and crop it, which is certain and costs pixels (the full uncropped field is 1.20 times as wide and 1.23 times as tall in tangent space as the crop, from the m00 and m11 above, so about 1.5 times the pixels at the
 same density; a margin of a few degrees costs correspondingly less, with the cropped view cut from it). The earlier plan of a temporary AA-off flight is superseded: the watch reads the image before EDVR's AA, so AA cannot be part of an event.
+
+## 2026-10-10 — the terrain cull is a centred frustum: READ, and the cover (test build, branch claude/cull-late-frames)
+
+**READ (build 332841, PE stamp 1788384820, image size 104894464; disassembled offline with capstone; dumps in analysis\decomp\verify_20261010_tiles_*).** The planet draw-list builder
+0x4462E80 calls 0x4455A40 (at 0x4463A83), which writes one record per render view. For a main (non-ortho) view it builds four cull planes at one place:
+
+```
+4455FDD  F3 41 0F 10 46 70            movss xmm0,[r14+0x70]     aspect   (the recommended W/H: the fov getter's out[0])
+4455FE3  0F 29 8D C0 00 00 00         movaps [rbp+0xC0],xmm1    (interleaved)
+4455FEA  F3 41 0F 10 8E 90 00 00 00   movss xmm1,[r14+0x90]     vFOV     (atan|top| + atan|bottom|: out[1])
+4455FF3  F3 0F 11 44 24 28            movss [rsp+0x28],xmm0     arg 6
+4455FF9  F3 0F 11 4C 24 20            movss [rsp+0x20],xmm1     arg 5
+4455FFF  44 0F 29 A5 E0 00 00 00      movaps [rbp+0xE0],xmm12   (interleaved)
+4456007  E8 F4 87 FE FF               call 0x14443E800          rcx, rdx, r8, r9 = rbp+0x160, +0xE0, +0xC0, +0xA0 (lea)
+```
+
+0x443E800 is entered with arg 5 (vFOV) at [rsp+0x28] and arg 6 (aspect) at [rsp+0x30]. Its head is `48 8B C4 / 48 89 58 10 / 48 89 68 18 / 48 89 70 20 / 57 / 48 81 EC 90 00 00 00 /
+F3 0F 10 8C 24 C0 00 00 00` (movss xmm1,[rsp+0xC0] = arg 5), `48 8B E9` (mov rbp,rcx), `F3 0F 59 0D rel32` (mulss by the 0.5 at 0x4DDF878). It computes a = vFOV/2, b =
+atan(aspect * tan a), and writes four planes through the eye: +-a about the camera's Z axis vertically, +-b horizontally. A CENTRED frustum, no margin. A .text scan finds exactly
+one E8 to it, the one at 0x4456007. The per-(patch, view) test 0x445BA40 -> 0x445A1C0 culls a patch box against these planes with no epsilon. LOD and selection use another box
+(0x44597B0), not a frustum. The rendered image uses the explicit kind-5 projection matrix, not these values. The call site's next instructions read the four planes back from [rbp+0x160..0x190]
+and nothing reads RAX or XMM0, so the builder's return value is nobody's.
+
+**What it explains.** From the frusta the runtime hands the game (analysis\decomp\verify_20261010_tiles_frustum_emu.txt, _coverage.txt):
+
+| rig | cull half-angles, v / h | the image reaches | the cull is short by |
+|---|---|---|---|
+| Crystal Super, cropped in Pimax Play (93 x 92 deg) | +-45.83 / +-46.80 | outer 51.44 | 4.64 deg outward (8.9% of the eye's width) |
+| Crystal Super, uncropped (103 x 103 deg) | +-51.67 / +-52.02 | outer 56.82 | 4.80 deg outward (9.7%) |
+| Quest 3 via Virtual Desktop (94 x 99 deg) | +-49.50 / +-47.78 | outer 54.00, down 55.00 | 6.22 deg outward (12.4%), 5.50 deg down (10.7%) |
+
+The inner side and the top are covered with 5.6 to 7.8 deg to spare. A patch is dropped only when its WHOLE box lies in the uncovered band: rare at rest, and it happens as patches slide
+through the band during a head turn, one frame's cull deciding what the next frame draws. Flat ground has the largest patches, so one dropped patch is a big shape; as it slides on it
+floats inside the view with terrain around it. The uncropped Crystal Super is short by the same 4.8 deg and shows nothing: its band lies at 52 to 57 deg, in the lens periphery where
+nothing is seen clearly; the cropped field and VD's put the band at 47 to 51 and 48 to 54 deg, in plain view. That comparison is the pilot's (the two fields were flown on different days);
+nothing here measures what each lens shows.
+
+**Overturned.** (1) The Status-detail ruling "a static frustum deficit (the centred-cull models, H-cam included) is ruled out because a steady head shows no squares" (10-09): the centred
+cull is READ, and a steady head should show almost none, because a patch needs its whole box inside a thin band. (2) Rounds 3-5's "the probe's eye groups cannot be expected to move an eye
+camera's frustum": true of the rendered frustum, not of this consumer, which takes the camera's aspect and vFOV from [r14+0x70] and [r14+0x90]. H-cam (the culler is a centred frustum
+built from the camera's aspect and vFOV) held in outline; FUN_13ACC40 was the wrong function. The old guard's horizontal widening fits it (it reached the game as a bigger render size, i.e. aspect) and cost render pixels; this widens the
+two numbers instead.
+
+**The fix (TEMPORARY, `advanced.terrain_cull_cover = on | off`, default on, live within a second).** src\d3d11\terrain_cull_cover_core.h (pure: the rule, the gate, the lines),
+terrain_cull_cover_hook.cpp (the glue), tools\terrain_cover_test. A CodeHook at 0x443E800 through the project's relay (a copy of the vertex resync's: the target is more than two
+gigabytes from this DLL), with a typed detour `(rcx, rdx, r8, r9, float vfov, float aspect)` that calls the original with the same four pointers and two floats it computed. The head's
+first two instructions are stolen (`mov rax,rsp`, `mov [rax+10h],rbx`: 7 bytes, nothing rip-relative; the relay's RAX is overwritten by the first). The detour reads none of the game's memory
+and so has no SEH and no stand-down; it is arithmetic and atomics, about 180 calls a second.
+
+*The rule.* With T and H the largest vertical and horizontal tangent over BOTH eyes of the frusta handed to the game (the native temporal channel's begin(), unjittered, after any FOV
+trim; published as one atomic word), a_in = vFOV/2, b_in = atan(aspect * tan a_in): a_out = max(a_in, atan T), b_out = max(b_in, atan H), vFOV' = 2 a_out, aspect' = tan b_out / tan a_out.
+The builder then derives a_out and b_out. An axis is widened only when the tangent reaches past it by more than 1e-5 rad (a float's rounding of the game's own sums, well under a pixel),
+so a covered headset is passed through bit for bit and `widened` means widened; the other axis keeps the game's own value. It never narrows (to the float's 1e-7). Passed through
+unchanged: the key off, no tangents known (flat, or before the first VR frame), a vFOV that is not finite or not in (0, pi), an aspect that is not finite and positive. Predicted values
+(the rig holds them): cropped Crystal Super aspect 1.0344 -> 1.2186 (vFOV 91.65 unchanged); uncropped 1.0127 -> 1.2092 (103.34 unchanged); Quest 3 vFOV 99.00 -> 110.00, aspect 0.9412 -> 0.9637.
+Taking the maximum over both eyes makes the cull the per-axis symmetric superset of both eyes' frusta: the narrower eye keeps a few more patches near its edge than it shows.
+
+*The gate.* The PE stamp 1788384820 and image size 104894464, the callee's 32-byte head plus a `mulss` in the next 16 bytes whose operand is exactly 0.5f, and the call-site chain
+(fragments A..D with at most 16 bytes of interleaved instructions between them, then the E8) at 0x4455FDD whose call lands on 0x443E800. Another stamp: the code section is scanned for
+the chain, and one match whose callee has the same head is accepted (`found by signature scan`); none, two, or a callee with another head is inert. A flat session is inert. CodeHook's own
+checks (an aligned entry, a decodable prologue, a trampoline in reach) stand as for every hook here. Every refusal is one line: `terrain cull cover: inert: <why>`.
+
+*The lines (graphics log).* `terrain cull cover: hook live at exe+0x443E800 (<how found>)`; `terrain cull cover: on|off (<what>)` at the first poll and at each change of the live key (read
+once a second with the config tick, the window closed at the change); `terrain cull cover: call N of 4: in aspect A vfov V deg -> out aspect A' vfov V' deg (widened|unchanged); T=t H=h;
+mode on|off` for the session's first four calls; `terrain cull cover: S s: mode on|off calls N widened W; last in aspect A vfov V deg -> out aspect A' vfov V' deg; T=t H=h` every 60 s,
+calls or none, and at each change. In VR expect about two calls a frame (180 a second at 90 Hz) with the eye's own aspect and vFOV as the in-values.
+`python tools\edvr_log.py --target <t> --tally cover` tables them per mode and joins the edge-black 60 s summaries to the mode in force at their start and end (`mixed` when a change fell
+inside one).
+
+*Tests.* tools\terrain_cover_test (build.bat `:rig_terrain_cover_test`, 11308 checks): the rule for the three rigs, a symmetric headset, an input already wider, bad input, the key off, a
+sweep that never narrows and leaves alone what it should; T and H from the frusta; the callee head byte by byte, the signature with 0 to 16 interleaved bytes and each way of being wrong,
+the scan on a synthetic buffer; the module gate on synthetic modules (the known build, a stamp one off, no PE, one match, none, two, a wrong callee, a wrong constant, no code section);
+the production hook with the real CodeHook on a synthetic builder of the same six-argument shape, in the known build's layout and in another build's: only arguments 5 and 6 change, the
+four register arguments and the return value are the caller's, the key off and no-tangent calls are bit for bit, a flat session patches nothing, the first four calls and the 60 s windows
+are exactly what the log says; tools\terrain_cover_fixture.log held byte for byte; the wiring (device_hook.cpp, native_temporal.cpp, build.bat, edvr.ini) read as text. The log tool's
+`--self-test` has the `--tally cover` cells.
+
+**Protocol (the flight).** The cropped Crystal Super (crop on) or the Quest 3 via VD, low over flat ground with head turns. About 4 minutes with `terrain_cull_cover = off` in the game's
+edvr.ini (live), then about 4 minutes `on`, the pilot counting flashes in each segment. `--tally cover` says the hook was live and called about twice a frame with widened = all while on;
+the edge-black events by region (outer, and bottom on the Quest 3) per minute, off against on, are the objective count. A clear drop with it on says the centred cull was the source. Events
+that stay with it on are not the cull: the black is then in tiles Elite generates late (H-gen-edge) or added after EDVR submits (H-after, weakened: it cannot float). Not flown.
