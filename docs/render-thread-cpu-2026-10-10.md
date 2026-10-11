@@ -10,8 +10,12 @@
 - **Finding 2, misses are whole-period.** Cycle p95 is 21-22 ms in windows 4-9, which is two periods. A frame that runs over costs a full period, so a 1 ms cut moves the miss count non-linearly; the mean alone will mislead.
 - **Finding 3, the next-wait "block" is the pacer.** next_wait_queue_delay p50 0.007 ms: the frame-end job always finishes before WaitGetPoses arrives. The 0.75 ms p50 is xrWaitFrame plus xrBeginFrame on the owner thread.
 - **Finding 4, windows 1-3 are not EDVR-limited.** Game work there is 1.0-1.5 ms, the render thread idles about 8 ms a frame, and misses still occur. Their tail sits after Submit (Elite's Present and after), not in EDVR's ~1.2 ms.
+- **Finding 5, 2026-10-11 flight (Frontier, v0.19.1-7-gf096d5b6, Pimax Crystal Super, DLSS, NVIDIA, 77-87 fps in the hangar).** The process CPU profile (branch claude/render-cpu-profiler) sampled 9953 render-thread stops at 995 Hz, 1.37% stopped. 44% of them sit in ntdll+0x164a14 under KERNELBASE+0x22a20, called from EliteDangerous64.exe+0x5d6d7f: function 0x5d6d20 (chain 0x5d40e0, 0x5d6750, 0x54f154, 0x55cb20, the thread entry). The function locks, then waits on a condition variable with a 10 ms timeout while a global generation counter still equals the thread's last-seen value. That is a frame handshake: the render thread waits for another thread (not yet identified) to publish the next frame. EDVR's own exclusive share on the render thread is 6.76%, about 0.75 ms a frame at 86 fps.
+- **Finding 6, wait-lead (same flight, the build's wait_lead_ms instrument).** In the hangar windows lead_p50 is 16.5-18.2 ms, work_p50 5.3-7.2 ms. In the worst windows the late frames split evenly: 17 with a short lead (17-18 ms), 17 with long work. SteamVR's gpu_frametime reads 8.5-10.7 ms there. What the large lead implies for the pace is not settled by these figures alone; the split is the open question.
+- **Hypothesis H6 (new), the pace is set by Elite's producer thread, not by the render thread.** The render thread has slack; a second thread publishes the frame and the render thread waits for it. **Discriminator:** the producer thread's CPU near 100% of the frame period, while the render thread's `waits for producer` share is high. A producer near idle with a high wait share refutes it; a producer near 100% with the render thread's wait share low refutes it the other way.
+- **EDVR's render-thread overhead is demoted.** At 6.76% of the render thread's samples it is about 0.75 ms a frame; it does not set the pace on this flight. H1 below is kept only as the mechanism that would cost frames if the producer were ever EDVR's.
 - **Open hypotheses**, each with its discriminating signature:
-  - H1, EDVR work tips the frame over. Signature: missed cycles have cycle minus next_wait above one period. Partly visible now; the 2x long-cycle threshold hides 1-2 period misses.
+  - H1, EDVR work tips the frame over. Signature: missed cycles have cycle minus next_wait above one period. Demoted by Finding 5; the 2x long-cycle threshold still hides 1-2 period misses.
   - H2, OpenXR pacing starts the frame later. Signature: per wait return, lead = predictedDisplayTime minus the return time, shrinking as EDVR work grows. NOT LOGGED.
   - H3, GPU limits windows 3 and 7 (gpu_frametime 10.5 and 8.0 ms). Signature: late cycles that coincide with real-Present blocking. Not yet seen; post2wait p95 is 4.3-4.7 ms in those windows.
   - H4, producer AcquireSync costs about 0.2 ms uncontended (a fixed handshake, not a wait). Signature: a timestamp before and after the call, with an immediate return. Current p99 0.44 ms, so a real wait is unlikely. NOT SPLIT.
@@ -23,11 +27,11 @@
   - ruled out: per-frame SRV creates, because scene_srv_creates=4 per 256-pair window and the SRVs are cached (openxr-submit-overlap-2026-09-15.md).
   - ruled out: a subscription gate as new work, because draw_gate.h (2026-09-22) already exists and vscreen.cpp:1960 reads it.
   - ruled out: the owner rendezvous as a cost, because it measured 10-60 us (perf review, 2026-09-14), and queue delay agrees here.
-- **Next flight** (same hangar, one build from HEAD with `build.bat` run and tests passing):
-  1. Per wait return: `wait_lead_ms` = predictedDisplayTime minus the return time, in QPC, on native_frame_cycle_window. Settles H2.
-  2. Long-cycle threshold from 2x to 1.0x period, with `work_ms` = cycle minus next_wait_roundtrip. Settles H1 against H2.
-  3. Separate timestamps around producer AcquireSync (H4) and first-call versus reissue draw time (H5).
-  No cut until items 1 and 2 show which side limits the frame.
+- **Next flight** (same hangar, the profiler v2 build, branch claude/render-cpu-profiler):
+  1. Read the producer thread's CPU from the multi-thread report: `thread=main` (or the busy `t<tid>`) `cpu_pct` near 100% of the frame period tests H6.
+  2. Read `thread=render waits for producer: ms_per_frame` against the frame period, on the gated build only (EliteDangerous64.exe stamp 1788384820, image 104894464).
+  3. Keep H4 and H5 split timestamps; they remain unsplit.
+  No cut until items 1 and 2 show which thread sets the pace.
 
 ## Evidence
 
@@ -106,3 +110,17 @@ Not recommended:
 - The log is v0.19.0; the code is HEAD. The submit and wait logic is unchanged, but measure on HEAD before cutting.
 - The 2x long-cycle threshold means misses of one or two periods are not logged per cycle. Their composition is inferred from window percentiles.
 - gpu_frametime is per window and the nine windows disagree (0.75 to 10.55 ms), so the GPU cannot be ruled out in windows 3 and 7.
+
+## 2026-10-11 -- the Frontier flight of the process profile, and the producer wait
+
+Flight: Frontier, v0.19.1-7-gf096d5b6 (branch origin/claude/render-cpu-test, the profiler merged with the wait-lead and hotspot branches). Log `edvr_gfx_20261011_045120.log`, CSV `cpu_profile_20261011_045750.csv`. 9953 render-thread samples at 995 Hz, 1.37% of wall stopped.
+
+What the samples show. 44% of the render thread's samples sit at ntdll+0x164a14 under KERNELBASE+0x22a20, called from EliteDangerous64.exe+0x5d6d7f. The caller chain is 0x5d6d20 (the function, 0x5d6d20..0x5d6de2), 0x5d40e0, 0x5d6750, 0x54f154, 0x55cb20, the thread entry. Disassembled at 0x5d6d20: it locks the object at rdi, then calls a condition-variable sleep (rcx = rdi+8, rdx = rdi, a 10 ms timeout) while the global generation counter at RVA 0x5d6d5f+7+0x595103a still equals the thread's last-seen value at [rcx+8]. The other branch clears a flag with lock cmpxchg, increments that counter and wakes. So this is a frame handshake: the render thread waits for another thread to publish the next frame. EDVR's own exclusive share on the render thread is 6.76%, about 0.75 ms a frame at 86 fps.
+
+Wait-lead, from the same rig (Pimax Crystal Super, DLSS, NVIDIA). In the hangar windows lead_p50 is 16.5-18.2 ms and work_p50 is 5.3-7.2 ms. In the worst windows the late frames split 17 with a short lead (17-18 ms) against 17 with long work, at 77-87 fps. SteamVR's gpu_frametime reads 8.5-10.7 ms there.
+
+What this changes. The pace is set by the thread that publishes the frame, not by EDVR's render-thread work, which is demoted above. Hypothesis H6 (Status): the producer thread runs near 100% of the frame period while the render thread's wait share is high. The profiler v2 measures both: the producer's CPU (`thread=main` or the busy `t<tid>` lines) and the render thread's `waits for producer` line, which reports ms per frame over the window's Present count, on the gated build only (stamp 1788384820, image 104894464, the build 332841 gate of ui_sizing_math.h).
+
+Instrument, profiler v2. The window samples the render thread (Present), the main thread (the earliest-created), and the four others with the most CPU over a one-second pre-window, round-robin at 1200 Hz combined, under the same 5% stopped-share cap. Each thread has its own lines: `cpu profile: thread=<label> role=... cpu_ms=... cpu_pct=...` (GetThreadTimes over the window), its top 20 functions (inclusive and exclusive), and its classes. The CSV has `thread` as its first column; `elite_hotspots.py --thread` filters it.
+
+Not yet known: which thread is the producer. The 0x5d6d20 handshake names a counterpart, but the flight did not record it; the multi-thread report does.

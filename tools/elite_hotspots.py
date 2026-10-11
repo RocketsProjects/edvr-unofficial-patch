@@ -222,19 +222,34 @@ def parse_rva(text):
     return int(t, 16)
 
 
-Sample = collections.namedtuple("Sample", "module rva frames")
+Sample = collections.namedtuple("Sample", "module rva frames thread")
+Sample.__new__.__defaults__ = ("",)   # the thread label; "" for a file with no thread column
 
 
-def read_samples(lines):
-    """Parse the sample CSV contract. Returns (samples, malformed_count)."""
+def read_samples(lines, thread=None):
+    """Parse the sample CSV contract. Returns (samples, malformed_count).
+
+    A file whose header is `thread,module,rva_hex,...` (the process profile's CSV) has one more leading cell per row:
+    the thread's label ("render", "main", "t<tid>"). `thread` keeps only that label's rows, compared case-insensitively.
+    Without the header the rows are the contract's as before, and a `thread` filter keeps none of them."""
     samples, malformed = [], 0
+    has_thread = False
     for row in csv.reader(lines):
         cells = [c.strip() for c in row]
         if not any(cells) or cells[0].startswith("#"):
             continue
+        if len(cells) >= 2 and cells[0].lower() == "thread" and cells[1].lower() == "module":
+            has_thread = True
+            continue
         if len(cells) >= 2 and cells[0].lower() == "module" and cells[1].lower() == "rva_hex":
             continue
+        label = ""
+        if has_thread:
+            label = cells[0]
+            cells = cells[1:]
         try:
+            if has_thread and not label:
+                raise ValueError("no thread label")
             if not cells[0]:
                 raise ValueError("no module")
             if len(cells) < 2 or not cells[1]:
@@ -248,7 +263,9 @@ def read_samples(lines):
         except ValueError:
             malformed += 1
             continue
-        samples.append(Sample(cells[0].lower(), rva, tuple(frames)))
+        if thread is not None and label.lower() != thread.lower():
+            continue
+        samples.append(Sample(cells[0].lower(), rva, tuple(frames), label))
     return samples, malformed
 
 
@@ -411,7 +428,7 @@ def disassemble(img, table, rva, rep, capstone_mod, out):
 
 
 def analyse(img, sample_lines, top=30, callers=3, force=False, disasm_rva=None,
-            capstone_mod=None, out=None):
+            capstone_mod=None, out=None, thread=None):
     """Returns (exit_code, Report or None)."""
     out = out or sys.stdout
     ok, line = build_identity(img)
@@ -427,7 +444,9 @@ def analyse(img, sample_lines, top=30, callers=3, force=False, disasm_rva=None,
     t0 = time.perf_counter()
     table = build_table(img)
     print(_pdata_line(table, (time.perf_counter() - t0) * 1000.0), file=out)
-    samples, malformed = read_samples(sample_lines)
+    samples, malformed = read_samples(sample_lines, thread)
+    if thread is not None:
+        print("thread %s: %d sample(s) of the file's thread column" % (thread, len(samples)), file=out)
     rep = aggregate(samples, table, malformed)
     total = rep.rows
     print("samples: %d rows; %d with an exe leaf (%d outside every .pdata function), "
@@ -565,6 +584,28 @@ def self_test():
     wide_samples, _ = read_samples(wide)
     check(len(wide_samples[0].frames) == MAX_FRAMES, "frames capped at eight")
 
+    # The process profile's CSV: a thread column first. Labels are kept; --thread keeps one label, any case.
+    threaded = [
+        "# build=test thread=render samples=4",
+        "thread,module,rva_hex,frame1_module,frame1_rva_hex",
+        "render,EliteDangerous64.exe,0x1000,EliteDangerous64.exe,0x1502",
+        "render,?,ff,EliteDangerous64.exe,0x1210",
+        "Main,EliteDangerous64.exe,0x1210",
+        "t4242,EliteDangerous64.exe,0x1000,,",
+        ",EliteDangerous64.exe,0x1000",
+    ]
+    tsamples, tmalformed = read_samples(threaded)
+    check(len(tsamples) == 4 and tmalformed == 1, "thread column read: four rows, the unlabelled one malformed")
+    check([s.thread for s in tsamples] == ["render", "render", "Main", "t4242"], "thread labels kept as written")
+    check(tsamples[0].frames == (("elitedangerous64.exe", 0x1502),), "frames after the thread column start at frame1")
+    check(tsamples[1].module == "?" and tsamples[1].rva == 0xFF, "a '?' module passes through")
+    only, _ = read_samples(threaded, thread="render")
+    check(len(only) == 2 and all(s.thread == "render" for s in only), "--thread render keeps that label's rows")
+    only_main, _ = read_samples(threaded, thread="main")
+    check(len(only_main) == 1, "--thread is case-insensitive")
+    none_kept, _ = read_samples(SELF_TEST_CSV, thread="render")
+    check(none_kept == [], "a file with no thread column keeps no rows under --thread")
+
     buf = io.StringIO()
     rc, rep = analyse(good, SELF_TEST_CSV, out=buf)
     check(rc == 0 and rep is not None, "good build annotates")
@@ -640,6 +681,9 @@ def main(argv=None):
                          "and the .pdata function count" % BUILD)
     ap.add_argument("--samples", metavar="CSV",
                     help="the sample CSV (contract in the module docstring)")
+    ap.add_argument("--thread", metavar="LABEL", default=None,
+                    help="with a process profile's CSV (thread column first): only this thread's samples, e.g. render, "
+                         "main or t1234 (case-insensitive)")
     ap.add_argument("--top", type=int, default=30, help="functions to list (default 30)")
     ap.add_argument("--callers", type=int, default=3,
                     help="callers listed per function (default 3)")
@@ -669,7 +713,7 @@ def main(argv=None):
                     lines = list(f)
             rc, _ = analyse(img, lines, top=args.top, callers=args.callers,
                             force=args.force, disasm_rva=disasm_rva,
-                            capstone_mod=import_capstone())
+                            capstone_mod=import_capstone(), thread=args.thread)
             return rc
     except (OSError, PEError, ValueError) as exc:
         print("elite_hotspots: %s" % exc, file=sys.stderr)
