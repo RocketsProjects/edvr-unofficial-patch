@@ -9700,6 +9700,380 @@ def self_test_slow_regime():
     return ok
 
 
+# ---- the render-thread CPU profile (src\common\cpu_sampler.h, src\d3d11\cpu_profile.cpp) ------------------------------
+# The graphics log carries one block per capture: a start line, a pacing line, the top leaves, the top functions
+# (inclusive and exclusive), the class and module shares, and an end line; every line is "cpu profile: ..." after the
+# log's timestamp. The raw samples are a CSV in the contract tools\elite_hotspots.py reads: one row per valid sample,
+# module,rva_hex, then up to 8 frames innermost first (a short row or a blank cell ends the frames); "# module," and
+# "# function," comment lines carry the module classes and the .pdata ranges the re-aggregation needs.
+
+_CPU_PREFIX = "cpu profile:"
+_CPU_START_RE = re.compile(r"cpu profile: start thread=(\d+) trigger=(.*?) window_s=([\d.]+) target_hz=([\d.]+) "
+                           r"duty_cap_pct=([\d.]+) csv=(\S+)")
+_CPU_PACING_RE = re.compile(r"cpu profile: pacing samples=(\d+) valid=(\d+) failures=(\d+) buffer_full=([01]) "
+                            r"achieved_hz=([\d.]+) wall_ms=([\d.]+) suspended_ms=([\d.]+) \(([\d.]+)% of wall\) "
+                            r"suspend_mean_us=([\d.]+) suspend_max_us=(\d+) timer=(\S+)")
+_CPU_LEAF_RE = re.compile(r"cpu profile: leaf\s+(\d+)\s+(\d+)\s+([\d.]+)%\s+(\S+)")
+_CPU_FN_RE = re.compile(r"cpu profile: fn\s+(\d+)\s+incl\s+(\d+)\s+([\d.]+)%\s+excl\s+(\d+)\s+([\d.]+)%\s+(\S+)")
+_CPU_CLASS_RE = re.compile(r"cpu profile: class\s+(\S+)\s+leaf\s+(\d+)\s+([\d.]+)%\s+on_stack\s+(\d+)\s+([\d.]+)%")
+_CPU_MODULE_RE = re.compile(r"cpu profile: module\s+(\S+)\s+leaf\s+(\d+)\s+([\d.]+)%\s+on_stack\s+(\d+)\s+([\d.]+)%")
+_CPU_END_RE = re.compile(r"cpu profile: end samples=(\d+) valid=(\d+) csv=(\S+)")
+_CPU_LABEL_RE = re.compile(r"(.+?)\+0x([0-9a-fA-F]+)(?:\.\.0x([0-9a-fA-F]+))?$")
+
+
+def _cpu_label(label):
+    """'name+0x10..0x20' -> (name, 0x10, 0x20); 'name+0x10' -> (name, 0x10, None); a bare name -> (name, None, None)."""
+    m = _CPU_LABEL_RE.match(label)
+    if not m:
+        return label, None, None
+    begin = int(m.group(2), 16)
+    end = int(m.group(3), 16) if m.group(3) else None
+    return m.group(1), begin, end
+
+
+def parse_cpu_profile(text):
+    """The capture blocks of a graphics log, oldest first, and the cpu profile lines outside any block (the armed,
+    requested and off lines). A block is complete when its end line follows its start line; one without an end is a
+    capture the log stops during."""
+    blocks, notes = [], []
+    cur = None
+    for raw in text.splitlines():
+        i = raw.find(_CPU_PREFIX)
+        if i < 0:
+            continue
+        line = raw[i:].rstrip()
+        if line.startswith("cpu profile: start "):
+            cur = {"lines": [line], "start": None, "pacing": None, "leaves": [], "fns": [], "classes": [],
+                   "modules": [], "end": None}
+            m = _CPU_START_RE.match(line)
+            if m:
+                cur["start"] = {"thread": int(m.group(1)), "trigger": m.group(2), "window_s": float(m.group(3)),
+                                "target_hz": float(m.group(4)), "duty_cap_pct": float(m.group(5)), "csv": m.group(6)}
+            blocks.append(cur)
+            continue
+        if cur is None:
+            notes.append(line)
+            continue
+        cur["lines"].append(line)
+        if line.startswith("cpu profile: pacing "):
+            m = _CPU_PACING_RE.match(line)
+            if m:
+                cur["pacing"] = {"samples": int(m.group(1)), "valid": int(m.group(2)), "failures": int(m.group(3)),
+                                 "buffer_full": m.group(4) == "1", "achieved_hz": float(m.group(5)),
+                                 "wall_ms": float(m.group(6)), "suspended_ms": float(m.group(7)),
+                                 "suspended_pct": float(m.group(8)), "suspend_mean_us": float(m.group(9)),
+                                 "suspend_max_us": int(m.group(10)), "timer": m.group(11)}
+        elif line.startswith("cpu profile: leaf "):
+            m = _CPU_LEAF_RE.match(line)
+            if m:
+                cur["leaves"].append({"rank": int(m.group(1)), "count": int(m.group(2)), "pct": float(m.group(3)),
+                                      "label": m.group(4)})
+        elif line.startswith("cpu profile: fn "):
+            m = _CPU_FN_RE.match(line)
+            if m:
+                cur["fns"].append({"rank": int(m.group(1)), "incl": int(m.group(2)), "incl_pct": float(m.group(3)),
+                                   "excl": int(m.group(4)), "excl_pct": float(m.group(5)), "label": m.group(6)})
+        elif line.startswith("cpu profile: class "):
+            m = _CPU_CLASS_RE.match(line)
+            if m:
+                cur["classes"].append({"name": m.group(1), "leaf": int(m.group(2)), "leaf_pct": float(m.group(3)),
+                                       "on_stack": int(m.group(4)), "on_stack_pct": float(m.group(5))})
+        elif line.startswith("cpu profile: module "):
+            m = _CPU_MODULE_RE.match(line)
+            if m:
+                cur["modules"].append({"name": m.group(1), "leaf": int(m.group(2)), "leaf_pct": float(m.group(3)),
+                                       "on_stack": int(m.group(4)), "on_stack_pct": float(m.group(5))})
+        elif line.startswith("cpu profile: end "):
+            m = _CPU_END_RE.match(line)
+            if m:
+                cur["end"] = {"samples": int(m.group(1)), "valid": int(m.group(2)), "csv": m.group(3)}
+            cur = None
+    return {"blocks": blocks, "notes": notes}
+
+
+def print_cpu_profile(text):
+    """The latest capture in a graphics log, verbatim, with a verdict line. 0 when it is complete, 4 when the log stops
+    during it, 3 when the log has no capture (the notes say why: idle, or armed and never started, or no lines at all)."""
+    parsed = parse_cpu_profile(text)
+    blocks = parsed["blocks"]
+    if not blocks:
+        for n in parsed["notes"]:
+            print("[edvr] " + n)
+        if parsed["notes"]:
+            print("[edvr] no capture ran in this log; the lines above say why")
+        else:
+            print("[edvr] no cpu profile: lines at all: this log predates the instrument, or it is another build")
+        return 3
+    print("[edvr] %d capture(s) in this log; the latest follows" % len(blocks))
+    b = blocks[-1]
+    for line in b["lines"]:
+        print(line)
+    if b["end"] is None:
+        print("[edvr] VERDICT: the log stops during this capture (no end line): its report is incomplete")
+        return 4
+    p = b["pacing"]
+    if p is None or p["valid"] == 0:
+        print("[edvr] VERDICT: the capture ended with no valid sample: the thread was never read")
+        return 0
+    top_leaf = b["leaves"][0] if b["leaves"] else None
+    top_fn = max(b["fns"], key=lambda f: f["incl"]) if b["fns"] else None
+    print("[edvr] VERDICT: %d valid samples at %.1f Hz, the render thread stopped %.2f%% of the window (mean %.1f us "
+          "a stop); top leaf %s (%.2f%%); top function by inclusive %s (%.2f%%)"
+          % (p["valid"], p["achieved_hz"], p["suspended_pct"], p["suspend_mean_us"],
+             top_leaf["label"] if top_leaf else "none", top_leaf["pct"] if top_leaf else 0.0,
+             top_fn["label"] if top_fn else "none", top_fn["incl_pct"] if top_fn else 0.0))
+    return 0
+
+
+def parse_cpu_csv(text):
+    """The raw samples CSV, read as the contract says. Module names compare case-insensitively."""
+    build, classes, functions, rows, bad = "?", {}, {}, [], 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            body = line[1:].strip()
+            if body.startswith("build="):
+                m = re.search(r"build=(.*?) thread=", body)
+                if m:
+                    build = m.group(1)
+            elif body.startswith("module,"):
+                f = body.split(",")
+                if len(f) >= 3:
+                    classes[f[1].lower()] = f[2]
+            elif body.startswith("function,"):
+                f = body.split(",")
+                try:
+                    functions.setdefault(f[1].lower(), []).append((int(f[2], 16), int(f[3], 16)))
+                except (IndexError, ValueError):
+                    bad += 1
+            continue
+        f = [c.strip() for c in line.split(",")]
+        if len(f) >= 2 and f[0].lower() == "module" and f[1].lower().startswith("rva"):
+            continue   # the optional header line
+        try:
+            leaf = (f[0], int(f[1], 16))
+        except (IndexError, ValueError):
+            bad += 1
+            continue
+        frames = []
+        j = 2
+        while j + 1 < len(f) and len(frames) < 8:
+            if not f[j] or not f[j + 1]:
+                break
+            try:
+                frames.append((f[j], int(f[j + 1], 16)))
+            except ValueError:
+                break
+            j += 2
+        rows.append((leaf, frames))
+    for ranges in functions.values():
+        ranges.sort()
+    # Module names compare case-insensitively; each is kept under the spelling its "# module," comment gives.
+    spelling = {}
+    for raw in text.splitlines():
+        body = raw.strip()[1:].strip() if raw.strip().startswith("#") else ""
+        if body.startswith("module,"):
+            f = body.split(",")
+            if len(f) >= 3:
+                spelling[f[1].lower()] = f[1]
+
+    def canon(name):
+        return spelling.get(name.lower(), name) if name != "?" else name
+
+    rows = [((canon(leaf[0]), leaf[1]), [(canon(n), r) for n, r in frames]) for leaf, frames in rows]
+    return {"build": build, "classes": classes, "functions": functions, "rows": rows, "bad": bad}
+
+
+def aggregate_cpu_csv(p):
+    """Leaves, functions (inclusive and exclusive, by the .pdata range that holds each frame) and class shares over the
+    rows. A frame with no module, or with a module but no .pdata entry for it, is keyed as such."""
+    import collections
+    index = {mod: ([b for b, _ in r], r) for mod, r in p["functions"].items()}
+
+    def fn_of(name, rva):
+        if name == "?":
+            return ("?", rva, None)
+        ent = index.get(name.lower())
+        if ent:
+            k = bisect.bisect_right(ent[0], rva) - 1
+            if k >= 0 and rva < ent[1][k][1]:
+                return (name, ent[1][k][0], ent[1][k][1])
+        return (name, None, None)
+
+    def class_of(name):
+        if name == "?":
+            return "unknown"
+        return p["classes"].get(name.lower(), "unknown")
+
+    agg = {"valid": 0, "leaf": collections.Counter(), "fn_incl": collections.Counter(),
+           "fn_excl": collections.Counter(), "cls_leaf": collections.Counter(), "cls_stack": collections.Counter()}
+    for (lname, lrva), frames in p["rows"]:
+        agg["valid"] += 1
+        agg["leaf"][(lname, lrva)] += 1
+        seen_fn, seen_cls = set(), set()
+        for name, rva in [(lname, lrva)] + frames:
+            fk = fn_of(name, rva)
+            if fk not in seen_fn:
+                seen_fn.add(fk)
+                agg["fn_incl"][fk] += 1
+            seen_cls.add(class_of(name))
+        agg["fn_excl"][fn_of(lname, lrva)] += 1
+        agg["cls_leaf"][class_of(lname)] += 1
+        for c in seen_cls:
+            agg["cls_stack"][c] += 1
+    return agg
+
+
+def _top(counter, n=40):
+    return sorted(counter.items(), key=lambda kv: (-kv[1], str(kv[0])))[:n]
+
+
+def print_cpu_csv(text):
+    """The re-aggregated tables of a raw samples CSV, the same shape as the graphics log's report. 0 with valid rows,
+    3 with none."""
+    p = parse_cpu_csv(text)
+    agg = aggregate_cpu_csv(p)
+    valid = agg["valid"]
+    print("[edvr] csv: %d valid sample row(s), build %s, %d module(s) with .pdata ranges, %d unparsed line(s)"
+          % (valid, p["build"], len(p["functions"]), p["bad"]))
+    if not valid:
+        print("[edvr] csv: no valid sample rows: the thread was never read")
+        return 3
+    pct = 100.0 / valid
+    print("[edvr] leaf: top %d by module+RVA (count, share)" % min(40, len(agg["leaf"])))
+    for i, ((name, rva), n) in enumerate(_top(agg["leaf"])):
+        print("[edvr]   leaf %2d %7d %6.2f%% %s+0x%x" % (i + 1, n, n * pct, name, rva))
+    print("[edvr] fn: top %d by inclusive (anywhere on the stack) with exclusive (the leaf)"
+          % min(40, len(agg["fn_incl"])))
+    for i, ((name, begin, end), n) in enumerate(_top(agg["fn_incl"])):
+        if begin is None:
+            label = "%s (no .pdata entry)" % name
+        elif end is None:
+            label = "%s+0x%x (no module)" % (name, begin)
+        else:
+            label = "%s+0x%x..0x%x" % (name, begin, end)
+        excl = agg["fn_excl"].get((name, begin, end), 0)
+        print("[edvr]   fn %2d incl %7d %6.2f%% excl %7d %6.2f%% %s"
+              % (i + 1, n, n * pct, excl, excl * pct, label))
+    print("[edvr] class: leaf share and on-stack share")
+    for name in sorted(set(agg["cls_leaf"]) | set(agg["cls_stack"])):
+        lf, st = agg["cls_leaf"].get(name, 0), agg["cls_stack"].get(name, 0)
+        print("[edvr]   class %s leaf %d %6.2f%% on_stack %d %6.2f%%" % (name, lf, lf * pct, st, st * pct))
+    return 0
+
+
+def self_test_cpu_profile():
+    import contextlib
+    import io
+    ok = True
+    log = (
+        "[10:00:00.001] cpu profile: start thread=4242 trigger=hotkey.profile_cpu window_s=10.0 target_hz=1000 "
+        "duty_cap_pct=5.0 csv=cpu_profile_20261010_100000.csv\n"
+        "[10:00:10.100] cpu profile: pacing samples=4 valid=4 failures=0 buffer_full=0 achieved_hz=999.8 "
+        "wall_ms=10001.2 suspended_ms=40.00 (0.40% of wall) suspend_mean_us=10.0 suspend_max_us=33 timer=high_res\n"
+        "[10:00:10.101] cpu profile: leaf samples=4; the top 40 module+RVA\n"
+        "[10:00:10.102] cpu profile: leaf  1       2  50.00% hot_target.dll+0x1020\n"
+        "[10:00:10.103] cpu profile: leaf  2       1  25.00% ?+0x7ff00 (no module)\n"
+        "[10:00:10.104] cpu profile: fn samples=4; the top 40 functions\n"
+        "[10:00:10.105] cpu profile: fn  1 incl       4 100.00% excl       2  50.00% hot_target.dll+0x1000..0x1100\n"
+        "[10:00:10.106] cpu profile: fn  2 incl       3  75.00% excl       1  25.00% EliteDangerous64.exe (no .pdata entry for the frame)\n"
+        "[10:00:10.107] cpu profile: class samples=4; leaf = the leaf frame's module\n"
+        "[10:00:10.108] cpu profile: class other leaf 2   50.00% on_stack 3  75.00%\n"
+        "[10:00:10.109] cpu profile: module top=2 by leaf share\n"
+        "[10:00:10.110] cpu profile: module hot_target.dll leaf 2  50.00% on_stack 3  75.00%\n"
+        "[10:00:10.111] cpu profile: end samples=4 valid=4 csv=cpu_profile_20261010_100000.csv\n"
+    )
+    parsed = parse_cpu_profile(log + "[10:01:00.000] cpu profile: capture requested by hotkey.profile_cpu\n")
+    b = parsed["blocks"][0] if parsed["blocks"] else None
+    if not b or not b["end"] or b["start"]["trigger"] != "hotkey.profile_cpu" or b["pacing"]["valid"] != 4:
+        print("cpu profile: a complete log block did not parse: %r" % (parsed,))
+        ok = False
+    if b and (len(b["leaves"]) != 2 or b["leaves"][1]["label"] != "?+0x7ff00" or len(b["fns"]) != 2):
+        print("cpu profile: leaf or fn rows did not parse (leaves %d, fns %d)" % (len(b["leaves"]), len(b["fns"])))
+        ok = False
+    if b and (b["classes"][0]["on_stack"] != 3 or b["modules"][0]["name"] != "hot_target.dll"):
+        print("cpu profile: class or module rows did not parse")
+        ok = False
+    if not parsed["notes"] or "requested" not in parsed["notes"][0]:
+        print("cpu profile: the note after the end line was not kept as a note")
+        ok = False
+    if _cpu_label("hot_target.dll+0x1000..0x1100") != ("hot_target.dll", 0x1000, 0x1100) or \
+            _cpu_label("EliteDangerous64.exe") != ("EliteDangerous64.exe", None, None):
+        print("cpu profile: label parsing")
+        ok = False
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        rc = print_cpu_profile(log)
+    if rc != 0 or "VERDICT: 4 valid samples" not in out.getvalue():
+        print("cpu profile: a complete capture printed rc=%d" % rc)
+        ok = False
+    partial = log.split("[10:00:10.111]")[0]
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        rc = print_cpu_profile(partial)
+    if rc != 4 or "stops during this capture" not in out.getvalue():
+        print("cpu profile: a capture with no end line should be rc 4, got %d" % rc)
+        ok = False
+    idle = ("[09:00:00.000] cpu profile: diag.profile_cpu = off: no thread and no samples until hotkey.profile_cpu is "
+            "pressed.\n")
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        rc = print_cpu_profile(idle)
+    if rc != 3 or "no capture ran" not in out.getvalue():
+        print("cpu profile: an idle log should say it ran no capture (rc 3), got %d" % rc)
+        ok = False
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        rc = print_cpu_profile("[09:00:00.000] nothing here\n")
+    if rc != 3 or "no cpu profile: lines at all" not in out.getvalue():
+        print("cpu profile: a log with no cpu profile lines should say so (rc 3), got %d" % rc)
+        ok = False
+    # The contract CSV: a case-insensitive module, a blank cell ending the frame list, a no-module leaf, a no-pdata frame.
+    csv_text = (
+        "# edvr cpu profile raw samples: one row per valid sample\n"
+        "# build=test thread=1 trigger=x window_s=2.000 sample_rate_target_hz=1000.0 achieved_hz=1000.00 samples=4 "
+        "valid=4 failures=0\n"
+        "# module,Game.exe,elite\n"
+        "# module,hot.dll,other\n"
+        "# function,hot.dll,1000,1100\n"
+        "# function,Game.exe,2000,2100\n"
+        "module,rva_hex,frame1_module,frame1_rva_hex,frame2_module,frame2_rva_hex\n"
+        "HOT.DLL,1010,Game.exe,2050\n"
+        "HOT.DLL,1020,Game.exe,2050,?,ff\n"
+        "game.exe,2050\n"
+        "?,ffff,Game.exe,2010,,\n"
+    )
+    cp = parse_cpu_csv(csv_text)
+    agg = aggregate_cpu_csv(cp)
+    checks = [
+        (agg["valid"] == 4, "four valid rows"),
+        (agg["leaf"][("hot.dll", 0x1020)] == 1 and agg["leaf"][("?", 0xffff)] == 1,
+         "leaf keys take the # module spelling, HOT.DLL and hot.dll are one module"),
+        (agg["leaf"][("hot.dll", 0x1010)] == 1, "the upper-case row lands in the same module as the lower-case ones"),
+        (agg["fn_excl"][("hot.dll", 0x1000, 0x1100)] == 2, "exclusive function counted case-insensitively (2 leaves)"),
+        (agg["fn_incl"][("Game.exe", 0x2000, 0x2100)] == 4, "inclusive Game.exe on all four samples"),
+        (agg["fn_incl"][("hot.dll", 0x1000, 0x1100)] == 2, "inclusive hot.dll on the two hot samples"),
+        (agg["fn_excl"][("?", 0xffff, None)] == 1, "a no-module leaf keys on its rva"),
+        (agg["cls_leaf"]["other"] == 2 and agg["cls_leaf"]["elite"] == 1 and agg["cls_leaf"]["unknown"] == 1,
+         "class shares of the leaves"),
+        (agg["cls_stack"]["unknown"] == 2, "unknown on the stack in two samples"),
+        (cp["build"] == "test", "the build stamp comment is read"),
+    ]
+    for passed, what in checks:
+        if not passed:
+            print("cpu profile csv: %s" % what)
+            ok = False
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        rc = print_cpu_csv(csv_text)
+    if rc != 0 or "leaf " not in out.getvalue():
+        print("cpu profile csv: the printed tables are missing (rc %d)" % rc)
+        ok = False
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc_empty = print_cpu_csv("# only a comment\n")
+    if rc_empty != 3:
+        print("cpu profile csv: a file with no rows should be rc 3, got %d" % rc_empty)
+        ok = False
+    return ok
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Locate and read EDVR flight logs.")
@@ -9737,6 +10111,12 @@ def main(argv=None):
                          "periodic lays the `periodic work:` timing against "
                          "the flight's long frames (graphics log plus its "
                          "runtime log)")
+    ap.add_argument("--cpu-profile", nargs="?", const="", default=None, metavar="CSV",
+                    help="the render-thread CPU profile (cpu_profile.h, temporary diagnostic keys): with no CSV, the latest "
+                         "`cpu profile:` capture in the log (--file or --dir or --target), verbatim, with a VERDICT line; "
+                         "exit 0 complete, 4 when the log stops during it, 3 when it has no capture (its notes say why). "
+                         "With a CSV path, the raw samples (the contract tools\\elite_hotspots.py reads) re-aggregated into "
+                         "the same leaf, function and class tables")
     ap.add_argument("--frame", type=int, default=None,
                     help="with --tally vh, restrict to this census frame "
                          "ordinal; frames past the census line cap have no "
@@ -9842,6 +10222,12 @@ def main(argv=None):
     ap.add_argument("--self-test", action="store_true",
                     help="check this script against itself and exit")
     args = ap.parse_args(argv)
+    if args.cpu_profile:
+        # A raw samples CSV: re-aggregated on its own, no flight log needed.
+        if not os.path.isfile(args.cpu_profile):
+            print("[edvr] no such file: %s" % args.cpu_profile)
+            return 1
+        return print_cpu_csv(read_text(args.cpu_profile))
 
     if args.self_test:
         return self_test()
@@ -9933,6 +10319,9 @@ def main(argv=None):
 
     if args.version:
         return 0
+
+    if args.cpu_profile is not None:
+        return print_cpu_profile(text)
 
     if args.vscreen_fit:
         return print_vscreen_fit(text)
@@ -10387,6 +10776,8 @@ def self_test():
         shutil.rmtree(tmp, ignore_errors=True)
 
     if not self_test_periodic():
+        ok = False
+    if not self_test_cpu_profile():
         ok = False
     if not self_test_camera_census():
         ok = False
