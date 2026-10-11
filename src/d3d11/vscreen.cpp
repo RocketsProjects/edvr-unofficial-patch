@@ -4945,6 +4945,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                 }
                 if(scene)scene->Release();
             }
+            // The per-draw census (diag.temporal_draws, temporal_pass.cpp): EVERY recognised eye-target scene draw,
+            // not only the first of the frame. Diagnostic: it reads the bound state and changes no output.
+            if (recognisedScene && temporalPassDrawsWanted())
+                temporalPassNoteEyeDraw(self, static_cast<const void*>(bindingGet(BindSlot::Dsv0)), sceneVs, perInstance);
             // The VR camera census (vr_camera_census.h): at the 2D screen's composite, once an eye. g_vrWorldWants is true
             // whenever the census is wanted, so with the key off this is one load of a false bool.
             if (g_vrWorldWants && vrCameraCensusWanted()) cameraCensusEyeDraw(self);

@@ -2149,6 +2149,9 @@ enum CameraChoiceFlag : uint32_t {
     kChoiceResync         = 1u << 7,
     kChoiceRefollow       = 1u << 8,
     kChoiceBoundLatchRows = 1u << 9,
+    kChoiceChainRefused   = 1u << 10,  // the chain refused an orientation-continuous candidate (fix.camera_continuity)
+    kChoiceDeparted       = 1u << 11,  // the pick departed from the chain: not taken into it
+    kChoiceReanchored     = 1u << 12,  // the chain re-anchored on this frame's second agreeing pick
 };
 enum CameraDrawFlag : uint32_t {
     kDrawSeen             = 1u << 0,
@@ -2187,6 +2190,7 @@ struct ObservedRowsWrite {
     float proj[2] = {};
     uint32_t frame = 0, seq = 0;
     bool rowsValid = false;
+    float blk[16] = {};   // the block's floats 784-799, for the per-draw census (diagnostic)
 };
 // 256: in space the game writes the block over a hundred times a frame
 // (114 measured 2026-09-04), and a ring of 48 had lost the frame's early
@@ -2222,6 +2226,21 @@ int         g_latchSlotPs = -1;
 TemporalCameraGate g_cameraGate;
 uint32_t    g_camCarried = 0;        // frames the ship's delta was carried over a drop
 uint32_t    g_camCarriedJump = 0;    // ...of which carried a translation over 50 m: zero by construction
+// CAMERA CONTINUITY (temporal_math.h): fix.camera_continuity, VR only. The
+// flat profile does not list the key, so it reads "off" there, which is the
+// chooser's behaviour before the key existed. TEMPORARY A/B key (2026-10-11).
+bool        g_camContOn = true;
+TemporalCameraChain g_chain;
+bool        g_camGuard = false;      // this frame's gate guard (temporalChainGuard)
+uint32_t    g_camGuardFrame = ~0u;   // the frame the gate carried on the guard (TEMP history bit 0x20)
+uint32_t    g_camRefuseFrames = 0;   // frames with an orientation-continuous candidate the chain refused
+uint32_t    g_camDeparted = 0;       // frames whose pick departed (not taken into the chain)
+uint32_t    g_camReanchored = 0;     // frames the chain re-anchored on its second agreeing pick
+uint32_t    g_camGuardCarried = 0;   // eye-frames the gate carried on the guard
+constexpr uint32_t kRefuseSamples = 256;
+float       g_camRefuseM[kRefuseSamples] = {};    // per refusing frame: the largest refused departure, metres
+float       g_camRefuseDeg[kRefuseSamples] = {};  // ...that candidate's rotation departure, degrees
+uint32_t    g_camRefuseN = 0;
 float    g_curRows[12] = {};
 float    g_curProj[2] = {};        // the picked write's projection z row (A, B); B > 0 once read
 bool     g_projNoted = false;      // the encoding line, once
@@ -2313,6 +2332,35 @@ void chooseCameraRows() {
         temporalRot3Of34(g_prevRows, rp);
         temporalTranspose3(rp, rpT);
     }
+    // CAMERA CONTINUITY (temporal_math.h): an orientation-continuous candidate
+    // must also stand where the chain's prediction puts the camera. A refused
+    // candidate is not continuous, unless no candidate agrees with the chain
+    // and it agrees with last frame's pending pick (the re-anchor). With the
+    // key off, or before the chain has a step, the test is orientation alone.
+    bool chainOk[kRowsRing] = {}, reOk[kRowsRing] = {};
+    bool anyChainOk = false, refusedFrame = false;
+    float refuseM = 0.0f, refuseDeg = 0.0f;
+    if (g_camContOn && g_prevValid) {
+        for (int i = 0; i < kRowsRing; ++i) {
+            chainOk[i] = true;
+            const RowsWrite& w = g_rowsRing[i];
+            if (!w.valid || w.frame != g_rowsFrame) continue;
+            float rn[9], d[9];
+            temporalRot3Of34(w.rows, rn);
+            temporalMul3(rpT, rn, d);
+            if (!(temporalRotationAngleDeg(d) < 3.0f)) continue;
+            float depM = 0.0f, depDeg = 0.0f;
+            chainOk[i] = temporalChainAgrees(g_chain, w.rows, &depM, &depDeg);
+            if (chainOk[i]) {
+                anyChainOk = true;
+            } else {
+                if (!refusedFrame || depM > refuseM) { refuseM = depM; refuseDeg = depDeg; }
+                refusedFrame = true;
+                reOk[i] = temporalChainReanchors(g_chain, w.rows);
+            }
+        }
+    }
+    const bool reAllowed = !anyChainOk;
     for (int i = 0; i < kRowsRing; ++i) {
         const RowsWrite& w = g_rowsRing[i];
         if (!w.valid || w.frame != g_rowsFrame) continue;
@@ -2326,6 +2374,7 @@ void chooseCameraRows() {
             temporalMul3(rpT, rn, d);
             continuous = temporalRotationAngleDeg(d) < 3.0f;
         }
+        if (continuous && g_camContOn && !chainOk[i] && !(reAllowed && reOk[i])) continuous = false;
         if (continuous) {
             ++continuousCount;
             // A write identical to last frame's chosen rows is the game's
@@ -2430,6 +2479,33 @@ void chooseCameraRows() {
         ++g_chooseResync;
     } else {
         ++g_chooseNone;
+    }
+    // The chain takes the pick, or holds it pending; the guard says whether
+    // this frame's delta (or the rows it is measured from) departed.
+    g_camGuard = false;
+    if (g_camContOn) {
+        if (pick >= 0) {
+            const TemporalChainOutcome o = temporalChainCommit(g_chain, g_rowsRing[pick].rows);
+            g_camGuard = temporalChainGuard(g_chain, o);
+            if (o == TemporalChainOutcome::Departed) {
+                ++g_camDeparted;
+                g_rowsChoice.flags |= kChoiceDeparted;
+            } else if (o == TemporalChainOutcome::Reanchored) {
+                ++g_camReanchored;
+                g_rowsChoice.flags |= kChoiceReanchored;
+            }
+        } else {
+            temporalChainNoPick(g_chain);
+        }
+        if (refusedFrame) {
+            ++g_camRefuseFrames;
+            g_rowsChoice.flags |= kChoiceChainRefused;
+            if (g_camRefuseN < kRefuseSamples) {
+                g_camRefuseM[g_camRefuseN] = refuseM;
+                g_camRefuseDeg[g_camRefuseN] = refuseDeg;
+                ++g_camRefuseN;
+            }
+        }
     }
     if (pick >= 0) {
         g_rowsChoice.flags |= kChoiceValid;
@@ -3155,7 +3231,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // carried figure over 50 m is counted so the invariant has a
             // witness on the line.
             const TemporalCameraStep step = temporalCameraGateStep(
-                g_cameraGate, g_prevRows, g_curRows, move, diffDeg, worldDelta, tvCam);
+                g_cameraGate, g_prevRows, g_curRows, move, diffDeg, worldDelta, tvCam, g_camGuard);
+            if (step.verdict == TemporalCameraVerdict::Departed) {
+                ++g_camGuardCarried;
+                g_camGuardFrame = g_rowsFrame;
+            }
             if (step.jump) {
                 ++g_camDropMove;
                 // The jump's frame, for the eye run's trace and the
@@ -3383,7 +3463,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             (screenSrv?256u:0u) | (p.holoJitter[2]!=0?512u:0u) |
             (e.haveHistory?1024u:0u) | (e.dlHaveHistory?2048u:0u) |
             (g_rowsDeltaOwn?4096u:0u) | (jumpedNow?8192u:0u) | (g_curRowsBound?16384u:0u) |
-            (celestial.srv?32768u:0u);
+            (celestial.srv?32768u:0u) |
+            // 10 and 20: fix.camera_continuity's bits (both retired before it): the chain refused a candidate this
+            // frame, and the gate carried this frame's delta on the guard (a departed pick or reference).
+            ((g_rowsChoice.frame == g_rowsFrame && (g_rowsChoice.flags & kChoiceChainRefused)) ? 16u : 0u) |
+            (g_camGuardFrame == g_rowsFrame ? 32u : 0u);
         memcpy(trace.worldTranslation,p.tvCam,12);
         if (g_rowsChoice.frame == g_rowsFrame) {
             trace.cameraChoiceFlags = g_rowsChoice.flags;
@@ -4408,6 +4492,102 @@ void temporalPassCaptureFinalEye(uint64_t sequence,uint32_t eye,ID3D11Texture2D*
     if(device)guarded("eye capture/final device release",[&]{device->Release();});
 }
 
+// THE PER-DRAW CENSUS (diag.temporal_draws, 2026-10-11). The rigid draw above
+// keeps only the FIRST recognised eye-target scene draw of each frame, and the
+// eye run's excursion frames showed that draw can sit at a different pose from
+// the chooser's pick. This keeps EVERY recognised draw into an identified eye:
+// the rows current at the draw (the VS b1 object's latest write this frame,
+// observedRowsCurrent), the VS hash, the index count, the draw's index within
+// the eye's frame, and the projection block's floats 784-799. A diagnostic: it
+// reads state, changes no output, and its cost is measured below (the 30 s line).
+// The ring keeps the newest kTdrwFrames frames; a frame keeps kTdrwDraws draws
+// per eye and counts the rest.
+constexpr int kTdrwFrames = 256;
+constexpr int kTdrwDraws = 32;
+struct TdrwDraw {
+    uint64_t vs = 0;
+    uint32_t indexCount = 0;
+    uint32_t seq = 0;          // the observed write's clock (0 when the object had no write this frame)
+    bool     hasRows = false;  // the object's write this frame was a rotation
+    float    T[3] = {};        // the rows' translation (the camera's place in the world)
+    float    R[4] = {};        // the rows' rotation as a quaternion, w x y z
+    float    P[16] = {};       // the projection block's floats 784-799
+};
+struct TdrwFrame {
+    uint32_t frame = ~0u;
+    uint32_t drawsSeen[2] = {};
+    TdrwDraw draws[2][kTdrwDraws];
+};
+TdrwFrame   g_tdrwRing[kTdrwFrames];
+std::mutex  g_tdrwMutex;
+bool        g_tdrwOn = false;        // diag.temporal_draws (temporary, default OFF: its render-thread cost is unmeasured)
+uint64_t    g_tdrwTicks = 0;         // the census's own cost this interval, in QPC ticks
+uint64_t    g_tdrwCalls = 0;         // recognised eye-target draws this interval
+
+bool temporalPassDrawsWanted() {
+    return g_tdrwOn && detail::g_temporalPassWantedFssChrome;
+}
+
+// The rotation of a row-major 3x4's 3x3 as a quaternion (w, x, y, z).
+void tdrwQuat(const float rows[12], float q[4]) {
+    const float m00 = rows[0], m01 = rows[1], m02 = rows[2];
+    const float m10 = rows[4], m11 = rows[5], m12 = rows[6];
+    const float m20 = rows[8], m21 = rows[9], m22 = rows[10];
+    const float tr = m00 + m11 + m22;
+    if (tr > 0.0f) {
+        const float s = 0.5f / sqrtf(tr + 1.0f);
+        q[0] = 0.25f / s; q[1] = (m21 - m12) * s; q[2] = (m02 - m20) * s; q[3] = (m10 - m01) * s;
+    } else if (m00 > m11 && m00 > m22) {
+        const float s = 2.0f * sqrtf(1.0f + m00 - m11 - m22);
+        q[0] = (m21 - m12) / s; q[1] = 0.25f * s; q[2] = (m01 + m10) / s; q[3] = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        const float s = 2.0f * sqrtf(1.0f + m11 - m00 - m22);
+        q[0] = (m02 - m20) / s; q[1] = (m01 + m10) / s; q[2] = 0.25f * s; q[3] = (m12 + m21) / s;
+    } else {
+        const float s = 2.0f * sqrtf(1.0f + m22 - m00 - m11);
+        q[0] = (m10 - m01) / s; q[1] = (m02 + m20) / s; q[2] = (m12 + m21) / s; q[3] = 0.25f * s;
+    }
+}
+
+void temporalPassNoteEyeDraw(ID3D11DeviceContext* ctx, const void* dsv, uint64_t vertexShaderHash, uint32_t indexCount) {
+    if (!temporalPassDrawsWanted() || !ctx) return;
+    LARGE_INTEGER t0{}, t1{};
+    QueryPerformanceCounter(&t0);
+    int eye = -1, targetIndex = -1;
+    depthProbeCurrentSceneEyeOf(static_cast<ID3D11DepthStencilView*>(const_cast<void*>(dsv)), &eye, &targetIndex);
+    if (eye >= 0 && eye <= 1) {
+        TdrwDraw d;
+        d.vs = vertexShaderHash;
+        d.indexCount = indexCount;
+        ID3D11Buffer* cb = nullptr;
+        ctx->VSGetConstantBuffers(1, 1, &cb);
+        if (cb) {
+            const ObservedRowsWrite* observed = observedRowsCurrent(cb);
+            if (observed) {
+                d.seq = observed->seq;
+                d.hasRows = observed->rowsValid;
+                memcpy(d.P, observed->blk, sizeof(d.P));
+                if (observed->rowsValid) {
+                    d.T[0] = observed->rows[3]; d.T[1] = observed->rows[7]; d.T[2] = observed->rows[11];
+                    tdrwQuat(observed->rows, d.R);
+                }
+            }
+            cb->Release();
+        }
+        std::lock_guard<std::mutex> lock(g_tdrwMutex);
+        TdrwFrame& f = g_tdrwRing[g_rowsFrame % kTdrwFrames];
+        if (f.frame != g_rowsFrame) {
+            f.frame = g_rowsFrame;
+            f.drawsSeen[0] = f.drawsSeen[1] = 0;
+        }
+        const uint32_t k = f.drawsSeen[eye]++;
+        if (k < kTdrwDraws) f.draws[eye][k] = d;
+    }
+    QueryPerformanceCounter(&t1);
+    g_tdrwTicks += static_cast<uint64_t>(t1.QuadPart - t0.QuadPart);
+    ++g_tdrwCalls;
+}
+
 void temporalPassDumpHistory(const char* trigger) {
     std::vector<TemporalHistoryEntry> entries;
     {
@@ -4421,7 +4601,7 @@ void temporalPassDumpHistory(const char* trigger) {
         "1 native, 2 NVIDIA. flags are the OpenVR request. "
         "events hex: 1 requested reset,2 size/format change,4 source-screen change,8 NVIDIA attempt,"
         "10 NVIDIA reset,20 diagnostic paint. inputs hex: 1 depth,2 previous depth,4 delta,8 world,"
-        "10 body (retired),20 terrain (retired),40 holo,80 mesh (retired),100 source-screen,200 consecutive,400 native history,"
+        "10 camera chain refused a candidate,20 camera gate carried on the chain guard,40 holo,80 mesh (retired),100 source-screen,200 consecutive,400 native history,"
         "800 NVIDIA history,1000 camera rows,2000 origin step,4000 bound rows,8000 celestial records. CPU only. ---",
         entries.size(),g_rowsFrame,trigger?trigger:"diagnostic request");
     constexpr size_t kTcamEntries = 512;
@@ -4429,7 +4609,7 @@ void temporalPassDumpHistory(const char* trigger) {
     Log::get().note(
         "TCAM legend: choice flags 1 valid,2 bound seen,4 bound write observed,8 selected bound,"
         "10 continuous,20 identical-to-previous twin present,40 twin fallback,80 resync,100 refollow,"
-        "200 bound rows valid. Draw flags 1 eligible draw seen,2 mapped write observed,4 rows valid,"
+        "200 bound rows valid,400 chain refused a candidate,800 pick departed from the chain,1000 chain re-anchored. Draw flags 1 eligible draw seen,2 mapped write observed,4 rows valid,"
         "8 previous draw rows valid,10 same resource,20 same observed write,40 same rows,80 selection later. "
         "Rows are literal scene rows; their origin is not assumed to be headset centre or eye pose. "
         "Detailed rows follow for the newest %zu of %zu eye calls; %zu older calls retain TEMP only.",
@@ -4471,6 +4651,60 @@ void temporalPassDumpHistory(const char* trigger) {
             double(e.drawRows[4]),double(e.drawRows[5]),double(e.drawRows[6]),double(e.drawRows[7]),
             double(e.drawRows[8]),double(e.drawRows[9]),double(e.drawRows[10]),double(e.drawRows[11]));
     }
+    // The per-draw census (diag.temporal_draws): every recognised eye-target draw of the newest frames.
+    {
+        std::vector<TdrwFrame> frames;
+        {
+            std::lock_guard<std::mutex> lock(g_tdrwMutex);
+            frames.assign(g_tdrwRing, g_tdrwRing + kTdrwFrames);
+        }
+        frames.erase(std::remove_if(frames.begin(), frames.end(),
+                                    [](const TdrwFrame& f) { return f.frame == ~0u; }), frames.end());
+        std::sort(frames.begin(), frames.end(),
+                  [](const TdrwFrame& a, const TdrwFrame& b) { return a.frame < b.frame; });
+        Log::get().note(
+            "TDRW legend (diag.temporal_draws): one line per recognised eye-target scene draw of the newest frames. "
+            "i = the draw's index in its eye's frame, vs = its vertex shader hash, n = its index count, seq = the write clock "
+            "of the CB object's latest write before the draw (0 = none this frame), rows 1 when that write was a rotation, "
+            "T = the rows' translation (the camera's place), R = the rows' rotation quaternion w x y z, P = the projection "
+            "block's floats 784-799 (the x and y rows' terms, then the z row at 792-793). TDRWF gives each eye-frame's draws "
+            "seen and kept; at most %u draws are kept per eye-frame.", static_cast<unsigned>(kTdrwDraws));
+        constexpr size_t kTdrwDumpLines = 4000;
+        size_t lines = 0;
+        size_t firstFrame = 0;
+        for (size_t i = frames.size(); i-- > 0;) {
+            size_t need = 2;
+            for (int e = 0; e < 2; ++e) need += std::min<uint32_t>(frames[i].drawsSeen[e], kTdrwDraws);
+            if (lines + need > kTdrwDumpLines) break;
+            lines += need;
+            firstFrame = i;
+        }
+        for (size_t i = firstFrame; i < frames.size(); ++i) {
+            const TdrwFrame& f = frames[i];
+            for (int e = 0; e < 2; ++e) {
+                const uint32_t kept = std::min<uint32_t>(f.drawsSeen[e], kTdrwDraws);
+                Log::get().note("TDRWF f%u eye=%d drawn=%u kept=%u", f.frame, e, f.drawsSeen[e], kept);
+                for (uint32_t k = 0; k < kept; ++k) {
+                    const TdrwDraw& d = f.draws[e][k];
+                    char buf[640];
+                    int n = snprintf(buf, sizeof(buf),
+                        "TDRW f%u eye=%d i=%u vs=%016llX n=%u seq=%u rows=%d T=(%+.7g,%+.7g,%+.7g) "
+                        "R=(%+.6g,%+.6g,%+.6g,%+.6g) P=(",
+                        f.frame, e, k, static_cast<unsigned long long>(d.vs), d.indexCount, d.seq, d.hasRows ? 1 : 0,
+                        d.T[0], d.T[1], d.T[2], d.R[0], d.R[1], d.R[2], d.R[3]);
+                    for (int j = 0; j < 16 && n > 0 && n < static_cast<int>(sizeof(buf)) - 32; ++j) {
+                        n += snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), "%s%+.7g", j ? "," : "", d.P[j]);
+                    }
+                    if (n > 0 && n < static_cast<int>(sizeof(buf)) - 2) snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), ")");
+                    Log::get().note("%s", buf);
+                }
+            }
+        }
+        if (firstFrame > 0) {
+            Log::get().note("TDRW older frames omitted: the dump keeps %u of %zu frames' draws (%zu lines).",
+                            static_cast<unsigned>(frames.size() - firstFrame), frames.size(), lines);
+        }
+    }
     Log::get().note("--- end temporal submission history ---");
 }
 
@@ -4490,6 +4724,11 @@ void temporalPassConfigure(Config& cfg) {
     // window regardless of whether the values read back the same.
     ++g_configGeneration;
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
+    // fix.camera_continuity (temporal_math.h, CAMERA CONTINUITY): VR only. The flat profile does not list the
+    // key, so it reads "off" there, the chooser's behaviour before the key existed.
+    g_camContOn = cfg.getString("fix.camera_continuity", "on") != "off";
+    // diag.temporal_draws (the per-draw census, TDRW lines): diagnostic, reads state only. TEMPORARY, listed in the arc's Status.
+    g_tdrwOn = cfg.getString("diag.temporal_draws", "off") == "on";
     const bool wasWanted = detail::g_temporalPassWantedFssChrome;
     detail::g_temporalPassWantedFssChrome = temporalModeEnabled(mode);
     if (detail::g_temporalPassWantedFssChrome != wasWanted) {
@@ -4832,6 +5071,7 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
         observed->frame = g_rowsFrame;
         observed->seq = observedSeq;
         observed->rowsValid = rowsValid;
+        memcpy(observed->blk, static_cast<const float*>(data) + 784, sizeof(observed->blk));
         if (rowsValid) {
             memcpy(observed->rows, f, sizeof(observed->rows));
             observed->proj[0] = pz[2];
@@ -4938,6 +5178,7 @@ void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexSha
     g_rigidDraw[eye] = sample;
 }
 
+
 void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
                           const float* eyeOffset) {
     if (eye < 0 || eye > 1) return;
@@ -4966,6 +5207,8 @@ void temporalPassFrameBoundary() {
     g_rowsWrites = 0;
     g_rowsObservedWrites = 0;
     g_rowsObservedEvictions = 0;
+    // A frame the chooser never judged holds no pick: nothing is pending for the next.
+    if (!g_chosenThisFrame) temporalChainNoPick(g_chain);
     g_chosenThisFrame = false;
     // This frame's rows become the next frame's reference, the view's own
     // only when a delta to them was measured and neither eye refused it.
@@ -5245,6 +5488,38 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                   g_chooseMulti, g_chooseMulti ? g_chooseSpreadSum / g_chooseMulti : 0.0,
                   g_chooseSpreadMax, g_twinFrames);
     }
+    // The camera chain's own line (fix.camera_continuity): the refusals and their sizes over the refusing
+    // frames, the picks that departed, the re-anchors and the eye-frames the guard carried.
+    if (g_camContOn) {
+        float sortM[kRefuseSamples], sortD[kRefuseSamples];
+        const uint32_t nS = g_camRefuseN;
+        memcpy(sortM, g_camRefuseM, sizeof(float) * nS);
+        memcpy(sortD, g_camRefuseDeg, sizeof(float) * nS);
+        std::sort(sortM, sortM + nS);
+        std::sort(sortD, sortD + nS);
+        const double p50M = nS ? sortM[nS / 2] : 0.0, maxM = nS ? sortM[nS - 1] : 0.0;
+        const double p50D = nS ? sortD[nS / 2] : 0.0, maxD = nS ? sortD[nS - 1] : 0.0;
+        Log::get().note(
+            "temporal camera continuity: fix.camera_continuity on; the chain refused an orientation-continuous "
+            "candidate on %u frames (departure from the chain's prediction p50 %.3f m max %.3f m, rotation p50 "
+            "%.3f deg max %.3f deg, over the first %u of them); %u frames' picks departed from the chain and were "
+            "not taken into it, %u re-anchored on a second agreeing frame, the gate carried %u eye-frames on a "
+            "departed pick or reference",
+            g_camRefuseFrames, p50M, maxM, p50D, maxD, nS, g_camDeparted, g_camReanchored, g_camGuardCarried);
+    }
+    // The per-draw census's own line (diag.temporal_draws): how many recognised eye-target draws the
+    // interval saw, and what the census itself cost on the render thread (QPC around its work).
+    if (g_tdrwOn) {
+        static LARGE_INTEGER freq{};
+        if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+        const double frames = g_rowsFramesSum ? static_cast<double>(g_rowsFramesSum) : 1.0;
+        const double totalUs = freq.QuadPart ? static_cast<double>(g_tdrwTicks) * 1.0e6 / static_cast<double>(freq.QuadPart) : 0.0;
+        Log::get().note(
+            "temporal draw census: %llu recognised eye-target draws over %.0f frames (%.1f a frame); the census "
+            "cost %.1f us a frame (%.2f us a draw) on the render thread",
+            static_cast<unsigned long long>(g_tdrwCalls), frames, static_cast<double>(g_tdrwCalls) / frames,
+            totalUs / frames, g_tdrwCalls ? totalUs / static_cast<double>(g_tdrwCalls) : 0.0);
+    }
     // The interval starts afresh: the next line judges the next stretch.
     memset(g_candPix, 0, sizeof(g_candPix));
     memset(g_candRej, 0, sizeof(g_candRej));
@@ -5277,6 +5552,13 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_chooseNone = 0;
     g_camCarried = 0;
     g_camCarriedJump = 0;
+    g_camRefuseFrames = 0;
+    g_camDeparted = 0;
+    g_camReanchored = 0;
+    g_camGuardCarried = 0;
+    g_camRefuseN = 0;
+    g_tdrwTicks = 0;
+    g_tdrwCalls = 0;
     g_probeWorldDx = g_probeWorldDy = 0;
     g_probeWorldN = 0;
     g_probeShipDx = g_probeShipDy = 0;

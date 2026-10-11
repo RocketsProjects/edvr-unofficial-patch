@@ -464,6 +464,11 @@ struct State {
     // off, so nothing has been recorded", which is the instrument refusing to
     // measure the one case it was built to settle.
     //
+    // Armed (fix.transition_flash on), dumpCameraRing logs "camera ring dump
+    // skipped: fix.transition_flash is armed ..." and returns before the camera
+    // ring. The temporal submission history (TEMP/TCAM) is written by the caller
+    // whatever this does, so a dump still carries the chooser's rows.
+    //
     // The file already half-believed this: it goes on recording after the
     // detector stands down mid-session, with a comment saying the dump must
     // describe the moment the user pressed the key rather than the moment the
@@ -2594,13 +2599,9 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
         // Armed and idle, glitchFrameObserve returns before recording: the ring
         // would hold old event frames or none, and presenting it as the moment
         // somebody pressed a key about would mislead.
-        Log::get().note("camera history dump requested, but the engine fix is armed "
-                        "(fix.transition_flash), and while it is the old detector's camera "
-                        "history is not recorded. Every frame the fix holds is logged as "
-                        "'transition flash: frame N held'; no such line near the moment you "
-                        "reacted to means it did not hold one. To record the history instead, "
-                        "set fix.transition_flash = 0 and restart -- the clean control for a "
-                        "flash report.");
+        Log::get().note("camera ring dump skipped: fix.transition_flash is armed, and the old "
+                        "detector does not record its camera ring while it is. The temporal "
+                        "submission history (TEMP/TCAM) is written below regardless.");
         return;
     }
     if (!s->observing) {

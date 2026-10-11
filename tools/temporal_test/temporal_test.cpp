@@ -79,6 +79,66 @@ edvr::TemporalCameraStep gateEye(edvr::TemporalCameraGate& g, const float prev[1
 
 bool same9(const float a[9], const float b[9]) { return memcmp(a, b, sizeof(float) * 9) == 0; }
 
+// The chooser's glue for one frame (temporal_pass.cpp, chooseCameraRows), over
+// the candidates' rows: the orientation test against last frame's rows, the
+// chain's test (with the key on), the re-anchor when no candidate agrees with
+// the chain, the pick (the latest continuous candidate, else the latest), its
+// commit and the guard. gated false is the key off: orientation alone.
+struct ContinuityFrame {
+    int pick = -1;
+    edvr::TemporalChainOutcome outcome = edvr::TemporalChainOutcome::Anchored;
+    bool guard = false;
+    bool refused = false;   // an orientation-continuous candidate the chain refused
+};
+
+ContinuityFrame continuityFrame(edvr::TemporalCameraChain& ch, const float prev[12], bool prevValid,
+                                float (*cands)[12], int n, bool gated) {
+    ContinuityFrame f;
+    bool orient[4] = {}, chainOk[4] = {}, reOk[4] = {};
+    bool anyChainOk = false;
+    for (int i = 0; i < n && prevValid; ++i) {
+        float rp[9], rn[9], rpT[9], d[9];
+        edvr::temporalRot3Of34(prev, rp);
+        edvr::temporalRot3Of34(cands[i], rn);
+        edvr::temporalTranspose3(rp, rpT);
+        edvr::temporalMul3(rpT, rn, d);
+        orient[i] = edvr::temporalRotationAngleDeg(d) < 3.0f;
+        if (!orient[i] || !gated) continue;
+        chainOk[i] = edvr::temporalChainAgrees(ch, cands[i]);
+        if (chainOk[i]) anyChainOk = true;
+        else f.refused = true;
+    }
+    if (gated) {
+        for (int i = 0; i < n; ++i) {
+            if (orient[i] && !chainOk[i]) reOk[i] = edvr::temporalChainReanchors(ch, cands[i]);
+        }
+    }
+    int cont = -1;
+    for (int i = 0; i < n; ++i) {
+        if (orient[i] && (!gated || chainOk[i] || (!anyChainOk && reOk[i]))) cont = i;
+    }
+    f.pick = cont >= 0 ? cont : n - 1;
+    if (!gated) return f;
+    f.outcome = edvr::temporalChainCommit(ch, cands[f.pick]);
+    f.guard = edvr::temporalChainGuard(ch, f.outcome);
+    return f;
+}
+
+// One frame through the gate, as temporal_pass.cpp runs it, with the head
+// taken as still (the delta's angle from the head is the rows' own turn).
+edvr::TemporalCameraStep gateFrame(edvr::TemporalCameraGate& g, const float prev[12],
+                                   const float now[12], bool guard, float W[9], float tv[3]) {
+    float mv[3];
+    edvr::temporalWorldFromRows(prev, now, W, tv, mv);
+    const double move = sqrt(static_cast<double>(mv[0]) * mv[0] +
+                             static_cast<double>(mv[1]) * mv[1] +
+                             static_cast<double>(mv[2]) * mv[2]);
+    const float diff = edvr::temporalRotationAngleDeg(W);
+    const edvr::TemporalCameraStep s = edvr::temporalCameraGateStep(g, prev, now, move, diff, W, tv, guard);
+    edvr::temporalCameraGateAdvance(g, true);
+    return s;
+}
+
 }  // namespace
 
 int main() {
@@ -665,6 +725,191 @@ int main() {
         const auto dropped = gateEye(j, far1, p, still, W, tv);
         check(dropped.carried && !dropped.carriedJump && memcmp(tv, d1tv, sizeof(tv)) == 0,
               "a drop after a jump carries the translation before it (a jump carried: zero)");
+    }
+    // CAMERA CONTINUITY (temporal_math.h, fix.camera_continuity): the chain's
+    // test, the re-anchor, the commit and the guard, through continuityFrame
+    // (the chooser's glue) and gateFrame (the gate). The view's camera stands
+    // at P; the excursions are other cameras' rows. Rows turn 0.04 deg a frame.
+    {
+        const float P[3] = {-3.0f, -1.8f, -13.0f};
+        float cs[2][12];
+        // A. A steady chain with one-frame excursions: 75 m / 2.9 deg, 20 m / 2.2 deg
+        // and 0.14 m / 2 deg (frames 10, 20, 30). Each is refused, the chain
+        // keeps the view's camera on every frame, and the delta carries no error.
+        {
+            edvr::TemporalCameraChain ch;
+            edvr::TemporalCameraGate gate;
+            float prev[12] = {};
+            bool prevValid = false;
+            int pickedView = 0, guards = 0, badMotion = 0, own = 0;
+            int refusedAt[3] = {0, 0, 0};
+            for (int k = 0; k < 60; ++k) {
+                rows34(0.04f * k, P[0], P[1], P[2], cs[0]);
+                int n = 1;
+                if (k == 10 || k == 20 || k == 30) {
+                    const float dist = k == 10 ? 75.0f : (k == 20 ? 20.0f : 0.14f);
+                    const float deg = k == 10 ? 2.9f : (k == 20 ? 2.2f : 2.0f);
+                    rows34(0.04f * k + deg, P[0] + dist, P[1], P[2], cs[1]);
+                    n = 2;
+                    if (!edvr::temporalChainAgrees(ch, cs[1])) ++refusedAt[(k - 10) / 10];
+                }
+                const ContinuityFrame f = continuityFrame(ch, prev, prevValid, cs, n, true);
+                if (f.pick == 0) ++pickedView;
+                if (f.guard) ++guards;
+                if (prevValid) {
+                    float W[9], tv[3];
+                    const edvr::TemporalCameraStep s = gateFrame(gate, prev, cs[f.pick], f.guard, W, tv);
+                    if (s.verdict == edvr::TemporalCameraVerdict::Own) ++own;
+                    const float tvLen = sqrtf(tv[0] * tv[0] + tv[1] * tv[1] + tv[2] * tv[2]);
+                    if (edvr::temporalRotationAngleDeg(W) > 0.1f || tvLen > 1e-3f) ++badMotion;
+                }
+                memcpy(prev, cs[f.pick], sizeof(prev));
+                prevValid = true;
+            }
+            check(refusedAt[0] && refusedAt[1] && refusedAt[2],
+                  "each excursion (75 m / 2.9 deg, 20 m / 2.2 deg, 0.14 m / 2 deg) is refused by the chain's test");
+            check(pickedView == 60 && guards == 0,
+                  "a steady chain keeps the view's camera on all 60 frames, no guard");
+            check(own == 59 && badMotion == 0,
+                  "with the excursions refused, every delta is the view's own and carries no motion error");
+        }
+        // A2. The key off (today's chooser): the latest orientation-continuous
+        // write is picked, so the excursion's 2.9 deg error enters the delta on
+        // its frame and carries back on the next (the out-and-back).
+        {
+            edvr::TemporalCameraChain unused;
+            edvr::TemporalCameraGate gate;
+            float prev[12] = {};
+            bool prevValid = false;
+            float errOn = 0.0f, errBack = 0.0f;
+            for (int k = 0; k <= 11; ++k) {
+                rows34(0.04f * k, P[0], P[1], P[2], cs[0]);
+                int n = 1;
+                if (k == 10) {
+                    rows34(0.04f * k + 2.9f, P[0] + 75.0f, P[1], P[2], cs[1]);
+                    n = 2;
+                }
+                const ContinuityFrame f = continuityFrame(unused, prev, prevValid, cs, n, false);
+                if (k == 10) check(f.pick == 1 && !f.guard, "key off: the excursion is picked, as before");
+                if (prevValid) {
+                    float W[9], tv[3];
+                    gateFrame(gate, prev, cs[f.pick], false, W, tv);
+                    if (k == 10) errOn = edvr::temporalRotationAngleDeg(W);
+                    if (k == 11) errBack = edvr::temporalRotationAngleDeg(W);
+                }
+                memcpy(prev, cs[f.pick], sizeof(prev));
+                prevValid = true;
+            }
+            check(errOn > 2.5f && errBack > 2.5f,
+                  "key off: the 2.9 deg excursion error enters the delta on its frame and comes back on the next");
+        }
+        // B. A straight flight at 300 m a frame is accepted from its second frame.
+        {
+            edvr::TemporalCameraChain ch;
+            float prev[12] = {};
+            bool prevValid = false;
+            bool allChain = true;
+            int picked = 0;
+            for (int k = 0; k < 40; ++k) {
+                rows34(0.0f, P[0] + 300.0f * k, P[1], P[2], cs[0]);
+                const ContinuityFrame f = continuityFrame(ch, prev, prevValid, cs, 1, true);
+                if (k > 0 && f.outcome != edvr::TemporalChainOutcome::Chain) allChain = false;
+                if (f.pick == 0) ++picked;
+                memcpy(prev, cs[f.pick], sizeof(prev));
+                prevValid = true;
+            }
+            check(allChain && picked == 40, "a straight flight at 300 m a frame is accepted by the chain");
+        }
+        // C. An accelerating flight (100 m a frame, gaining 5 m a frame) is accepted.
+        {
+            edvr::TemporalCameraChain ch;
+            float prev[12] = {};
+            bool prevValid = false;
+            bool none = true;
+            float x = 0.0f, step = 100.0f;
+            for (int k = 0; k < 40; ++k) {
+                rows34(0.0f, P[0] + x, P[1], P[2], cs[0]);
+                const ContinuityFrame f = continuityFrame(ch, prev, prevValid, cs, 1, true);
+                if (k > 0 && f.outcome == edvr::TemporalChainOutcome::Departed) none = false;
+                memcpy(prev, cs[f.pick], sizeof(prev));
+                prevValid = true;
+                x += step;
+                step += 5.0f;
+            }
+            check(none, "an accelerating flight (100 m a frame, gaining 5 m a frame) is accepted by the chain");
+        }
+        // D. A real cut to a new pose (500 m, 30 deg) held from frame 10: the first
+        // frame is held out of the chain and its delta carried, the second frame
+        // re-anchors the chain, and from the third the chain follows the new pose.
+        {
+            edvr::TemporalCameraChain ch;
+            float prev[12] = {};
+            bool prevValid = false;
+            edvr::TemporalChainOutcome o[13] = {};
+            bool g[13] = {};
+            for (int k = 0; k < 13; ++k) {
+                if (k < 10) rows34(0.0f, P[0], P[1], P[2], cs[0]);
+                else rows34(30.0f, P[0] + 500.0f, P[1], P[2], cs[0]);
+                const ContinuityFrame f = continuityFrame(ch, prev, prevValid, cs, 1, true);
+                o[k] = f.outcome;
+                g[k] = f.guard;
+                memcpy(prev, cs[f.pick], sizeof(prev));
+                prevValid = true;
+            }
+            check(o[10] == edvr::TemporalChainOutcome::Departed && g[10],
+                  "a real cut's first frame is held out of the chain and its delta carried");
+            check(o[11] == edvr::TemporalChainOutcome::Reanchored,
+                  "a cut held for a second frame re-anchors the chain on that frame");
+            check(o[12] == edvr::TemporalChainOutcome::Chain && !g[12],
+                  "from the third frame the chain follows the new pose, with no guard");
+        }
+        // E. The floating origin moves 1000 m in one frame. The chain holds it
+        // out, the second frame re-anchors, and the gate's own jump rule (the
+        // translation dropped, the turn kept) is unchanged with the guard off.
+        {
+            edvr::TemporalCameraChain ch;
+            float prev[12] = {};
+            bool prevValid = false;
+            edvr::TemporalChainOutcome o10 = edvr::TemporalChainOutcome::Anchored, o11 = o10;
+            bool g10 = false;
+            for (int k = 0; k < 12; ++k) {
+                rows34(0.0f, P[0] + (k >= 10 ? 1000.0f : 0.0f), P[1], P[2], cs[0]);
+                const ContinuityFrame f = continuityFrame(ch, prev, prevValid, cs, 1, true);
+                if (k == 10) { o10 = f.outcome; g10 = f.guard; }
+                if (k == 11) o11 = f.outcome;
+                memcpy(prev, cs[f.pick], sizeof(prev));
+                prevValid = true;
+            }
+            check(o10 == edvr::TemporalChainOutcome::Departed && g10,
+                  "an origin move's first frame is held out of the chain and its delta carried");
+            check(o11 == edvr::TemporalChainOutcome::Reanchored,
+                  "after an origin move the chain re-anchors on the second frame");
+            float a[12], b[12], W[9], tv[3];
+            rows34(0.0f, P[0], P[1], P[2], a);
+            rows34(0.0f, P[0] + 1000.0f, P[1], P[2], b);
+            edvr::TemporalCameraGate jg;
+            jg.refOwn = true;   // the rows before the jump are the view's own, as in a running session
+            gateFrame(jg, a, a, false, W, tv);
+            const edvr::TemporalCameraStep js = gateFrame(jg, a, b, false, W, tv);
+            check(js.jump && js.verdict == edvr::TemporalCameraVerdict::Own &&
+                  tv[0] == 0.0f && tv[1] == 0.0f && tv[2] == 0.0f,
+                  "an origin move with the guard off keeps the gate's jump rule (translation dropped, turn kept)");
+        }
+        // F. The guard: a departed pick's delta (here a 75 m excursion, if it were
+        // picked) is carried as the last good, whatever its own size.
+        {
+            float still[12], ex[12], W[9], tv[3];
+            rows34(0.0f, P[0], P[1], P[2], still);
+            rows34(2.9f, P[0] + 75.0f, P[1], P[2], ex);
+            edvr::TemporalCameraGate gg;
+            gg.refOwn = true;   // the rows before the excursion are the view's own
+            gateFrame(gg, still, still, false, W, tv);
+            const edvr::TemporalCameraStep s = gateFrame(gg, still, ex, true, W, tv);
+            check(s.verdict == edvr::TemporalCameraVerdict::Departed && s.carried &&
+                  memcmp(W, gg.lastGoodC, sizeof(W)) == 0 &&
+                  memcmp(tv, gg.lastGoodTv, sizeof(tv)) == 0,
+                  "the guard carries a departed delta as the last good, the turn and the translation both");
+        }
     }
     if (g_fails) {
         printf("\nTEMPORAL TEST FAILED (%d)\n", g_fails);

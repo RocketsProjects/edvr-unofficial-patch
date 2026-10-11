@@ -1,8 +1,10 @@
 #include "openvr_system.h"
 #include "canted_display.h"
 #include "native_cpu_trace.h"
+#include "native_trace.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <intrin.h>
 #include <windows.h>
@@ -215,6 +217,34 @@ void OpenVRSystem::GetProjectionRaw(EVREye e,float* l,float* r,float* t,float* b
     else out=base;
   }
   if(l)*l=out.left;if(r)*r=out.right;if(t)*t=out.top;if(b)*b=out.bottom;
+  // Once per eye per session (diagnostic): the FOV tangents handed to Elite, to compare offline with the projection
+  // block's floats 784-799 that the per-draw census (TDRW lines in the gfx log) records.
+  // The values go out as integers in units of 1e-7 (left_e7=10000000 is a tangent of 1): printf's float path
+  // crashed on the openxr self-test's thread (2026-10-11), so this formats by hand.
+  static bool projectionNoted[2]={};
+  if(eye<2&&!projectionNoted[eye]) {
+    projectionNoted[eye]=true;
+    char line[224];
+    char* p=line;
+    const char* end=line+sizeof(line)-1;
+    auto text=[&](const char* s){while(*s&&p<end)*p++=*s++;};
+    auto number=[&](double scaled){
+      const bool negative=scaled<0.0;
+      unsigned long long a=static_cast<unsigned long long>((negative?-scaled:scaled)+0.5);
+      char digits[24];int n=0;
+      do{digits[n++]=static_cast<char>('0'+int(a%10ull));a/=10ull;}while(a&&n<23);
+      if(negative&&p<end)*p++='-';
+      while(n&&p<end)*p++=digits[--n];
+    };
+    text("projection_raw,eye=");number(eye);
+    text(",left_e7=");number(double(out.left)*1.0e7);
+    text(",right_e7=");number(double(out.right)*1.0e7);
+    text(",top_e7=");number(double(out.top)*1.0e7);
+    text(",bottom_e7=");number(double(out.bottom)*1.0e7);
+    text(",live=");number(liveGeometry?1.0:0.0);
+    *p=0;
+    nativeTracePuts(line);
+  }
 }
 DistortionCoordinates_t OpenVRSystem::ComputeDistortion(EVREye,float,float) { unavailable(3);return {}; }
 HmdMatrix34_t OpenVRSystem::GetEyeToHeadTransform(EVREye e) {

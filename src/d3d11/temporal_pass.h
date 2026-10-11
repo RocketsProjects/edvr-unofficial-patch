@@ -86,6 +86,11 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx);
 // path do not read this state. `resource` is the VS b1 object used by the draw.
 bool temporalPassWantsRigidDraw(int eye);
 void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexShaderHash);
+// The per-draw census (diag.temporal_draws, 2026-10-11): every recognised eye-target scene draw, per eye and frame, with the
+// rows current at that draw (VS b1), its VS hash, its index count and the projection block's floats 784-799. Diagnostic
+// only: it reads state and changes no output. dsv is the draw's depth target (ID3D11DepthStencilView*).
+bool temporalPassDrawsWanted();
+void temporalPassNoteEyeDraw(ID3D11DeviceContext* ctx, const void* dsv, uint64_t vertexShaderHash, uint32_t indexCount);
 // This frame's rows become last frame's; called at the frame boundary.
 void temporalPassFrameBoundary();
 // The rows the pass CHOSE for the frame in progress (chooseCameraRows' pick: float 932 of the scene block, three 3x4 rows), for the VR camera census's episodes

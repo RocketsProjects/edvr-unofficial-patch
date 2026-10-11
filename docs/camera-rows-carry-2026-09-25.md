@@ -2,8 +2,14 @@
 
 ## Status
 
-*Last updated 2026-09-28: H2 remains convicted; 162120 rules it out for its
-captured frames.*
+*Last updated 2026-10-11: hangar excursions traced to the chooser's orientation-only
+test; fix and per-draw census built, NOT flown (see 2026-10-11).*
+
+- **2026-10-11 (open, not flown):** the chooser takes another camera's write for one
+  frame in a docked hangar (75 m / 2.9 deg, 19.8 m, 0.14 m / 2 deg). Fix on branch
+  `claude/vr-camera-continuity`: temporary key `fix.camera_continuity` (default on).
+  Open: is there a draw whose rows are the view pose on every frame, and does a VS
+  hash or the projection identify it? Diagnostic `diag.temporal_draws` (TDRW lines).
 
 - **State:** the 2026-09-25 gate fix (branch `claude/camera-rows-carry`, merged
   to main) is FLOWN and working as designed, and its open hypothesis is now
@@ -39,13 +45,10 @@ captured frames.*
   head stream -- undecided.
 - **Ruled out / declined:** see "Declined" at the end. It covers measuring from
   the last accepted rows, and refusing every delta after a drop.
-- **Latest evidence (162120):** all 16 actual scene-row blocks match the
-  selected rows within 5e-6; all 32 eyes accept/bind rows with follow 30. Stale
-  carry and later auxiliary selection contamination do not explain this run.
-  World-covered detail still misses raw-image motion; the confirmed
-  substitution-ownership defect and existing F7 repair belong to the
-  kinematic-motion doc, 2026-09-28 entry. Earlier H2 and the session-wide H3
-  question remain open work.
+- **Latest evidence (162120):** scene-row blocks match the selected rows within
+  5e-6; stale carry and auxiliary contamination do not explain that run. The
+  substitution defect belongs to the kinematic-motion doc, 2026-09-28. H2 and H3
+  stay open.
 - **Next:** no additional Coriolis flight is planned until a concrete repair is
   proven. The earlier roll/turn protocol in "Verification" remains the
   discriminating test for the H2 stand-down once designed.
@@ -251,3 +254,74 @@ installation, and headset verification follow. The complete ROI table and
 reconstruction-floor exclusion live in
 docs/kinematic-motion-injection-2026-09-19.md's 2026-09-28 entry. No new flight
 is needed for diagnosis before that verified repair is installed.
+
+## 2026-10-11 -- hangar excursions: the chooser takes another camera for one frame
+
+**Finding (eye run edvr_gfx_20261011_055853, docked hangar, DLSS, eye 0, TCAM
+frames 9684-12461).** The chosen rows left the view pose on one-frame
+excursions to another camera: 75 m / 2.9 deg (flagged 0x2000 origin step, at
+frames 11663, 11743, 11756, 11768, 11780, 11792, 11804), 19.8 m (11732-33) and
+0.14 m / 2 deg (20 pairs). Normal frames rotate by a median 0.039 deg a frame.
+
+**Cause (code).** `chooseCameraRows` tests continuity by orientation alone: a
+write within 3 deg of last frame's chosen rows. A camera facing the same way
+but elsewhere passes. The gate then zeroes the translation of a 50 m+ step and
+keeps the 2-3 deg rotation error, and the frame after takes the excursion as
+its reference, so each excursion is an out-and-back.
+
+**What the log rules in or out.**
+- The projection z row (`proj`, A and B) is 0 and 0.0250000004 on every sampled
+  line, excursions included. It cannot tell the cameras apart. The x and y
+  rows (the FOV tangents) are not captured yet.
+- Over 1,536 eye-0 TCAM lines: selected at the view and the first recognised
+  draw at the view, 1,346; selected at the view and the draw ODD, 181; selected
+  odd and draw odd, 9. On every line the selected write is newer than the draw's
+  write. So the first-draw snapshot is not an independent oracle: it sits at the
+  odd pose on 181 frames where the chooser is right, and on the excursion frames
+  it agrees with the excursion. Using draw rows would have been wrong on 181.
+
+**Fix (unflown; branch `claude/vr-camera-continuity`, WIP commit c09750c3 and
+the commit that follows it).** `temporal_math.h`, CAMERA CONTINUITY: a candidate
+is continuous only when its pose agrees with a constant-velocity prediction from
+the last ACCEPTED pose: position within 1 m + 2 x the last step, rotation within
+0.5 deg + 2 x the last rotation step. A pick that agrees with nothing is held as
+pending; a second agreeing frame re-anchors the chain. The gate carries a delta
+whose pick, or whose reference, departed (`temporalCameraGateStep`, `departed`).
+The 0.5 deg floor is what refuses the 0.14 m / 2 deg excursion: the 1 m floor
+alone passes it. Key `fix.camera_continuity` (VR only; flat reads unlisted keys
+as off, which is today's behaviour), temporary A/B, default on.
+
+**Diagnostic (no behaviour change, `diag.temporal_draws`, temporary).** Every
+recognised eye-target scene draw is recorded per eye per frame in a 256-frame
+ring (32 draws kept per eye-frame, the rest counted): the CB rows at the draw
+(translation, rotation quaternion), the VS hash, the index count, the draw's
+index, and the projection block's floats 784-799. The Pause dump writes a
+`TDRW legend` line, one `TDRWF` line per eye-frame (drawn, kept) and `TDRW`
+lines (at most 4000 a dump, newest frames). The 30 s `temporal draw census:`
+line reports the count and the census's own QPC cost. A once-per-eye
+`projection_raw` line in the OpenXR trace gives the FOV tangents EDVR hands
+Elite, as integers in units of 1e-7 (formatted by hand: printf's float path
+crashed on that thread).
+
+**Rig.** `tools\temporal_test`, new cases: a steady chain with the three
+excursions refused, no motion error; the key off reproduces the excursion error
+on its frame and the next; a straight flight at 300 m a frame accepted; an
+accelerating flight accepted; a real cut held two frames re-anchored on the
+second; an origin move re-anchored, with the gate's jump rule unchanged with the
+guard off; the guard carries a departed delta as the last good.
+
+**Build status: not green.** `openxr_native_tests` crashes intermittently
+(0xC0000005 after `pose_failure`, in the native runtime host's pose path, on a
+background thread). The unmodified base commit 9033ff1b reproduces it in 4 of
+6 runs, so it predates this work. Not fixed here.
+
+**Open question the census answers.** Is there a draw on every frame, excursion
+frames included, whose rows are the view pose? Does a VS hash or the projection
+identify it deterministically? Compare each TDRW `R` and `T` with the TCAM
+`selected rows` of the same frame.
+
+**Next flight.** Sean in the same hangar, `fix.camera_continuity` on, then off;
+the TEMP history should show no 2-3 deg excursions with it on, and the `temporal
+camera continuity:` counter should be nonzero. Then a Pause dump during a planet
+approach to check the guard refuses nothing false. Also record the census cost
+from its 30 s line.

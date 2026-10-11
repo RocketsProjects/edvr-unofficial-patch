@@ -377,6 +377,7 @@ enum class TemporalCameraVerdict : uint8_t {
     Own,       // the view's own delta: used, and kept as the last good
     Another,   // over 3 degrees from the head's: another camera's rows, or a stale latch
     Parked,    // measured from rows a drop left behind, and not turned at all
+    Departed,  // the chain's guard (camera continuity, below): the pick, or the rows it is measured from, departed from the chain
 };
 
 struct TemporalCameraStep {
@@ -400,10 +401,13 @@ inline bool temporalRowsSameTurn(const float a[12], const float b[12]) {
 // the delta's angle from the eye's head delta (0 without one). W and tv come
 // back as the delta to use: the rows' own, or the last good carried. Both
 // eyes judge a frame against the same standing; it moves on once a frame, in
-// temporalCameraGateAdvance.
+// temporalCameraGateAdvance. `departed` is the chain's guard
+// (temporalChainGuard): a delta the chain's prediction does not stand behind
+// is carried whatever its own size, the same as any other refusal.
 inline TemporalCameraStep temporalCameraGateStep(TemporalCameraGate& g, const float prev[12],
                                                  const float now[12], double move,
-                                                 float diffDeg, float W[9], float tv[3]) {
+                                                 float diffDeg, float W[9], float tv[3],
+                                                 bool departed = false) {
     TemporalCameraStep s;
     s.jump = move >= 50.0;
     if (s.jump) {
@@ -415,6 +419,7 @@ inline TemporalCameraStep temporalCameraGateStep(TemporalCameraGate& g, const fl
         s.verdict = TemporalCameraVerdict::Parked;
         g.parked = true;
     }
+    if (departed && s.verdict == TemporalCameraVerdict::Own) s.verdict = TemporalCameraVerdict::Departed;
     g.measured = true;
     if (s.verdict != TemporalCameraVerdict::Own) {
         g.refused = true;
@@ -447,6 +452,201 @@ inline void temporalCameraGateAdvance(TemporalCameraGate& g, bool rowsKept) {
     g.measured = false;
     g.refused = false;
     g.parked = false;
+}
+
+// CAMERA CONTINUITY (2026-10-11, fix.camera_continuity). The chooser's
+// orientation test (3 degrees from last frame's chosen rows) let another
+// camera's write through for one frame when that camera sat within 3 degrees
+// of the view. Eye run edvr_gfx_20261011_055853.log (a docked hangar, DLSS):
+// one-frame excursions of the chosen rows to another camera's pose, 75 m /
+// 2.9 deg (flagged as origin steps, the translation zeroed and the rotation
+// error kept), 20 m / 2.2 deg, and 0.14 m / 2 deg. Measured against last
+// frame's rows, the frame after an excursion took the excursion as its
+// reference and carried its error back, so each excursion was an out-and-back.
+//
+// The rule. The chain holds the last ACCEPTED pose: its position c, its
+// rotation R, the last accepted step (c minus the accepted pose before it) and
+// the last accepted rotation step (R_before^T R). A candidate agrees with the
+// chain when it stands where the constant-velocity prediction puts it:
+//   position:  |c - (c_acc + step)|       <= 1 m + 2 * |step|
+//   rotation:  angle(R_acc * rotStep)^T R <= 0.5 deg + 2 * (last rotation step)
+// The 2 x step term covers a stop, or a speed up to three times, in one frame;
+// the 1 m and 0.5 deg floors cover tracking noise and a still camera. The
+// 0.5 deg floor is what refuses the 0.14 m / 2 deg excursion: the 1 m floor
+// alone passes it. Before the chain has a step (its first accepted frame) the
+// test is the orientation test alone, as before.
+//
+// A pick that agrees with nothing is not taken into the chain, and is held
+// as the PENDING reference. A candidate that agrees with the pending pick,
+// within 1 m + 2 times the step between the two picks (the pending step) and
+// the matching rotation bound, re-anchors the chain on its second agreeing
+// frame, so a sustained change of camera (a cut, an origin move) is
+// re-accepted promptly. A candidate that agrees with the chain always wins
+// over one that only agrees with the pending pick. The guard: a frame whose
+// pick departed, or whose reference (last frame's pick) departed, has its
+// delta carried by the gate (temporalCameraGateStep, `departed`), since
+// neither delta is the view's own. With the key off the chooser does not
+// call any of this, so its behaviour is the orientation test alone.
+constexpr float kTemporalChainPosFloor = 1.0f;   // metres
+constexpr float kTemporalChainPosK = 2.0f;       // times the step
+constexpr float kTemporalChainRotFloor = 0.5f;   // degrees
+constexpr float kTemporalChainRotK = 2.0f;       // times the rotation step
+
+struct TemporalCameraChain {
+    bool  valid = false;        // an anchor is held
+    bool  stepKnown = false;    // the chain has a step: the test applies
+    float pos[3] = {};          // the last accepted camera position (rows[3], [7], [11])
+    float step[3] = {};         // the last accepted step
+    float rot[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};       // the last accepted rotation (rows' 3x3)
+    float rotStep[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // the last accepted rotation step, R_before^T R
+    float rotStepDeg = 0.0f;
+    bool  pendValid = false;    // last frame's pick departed: held as the reference for a re-anchor
+    float pendPos[3] = {};
+    float pendStep[3] = {};     // the step from the chain's (or the earlier pending) pose to the pending pick
+    float pendRot[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    float pendRotStepDeg = 0.0f;
+    bool  prevDeparted = false; // last frame's pick departed: the rows it is measured from are not the view's own
+};
+
+enum class TemporalChainOutcome : uint8_t {
+    Anchored,    // no chain yet: the pick starts it
+    Chain,       // the pick agrees with the chain's prediction, and moves the chain
+    Reanchored,  // the pick agrees with last frame's pending pick: the chain moves to it
+    Departed,    // the pick agrees with neither: not taken into the chain
+};
+
+inline float temporalChainVecLen(const float v[3]) {
+    return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+// The angle between two rotations in degrees: angle(a^T b).
+inline float temporalChainRotBetweenDeg(const float a[9], const float b[9]) {
+    float aT[9], d[9];
+    temporalTranspose3(a, aT);
+    temporalMul3(aT, b, d);
+    return temporalRotationAngleDeg(d);
+}
+
+// A candidate's departures from the chain's prediction: metres and degrees.
+// Both are zero before the chain has a step.
+inline void temporalChainDeparture(const TemporalCameraChain& ch, const float rows[12],
+                                   float* depM, float* depDeg) {
+    *depM = 0.0f;
+    *depDeg = 0.0f;
+    if (!ch.valid || !ch.stepKnown) return;
+    float d[3];
+    for (int i = 0; i < 3; ++i) d[i] = rows[3 + 4 * i] - (ch.pos[i] + ch.step[i]);
+    *depM = temporalChainVecLen(d);
+    float predR[9], rn[9];
+    temporalMul3(ch.rot, ch.rotStep, predR);
+    temporalRot3Of34(rows, rn);
+    *depDeg = temporalChainRotBetweenDeg(predR, rn);
+}
+
+// Does the candidate agree with the chain's prediction? True whenever the
+// chain has no step yet. Departures come back for the log either way.
+inline bool temporalChainAgrees(const TemporalCameraChain& ch, const float rows[12],
+                                float* depM = nullptr, float* depDeg = nullptr) {
+    float m = 0.0f, deg = 0.0f;
+    temporalChainDeparture(ch, rows, &m, &deg);
+    if (depM) *depM = m;
+    if (depDeg) *depDeg = deg;
+    if (!ch.valid || !ch.stepKnown) return true;
+    return m <= kTemporalChainPosFloor + kTemporalChainPosK * temporalChainVecLen(ch.step) &&
+           deg <= kTemporalChainRotFloor + kTemporalChainRotK * ch.rotStepDeg;
+}
+
+// Does the candidate agree with last frame's pending pick? False when no pick
+// is pending.
+inline bool temporalChainReanchors(const TemporalCameraChain& ch, const float rows[12]) {
+    if (!ch.pendValid) return false;
+    float d[3], rn[9];
+    for (int i = 0; i < 3; ++i) d[i] = rows[3 + 4 * i] - ch.pendPos[i];
+    temporalRot3Of34(rows, rn);
+    return temporalChainVecLen(d) <= kTemporalChainPosFloor + kTemporalChainPosK * temporalChainVecLen(ch.pendStep) &&
+           temporalChainRotBetweenDeg(ch.pendRot, rn) <= kTemporalChainRotFloor + kTemporalChainRotK * ch.pendRotStepDeg;
+}
+
+// Moves the chain to rows, its step and rotation step measured from the pose
+// (fromPos, fromRot), which the caller passes by value of the chain's own.
+inline void temporalChainMove(TemporalCameraChain& ch, const float fromPos[3],
+                              const float fromRot[9], const float rows[12]) {
+    float p0[3] = {fromPos[0], fromPos[1], fromPos[2]};
+    float r0[9];
+    memcpy(r0, fromRot, sizeof(r0));
+    float rn[9], rT[9];
+    temporalRot3Of34(rows, rn);
+    temporalTranspose3(r0, rT);
+    temporalMul3(rT, rn, ch.rotStep);
+    ch.rotStepDeg = temporalRotationAngleDeg(ch.rotStep);
+    for (int i = 0; i < 3; ++i) {
+        ch.pos[i] = rows[3 + 4 * i];
+        ch.step[i] = ch.pos[i] - p0[i];
+    }
+    memcpy(ch.rot, rn, sizeof(rn));
+    ch.valid = true;
+    ch.stepKnown = true;
+    ch.pendValid = false;
+}
+
+// The chooser's commit for the pick: moves the chain, or holds the pick as
+// pending, and says which. Call once per frame with the pick's rows, after
+// the candidates were judged against the same chain state.
+inline TemporalChainOutcome temporalChainCommit(TemporalCameraChain& ch, const float rows[12]) {
+    if (!ch.valid) {
+        float rn[9];
+        temporalRot3Of34(rows, rn);
+        for (int i = 0; i < 3; ++i) {
+            ch.pos[i] = rows[3 + 4 * i];
+            ch.step[i] = 0.0f;
+        }
+        memcpy(ch.rot, rn, sizeof(rn));
+        memset(ch.rotStep, 0, sizeof(ch.rotStep));
+        ch.rotStep[0] = ch.rotStep[4] = ch.rotStep[8] = 1.0f;
+        ch.rotStepDeg = 0.0f;
+        ch.valid = true;
+        ch.stepKnown = false;
+        ch.pendValid = false;
+        return TemporalChainOutcome::Anchored;
+    }
+    if (temporalChainAgrees(ch, rows)) {
+        temporalChainMove(ch, ch.pos, ch.rot, rows);
+        return TemporalChainOutcome::Chain;
+    }
+    if (temporalChainReanchors(ch, rows)) {
+        temporalChainMove(ch, ch.pendPos, ch.pendRot, rows);
+        return TemporalChainOutcome::Reanchored;
+    }
+    // Departed: held as the pending reference, its step from the pose it
+    // departed from (the earlier pending pick, else the chain).
+    float rn[9], p[3];
+    temporalRot3Of34(rows, rn);
+    for (int i = 0; i < 3; ++i) p[i] = rows[3 + 4 * i];
+    const float* fromPos = ch.pendValid ? ch.pendPos : ch.pos;
+    const float* fromRot = ch.pendValid ? ch.pendRot : ch.rot;
+    float newStep[3];
+    for (int i = 0; i < 3; ++i) newStep[i] = p[i] - fromPos[i];
+    ch.pendRotStepDeg = temporalChainRotBetweenDeg(fromRot, rn);
+    memcpy(ch.pendStep, newStep, sizeof(newStep));
+    memcpy(ch.pendPos, p, sizeof(p));
+    memcpy(ch.pendRot, rn, sizeof(rn));
+    ch.pendValid = true;
+    return TemporalChainOutcome::Departed;
+}
+
+// The guard for this frame's delta, after its commit: carried when the pick
+// departed or the rows it is measured from did. Call once per frame.
+inline bool temporalChainGuard(TemporalCameraChain& ch, TemporalChainOutcome o) {
+    const bool departed = o == TemporalChainOutcome::Departed;
+    const bool guard = departed || ch.prevDeparted;
+    ch.prevDeparted = departed;
+    return guard;
+}
+
+// A frame with no pick: the chain holds, and nothing is pending.
+inline void temporalChainNoPick(TemporalCameraChain& ch) {
+    ch.pendValid = false;
+    ch.prevDeparted = false;
 }
 
 // The whole reprojection for one pixel, as the shader does it: the pixel's
