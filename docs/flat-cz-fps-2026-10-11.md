@@ -26,6 +26,10 @@ Built (commit 1): a published flag `g_claimsLive` (no source claim and no detach
 the header locks `g_mutex`. A clear with the flag false returns without the mutex; a merge with it false gets a fixed token with
 no plan, no walk and no allocation; the clear walk's three sets are small-buffer sets (no heap up to 8 nodes). Expected gain:
 about 2-3 ms of the 10-25 ms delta.
+Built (commit 2): the pool copier gets a lock-free exit for the quiet cases (count 0, no lease at the base, one lease that fits)
+when no claim, no plan and no pool patch is published; a seqlock-published view of the active leases (`g_poolView`) lets it
+classify the call. Counters fold into `stats()`, so `copier spans` and `no active map` keep their meaning. Ambiguous leases, bad
+ranges, strides and counts, and any claim or patch still take the mutex.
 Open: was the reporter fine on 0.19.0? The observers and the flat substitution are byte-identical between v0.19.0 and v0.19.1
 and the always-on 0.19.1 additions all run in the 45 fps off state, so the diff cannot explain it. Ask which `temporal_aa`
 mode and which scene they ran on 0.19.0.
@@ -41,6 +45,10 @@ for a no-claim merge, and `merge plans` counts full plans only. The observer-wor
 Unwind of the no-claim token revokes every claim registered since (the old empty plan spared unrelated later owners after a
 clear or a frame change). Safe direction, native unwinds only; two old checks now assert it. The full plan keeps its precision
 (tests in `primary_copy_observer_tests.h`). A malformed list with no claims no longer bumps the epoch or counts a merge failure.
+Commit 2: every entry point that can change a lease, base, size or patch sets `g_poolsDirty`; `ClaimLock` then rebuilds the view,
+and opens the seqlock window only if something differs. A copy that read an odd or moved sequence takes the mutex. The skipped copy
+is ordered before any critical section still in flight. That is legal on one premise, not proven here: the engine finishes an
+item's emit, and the Map that returned its destination, before that item's copy starts. The copier's equivalence tests run the pre-change copier beside it on 21 configurations.
 
 ## Benchmark
 
@@ -60,7 +68,11 @@ Elite's lists, ns per call, one machine, same run for both columns.
 | 4 threads, clear no claims (per thread) | 95 ns | 32 ns |
 | 4 threads, merge then clear, no claims | 2784 ns | 63 ns |
 | 4 threads, merge then clear, claims present | 3766 ns | 1996 ns |
-| copier, active pool, no claims, 1 slot | 16.9 ns | 16.8 ns |
-| 4 threads, copier (per thread) | 119 ns | 119 ns |
+| copier, active pool, no claims, 1 slot (commit 1 vs 2) | 16.8 ns | 5.5 ns |
+| copier, 8 slots | 40.9 ns | 5.5 ns |
+| 4 threads, copier (per thread) | 116 ns | 32 ns |
+| copier against 3 threads calling `invalidateEmission` | 80 ns | 5.5 ns |
+| same, 16 copies per map+unmap cycle (per copy) | 97 ns | 68 ns |
 
-The 4-thread no-claim figures are bounded by two shared counters; striping them was not worth the code.
+The 4-thread no-claim figures are bounded by shared counters; striping them was not worth the code. The first block is commit 1
+against the baseline, the copier rows commit 2 against commit 1.
