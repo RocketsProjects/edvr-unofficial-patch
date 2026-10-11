@@ -13,10 +13,10 @@
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
 - **Current integration:** main `3983bb45` integrated at `b917041e`.
-  Sampler startup validated in
-  `build/full-plugin-sampler-startup-offline-20261010-r1.log` (receipt
-  `48646d16`). Selections remain informational; availability stays
-  closed.
+  Sampler startup is pushed as `752c7412`. Admission foundation passed
+  `build/full-plugin-admission-foundation-offline-20261010-r1.log`
+  (receipt `b9efec6f`). Helpers have no production callers; selections
+  remain informational and availability stays closed.
 - **Module progress:** Performance owns resolution, FOV engine/settings,
   and sampler. Cockpit owns RemLok and TargetSharp policy/state; shared
   VScreen services stay core. Diagnostics owns scheduler. Comfort owns
@@ -4796,3 +4796,56 @@ identifies concrete remaining host bypasses for subsequent work.
 No Steam install, live settings edit, promotion or flight occurred.
 Feature-to-main remains held until shipping approval; final matched
 performance validation remains at rendering-code freeze.
+
+### 2026-10-10 — shared admission rules and exact loaded-peer qualification
+
+After the pushed sampler checkpoint `752c7412`, the shared admission
+rules became source in `src/common/plugin_selection_admission.h/.cpp`.
+They derive group identity and readiness from the generated catalog,
+validate the original snapshot facts, and require every applicable group
+to be ready before a profile can yield an admitted candidate. The
+generated catalog is constant-initialized. The current supported-profile
+mask remains zero. These are local candidates with no production caller,
+cross-DLL commitment or owner activation.
+
+The fixture covers independent VR/Flat owner inventories, empty and
+selected all-ready masks, a missing applicable ready group,
+profile/schema/fingerprint/reserved/mask errors, non-S_OK capture, zero
+provider, malformed decisions, and index bounds. Review caught a Legacy
+fallback that interpreted an invalid source mask; the repaired path
+preserves every applicable Legacy owner. Synthetic Flat readiness proves
+only these pure rules, not graphics-only production admission.
+
+`src/common/plugin_admission_peer.h/.cpp` owns a reference to an exact
+already-loaded drive-absolute module, checks its mapped path, rejects
+forwarded export RVAs before export lookup, and verifies address
+ownership. It neither loads a provider nor calls its ABI. The real Win32
+fixture exercises absent and explicitly late-loaded peers, old peers,
+duplicate basenames, initially absent and preloaded forwarder targets,
+rejected paths, and reference balance. Review also repaired embedded-NUL
+handling, export metadata bounds, and exception-safe ownership of
+modules and the fixture's temporary subtree. UNC and extended paths
+conservatively reject.
+
+Both focused native fixtures passed in
+`build/focused-admission-foundation-20261010-r2.log`; the source gate
+passed five in-memory mutations. The normal full build compiled both
+helpers without fixture macros into the graphics and native DLLs, ran
+166 jobs, and passed production, PE/export, config and installer gates
+in `build/full-plugin-admission-foundation-offline-20261010-r1.log`,
+receipt
+`b9efec6f57e949c809f25bee46f9edb35dfb935c8c8c2fcf060e2f5a6a556b47`.
+Native ordinals 1–16 and graphics exports remain unchanged. The
+definition-only forwarder fixture emits the expected nonfatal LNK4001
+warning.
+
+The load-order audit ruled out mapped native-module presence as proof of
+Elite's chosen live owner: `refresh()` in `src/d3d11/vr_runtime.cpp`
+classifies exports before `VR_InitInternal` creates ownership.
+Preloaded-only admission remains a conservative proposal. Explicit
+loading still needs routing and reentry proofs; the exact-peer fixture
+does not establish Pimax launch order or behavior under graphics
+INIT_ONCE. Immutable peer commitment, real early owner gates,
+whole-group absence and the Flat production route remain open. No Steam
+install, live-settings edit, promotion, flight or feature-to-main merge
+occurred.

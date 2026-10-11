@@ -1,0 +1,3 @@
+LIBRARY forwarder_fixture
+EXPORTS
+    FixtureAdmissionProbe=provider_fixture.FixtureAdmissionProbe

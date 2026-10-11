@@ -1,0 +1,3 @@
+LIBRARY old_peer_fixture
+EXPORTS
+    FixtureOldPeerOnly

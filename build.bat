@@ -337,6 +337,8 @@ python "tools\plugin_lifecycle_wiring_test.py" --self-test || exit /b 1
 python "tools\performance_sampler_test\source_test.py" --self-test || exit /b 1
 python "tools\plugin_selection_transport_test\source_test.py" --dry-run || exit /b 1
 python "tools\plugin_selection_transport_test\source_test.py" --self-test || exit /b 1
+python "tools\plugin_admission_peer_test\source_test.py" --dry-run || exit /b 1
+python "tools\plugin_admission_peer_test\source_test.py" --self-test || exit /b 1
 python "tools\target_sharp_wiring_test.py" --dry-run || exit /b 1
 python "tools\target_sharp_wiring_test.py" --self-test || exit /b 1
 
@@ -683,6 +685,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
     "src\common\frame_flag.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" "src\common\plugin_selection_snapshot.cpp" ^
+    "src\common\plugin_selection_admission.cpp" "src\common\plugin_admission_peer.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
@@ -805,6 +808,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_
     /I"third_party\openxr\include" /I"%GEN%" /Fo"%OBJ%\openxr_module\\" ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" "src\common\plugin_selection_snapshot.cpp" "src\common\iniedit.cpp" ^
+    "src\common\plugin_selection_admission.cpp" "src\common\plugin_admission_peer.cpp" ^
     "src\plugins\performance\fov_trim_policy.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
@@ -1147,6 +1151,55 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: FOV trim settings policy test build failed & exit /b 1 )
 "%BUILD%\fov_trim_settings_test.exe" --dry-run || exit /b 1
 "%BUILD%\fov_trim_settings_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_plugin_selection_admission_test
+echo [edvr] === plugin_selection_admission_test.exe ===
+if not exist "%OBJ%\plugin_selection_admission" mkdir "%OBJ%\plugin_selection_admission"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DEDVR_SELECTION_ADMISSION_TEST /I"%GEN%" /I"src\common" ^
+    /Fo"%OBJ%\plugin_selection_admission\\" /Fe"%BUILD%\plugin_selection_admission_test.exe" ^
+    "tools\plugin_selection_admission_test\plugin_selection_admission_test.cpp" ^
+    "src\common\plugin_selection_admission.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: plugin selection admission fixture build failed & exit /b 1 )
+"%BUILD%\plugin_selection_admission_test.exe" --dry-run || exit /b 1
+"%BUILD%\plugin_selection_admission_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_plugin_admission_peer_test
+echo [edvr] === plugin_admission_peer_test.exe ===
+if not exist "%OBJ%\plugin_admission_peer" mkdir "%OBJ%\plugin_admission_peer"
+if not exist "%BUILD%\plugin_admission_peer_fixtures" mkdir "%BUILD%\plugin_admission_peer_fixtures"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\plugin_admission_peer\provider.obj" ^
+    /Fe"%BUILD%\plugin_admission_peer_fixtures\provider_fixture.dll" ^
+    "tools\plugin_admission_peer_test\provider.cpp" ^
+    /link /INCREMENTAL:NO /DEF:"tools\plugin_admission_peer_test\provider.def" ^
+    /IMPLIB:"%BUILD%\plugin_admission_peer_fixtures\provider_fixture.lib"
+if errorlevel 1 ( echo [edvr] ERROR: admission provider fixture build failed & exit /b 1 )
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\plugin_admission_peer\old_peer.obj" ^
+    /Fe"%BUILD%\plugin_admission_peer_fixtures\old_peer_fixture.dll" ^
+    "tools\plugin_admission_peer_test\old_peer.cpp" ^
+    /link /INCREMENTAL:NO /DEF:"tools\plugin_admission_peer_test\old_peer.def" ^
+    /IMPLIB:"%BUILD%\plugin_admission_peer_fixtures\old_peer_fixture.lib"
+if errorlevel 1 ( echo [edvr] ERROR: admission old-peer fixture build failed & exit /b 1 )
+link.exe /nologo /DLL /NOENTRY /MACHINE:X64 ^
+    /DEF:"tools\plugin_admission_peer_test\forwarder.def" ^
+    /OUT:"%BUILD%\plugin_admission_peer_fixtures\forwarder_fixture.dll" ^
+    /IMPLIB:"%BUILD%\plugin_admission_peer_fixtures\forwarder_fixture.lib"
+if errorlevel 1 ( echo [edvr] ERROR: admission forwarder fixture build failed & exit /b 1 )
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\common" /Fo"%OBJ%\plugin_admission_peer\\" ^
+    /Fe"%BUILD%\plugin_admission_peer_test.exe" ^
+    "tools\plugin_admission_peer_test\plugin_admission_peer_test.cpp" ^
+    "src\common\plugin_admission_peer.cpp" /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: admission peer fixture build failed & exit /b 1 )
+"%BUILD%\plugin_admission_peer_test.exe" --dry-run || exit /b 1
+"%BUILD%\plugin_admission_peer_test.exe" --self-test ^
+    "%BUILD%\plugin_admission_peer_fixtures\provider_fixture.dll" ^
+    "%BUILD%\plugin_admission_peer_fixtures\old_peer_fixture.dll" ^
+    "%BUILD%\plugin_admission_peer_fixtures\forwarder_fixture.dll" || exit /b 1
 exit /b 0
 
 :rig_plugin_selection_transport_test
