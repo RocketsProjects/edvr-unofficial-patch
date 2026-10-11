@@ -82,6 +82,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
+#include "hmd_camera_tag_hook.h"       // hmdCameraTagInstall at startup: the headset camera tag's coordinator hook (VR; fix.hmd_camera_tag)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
 #include "boundary_tick.h"   // one fault budget per frame-boundary tick
 #include "vscreen.h"
@@ -2865,6 +2866,9 @@ void hookDevice(ID3D11Device* device) {
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on, VR only (a flat session says
             // it is inert). A build that is not 332841 is scanned for the call site; anything short of one match is one log line and nothing patched.
             terrainCullCoverInstall(runtimeFlatProfile());
+            // The headset camera tag (hmd_camera_tag_hook.cpp; hmd_camera_tag.h): a CodeHook on the camera coordinator that the headset block's commit
+            // runs inside, VR only. Any miss is one log line and nothing patched; the chooser then keeps today's pick.
+            hmdCameraTagInstall(runtimeFlatProfile());
 
             // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
             // own commit writes two dozen entries of this table in the shared

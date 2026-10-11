@@ -20,6 +20,7 @@ struct Draw {
     uint32_t indexCount = 0;   // the draw's index count per instance
     uint32_t seq = 0;          // the scene block's write clock for the latest write before the draw (0 = none this frame)
     bool     hasRows = false;  // that write's rows were a rotation
+    bool     hmd = false;      // the rows equal the frame's latest headset-stamped write (hmd_camera_tag.h), made before the draw
     float    T[3] = {};        // the rows' translation: the camera's place in the world
     float    R[4] = {};        // the rows' rotation as a quaternion, w x y z
     float    P[16] = {};       // the projection block's floats 784-799
@@ -92,8 +93,8 @@ inline bool noteDraw(Ring& ring, bool wanted, uint32_t frame, int eye, const Dra
 // One TDRW line, without the logger's prefix. Returns the number of characters written, or 0 when the buffer is too small.
 inline int formatDraw(char* buf, size_t n, uint32_t frame, int eye, uint32_t i, const Draw& d) {
     int len = std::snprintf(buf, n,
-        "TDRW f%u eye=%d i=%u vs=%016llX n=%u seq=%u rows=%d T=(%+.7g,%+.7g,%+.7g) R=(%+.6g,%+.6g,%+.6g,%+.6g) P=(",
-        frame, eye, i, static_cast<unsigned long long>(d.vs), d.indexCount, d.seq, d.hasRows ? 1 : 0,
+        "TDRW f%u eye=%d i=%u vs=%016llX n=%u seq=%u rows=%d hmd=%d T=(%+.7g,%+.7g,%+.7g) R=(%+.6g,%+.6g,%+.6g,%+.6g) P=(",
+        frame, eye, i, static_cast<unsigned long long>(d.vs), d.indexCount, d.seq, d.hasRows ? 1 : 0, d.hmd ? 1 : 0,
         d.T[0], d.T[1], d.T[2], d.R[0], d.R[1], d.R[2], d.R[3]);
     if (len <= 0 || static_cast<size_t>(len) >= n) return 0;
     for (int j = 0; j < 16; ++j) {
@@ -103,6 +104,18 @@ inline int formatDraw(char* buf, size_t n, uint32_t frame, int eye, uint32_t i, 
     }
     len += std::snprintf(buf + len, n - static_cast<size_t>(len), ")");
     return len;
+}
+
+// The census cost line's text, without the logger's prefix: the interval's draws, its frames and the census's own QPC ticks (ticksPerSecond from
+// QueryPerformanceFrequency). Returns the length written, or a negative value on an encoding error. Zero frames and zero draws print as zeros.
+inline int formatCost(char* buf, size_t n, uint64_t calls, uint32_t frames, uint64_t ticks, double ticksPerSecond) {
+    const double f = frames ? static_cast<double>(frames) : 1.0;
+    const double totalUs = ticksPerSecond > 0.0 ? static_cast<double>(ticks) * 1.0e6 / ticksPerSecond : 0.0;
+    return std::snprintf(buf, n,
+        "temporal draw census: %llu recognised eye-target draws over %u frames (%.1f a frame); the census "
+        "cost %.1f us a frame (%.2f us a draw) on the render thread",
+        static_cast<unsigned long long>(calls), frames, static_cast<double>(calls) / f,
+        totalUs / f, calls ? totalUs / static_cast<double>(calls) : 0.0);
 }
 
 }  // namespace edvr::census

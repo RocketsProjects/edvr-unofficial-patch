@@ -6550,6 +6550,9 @@ void vScreenFrameBoundary() {
                 }
                 // The ship split on foot, with its zeros: the same interval, so the two read together.
                 temporalPassNoteFootTotals();
+                // The per-draw census's cost line. Its own call, not inside the registration's: that one returns early on the native
+                // resolve's interval count, which the trained path never advances (temporal_pass.cpp, temporalPassCensusLine).
+                temporalPassCensusLine();
             }
         }
         // The trained pass's, when it runs.

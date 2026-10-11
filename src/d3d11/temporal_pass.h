@@ -93,6 +93,8 @@ bool temporalPassDrawsWanted();
 void temporalPassNoteEyeDraw(ID3D11DeviceContext* ctx, const void* dsv, uint64_t vertexShaderHash, uint32_t indexCount);
 // This frame's rows become last frame's; called at the frame boundary.
 void temporalPassFrameBoundary();
+// The census's cost line (diag.temporal_draws), called by vscreen's totals when they move. Own counters, reset after the print; silent with the key off.
+void temporalPassCensusLine();
 // The rows the pass CHOSE for the frame in progress (chooseCameraRows' pick: float 932 of the scene block, three 3x4 rows), for the VR camera census's episodes
 // (vr_camera_census_core.h: it matches them to the calls' view axes). Side-effect free: nothing is chosen, latched or counted by asking. False when no rows stand --
 // the pass is not wanted, or the frame has not treated yet (the choice is made at the first treat) or chose none; `rows` is then untouched. `bound` says the chosen

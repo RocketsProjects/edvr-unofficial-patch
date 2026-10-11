@@ -9,8 +9,7 @@
   and smaller). The census (`diag.temporal_draws`, default off) asks whether a view-pose
   draw exists every frame and whether its VS hash or projection identifies it. Next:
   same hangar, key on, Pause on visible resets (2026-10-11 entry).
-- **2026-10-11 (static, NOT flown):** the headset block's commit is inferred to run inside
-  coordinator `0x594B60` (only direct caller: VR job `0x2868C30`, call at `0x286906E`). See the entry at the end.
+- **2026-10-11 (built, NOT flown):** `fix.hmd_camera_tag` hooks coordinator `0x594B60` and stamps the writes made inside it; the chooser takes the frame's latest stamp. Entry at the end. Next: hangar, key on then off.
 
 - **State:** the 2026-09-25 gate fix (branch `claude/camera-rows-carry`, merged
   to main) is FLOWN and working as designed, and its open hypothesis is now
@@ -389,3 +388,35 @@ record loop 0x4C52E40 -> upload @0x4C53126 (vtable 0x5A6E0F8 +0x10)
 - Log per frame: depth, C, and the number of stamped Unmaps. Expect one stamped set per frame, including a block of 3776 bytes or more. Refute: no stamped block while depth > 0, which means the commit is deferred and the inferred step fails.
 - Compare the stamped block's rows at float 932 with the eye draws' TDRW rows, using the 5e-6 test from 2026-09-28.
 - Static follow-up that would turn the inferred step into a proof: find the vtable of the items in `[C+0x108]` (the constructors that store it into objects added to that list) and read its `+0x88`.
+
+## 2026-10-11 -- the headset tag, built on build 332841 (NOT flown)
+
+Branch `claude/vr-camera-hmd-tag`, from `claude/vr-camera-source-trace` e1d7c4c9. Full build green; the commit and `--dll-only` promotion are in the git log.
+
+**What was built.**
+- **Hook** (`src\d3d11\hmd_camera_tag_hook.cpp`): a CodeHook on `EliteDangerous64.exe+0x594B60`, the coordinator. Gated on the PE stamp 1788384820 and image size 104894464, the 30 prologue bytes, and the 7 call-site bytes at `0x2869068` (`B2 01 48 8B 48 18 E8`) whose rel32 resolves to `0x594B60`. Any miss is one `hmd camera tag: inert:` line, nothing patched, the chooser unchanged. VR only; flat is inert.
+- **Detour**: a thread-local depth scope (RAII, so a C++ throw restores it) around the original call. It records rcx, the thread id and the frame. It allocates and logs nothing.
+- **Stamp**: `temporalPassNoteSceneWrite` (`src\d3d11\temporal_pass.cpp`, called from the camResource Unmap at `src\d3d11\vscreen.cpp`, the `g_temporalCameraBudget` block) marks a rotation write `hmd` when the Unmap runs on a thread inside the coordinator.
+- **Chooser** (`chooseCameraRows`): after today's pick, the frame's latest stamped write replaces it when `fix.hmd_camera_tag` is on. With no stamp, or the key off, the pick is today's. The counts run either way, so the line says what the tag would have done.
+- **Key**: `fix.hmd_camera_tag`, default on, in `edvr.ini` `[fix]` as a hidden flight A/B (it must go when the arc closes). Flat reads it `off`: the key is not on the flat allow-list (`runtime_profile.h`).
+- **Pure core**: `src\common\hmd_camera_tag.h` (gate, depth scope, `latestStamped`, `decide`, the 30 s line's text). Rig: `tools\temporal_test`, 22 new checks (gate on the true bytes and on one-byte changes, a stamp chosen over a newer unstamped pose, the no-stamp fallback, key off, depth balance across nesting and a throw, the 30 s line, the census cost line, the TDRW `hmd` field). All pass.
+
+**Instruments.**
+- `temporal hmd tag: hook=live|inert:<why> coordinator_calls=.. per_frame=.. stamped_writes=.. frames_with_stamp=a/b chosen_by_tag=.. fallback=.. disagree=.. key=on|off last_frame=.. last_thread=.. last_c=..` every 30 s, on its own QPC clock at the frame boundary, zeros included.
+- TCAM `cf` bit `0x400` = the pick is the stamped write (legend updated).
+- TDRW gains `hmd=1` when the draw's object rows equal the frame's latest stamped rows made before the draw.
+
+**The census line (`temporal draw census:`), root cause.** `temporalPassRegistration` returns at its entry guard when `g_intervalFrames == 0`, and the census line was the last thing it printed. `g_intervalFrames` is advanced only by the native resolve's stats readback in `pollSlots`. A trained (DLAA/DLSS) frame queues its slot with `statsDone = true` (`temporal_pass.cpp`, the enqueue: `statsDone = !(statsWritten || (ran && !usedDlaa && !leanOwn))`), so the readback never runs. The trained path still advances `g_treats`, so the totals line printed and the census did not. Evidence: `edvr_gfx_20261011_072408.log` (DLAA; "first trained frame" at 07:24:13) has 5 TDRW legend lines and no census line, and none of the 25 recent logs carries a `temporal aa registration:` line. The census counters were also reset inside that function after the return, so on the trained path they were never reset and the cost was a session total. Fix: the line is now `temporalPassCensusLine()`, called from vscreen's totals block, with its own counters and frame count (`g_tdrwFrames`; the old denominator was `g_rowsFramesSum`, which only the registration reset). The cadence is the 20 s totals window (`kTotalsWindowMs`), not the 30 s this doc's earlier note said. Not fixed here: the registration line has the same guard, so it still never prints on the trained path.
+
+**Risks.**
+- The stamp assumes the headset block's Map/memcpy/Unmap run on the thread that calls the coordinator. That is inferred, not proven. If they run elsewhere, `stamped_writes=0`, every frame is a fallback, and the chooser is today's. That is the designed failure mode, but the flight will look like "hook live, nothing stamped".
+- The coordinator also calls `0x6BE790`, `0x5919E0` and `0x5875B0` inside the scope. A camera-block Unmap made there on the same thread would be stamped too. A wrong stamp shows as `disagree` and as TDRW rows that differ from the view.
+- The chooser runs at the frame's first treat. A stamp written after that is not seen this frame, as with the legacy pick.
+- The hook's last-call fields are per call, not per frame: `last_frame` reads the frame the chooser was on, which can lag the game's frame by one.
+
+**Next flight** (hangar, the same docked scene as 2026-10-11 055853; Pause on visible resets):
+1. `fix.hmd_camera_tag = on`, `diag.temporal_draws = on`. Expect: `hook=live`; `per_frame` about 1.00; `frames_with_stamp` about all frames; `chosen_by_tag` about all frames; `disagree` nonzero only on the one-frame excursion frames (the 0x2000 origin-step frames); no visible resets on Pause.
+2. `fix.hmd_camera_tag = off`, same scene. Expect: the same `hook=live` and counts, `chosen_by_tag=0`, and the excursion frames back, with `disagree` still counted (it says what the tag would have done).
+3. In either run, the `temporal draw census:` line should now print each 20 s totals window. Its cost figure is per window, not a session total.
+4. TDRW `hmd=1` rows should equal the TCAM `selected rows` (the view pose) on every frame that has a stamp.
+Refute: `stamped_writes=0` with `hook=live` means the Unmap is not on the coordinator's thread; the next static step is the `[C+0x108]` item vtable's `+0x88`.

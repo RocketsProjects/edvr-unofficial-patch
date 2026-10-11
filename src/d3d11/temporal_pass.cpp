@@ -31,6 +31,8 @@
 #include "../common/supersample_math.h"   // supersampleRegionFromBounds: one region rule at the door
 #include "../common/temporal_math.h"
 #include "../common/temporal_census.h"   // the per-draw census's ring and TDRW format (diag.temporal_draws)
+#include "../common/hmd_camera_tag.h"    // the headset camera tag: the stamp, the chooser's pick and the 30 s line (fix.hmd_camera_tag)
+#include "hmd_camera_tag_hook.h"         // the coordinator hook's state and frame, for the 30 s line
 #include "depth_probe.h"
 #include "luma_probe.h"
 #include "dlaa.h"
@@ -2138,6 +2140,7 @@ struct RowsWrite {
     uint32_t    seq = 0;
     uint32_t    observedSeq = 0; // diagnostic clock, includes rejected non-rotation writes
     bool        valid = false;
+    bool        hmd = false;     // made inside the camera coordinator on this thread: the headset block's commit (hmd_camera_tag.h)
 };
 enum CameraChoiceFlag : uint32_t {
     kChoiceValid          = 1u << 0,
@@ -2150,6 +2153,7 @@ enum CameraChoiceFlag : uint32_t {
     kChoiceResync         = 1u << 7,
     kChoiceRefollow       = 1u << 8,
     kChoiceBoundLatchRows = 1u << 9,
+    kChoiceByTag          = 1u << 10,   // the pick is the headset-stamped write (fix.hmd_camera_tag on, a stamp this frame)
 };
 enum CameraDrawFlag : uint32_t {
     kDrawSeen             = 1u << 0,
@@ -2209,6 +2213,14 @@ bool        g_boundLatchRowsValid = false;
 uint32_t    g_rowsWrites = 0;        // writes this frame
 uint64_t    g_rowsWritesSum = 0;     // ...summed over the interval
 uint32_t    g_rowsFramesSum = 0;
+// The headset camera tag (hmd_camera_tag.h): fix.hmd_camera_tag (VR; flat reads it off), the 30 s line's window, the frame's latest stamped rows (the
+// census's hmd flag compares against them), and when the window began.
+hmdtag::Stats g_tag;
+bool          g_tagKeyOn = false;
+int64_t       g_tagWindowTicks = 0;
+uint32_t      g_hmdRowsFrame = ~0u;
+bool          g_hmdRowsValid = false;
+float         g_hmdRows[12] = {};
 uint64_t    g_candSumCount = 0;      // this frame's candidate writes, summed
 uint32_t    g_chooseBound = 0;       // frames whose chosen rows were the bound object's
 uint32_t    g_chooseOther = 0;       // ...another object's, by continuity
@@ -2433,6 +2445,23 @@ void chooseCameraRows() {
     } else {
         ++g_chooseNone;
     }
+    // The headset tag (hmd_camera_tag.h): the latest write the headset block's commit stamped this frame. With fix.hmd_camera_tag on it replaces
+    // today's pick; with it off, or with no stamp this frame, the pick stays today's. The counts run either way, so the 30 s line says what the
+    // tag would have done.
+    const int tagIdx = hmdtag::latestStamped(kRowsRing, g_rowsFrame, [](int i) {
+        const RowsWrite& w = g_rowsRing[i];
+        return hmdtag::Cand{w.valid ? w.frame : ~0u, w.seq, w.valid && w.hmd};
+    });
+    const hmdtag::Decision dec = hmdtag::decide(pick, tagIdx, g_tagKeyOn);
+    ++g_tag.frames;
+    if (tagIdx >= 0) ++g_tag.framesWithStamp;
+    else ++g_tag.fallback;
+    if (dec.disagree) ++g_tag.disagree;
+    if (dec.byTag) {
+        ++g_tag.chosenByTag;
+        g_rowsChoice.flags |= kChoiceByTag;
+    }
+    pick = dec.pick;
     if (pick >= 0) {
         g_rowsChoice.flags |= kChoiceValid;
         g_rowsChoice.selectedResource = g_rowsRing[pick].buf;
@@ -4421,6 +4450,7 @@ std::mutex   g_tdrwMutex;
 bool         g_tdrwOn = false;        // diag.temporal_draws (temporary, default off)
 uint64_t     g_tdrwTicks = 0;         // the census's own cost this interval, in QPC ticks
 uint64_t     g_tdrwCalls = 0;         // recognised eye-target draws recorded this interval
+uint32_t     g_tdrwFrames = 0;        // frames this interval while the census is on: the cost line's denominator (its own clock, see temporalPassCensusLine)
 
 bool temporalPassDrawsWanted() {
     return g_tdrwOn && detail::g_temporalPassWantedFssChrome;
@@ -4440,6 +4470,9 @@ void temporalPassNoteEyeDraw(ID3D11DeviceContext* ctx, const void* dsv, uint64_t
         census::fillDraw(d, vertexShaderHash, indexCount, observed ? observed->rows : nullptr,
                          observed && observed->rowsValid, observed ? observed->seq : 0u,
                          observed ? observed->blk : nullptr);
+        // The tag's test: this object's rows are the frame's latest headset-stamped rows (made before this draw).
+        d.hmd = observed && observed->rowsValid && g_hmdRowsValid && g_hmdRowsFrame == g_rowsFrame &&
+                memcmp(observed->rows, g_hmdRows, sizeof(g_hmdRows)) == 0;
         if (cb) cb->Release();
         std::lock_guard<std::mutex> lock(g_tdrwMutex);
         census::noteDraw(g_tdrwRing, true, g_rowsFrame, eye, d, &g_tdrwCalls);
@@ -4469,7 +4502,7 @@ void temporalPassDumpHistory(const char* trigger) {
     Log::get().note(
         "TCAM legend: choice flags 1 valid,2 bound seen,4 bound write observed,8 selected bound,"
         "10 continuous,20 identical-to-previous twin present,40 twin fallback,80 resync,100 refollow,"
-        "200 bound rows valid. Draw flags 1 eligible draw seen,2 mapped write observed,4 rows valid,"
+        "200 bound rows valid, 400 chosen by the headset tag (fix.hmd_camera_tag). Draw flags 1 eligible draw seen,2 mapped write observed,4 rows valid,"
         "8 previous draw rows valid,10 same resource,20 same observed write,40 same rows,80 selection later. "
         "Rows are literal scene rows; their origin is not assumed to be headset centre or eye pose. "
         "Detailed rows follow for the newest %zu of %zu eye calls; %zu older calls retain TEMP only.",
@@ -4578,6 +4611,9 @@ void temporalPassConfigure(Config& cfg) {
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
     // diag.temporal_draws (the per-draw census, TDRW lines): diagnostic, reads state only. Off by default; temporary.
     g_tdrwOn = cfg.getString("diag.temporal_draws", "off") == "on";
+    // fix.hmd_camera_tag (temporary A/B; hmd_camera_tag.h): on picks the headset-stamped write when the frame has one. VR only: the flat
+    // allow-list does not list it, so flat reads "off" and keeps today's pick.
+    g_tagKeyOn = cfg.getString("fix.hmd_camera_tag", "on") == "on";
     const bool wasWanted = detail::g_temporalPassWantedFssChrome;
     detail::g_temporalPassWantedFssChrome = temporalModeEnabled(mode);
     if (detail::g_temporalPassWantedFssChrome != wasWanted) {
@@ -4950,6 +4986,15 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     w.frame = g_rowsFrame;
     w.seq = g_rowsSeq;
     w.observedSeq = observedSeq;
+    // The headset tag (hmd_camera_tag.h): a write made inside the camera coordinator on this thread is the headset block's commit. Stamped on the
+    // thread that does the Unmap; the chooser and the census read the stamp. Nothing else changes for an unstamped write.
+    w.hmd = hmdtag::insideCoordinator();
+    if (w.hmd) {
+        ++g_tag.stampedWrites;
+        g_hmdRowsFrame = g_rowsFrame;
+        g_hmdRowsValid = true;
+        memcpy(g_hmdRows, f, sizeof(g_hmdRows));
+    }
     w.valid = true;
     ++g_rowsSeq;
 }
@@ -5039,9 +5084,11 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
     e.headNoted = true;
 }
 
+void temporalPassHmdTagTick();   // the 30 s line, defined with the census line below
 void temporalPassFrameBoundary() {
     g_eyeFinalClock.boundary(g_eyeFinalRun.armed);
     if (!detail::g_temporalPassWantedFssChrome) return;
+    temporalPassHmdTagTick();
     for (int eye = 0; eye < 2; ++eye) {
         if (g_rigidDraw[eye].seen && g_rigidDraw[eye].frame == g_rowsFrame) {
             g_prevRigidDraw[eye] = g_rigidDraw[eye];
@@ -5050,8 +5097,10 @@ void temporalPassFrameBoundary() {
         }
     }
     ++g_rowsFrame;
+    hmdCameraTagNoteFrame(g_rowsFrame);
     g_rowsWritesSum += g_rowsWrites;
     ++g_rowsFramesSum;
+    if (g_tdrwOn) ++g_tdrwFrames;
     g_rowsWrites = 0;
     g_rowsObservedWrites = 0;
     g_rowsObservedEvictions = 0;
@@ -5334,19 +5383,9 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
                   g_chooseMulti, g_chooseMulti ? g_chooseSpreadSum / g_chooseMulti : 0.0,
                   g_chooseSpreadMax, g_twinFrames);
     }
-    // The per-draw census's own line (diag.temporal_draws): how many recognised eye-target draws the interval saw, and
-    // what the census itself cost on the render thread (QPC around its work). Silent while the key is off.
-    if (g_tdrwOn) {
-        static LARGE_INTEGER freq{};
-        if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
-        const double frames = g_rowsFramesSum ? static_cast<double>(g_rowsFramesSum) : 1.0;
-        const double totalUs = freq.QuadPart ? static_cast<double>(g_tdrwTicks) * 1.0e6 / static_cast<double>(freq.QuadPart) : 0.0;
-        Log::get().note(
-            "temporal draw census: %llu recognised eye-target draws over %.0f frames (%.1f a frame); the census "
-            "cost %.1f us a frame (%.2f us a draw) on the render thread",
-            static_cast<unsigned long long>(g_tdrwCalls), frames, static_cast<double>(g_tdrwCalls) / frames,
-            totalUs / frames, g_tdrwCalls ? totalUs / static_cast<double>(g_tdrwCalls) : 0.0);
-    }
+    // The census's own line is temporalPassCensusLine's, on the totals' cadence but not behind this function's early return: that return
+    // needs g_intervalFrames, which only the native resolve's stats readback advances, so on the trained (DLAA/DLSS) path the census line
+    // never printed. Its counters are reset there, not here, for the same reason.
     // The interval starts afresh: the next line judges the next stretch.
     memset(g_candPix, 0, sizeof(g_candPix));
     memset(g_candRej, 0, sizeof(g_candRej));
@@ -5379,8 +5418,6 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_chooseNone = 0;
     g_camCarried = 0;
     g_camCarriedJump = 0;
-    g_tdrwTicks = 0;
-    g_tdrwCalls = 0;
     g_probeWorldDx = g_probeWorldDy = 0;
     g_probeWorldN = 0;
     g_probeShipDx = g_probeShipDy = 0;
@@ -5407,6 +5444,46 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     g_tvFrames = 0;
     g_twinFrames = 0;
     return true;
+}
+
+// The census's cost line (diag.temporal_draws): the draws it recorded, its frames and its own QPC cost, printed on the totals' cadence (vscreen
+// calls this when the totals move). Its counters reset here and nowhere else, after the print. Silent while the key is off.
+void temporalPassCensusLine() {
+    if (!g_tdrwOn) return;
+    static LARGE_INTEGER freq{};
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    uint64_t calls = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_tdrwMutex);
+        calls = g_tdrwCalls;
+        g_tdrwCalls = 0;
+    }
+    char line[400];
+    if (census::formatCost(line, sizeof(line), calls, g_tdrwFrames, g_tdrwTicks, static_cast<double>(freq.QuadPart)) > 0)
+        Log::get().note("%s", line);
+    g_tdrwTicks = 0;
+    g_tdrwFrames = 0;
+}
+
+// The headset tag's 30 s line (hmd_camera_tag.h), on a clock of its own, read at the frame boundary. Its window resets with each line, zeros included.
+void temporalPassHmdTagTick() {
+    const int64_t now = qpcNow();
+    const int64_t freq = qpcFrequency();
+    if (g_tagWindowTicks == 0) {
+        g_tagWindowTicks = now;
+        return;
+    }
+    if (freq <= 0 || now - g_tagWindowTicks < 30 * freq) return;
+    g_tagWindowTicks = now;
+    const HmdCameraTagState st = hmdCameraTagState();
+    hmdtag::Stats s = g_tag;
+    s.coordinatorCalls = hmdCameraTagTakeCalls();
+    s.lastC = st.lastC;
+    s.lastThread = st.lastThread;
+    s.lastFrame = st.lastFrame;
+    char line[600];
+    if (hmdtag::formatReport(line, sizeof(line), st.live, st.why, g_tagKeyOn, s) > 0) Log::get().note("%s", line);
+    g_tag = hmdtag::Stats{};
 }
 
 bool temporalPassDlaaTotals(uint32_t* frames, double* avgMs, double* maxMs,

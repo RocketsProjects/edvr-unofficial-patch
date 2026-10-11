@@ -18,6 +18,8 @@
 
 #include "../../src/common/temporal_math.h"
 #include "../../src/common/temporal_census.h"
+#include "../../src/common/hmd_camera_tag.h"
+#include <stdexcept>
 #include "../../src/common/temporal_mode.h"
 #include "../../src/d3d11/temporal_history.h"
 
@@ -764,6 +766,138 @@ int main() {
             check(!d.hasRows && d.T[0] == 0.0f && d.P[15] == 15.5f && d.seq == 3u,
                   "census: a non-rotation write keeps its P floats and clock, and no translation or rotation");
         }
+    }
+    // THE HEADSET CAMERA TAG (hmd_camera_tag.h, 2026-10-11): the gate, the chooser's pick, the depth scope, the 30 s line, the census's cost line and
+    // the TDRW hmd field. The hook itself (src\d3d11\hmd_camera_tag_hook.cpp) is Windows and is exercised by the flight, not here.
+    {
+        using namespace edvr::hmdtag;
+        // A. The gate: build 332841's bytes pass; a one-byte change in any read is refused.
+        uint8_t prologue[kPrologueBytes];
+        std::memcpy(prologue, kPrologue, sizeof(prologue));
+        uint8_t site[kCallSpan];
+        std::memcpy(site, kCallSite, kCallSiteBytes);
+        const int64_t rel = int64_t(kCoordinatorRva) - (int64_t(kCallSiteRva) + int64_t(kCallSpan));
+        const int32_t rel32 = int32_t(rel);
+        std::memcpy(site + kCallSiteBytes, &rel32, 4);
+        check(gateVerdict(kExpectedTimestamp, kExpectedImageSize, prologue, site) == nullptr,
+              "hmd tag gate: the build's identity, the coordinator's prologue and the call site's displacement all pass");
+        uint8_t p2[kPrologueBytes];
+        std::memcpy(p2, prologue, sizeof(p2));
+        p2[17] ^= 0x01;
+        check(gateVerdict(kExpectedTimestamp, kExpectedImageSize, p2, site) != nullptr,
+              "hmd tag gate: a one-byte change in the prologue is refused");
+        uint8_t s2[kCallSpan];
+        std::memcpy(s2, site, sizeof(s2));
+        s2[7] ^= 0x01;   // the rel32's low byte
+        check(gateVerdict(kExpectedTimestamp, kExpectedImageSize, prologue, s2) != nullptr,
+              "hmd tag gate: a one-byte change in the call's displacement is refused");
+        uint8_t s3[kCallSpan];
+        std::memcpy(s3, site, sizeof(s3));
+        s3[0] ^= 0x01;   // the call site's first opcode byte
+        check(gateVerdict(kExpectedTimestamp, kExpectedImageSize, prologue, s3) != nullptr,
+              "hmd tag gate: a one-byte change in the call site's opcode bytes is refused");
+        check(gateVerdict(kExpectedTimestamp + 1u, kExpectedImageSize, prologue, site) != nullptr,
+              "hmd tag gate: another PE timestamp is refused");
+        check(gateVerdict(kExpectedTimestamp, kExpectedImageSize, prologue, nullptr) != nullptr,
+              "hmd tag gate: a missing call-site read is refused");
+        // B. The pick: a stamped write of this frame is chosen over a newer unstamped write of another camera's pose, and another frame's stamp is ignored.
+        const Cand ring[3] = {{5u, 10u, true}, {5u, 14u, false}, {4u, 20u, true}};
+        const int tagB = latestStamped(3, 5u, [&](int i) { return ring[i]; });
+        check(tagB == 0, "hmd tag: the frame's stamp is found; the newer unstamped write and the other frame's stamp are not");
+        const Decision dB = decide(/*legacy pick*/ 1, tagB, true);
+        check(dB.pick == 0 && dB.byTag && dB.disagree && !dB.fellBack,
+              "hmd tag: with the key on, the stamped write is chosen over the newer unstamped pose, and the disagreement is counted");
+        // C. The latest of several stamps of the frame.
+        const Cand ringC[3] = {{5u, 10u, true}, {5u, 12u, true}, {5u, 11u, false}};
+        check(latestStamped(3, 5u, [&](int i) { return ringC[i]; }) == 1,
+              "hmd tag: of several stamps of a frame the latest (highest clock) is taken");
+        // D. No stamp: today's pick, counted as a fallback.
+        const Cand ringD[2] = {{5u, 3u, false}, {5u, 4u, false}};
+        const int tagD = latestStamped(2, 5u, [&](int i) { return ringD[i]; });
+        const Decision dD = decide(/*legacy pick*/ 1, tagD, true);
+        check(tagD == -1 && dD.pick == 1 && !dD.byTag && !dD.disagree && dD.fellBack,
+              "hmd tag: with no stamp this frame the pick is today's, and the frame counts as a fallback");
+        // E. Key off: the pick is today's whatever the stamp says; the disagreement is still reported.
+        const Decision dE = decide(/*legacy pick*/ 1, 0, false);
+        check(dE.pick == 1 && !dE.byTag && dE.disagree,
+              "hmd tag: with the key off the pick is today's, and the tag's disagreement is still counted");
+        // F. The depth scope: balanced across nested scopes, and across a throw out of nested calls.
+        uint32_t depth = 0;
+        {
+            DepthScope a(depth);
+            {
+                DepthScope b(depth);
+                check(depth == 2, "hmd tag depth: a nested scope counts two");
+            }
+            check(depth == 1, "hmd tag depth: leaving the nested scope counts one");
+        }
+        check(depth == 0, "hmd tag depth: the nested scopes balance to zero");
+        auto thrower = [](auto& self, uint32_t& dep, int k) -> void {
+            DepthScope s(dep);
+            if (k == 0) throw std::runtime_error("the game threw");
+            self(self, dep, k - 1);
+        };
+        bool caught = false;
+        try {
+            thrower(thrower, depth, 3);
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        check(caught && depth == 0, "hmd tag depth: a throw out of four nested scopes restores the count to zero");
+        check(!insideCoordinator(), "hmd tag: outside the coordinator's scope the thread is not inside it");
+        {
+            DepthScope s(coordinatorDepth);
+            check(insideCoordinator(), "hmd tag: inside the scope the thread is inside the coordinator");
+        }
+        try {
+            thrower(thrower, coordinatorDepth, 2);
+        } catch (const std::runtime_error&) {
+        }
+        check(!insideCoordinator() && coordinatorDepth == 0,
+              "hmd tag: a throw inside the thread's coordinator scope leaves the thread outside it");
+        // G. The 30 s line: live, inert with its reason, zeros included, and a buffer too small is refused.
+        Stats st;
+        st.coordinatorCalls = 12;
+        st.frames = 12;
+        st.framesWithStamp = 12;
+        st.stampedWrites = 12;
+        st.chosenByTag = 12;
+        st.disagree = 2;
+        st.lastFrame = 99;
+        st.lastThread = 7;
+        char line[640];
+        const int gLen = formatReport(line, sizeof(line), true, nullptr, true, st);
+        check(gLen > 0 && std::strstr(line, "temporal hmd tag: hook=live ") && std::strstr(line, "per_frame=1.00") &&
+                  std::strstr(line, "frames_with_stamp=12/12") && std::strstr(line, "disagree=2 key=on") &&
+                  std::strstr(line, "last_frame=99 last_thread=7"),
+              "hmd tag 30 s line, live: per frame, stamp coverage, disagreement, the key and the last call");
+        const int gLen2 = formatReport(line, sizeof(line), false, "not build 332841 (PE timestamp or image size differs)", false, Stats{});
+        check(gLen2 > 0 && std::strstr(line, "hook=inert:not build 332841") && std::strstr(line, "per_frame=0.00") &&
+                  std::strstr(line, "key=off"),
+              "hmd tag 30 s line, inert: names the reason, and an idle window prints its zeros");
+        check(formatReport(line, 20, true, nullptr, true, st) == 0, "hmd tag 30 s line: a buffer too small is refused, not truncated");
+        // H. The census's cost line: zero draws over zero frames print zeros; the per-frame and per-draw costs are the interval's.
+        char cost[400];
+        const int cl0 = edvr::census::formatCost(cost, sizeof(cost), 0u, 0u, 0u, 1.0e7);
+        check(cl0 > 0 && std::strstr(cost, "temporal draw census: 0 recognised eye-target draws over 0 frames") && !std::strstr(cost, "nan") &&
+                  !std::strstr(cost, "inf"),
+              "census cost line: no draws over no frames prints zeros, never nan or inf");
+        const int cl1 = edvr::census::formatCost(cost, sizeof(cost), 10u, 4u, 5000u, 1.0e7);
+        check(cl1 > 0 && std::strstr(cost, "10 recognised eye-target draws over 4 frames (2.5 a frame)") &&
+                  std::strstr(cost, "the census cost 125.0 us a frame (50.00 us a draw)"),
+              "census cost line: 10 draws over 4 frames, 500 us of census work, prints 2.5 a frame and 125 us a frame");
+        // I. The TDRW line's hmd field: a draw whose rows are the frame's headset-stamped rows is marked hmd=1, the rest hmd=0.
+        const float rowsI[12] = {1, 0, 0, 2, 0, 1, 0, 3, 0, 0, 1, 4};
+        edvr::census::Draw dI;
+        edvr::census::fillDraw(dI, 9u, 1u, rowsI, true, 1u, nullptr);
+        dI.hmd = true;
+        char tl[640];
+        const int tlen = edvr::census::formatDraw(tl, sizeof(tl), 3u, 0, 0u, dI);
+        check(tlen > 0 && std::strstr(tl, "rows=1 hmd=1 T=(+2,+3,+4)") && !std::strstr(tl, "hmd=0"),
+              "census: a TDRW line marks the draw whose rows are the headset-stamped write's: rows=1 hmd=1");
+        dI.hmd = false;
+        const int tlen0 = edvr::census::formatDraw(tl, sizeof(tl), 3u, 0, 0u, dI);
+        check(tlen0 > 0 && std::strstr(tl, "rows=1 hmd=0 T=("), "census: a TDRW line without the stamp is hmd=0");
     }
     if (g_fails) {
         printf("\nTEMPORAL TEST FAILED (%d)\n", g_fails);
