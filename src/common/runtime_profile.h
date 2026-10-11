@@ -124,6 +124,11 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         std::strcmp(key, "hotkey.state_dump") == 0 ||
         std::strcmp(key, "diag.state_dump") == 0 ||
         std::strcmp(key, "diag.state_dump_frames") == 0 ||
+        // TEMPORARY, the sealed-hangar trial (sealed_trial.h) and the look probe (look_probe.h): their keys and the radius, so the
+        // flat profile reads them.
+        std::strcmp(key, "hotkey.sealed_trial") == 0 ||
+        std::strcmp(key, "diag.sealed_trial_radius_m") == 0 ||
+        std::strcmp(key, "hotkey.look_probe") == 0 ||
         std::strcmp(key, "fix.render_sharpness") == 0 ||
         // The interface quality (flat panel row; ui_panel_scale.cpp's flat factor and the flat UI layer). The VR layer reads it
         // too, but stays inert in flat: it is live only with fix.temporal_aa on through this gate, which refuses that key.

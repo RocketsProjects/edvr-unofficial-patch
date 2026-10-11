@@ -85,6 +85,8 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "sun_pass_probe.h"       // the hangar sun probe (TEMPORARY): install, per-frame, the skip key
 #include "shadow_gate_probe.h"    // the shadow gate probe (TEMPORARY, D0): install, per-frame, the key
 #include "state_dump_probe.h"     // the state dump (TEMPORARY, M2): install, per-frame, the key
+#include "sealed_trial.h"         // the sealed-hangar trial (TEMPORARY): install, per-frame, the key
+#include "look_probe.h"           // the look probe (TEMPORARY): install, per-frame, the key
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
 #include "hmd_camera_tag_hook.h"       // hmdCameraTagInstall at startup: the headset camera tag's coordinator hook (VR; fix.hmd_camera_tag)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
@@ -286,6 +288,12 @@ struct State {
     // The state dump's key (TEMPORARY; state_dump_probe.h). Unbound by default.
     Hotkey stateDumpKey;
     std::string stateDumpKeyText;
+    // The sealed-hangar trial's key (TEMPORARY; sealed_trial.h). Unbound by default.
+    Hotkey sealedTrialKey;
+    std::string sealedTrialKeyText;
+    // The look probe's key (TEMPORARY; look_probe.h). Unbound by default.
+    Hotkey lookProbeKey;
+    std::string lookProbeKeyText;
     bool        diagnosticKeysBound = false;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings; they give the FSS mode latch its frame-exact edges.
@@ -1239,6 +1247,10 @@ EDVR_BOUNDARY_TICK(tkSunPassProbe, "sun_pass_probe");
 EDVR_BOUNDARY_TICK(tkShadowGateProbe, "shadow_gate_probe");
 // The state dump's frame tick (TEMPORARY; state_dump_probe.cpp): under its own fault budget.
 EDVR_BOUNDARY_TICK(tkStateDumpProbe, "state_dump_probe");
+// The sealed-hangar trial's frame tick (TEMPORARY; sealed_trial.cpp): under its own fault budget.
+EDVR_BOUNDARY_TICK(tkSealedTrial, "sealed_trial");
+// The look probe's frame tick (TEMPORARY; look_probe.cpp): under its own fault budget.
+EDVR_BOUNDARY_TICK(tkLookProbe, "look_probe");
 EDVR_BOUNDARY_TICK(tkEngineVelocityClock, "engine_velocity_clock");
 EDVR_BOUNDARY_TICK(tkSchedulerProbe, "scheduler_probe");
 EDVR_BOUNDARY_TICK(tkVtableWatch, "vtable_watch");
@@ -1355,6 +1367,11 @@ void tickHotkeys() {
     if (g_state->shadowGateKey.pressed()) shadowGateProbeRequest("hotkey.shadow_gate_probe");
     // The state dump (TEMPORARY; state_dump_probe.h): a press starts one 600-frame capture at the next frame.
     if (g_state->stateDumpKey.pressed()) stateDumpRequest("hotkey.state_dump");
+    // The sealed-hangar trial (TEMPORARY; sealed_trial.h): a press turns the trial on or off, from the next frame.
+    if (g_state->sealedTrialKey.pressed())
+        sealedTrialToggle("hotkey.sealed_trial", static_cast<uint32_t>(g_state->frameCounter));
+    // The look probe (TEMPORARY; look_probe.h): a press arms one capture of the next frame.
+    if (g_state->lookProbeKey.pressed()) lookProbeRequest("hotkey.look_probe");
     // The two keys above are gated on focus like the others, and said nothing when a press was refused for it.
     missedDiagnosticPressNote(g_state->occlusionKey, g_state->missedOcclusionNotes, "The occlusion census key");
     missedDiagnosticPressNote(g_state->sunSkipKey, g_state->missedSunSkipNotes, "The hangar sun probe skip key");
@@ -1581,6 +1598,14 @@ void presentFrameBoundary() {
     });
     tkStateDumpProbe.run([] {
         stateDumpFrame(static_cast<uint32_t>(g_state->frameCounter));
+    });
+    // The sealed-hangar trial's frame tick (TEMPORARY): the 10-second line while the trial is on; a branch when off.
+    tkSealedTrial.run([] {
+        sealedTrialFrame(static_cast<uint32_t>(g_state->frameCounter));
+    });
+    // The look probe's frame tick (TEMPORARY): starts, finishes and reads back its capture; a branch when idle.
+    tkLookProbe.run([] {
+        lookProbeFrame(static_cast<uint32_t>(g_state->frameCounter));
     });
     // Engine-record velocity's clock (the emit table's frame stamps and
     // the per-eye snapshots), the same exactly-once-per-owned-present tick.
@@ -2088,6 +2113,16 @@ void configureDiagnosticHotkeys() {
          "hotkey.state_dump", "state dump",
          "hotkey: state_dump is set but bound nothing, so the state dump cannot be started by key this session.",
          " Starts one 600-frame capture of the docking readers, the journal counts and the Status words (temporary probe)."},
+        // TEMPORARY, the sealed-hangar trial (sealed_trial.h): a press toggles it. Empty is off.
+        {&s.sealedTrialKey, &s.sealedTrialKeyText, Config::get().getString("hotkey.sealed_trial", ""),
+         "hotkey.sealed_trial", "sealed trial",
+         "hotkey: sealed_trial is set but bound nothing, so the sealed-hangar trial cannot be toggled by key this session.",
+         " Toggles the sealed-hangar trial (temporary probe): records outside the sphere lose their views; the sun pair is skipped."},
+        // TEMPORARY, the look probe (look_probe.h): a press arms one capture. Empty is off.
+        {&s.lookProbeKey, &s.lookProbeKeyText, Config::get().getString("hotkey.look_probe", ""),
+         "hotkey.look_probe", "look probe",
+         "hotkey: look_probe is set but bound nothing, so the look probe cannot be armed by key this session.",
+         " Arms one capture of the next frame's records on the forward ray and its centre draws (temporary probe)."},
     };
     for (Item& it : items) {
         if (!first && *it.applied == it.value) continue;
@@ -2951,6 +2986,10 @@ void hookDevice(ID3D11Device* device) {
             shadowGateProbeInstall(runtimeFlatProfile());
             // The state dump (TEMPORARY, state_dump_probe.cpp): reads diag.state_dump; nothing is hooked until a key or the diag timer starts it.
             stateDumpInstall(runtimeFlatProfile());
+            // The sealed-hangar trial (TEMPORARY, sealed_trial.cpp): reads diag.sealed_trial_radius_m; off until its key is pressed.
+            sealedTrialInstall(runtimeFlatProfile());
+            // The look probe (TEMPORARY, look_probe.cpp): armed by key only; nothing is observed until then.
+            lookProbeInstall(runtimeFlatProfile());
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on, VR only (a flat session says
             // it is inert). A build that is not 332841 is scanned for the call site; anything short of one match is one log line and nothing patched.
             terrainCullCoverInstall(runtimeFlatProfile());

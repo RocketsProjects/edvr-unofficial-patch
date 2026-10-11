@@ -555,6 +555,9 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\sun_pass_probe.cpp" ^
     "src\d3d11\shadow_gate_probe.cpp" ^
     "src\d3d11\state_dump_probe.cpp" ^
+    "src\d3d11\store_hook.cpp" ^
+    "src\d3d11\sealed_trial.cpp" ^
+    "src\d3d11\look_probe.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -1593,6 +1596,47 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: shadow gate probe test build failed & exit /b 1 )
 "%BUILD%\shadow_gate_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_sealed_trial_test
+echo [edvr] === sealed_trial_test.exe ===
+REM The sealed-hangar trial's pure half (src\d3d11\sealed_trial_core.h, TEMPORARY, docs\concourse-culling-2026-10-11.md): the radius
+REM parse and clamp, the sphere rule (a record that contains the camera or meets the camera's sphere is kept), and the window and
+REM toggle lines. No DLL and no game.
+if not exist "%OBJ%\sealedtrial" mkdir "%OBJ%\sealedtrial"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\sealedtrial\\" ^
+    /Fe"%BUILD%\sealed_trial_test.exe" "tools\sealed_trial_test\sealed_trial_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: sealed trial test build failed & exit /b 1 )
+"%BUILD%\sealed_trial_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_look_probe_test
+echo [edvr] === look_probe_test.exe ===
+REM The look probe's pure half (src\d3d11\look_probe_core.h, TEMPORARY, docs\concourse-culling-2026-10-11.md): the ray test, the
+REM forward direction from a frustum under both plane conventions and rotated, the refusal cases, and the CSV rows (24 fields each,
+REM the other kind's columns empty) and the summary line. No DLL and no game.
+if not exist "%OBJ%\lookprobe" mkdir "%OBJ%\lookprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\lookprobe\\" ^
+    /Fe"%BUILD%\look_probe_test.exe" "tools\look_probe_test\look_probe_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: look probe test build failed & exit /b 1 )
+"%BUILD%\look_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_journal_location_test
+echo [edvr] === location_scan_test.exe ===
+REM The journal's Location scanner (src\d3d11\journal_location_core.h, the reader of Docked in journal_watch.cpp): every split
+REM of a one-line journal, one-byte reads, a replay from the top, overlapping re-reads and the refusals. No DLL and no game.
+if not exist "%OBJ%\locationscan" mkdir "%OBJ%\locationscan"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\locationscan\\" ^
+    /Fe"%BUILD%\location_scan_test.exe" "tools\location_scan_test\location_scan_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: location scan test build failed & exit /b 1 )
+"%BUILD%\location_scan_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_state_dump_test

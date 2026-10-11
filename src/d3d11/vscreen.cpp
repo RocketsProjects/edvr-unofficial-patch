@@ -71,6 +71,7 @@
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "flat_runtime.h"
 #include "occlusion_census.h"   // the draw wrappers below, and their install (occlusionCensusInstallWrappers)
+#include "look_probe.h"          // the look probe: each wrapper offers its draw before the census bracket (TEMPORARY)
 #include "flat_temporal.h"   // bounded, flat-profile-only scene discovery
 #include "../common/runtime_profile.h"
 #include "intro_panel.h"
@@ -4708,14 +4709,45 @@ bool occlusionSceneNow() {
     return s->rtv0Eye;
 }
 
+// The look probe's replays (look_probe.h): each draw kind is re-issued through the real entry point, below the census wrappers,
+// so the duplicate is not counted as one of the frame's draws.
+struct LookReplayD { ID3D11DeviceContext* self; UINT count; UINT start; };
+void lookReplayD(void* p) {
+    auto* a = static_cast<LookReplayD*>(p);
+    g_occReal.draw(a->self, a->count, a->start);
+}
+struct LookReplayI { ID3D11DeviceContext* self; UINT count; UINT startIndex; INT baseVertex; };
+void lookReplayI(void* p) {
+    auto* a = static_cast<LookReplayI*>(p);
+    g_occReal.drawIndexed(a->self, a->count, a->startIndex, a->baseVertex);
+}
+struct LookReplayN { ID3D11DeviceContext* self; UINT perInstance; UINT instances; UINT startVertex; UINT startInstance; };
+void lookReplayN(void* p) {
+    auto* a = static_cast<LookReplayN*>(p);
+    g_occReal.drawInstanced(a->self, a->perInstance, a->instances, a->startVertex, a->startInstance);
+}
+struct LookReplayX { ID3D11DeviceContext* self; UINT perInstance; UINT instances; UINT startIndex; INT baseVertex; UINT startInstance; };
+void lookReplayX(void* p) {
+    auto* a = static_cast<LookReplayX*>(p);
+    g_occReal.drawIndexedInstanced(a->self, a->perInstance, a->instances, a->startIndex, a->baseVertex, a->startInstance);
+}
+
 void STDMETHODCALLTYPE occDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     occlusion::Ticket t;
+    if (lookProbeWantsDraws()) {
+        LookReplayD a{self, count, start};
+        lookProbeDraw(self, 'D', count, 1, &lookReplayD, &a);
+    }
     occlusionCensusBegin(self, 'D', count, 1, occlusionSceneNow(), &t);
     g_occReal.draw(self, count, start);
     occlusionCensusEnd(self, t);
 }
 void STDMETHODCALLTYPE occDrawIndexed(ID3D11DeviceContext* self, UINT count, UINT startIndex, INT baseVertex) {
     occlusion::Ticket t;
+    if (lookProbeWantsDraws()) {
+        LookReplayI a{self, count, startIndex, baseVertex};
+        lookProbeDraw(self, 'I', count, 1, &lookReplayI, &a);
+    }
     occlusionCensusBegin(self, 'I', count, 1, occlusionSceneNow(), &t);
     g_occReal.drawIndexed(self, count, startIndex, baseVertex);
     occlusionCensusEnd(self, t);
@@ -4723,6 +4755,10 @@ void STDMETHODCALLTYPE occDrawIndexed(ID3D11DeviceContext* self, UINT count, UIN
 void STDMETHODCALLTYPE occDrawInstanced(ID3D11DeviceContext* self, UINT perInstance, UINT instances, UINT startVertex,
                                         UINT startInstance) {
     occlusion::Ticket t;
+    if (lookProbeWantsDraws()) {
+        LookReplayN a{self, perInstance, instances, startVertex, startInstance};
+        lookProbeDraw(self, 'N', perInstance, instances, &lookReplayN, &a);
+    }
     occlusionCensusBegin(self, 'N', perInstance, instances, occlusionSceneNow(), &t);
     g_occReal.drawInstanced(self, perInstance, instances, startVertex, startInstance);
     occlusionCensusEnd(self, t);
@@ -4730,6 +4766,10 @@ void STDMETHODCALLTYPE occDrawInstanced(ID3D11DeviceContext* self, UINT perInsta
 void STDMETHODCALLTYPE occDrawIndexedInstanced(ID3D11DeviceContext* self, UINT perInstance, UINT instances,
                                                UINT startIndex, INT baseVertex, UINT startInstance) {
     occlusion::Ticket t;
+    if (lookProbeWantsDraws()) {
+        LookReplayX a{self, perInstance, instances, startIndex, baseVertex, startInstance};
+        lookProbeDraw(self, 'X', perInstance, instances, &lookReplayX, &a);
+    }
     occlusionCensusBegin(self, 'X', perInstance, instances, occlusionSceneNow(), &t);
     g_occReal.drawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance);
     occlusionCensusEnd(self, t);
@@ -4737,18 +4777,21 @@ void STDMETHODCALLTYPE occDrawIndexedInstanced(ID3D11DeviceContext* self, UINT p
 // The GPU-driven draws name no count on the CPU: they are measured and counted, and their triangles are reported as 0.
 void STDMETHODCALLTYPE occDrawInstancedIndirect(ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
     occlusion::Ticket t;
+    if (lookProbeWantsDraws()) lookProbeDraw(self, 'Y', 0, 1, nullptr, nullptr);   // listed, not tested
     occlusionCensusBegin(self, 'Y', 0, 1, occlusionSceneNow(), &t);
     g_occReal.drawInstancedIndirect(self, args, off);
     occlusionCensusEnd(self, t);
 }
 void STDMETHODCALLTYPE occDrawIndexedInstancedIndirect(ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
     occlusion::Ticket t;
+    if (lookProbeWantsDraws()) lookProbeDraw(self, 'Z', 0, 1, nullptr, nullptr);   // listed, not tested
     occlusionCensusBegin(self, 'Z', 0, 1, occlusionSceneNow(), &t);
     g_occReal.drawIndexedInstancedIndirect(self, args, off);
     occlusionCensusEnd(self, t);
 }
 void STDMETHODCALLTYPE occDrawAuto(ID3D11DeviceContext* self) {
     occlusion::Ticket t;
+    if (lookProbeWantsDraws()) lookProbeDraw(self, 'A', 0, 1, nullptr, nullptr);   // listed, not tested
     occlusionCensusBegin(self, 'A', 0, 1, occlusionSceneNow(), &t);
     g_occReal.drawAuto(self);
     occlusionCensusEnd(self, t);
@@ -5107,6 +5150,14 @@ uint32_t readDistanceIndex(Config& cfg) {
 // The occlusion census's install (occlusion_census.h): the real draw pointers point at the wrappers above only while a
 // capture records. Off, they are the game's own trampolines again.
 void occlusionCensusInstallWrappers(bool on) {
+    // Counted: the census and the look probe each hold the wrappers while they record. The first `on` installs them and the
+    // last `off` puts the game's pointers back, so a second `on` never captures the wrappers as the "real" pointers.
+    static int holders = 0;
+    if (on) {
+        if (holders++ > 0) return;
+    } else if (holders == 0 || --holders > 0) {
+        return;
+    }
     State* s = g_state;
     if (!s) return;
     if (on) {

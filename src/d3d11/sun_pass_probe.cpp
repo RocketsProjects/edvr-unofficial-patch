@@ -1,6 +1,7 @@
 #include "sun_pass_probe.h"
 #include "sun_pass_probe_core.h"
 #include "journal_watch.h"
+#include "sealed_trial.h"
 #include "../common/config.h"
 #include "../common/log.h"
 
@@ -214,6 +215,11 @@ void sunPassProbeToggle(uint32_t frame) {
 }
 
 bool sunPassProbeSkipDraw(uint64_t vs, uint64_t ps) noexcept {
+    // The sealed-hangar trial skips the sun pair while it is on (sealed_trial.h), whether or not this probe is armed.
+    if (sealedTrialSkipsSunPair() && sp::classify(vs, ps) == sp::Match::kPair) {
+        sealedTrialNoteSunSkip();
+        return true;
+    }
     if (!g_live.load(std::memory_order_acquire)) return false;   // not armed: nothing counted, nothing skipped
     const sp::Match m = sp::classify(vs, ps);
     if (m == sp::Match::kNone) return false;                     // the common case: two compares against the table

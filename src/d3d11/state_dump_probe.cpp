@@ -227,6 +227,14 @@ bool g_countersSeen = false;
 int g_locLast = -2;           // the last Location Docked value written to the log (-2: none yet)
 int g_statusLast = -2;        // the last Status docked value written to the log
 Track g_tracks[sd::kTracks];
+// The AAB8 object: the first object the readers name whose address ends in 0xAAB8 is pinned for the capture and tracked on every
+// frame, named or not (a general track is freed when the readers stop naming its object). Its key bytes at +0x3C0..+0x3D0 are
+// written on every row, as "AAB8.key3C0=<32 hex>".
+constexpr uintptr_t kPinTag = 0xAAB8u;
+constexpr uintptr_t kPinKeyOff = 0x3C0;
+constexpr size_t kPinKeyBytes = 0x10;
+Track g_pinned;
+uintptr_t g_pinnedAddr = 0;
 std::vector<Row> g_rows;
 int g_linesLeft = kLogLineCap;
 uint32_t g_faults = 0;
@@ -318,10 +326,11 @@ void collectRow(uint32_t frame) {
         f.object[i] = s.object.load(std::memory_order_relaxed);   // the last object it named, for tracking
     }
 
-    // The distinct objects the readers have named: each gets a track (a fresh one when none is free).
+    // The distinct objects the readers have named: each gets a track (a fresh one when none is free). The pinned AAB8 object is
+    // left to the pin below, so it is tracked once a frame.
     for (int i = 0; i < sd::kReaders; ++i) {
         const uintptr_t obj = f.object[i];
-        if (!obj) continue;
+        if (!obj || obj == g_pinnedAddr) continue;
         Track* t = nullptr;
         for (Track& k : g_tracks)
             if (k.addr == obj) t = &k;
@@ -332,6 +341,30 @@ void collectRow(uint32_t frame) {
         if (!t) continue;
         if (t->addr != obj) *t = Track{};
         trackObject(*t, obj, row.changes, row.changedBytes, g_faults);
+    }
+    if (!g_pinnedAddr) {
+        for (int i = 0; i < sd::kReaders; ++i) {
+            const uintptr_t obj = f.object[i];
+            if (obj && (obj & 0xFFFFu) == kPinTag) {
+                g_pinnedAddr = obj;
+                break;
+            }
+        }
+    }
+    if (g_pinnedAddr) {
+        trackObject(g_pinned, g_pinnedAddr, row.changes, row.changedBytes, g_faults);
+        uint8_t key[kPinKeyBytes] = {};
+        char text[96];
+        if (readMem(key, g_pinnedAddr + kPinKeyOff, sizeof(key))) {
+            int at = std::snprintf(text, sizeof(text), "AAB8.key3C0=");
+            for (size_t k = 0; k < sizeof(key) && at > 0 && static_cast<size_t>(at) + 3 < sizeof(text); ++k)
+                at += std::snprintf(text + at, sizeof(text) - static_cast<size_t>(at), "%02X", key[k]);
+        } else {
+            std::snprintf(text, sizeof(text), "AAB8.key3C0=unreadable");
+            ++g_faults;
+        }
+        row.changes += (row.changes.empty() ? "" : " ");
+        row.changes += text;
     }
     if (row.changes.empty()) row.changes = "-";
     g_rows.push_back(std::move(row));
@@ -479,6 +512,8 @@ void startCapture(uint32_t firstFrame, const char* trigger) {
     g_faults = 0;
     g_linesLeft = kLogLineCap;
     for (Track& t : g_tracks) t = Track{};
+    g_pinned = Track{};
+    g_pinnedAddr = 0;
     g_firstFrame = firstFrame;
     g_trigger = trigger;
     g_capturing = true;

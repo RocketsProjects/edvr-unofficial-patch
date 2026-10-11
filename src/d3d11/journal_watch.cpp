@@ -7,6 +7,8 @@
 #include <atomic>
 #include <cstring>
 #include <map>
+
+#include "journal_location_core.h"
 #include <memory>
 #include <mutex>
 #include <new>
@@ -250,6 +252,8 @@ struct Session {
     // boundary is still seen. Sixteen bytes covers `"event":"` plus slack.
     char         carry[32] = {};
     uint32_t     carryLen = 0;
+    // The Location line's Docked flag, read as a byte stream across reads (journal_location_core.h): every byte of the file once.
+    edvr::journal_location::LocationScan loc;
     // Consecutive Status.json parse misses. The game rewrites the file about
     // once a second and a read can land mid-write; one blip must not read as
     // the player teleporting off their feet, so `known` only drops after a
@@ -310,6 +314,7 @@ void closeFile(Session& s) {
     }
     s.offset = 0;
     s.carryLen = 0;
+    s.loc.reset();   // the next file (or this one, read again from the top) is fed from its first byte
 }
 
 // FILETIME is a 64-bit count in two halves; the decision below wants one
@@ -405,27 +410,6 @@ void onEvent(Session& s, const char* name, uint32_t len, uint64_t at) {
 const char kEventTok[] = "\"event\":\"";
 constexpr uint32_t kEventTokLen = sizeof(kEventTok) - 1;
 
-// The Location line's "Docked":true|false, read from the same buffer (the line's own text, up to its newline). A value that
-// the buffer does not hold is not read; the next Location line gives it again.
-void noteLocation(Session& s, const char* p, uint32_t n, uint32_t from) {
-    static const char kDocked[] = "\"Docked\":";
-    constexpr uint32_t kKeyLen = sizeof(kDocked) - 1;
-    const uint32_t lim = from + 600 < n ? from + 600 : n;
-    for (uint32_t j = from; j + kKeyLen < lim; ++j) {
-        if (p[j] == '\n') return;
-        if (memcmp(p + j, kDocked, kKeyLen) != 0) continue;
-        const uint32_t v = j + kKeyLen;
-        if (lim - v >= 4 && memcmp(p + v, "true", 4) == 0) {
-            s.pub.locationKnown = true;
-            s.pub.locationDocked = true;
-        } else if (lim - v >= 5 && memcmp(p + v, "false", 5) == 0) {
-            s.pub.locationKnown = true;
-            s.pub.locationDocked = false;
-        }
-        return;
-    }
-}
-
 // `base` is the absolute file offset of p[0], so a token's position is its absolute offset.
 void scanRange(Session& s, const char* p, uint32_t n, uint64_t base) {
     for (uint32_t i = 0; i + kEventTokLen < n; ++i) {
@@ -435,7 +419,6 @@ void scanRange(Session& s, const char* p, uint32_t n, uint64_t base) {
         while (end < n && p[end] != '"' && end - start < 40) ++end;
         if (end < n && p[end] == '"') {
             onEvent(s, p + start, end - start, base + i);
-            if (end - start == 8 && memcmp(p + start, "Location", 8) == 0) noteLocation(s, p, n, end);
         }
         i = end;
     }
@@ -563,6 +546,11 @@ void scanEvents(Session& s, const char* data, uint32_t len) {
     const uint64_t chunkStart = s.offset - len;
     if (stitchedLen) scanRange(s, stitched, stitchedLen, chunkStart - s.carryLen);
     scanRange(s, data, len, chunkStart);
+    // The Location line's Docked flag: the bytes of this read the scanner has not seen yet, in order. The split of the read
+    // no longer matters (the key sits about fifty bytes after the event, past any carry).
+    s.loc.feedChunk(reinterpret_cast<const uint8_t*>(data), len, chunkStart);
+    s.pub.locationKnown = s.loc.known();
+    s.pub.locationDocked = s.loc.docked();
 
     // Keep the tail as the next carry. Anything already scanned in `stitched`
     // that also sits in `data`'s head double-scans harmlessly: LoadGame and
