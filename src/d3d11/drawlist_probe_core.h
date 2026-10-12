@@ -117,6 +117,9 @@ struct FrameCounts {
     size_t carried = 0;              // carried candidates: appended earlier in the window, not this frame
     size_t rebuilt = 0;              // distinct collections a copy, merge or clear touched this frame
     uint64_t keysOverflow = 0;       // keys past the tracking cap (counted, not tracked)
+    uint64_t cCalls = 0;             // Built v11: path C (FUN_14369C9C0, producer 1's bracket) calls, after the forward
+    int64_t cItems = 0;              // the pool records those calls appended (the owner's count delta)
+    uint64_t cFaults = 0;            // C calls whose counters could not be read (their items are not counted)
 };
 
 // The per-frame summary line. joinLine is the fixed statement about the draw join (joinStatement()).
@@ -128,12 +131,16 @@ inline int formatFrameLine(char* out, size_t cap, const FrameCounts& c, const ch
     return std::snprintf(out, cap,
                          "drawlist probe: frame %u (window %u of %u; mode %s; engine motion %s): producer taps: builder A calls %llu "
                          "(%s), producer B calls %llu appended %lld items, copy %llu calls %llu records, merge %llu, clear %llu; "
-                         "substituted pool draws %llu; appended this frame A %zu, B %zu; carried candidates %zu; collections rebuilt %zu%s.%s%s",
+                         "substituted pool draws %llu; appended this frame A %zu, B %zu; carried candidates %zu; collections rebuilt %zu. "
+                         "path C (FUN_14369C9C0, the producer-1 bracket): calls %llu, items %lld, faults %llu; path D (FUN_14434D120 via "
+                         "D470): not hooked in this build, not counted.%s%s%s",
                          c.frame, c.window, kFrames, c.mode, engine, static_cast<unsigned long long>(c.builderCalls), bracket,
                          static_cast<unsigned long long>(c.emitCalls), static_cast<long long>(c.emitItems),
                          static_cast<unsigned long long>(c.copyCalls), static_cast<unsigned long long>(c.copyRecords),
                          static_cast<unsigned long long>(c.mergeCalls), static_cast<unsigned long long>(c.clearCalls),
                          static_cast<unsigned long long>(c.familyDraws), c.appendedA, c.appendedB, c.carried, c.rebuilt,
+                         static_cast<unsigned long long>(c.cCalls), static_cast<long long>(c.cItems),
+                         static_cast<unsigned long long>(c.cFaults),
                          c.keysOverflow ? " (key tracking overflowed; the counts are exact, the key sets are not)" : "",
                          names && names[0] ? " " : "", names ? names : "");
 }

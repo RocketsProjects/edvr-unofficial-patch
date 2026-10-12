@@ -40,6 +40,7 @@ constexpr uintptr_t kRecName = 0x18;        // pointer: the record's node (node+
 
 constexpr size_t kObservedCap = 32768;       // records the observer keeps for the report in one frame
 constexpr uint32_t kReportNodeCap = 40000;   // records the report walks at most
+constexpr size_t kKeptNamedRows = 4000;      // Built v11: kept named records the report lists (nearest the capsule's axis first)
 constexpr uint32_t kReportDepth = 6;         // child-list generations the report walks below an observed record
 constexpr uint32_t kReportChildCap = 4096;   // children read from one child list
 constexpr size_t kClassSlots = 4096;         // the class cache: one slot per node (lock-free, valid for one frame)
@@ -67,6 +68,7 @@ uint64_t g_ptrNull = 0, g_ptrImage = 0, g_ptrOther = 0, g_ptrUnread = 0;
 // Built v10: producer B's veto: the mode (diag.sealed_trial_producer) and the window's counts (under the lock).
 sealed::ProducerMode g_producerMode = sealed::ProducerMode::kVeto;
 uint64_t g_prodCalls = 0, g_prodVetoed = 0, g_prodKept = 0, g_prodStyle = 0, g_prodUnread = 0;
+uint64_t g_worldSrc[5] = {};   // Built v11: the named rule's world centre by source (sealed_trial_core.h Window::worldSrc)
 std::atomic<uint32_t> g_frameStamp{0};       // advanced at every Present tick: the observer resolves the view once per frame
 std::atomic<bool> g_cameraKnown{false};
 
@@ -76,6 +78,10 @@ std::recursive_mutex g_sealedMutex;
 
 // The named mode's cell radii (diag.sealed_cell_small_m / _medium_m / _large_m; guesses 60 / 90 / 130 m) and the size last seen. Under the lock.
 float g_cellRadius[3] = {sealed::kCellDefaultM[0], sealed::kCellDefaultM[1], sealed::kCellDefaultM[2]};
+// Built v11 (second addendum): the box's doubled axis (diag.sealed_cell_double: length, the default, or width) and its margin (diag.sealed_cell_margin_m,
+// stepped by PAGEUP and PAGEDOWN in named mode).
+bool g_doubleLength = true;
+float g_margin = sealed::kMarginDefaultM;
 char g_lastSize = 'S';
 
 // The class cache (lock-free): a slot per node, a word per slot (sealed_trial_core.h packs it). Written by any thread that runs the store.
@@ -162,6 +168,7 @@ void resetWindow() noexcept {
     g_poseFallback = 0;
     g_ptrNull = g_ptrImage = g_ptrOther = g_ptrUnread = 0;
     g_prodCalls = g_prodVetoed = g_prodKept = g_prodStyle = g_prodUnread = 0;
+    for (auto& v : g_worldSrc) v = 0;
     g_centreDist.clear();
     if (g_centreDist.capacity() < kCentreDistCap) g_centreDist.reserve(kCentreDistCap);   // at a window's end, not on the store's hot path
 }
@@ -192,6 +199,10 @@ sealed::Window takeWindow() noexcept {
     w.producerStyle = g_prodStyle;
     w.producerUnread = g_prodUnread;
     w.producerMode = sealed::producerModeName(g_producerMode);
+    for (int k = 0; k < 5; ++k) w.worldSrc[k] = g_worldSrc[k];
+    w.boxOn = g_cellPrev.box;
+    for (int k = 0; k < 3; ++k) w.boxHalf[k] = g_cellPrev.box ? g_cellPrev.boxHalf[k] : 0.0f;
+    w.boxMargin = g_margin;
     w.distN = g_centreDist.size();
     if (!g_centreDist.empty()) {
         w.distP50 = sealed::percentileOf(g_centreDist, 0.50);
@@ -351,6 +362,149 @@ static void notePtr(sealed::PtrKind k) noexcept {
     }
 }
 
+// --- Built v11: the named rule's world centre, one rule for every named position (own pad, explicit parts, the cell test). The order, per record:
+// the producer B cache (the veto's store-style sphere, for the records B was called on this frame), the pose (builder, path A), the store-style
+// sphere (the node block through rec+0x190; storeSphereOf), and the raw rec+0x240 as the last fallback.
+namespace {
+// The store-style world sphere (decomp_4312040.txt lines 212-262, sealed_trial_core.h storeWorldSphere). False when any read fails or the result
+// is not finite. Reads only.
+bool storeSphereOf(uintptr_t rec, float centre[3], float* radius) noexcept {
+    constexpr uintptr_t kNodeOff = 0x18;       // rec+0x18: the node (census's name pointer)
+    constexpr uintptr_t kBlockOff = 0x08;      // node+0x08: the bounds block
+    constexpr uintptr_t kPoseOff = 0x190;      // rec+0x190: the pose block A
+    constexpr uintptr_t kMatrixOff = 0x50;     // A+0x50: the matrix B
+    float L[3] = {}, A[15] = {}, B[16] = {};
+    float r = 0.0f;
+    uintptr_t node = 0, block = 0, pose = 0, matrix = 0;
+    bool ok = readVal(&node, rec + kNodeOff) && node && readVal(&block, node + kBlockOff) && block &&
+              readMem(L, block + 0x20, sizeof(L)) && readVal(&r, block + 0x2C) && readVal(&pose, rec + kPoseOff) && pose &&
+              readMem(A, pose, sizeof(A)) && readVal(&matrix, pose + kMatrixOff) && matrix && readMem(B, matrix, sizeof(B));
+    ok = ok && std::isfinite(r) && r > 0.0f && sealed::storeWorldSphere(L, A, B, centre);
+    if (ok) *radius = r;
+    return ok;
+}
+
+// Built v11 (second addendum): a record's local axes in the world. The builder's quaternion (the pose at rec+0x290: q at +0x10, the extent at
+// +0x90) when the record has one (path A); else the store-style pose (rec+0x190 and its +0x50 matrix; decomp_4312040.txt). src: 1 builder,
+// 2 store-style, 4 neither (false). extOk: the builder extent was read (only the builder pose gives one).
+bool poseOrientOf(uintptr_t rec, float axes[3][3], float ext[3], bool* extOk, uint8_t* src) noexcept {
+    *extOk = false;
+    *src = 4;
+    uintptr_t pose = 0;
+    float q[4] = {};
+    if (readVal(&pose, rec + kRecPose) && pose && readMem(q, pose + 0x10, sizeof(q)) && std::isfinite(q[0]) && std::isfinite(q[1]) &&
+        std::isfinite(q[2]) && std::isfinite(q[3])) {
+        sealed::quatAxes(q, axes);
+        *src = 1;
+        if (readMem(ext, pose + 0x90, 3 * sizeof(float)) && std::isfinite(ext[0]) && std::isfinite(ext[1]) && std::isfinite(ext[2])) *extOk = true;
+        return true;
+    }
+    uintptr_t pa = 0, matrix = 0;
+    float A[15] = {}, B[16] = {};
+    if (readVal(&pa, rec + 0x190) && pa && readMem(A, pa, sizeof(A)) && readVal(&matrix, pa + 0x50) && matrix && readMem(B, matrix, sizeof(B))) {
+        sealed::storeAxes(A, B, axes);
+        *src = 2;
+        return true;
+    }
+    return false;
+}
+
+// The producer B cache: per record, the centre and radius B's veto decision used this frame. A generation per frame (the stamp moves at Present)
+// makes a stale slot empty; under the lock.
+constexpr size_t kProdSlots = 8192;
+struct ProdSlot {
+    uintptr_t rec = 0;
+    uint32_t gen = 0;
+    float c[3] = {};
+    float r = 0.0f;
+};
+ProdSlot g_prodSlots[kProdSlots];
+uint32_t g_prodGen = 1;          // the generation the slots are valid for (0 is never valid)
+uint32_t g_prodStampSeen = 0;
+
+void prodSync() noexcept {
+    const uint32_t s = g_frameStamp.load(std::memory_order_relaxed);
+    if (s != g_prodStampSeen) {
+        g_prodStampSeen = s;
+        ++g_prodGen;
+    }
+}
+
+size_t prodIndex(uintptr_t rec) noexcept {
+    return static_cast<size_t>((static_cast<uint64_t>(rec) >> 4) * 0x9E3779B97F4A7C15ull >> 51) & (kProdSlots - 1);
+}
+
+void prodPut(uintptr_t rec, const float c[3], float r) noexcept {
+    size_t i = prodIndex(rec);
+    for (size_t n = 0; n < kProdSlots; ++n, i = (i + 1) & (kProdSlots - 1)) {
+        ProdSlot& s = g_prodSlots[i];
+        if (s.gen != g_prodGen || s.rec == rec) {
+            s.rec = rec;
+            s.gen = g_prodGen;
+            s.c[0] = c[0];
+            s.c[1] = c[1];
+            s.c[2] = c[2];
+            s.r = r;
+            return;
+        }
+    }
+}
+
+bool prodGet(uintptr_t rec, float c[3], float* r) noexcept {
+    size_t i = prodIndex(rec);
+    for (size_t n = 0; n < kProdSlots; ++n, i = (i + 1) & (kProdSlots - 1)) {
+        const ProdSlot& s = g_prodSlots[i];
+        if (s.gen != g_prodGen) return false;
+        if (s.rec == rec) {
+            c[0] = s.c[0];
+            c[1] = s.c[1];
+            c[2] = s.c[2];
+            *r = s.r;
+            return true;
+        }
+    }
+    return false;
+}
+
+struct WorldRead {
+    float world[3] = {};
+    float radius = 0.0f;
+    uint8_t source = 4;   // 0 producer B, 1 pose, 2 store-style, 3 raw fallback, 4 none
+};
+
+// The named rule's world centre and radius for a record (see the block comment above). Called under the lock.
+WorldRead worldOfRecord(uintptr_t rec) noexcept {
+    WorldRead w;
+    prodSync();
+    if (prodGet(rec, w.world, &w.radius)) {
+        w.source = 0;
+        return w;
+    }
+    float p[3] = {};
+    if (poseCentreOf(rec, p)) {
+        float r = 0.0f;
+        if (readVal(&r, rec + kRecRadius) && std::isfinite(r) && r > 0.0f) {
+            for (int k = 0; k < 3; ++k) w.world[k] = p[k];
+            w.radius = r;
+            w.source = 1;
+        }
+        return w;
+    }
+    if (storeSphereOf(rec, w.world, &w.radius)) {
+        w.source = 2;
+        return w;
+    }
+    float raw[3] = {};
+    float r = 0.0f;
+    if (readMem(raw, rec + kRecCentre, sizeof(raw)) && sealed::finite3(raw) && readVal(&r, rec + kRecRadius) && std::isfinite(r) && r > 0.0f) {
+        for (int k = 0; k < 3; ++k) w.world[k] = raw[k];
+        w.radius = r;
+        w.source = 3;
+    }
+    return w;
+}
+}  // namespace
+
 // The class of a node's name, read from game memory with no lock (the census's accept rules). The miss path of the class cache.
 sealed::NameClass classifyNode(uintptr_t node) noexcept {
     uintptr_t text = 0;
@@ -395,6 +549,116 @@ void logCellChange(const sealed::OwnCell& cell, uint32_t frame) {
         Log::get().note("sealed cell: no own pad at frame %u (%s); named mode is the sphere rule for those frames.", frame, cell.reason);
 }
 
+// Built v11 (second addendum): the oriented box for the own pad, from the pad's own orientation. The length axis is the pad's footprint axis with
+// the larger builder extent; the doubled axis, the wiki size and the margin give the half-extents. When the orientation or the extent cannot be
+// read, the box is not built and the capsule (or the pad's sphere) stays the cell, with the reason in boxInfo.
+void buildBoxFor(sealed::OwnCell& cell, const float target[3]) {
+    cell.box = false;
+    char why[240] = {};
+    float axes[3][3] = {}, ext[3] = {};
+    bool extOk = false;
+    uint8_t src = 4;
+    if (!cell.has || cell.size == sealed::PadSize::kNone) {
+        std::snprintf(why, sizeof(why), "no sized pad");
+    } else if (!poseOrientOf(cell.pad, axes, ext, &extOk, &src)) {
+        std::snprintf(why, sizeof(why), "the pad's orientation is not readable (no builder pose, no store-style pose block)");
+    } else if (!extOk) {
+        std::snprintf(why, sizeof(why), "the pad has no builder extent (store-style orientation only), so its length and width cannot be told apart");
+    } else {
+        float u[3] = {target[0] - cell.centre[0], target[1] - cell.centre[1], target[2] - cell.centre[2]};
+        const float ul = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+        int li = -1, wi = -1;
+        if (!(ul >= 1.0f)) {
+            std::snprintf(why, sizeof(why), "the shaft or the footprint could not be found");
+        } else {
+            for (float& v : u) v /= ul;
+            if (!sealed::footprintAxes(axes, u, ext, &li, &wi)) {
+                std::snprintf(why, sizeof(why), "the shaft or the footprint could not be found");
+                std::snprintf(cell.boxInfo, sizeof(cell.boxInfo), "not built: %s", why);
+                return;
+            }
+            const float* wiki = sealed::kPadWikiM[sealed::sizeIndex(cell.size)];
+            const float halfLen = wiki[0] * 0.5f * (g_doubleLength ? 2.0f : 1.0f);
+            const float halfWid = wiki[1] * 0.5f * (g_doubleLength ? 1.0f : 2.0f);
+            if (!sealed::buildBox(cell.centre, target, axes[li], halfLen, halfWid, g_margin, &cell)) {
+                std::snprintf(why, sizeof(why), "the box could not be built");
+            } else {
+                std::snprintf(cell.boxInfo, sizeof(cell.boxInfo),
+                              "pad axes: e0 (%.2f, %.2f, %.2f), e1 (%.2f, %.2f, %.2f), e2 (%.2f, %.2f, %.2f); length e%d, width e%d, up the other; "
+                              "builder extent (%.1f, %.1f, %.1f) m; wiki %.0f x %.0f m; doubled on the %s axis; source %s",
+                              static_cast<double>(axes[0][0]), static_cast<double>(axes[0][1]), static_cast<double>(axes[0][2]),
+                              static_cast<double>(axes[1][0]), static_cast<double>(axes[1][1]), static_cast<double>(axes[1][2]),
+                              static_cast<double>(axes[2][0]), static_cast<double>(axes[2][1]), static_cast<double>(axes[2][2]), li, wi,
+                              static_cast<double>(ext[0]), static_cast<double>(ext[1]), static_cast<double>(ext[2]),
+                              static_cast<double>(wiki[0]), static_cast<double>(wiki[1]), g_doubleLength ? "length" : "width",
+                              src == 1 ? "builder quaternion" : "store-style pose");
+                return;
+            }
+        }
+    }
+    std::snprintf(cell.boxInfo, sizeof(cell.boxInfo), "not built: %s", why);
+}
+
+// Built v11 (second addendum): the box's log, once per change (the box appears or goes, its centre moves by more than 5 cm, or the reason changes).
+void logBoxChange(const sealed::OwnCell& c, uint32_t frame) {
+    static bool lastBox = false;
+    static float lastCentre[3] = {};
+    static char lastInfo[320] = {};
+    bool changed = c.box != lastBox;
+    if (c.box && lastBox) {
+        for (int k = 0; k < 3; ++k)
+            if (std::fabs(c.boxCentre[k] - lastCentre[k]) > 0.05f) changed = true;
+    }
+    if (!c.box && std::strcmp(c.boxInfo, lastInfo) != 0) changed = true;
+    if (!changed) return;
+    lastBox = c.box;
+    std::memcpy(lastCentre, c.boxCentre, sizeof(lastCentre));
+    std::snprintf(lastInfo, sizeof(lastInfo), "%s", c.box ? "" : c.boxInfo);
+    if (!c.box) {
+        if (c.boxInfo[0] != '\0')
+            Log::get().note("sealed box: at frame %u: %s. The capsule (or the pad's sphere) is the cell.", frame, c.boxInfo);
+        return;
+    }
+    Log::get().note("sealed box: at frame %u: %s. Box centre (%.1f, %.1f, %.1f); half-extents length %.1f, width %.1f, height %.1f m (margin %.0f m); "
+                    "length axis (%.3f, %.3f, %.3f), width axis (%.3f, %.3f, %.3f), shaft (%.3f, %.3f, %.3f).", frame, c.boxInfo,
+                    static_cast<double>(c.boxCentre[0]), static_cast<double>(c.boxCentre[1]), static_cast<double>(c.boxCentre[2]),
+                    static_cast<double>(c.boxHalf[0]), static_cast<double>(c.boxHalf[1]), static_cast<double>(c.boxHalf[2]),
+                    static_cast<double>(c.boxMargin), static_cast<double>(c.boxU[0]), static_cast<double>(c.boxU[1]),
+                    static_cast<double>(c.boxU[2]), static_cast<double>(c.boxV[0]), static_cast<double>(c.boxV[1]),
+                    static_cast<double>(c.boxV[2]), static_cast<double>(c.boxW[0]), static_cast<double>(c.boxW[1]),
+                    static_cast<double>(c.boxW[2]));
+}
+
+// Built v11: the capsule's axis, logged once per change (the pad or the target moved by more than 5 cm, or the capsule came or went). Under the lock.
+void logCapsuleChange(const sealed::OwnCell& c, uint32_t frame) {
+    static bool lastCap = false;
+    static float lastA[3] = {}, lastB[3] = {};
+    bool changed = c.capsule != lastCap;
+    if (c.capsule && lastCap) {
+        for (int k = 0; k < 3; ++k)
+            if (std::fabs(c.capA[k] - lastA[k]) > 0.05f || std::fabs(c.capB[k] - lastB[k]) > 0.05f) changed = true;
+    }
+    if (!changed) return;
+    lastCap = c.capsule;
+    for (int k = 0; k < 3; ++k) {
+        lastA[k] = c.capA[k];
+        lastB[k] = c.capB[k];
+    }
+    if (!c.capsule) {
+        Log::get().note("sealed cell: no capsule at frame %u (no BlastShieldBase or own Hanger within %.0f m of the pad, or no pad); the cell is "
+                        "the pad's sphere of radius %.1f m", frame, static_cast<double>(sealed::kCapsuleMaxM), static_cast<double>(c.radius));
+        return;
+    }
+    const float dx = c.capB[0] - c.capA[0], dy = c.capB[1] - c.capA[1], dz = c.capB[2] - c.capA[2];
+    const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const float inv = len > 0.0f ? 1.0f / len : 0.0f;
+    Log::get().note("sealed cell: capsule at frame %u: axis from the pad (%.1f, %.1f, %.1f) to %s, extended %.0f m past it; length %.1f m, "
+                    "direction (%.3f, %.3f, %.3f); radius %.1f m (the cell radius for the pad's size)", frame, static_cast<double>(c.centre[0]),
+                    static_cast<double>(c.centre[1]), static_cast<double>(c.centre[2]), c.capTarget,
+                    static_cast<double>(sealed::kCapsuleExtendM), static_cast<double>(c.capLen), static_cast<double>(dx * inv),
+                    static_cast<double>(dy * inv), static_cast<double>(dz * inv), static_cast<double>(c.radius));
+}
+
 // Promotes the previous frame's pads into the cell for the frame now starting, and the explicit instances for that cell. Called under the lock
 // at the frame's first record. The pads and explicit parts are the previous frame's; the camera is the previous frame's too.
 void promoteFrame(uint32_t stamp, uint32_t frame) {
@@ -403,19 +667,36 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
         if (g_frameCamValid) {
             const float radii[3] = {g_cellRadius[0], g_cellRadius[1], g_cellRadius[2]};
             sealed::pickOwnPad(g_pads, g_padCount, g_frameCam, radii, &next);
+            // Built v11: the capsule. The axis runs from the pad's centre to the nearest BlastShieldBase* (else the own Hanger*), on 20 m past it.
+            if (next.has) {
+                float q[3] = {};
+                char qn[48] = {};
+                if (sealed::pickCapsuleTarget(g_explicits, g_explicitCount, next.centre, q, qn, sizeof(qn)) &&
+                    sealed::buildCapsule(next.centre, q, sealed::kCapsuleExtendM, next.capA, next.capB, &next.capLen)) {
+                    next.capsule = true;
+                    std::snprintf(next.capTarget, sizeof(next.capTarget), "%s", qn);
+                    buildBoxFor(next, q);   // Built v11 (second addendum): the box when the pad's orientation and extent are readable
+                }
+            }
         } else {
             std::snprintf(next.reason, sizeof(next.reason), "no camera for the previous frame");
         }
     } else {
         std::snprintf(next.reason, sizeof(next.reason), "sphere mode");
     }
-    g_explicitPrevCount = next.has ? sealed::pickExplicit(g_explicits, g_explicitCount, next.centre, g_explicitPrev, sealed::kExplicitNodes) : 0;
+    // Built v11 (addendum): with a capsule the explicit picks are the parts within kExplicitCapsuleM of its axis; without one, the v8.3b pick.
+    if (next.has && next.capsule)
+        g_explicitPrevCount = sealed::pickExplicitSegment(g_explicits, g_explicitCount, next.capA, next.capB, g_explicitPrev, sealed::kExplicitNodes);
+    else
+        g_explicitPrevCount = next.has ? sealed::pickExplicit(g_explicits, g_explicitCount, next.centre, g_explicitPrev, sealed::kExplicitNodes) : 0;
     g_cellPrev = next;
     g_padCount = 0;
     g_explicitCount = 0;
     g_cellStamp = stamp;
     if (next.has) g_lastSize = sealed::padSizeLetter(next.size);
     logCellChange(next, frame);
+    logCapsuleChange(next, frame);
+    logBoxChange(next, frame);
 }
 
 // Writes the kept-records report for the frame collected. Walks each observed record's child lists (to a small depth), reads each record's sphere,
@@ -474,7 +755,9 @@ void writeKeptReport() {
         e.parent = w.parent == kNone ? 0 : entries[w.parent].address;
         // Built v8.4: the world centre (the builder's, from the pose) and both centres for the columns.
         const CentreRead cr = recordCentreRead(w.rec);
-        const float* centre = cr.world;
+        // Built v11: the centre the report measures from is the named rule's position (worldOfRecord), the same rule the cell test uses.
+        const WorldRead wr = worldOfRecord(w.rec);
+        const float* centre = wr.world;
         for (int c = 0; c < 3; ++c) e.poseCentre[c] = cr.pose[c];
         e.poseOk = cr.poseOk;
         e.rawZero = cr.rawZero;
@@ -485,12 +768,11 @@ void writeKeptReport() {
             e.ptr290Kind = static_cast<uint8_t>(ptr290Of(w.rec, &raw));
             e.ptr290 = raw;
         }
-        float radius = 0.0f;
+        float radius = wr.radius;
         uint64_t mask = 0;
         uint64_t children = 0;
         uintptr_t vt = 0;
-        const bool readOk = cr.source != sealed::CentreSource::kNone && readVal(&radius, w.rec + kRecRadius) &&
-                            readVal(&mask, w.rec + kRecMask) && readVal(&children, w.rec + kRecChildCount);
+        const bool readOk = wr.source != 4 && readVal(&mask, w.rec + kRecMask) && readVal(&children, w.rec + kRecChildCount);
         readVal(&vt, w.rec);
         {
             char name[64];
@@ -557,7 +839,11 @@ void writeKeptReport() {
                 ++nSphereNoCell;
             } else {
                 const float c[3] = {e.rel[0] + cam[0], e.rel[1] + cam[1], e.rel[2] + cam[2]};
-                if (sealed::distance(c, g_cellPrev.centre) <= g_cellPrev.radius) {
+                // Built v11: the cell test is the capsule's (the distance to the axis) when a capsule is in force, else the pad's sphere.
+                const bool inCell = g_cellPrev.box                 ? sealed::inBox(c, g_cellPrev)
+                                    : g_cellPrev.capsule           ? sealed::distToSegment(c, g_cellPrev.capA, g_cellPrev.capB) <= g_cellPrev.radius
+                                                                   : sealed::distance(c, g_cellPrev.centre) <= g_cellPrev.radius;
+                if (inCell) {
                     e.label = "cell";
                     ++nCell;
                 } else if (sealed::inAddrSet(g_explicitPrev, g_explicitPrevCount, e.address)) {
@@ -589,6 +875,26 @@ void writeKeptReport() {
     const kept::Stats st = kept::countKept(entries.data(), static_cast<uint32_t>(entries.size()));
     uint32_t byRadius[kept::kTop];
     uint32_t byBase[kept::kTop];
+    // Built v11 (addendum): with a capsule in force, every readable entry's distance to the axis and its position along it, from the pad.
+    if (g_cellPrev.capsule) {
+        float u[3] = {g_cellPrev.capB[0] - g_cellPrev.capA[0], g_cellPrev.capB[1] - g_cellPrev.capA[1], g_cellPrev.capB[2] - g_cellPrev.capA[2]};
+        const float ul = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+        if (ul > 0.0f)
+            for (float& v : u) v /= ul;
+        for (kept::Entry& e : entries) {
+            if (!e.readable) continue;
+            const float c[3] = {e.rel[0] + cam[0], e.rel[1] + cam[1], e.rel[2] + cam[2]};
+            e.axisDist = sealed::distToSegment(c, g_cellPrev.capA, g_cellPrev.capB);
+            e.axisAlong = (c[0] - g_cellPrev.capA[0]) * u[0] + (c[1] - g_cellPrev.capA[1]) * u[1] + (c[2] - g_cellPrev.capA[2]) * u[2];
+            if (g_cellPrev.box) {   // Built v11 (second addendum): the record's place in the box
+                float o[3] = {};
+                sealed::boxCoords(c, g_cellPrev, o);
+                e.boxU = o[0];
+                e.boxV = o[1];
+                e.boxUp = o[2];
+            }
+        }
+    }
     const uint32_t nRadius = kept::topByRadius(entries.data(), static_cast<uint32_t>(entries.size()), byRadius);
     const uint32_t nBase = kept::topBases(entries.data(), static_cast<uint32_t>(entries.size()), byBase);
 
@@ -636,6 +942,24 @@ void writeKeptReport() {
             if (kept::formatRow(row, sizeof(row), "radius", k + 1, entries[byRadius[k]]) >= 0) std::fprintf(f, "%s\n", row);
         for (uint32_t k = 0; k < nBase; ++k)
             if (kept::formatRow(row, sizeof(row), "base", k + 1, entries[byBase[k]]) >= 0) std::fprintf(f, "%s\n", row);
+        // Built v11 (addendum): every kept named record, nearest the capsule's axis first (no capsule: by address), so a neighbouring bay shows up
+        // by name and distance. Capped; the totals line says how many were written.
+        if (named) {
+            std::vector<uint32_t> keptNamed;
+            for (uint32_t i = 0; i < entries.size(); ++i)
+                if (entries[i].kept && entries[i].label) keptNamed.push_back(i);
+            std::sort(keptNamed.begin(), keptNamed.end(), [&entries](uint32_t a, uint32_t b) {
+                const float da = entries[a].axisDist >= 0.0f ? entries[a].axisDist : 1.0e9f;
+                const float db = entries[b].axisDist >= 0.0f ? entries[b].axisDist : 1.0e9f;
+                if (da != db) return da < db;
+                return entries[a].address < entries[b].address;
+            });
+            const size_t written = keptNamed.size() < kKeptNamedRows ? keptNamed.size() : kKeptNamedRows;
+            for (size_t k = 0; k < written; ++k)
+                if (kept::formatRow(row, sizeof(row), "named", static_cast<uint32_t>(k + 1), entries[keptNamed[k]]) >= 0)
+                    std::fprintf(f, "%s\n", row);
+            std::fprintf(f, "# named kept rows: %zu written of %zu (cap %zu)\n", written, keptNamed.size(), kKeptNamedRows);
+        }
         std::fclose(f);
     }
 
@@ -694,6 +1018,21 @@ void sealedTrialInstall(bool flatProfile) {
     if (!sealed::parseProducerMode(producerText.c_str(), &producer))
         Log::get().note("sealed trial: diag.sealed_trial_producer = '%s' is not veto or count; producer B is vetoed.", producerText.c_str());
     g_producerMode = producer;
+    // Built v11 (second addendum): the box's doubled axis (length, the default, or width) and its margin in metres.
+    const std::string doubleText = Config::get().getString("diag.sealed_cell_double", "");
+    if (doubleText == "width") {
+        g_doubleLength = false;
+    } else {
+        g_doubleLength = true;
+        if (!doubleText.empty() && doubleText != "length")
+            Log::get().note("sealed box: diag.sealed_cell_double = '%s' is not length or width; the length axis is doubled.", doubleText.c_str());
+    }
+    const std::string marginText = Config::get().getString("diag.sealed_cell_margin_m", "");
+    if (!sealed::parseMarginM(marginText.c_str(), sealed::kMarginDefaultM, &g_margin))
+        Log::get().note("sealed box: diag.sealed_cell_margin_m = '%s' is not a number of metres; the margin is %.0f m.", marginText.c_str(),
+                        static_cast<double>(sealed::kMarginDefaultM));
+    Log::get().note("sealed box: the doubled axis is %s (diag.sealed_cell_double; a guess); margin %.0f m (diag.sealed_cell_margin_m; PAGEUP and "
+                    "PAGEDOWN step it in named mode).", g_doubleLength ? "length" : "width", static_cast<double>(g_margin));
     Log::get().note("sealed trial: off. hotkey.sealed_trial toggles it; the sphere starts at %.1f m (diag.sealed_trial_radius_m); the "
                     "record rule is %s (diag.sealed_trial_mode; hotkey.sealed_trial_mode cycles it while on). Named mode's cell radii are "
                     "small %.1f, medium %.1f, large %.1f m (diag.sealed_cell_*_m; guesses until measured); hotkey.sealed_cell_larger and "
@@ -806,16 +1145,17 @@ void sealedTrialCellStep(int dir, const char* trigger, uint32_t frame) {
                         "(trigger %s).", g_on.load() ? "on" : "off", sealed::modeName(g_mode.load(std::memory_order_relaxed)), trigger);
         return;
     }
-    const char size = g_cellPrev.has ? sealed::padSizeLetter(g_cellPrev.size) : g_lastSize;
-    const int index = size == 'S' ? 0 : (size == 'M' ? 1 : 2);
+    // Built v11 (second addendum): PAGEUP and PAGEDOWN step the box's margin (-10, -5, 0, 5, 10, 20, 40 m); the next frame's box uses it.
     bool moved = false;
-    const float before = g_cellRadius[index];
-    const float after = sealed::stepCellRadius(before, dir, &moved);
-    if (moved) {
-        g_cellRadius[index] = after;
-        if (g_cellPrev.has && sealed::padSizeLetter(g_cellPrev.size) == size) g_cellPrev.radius = after;
-    }
-    sealed::formatCellStep(line, sizeof(line), size, moved, moved ? after : before, dir, frame, trigger);
+    const float before = g_margin;
+    const float after = sealed::stepMarginRung(before, dir, &moved);
+    if (moved) g_margin = after;
+    if (moved)
+        std::snprintf(line, sizeof(line), "named box: margin %.0f m (was %.0f m; ladder -10, -5, 0, 5, 10, 20, 40 m) at frame %u (trigger %s)",
+                      static_cast<double>(after), static_cast<double>(before), frame, trigger);
+    else
+        std::snprintf(line, sizeof(line), "named box: margin is at the end of its ladder (%.0f m); nothing changed (trigger %s)",
+                      static_cast<double>(before), trigger);
     Log::get().note("%s", line);
 }
 
@@ -898,18 +1238,14 @@ bool sealedTrialSkipsSunPair() noexcept { return g_on.load(std::memory_order_acq
 // True skips the forward (veto mode); count mode only counts the decision.
 namespace {
 bool producerDecide(uintptr_t rec) noexcept {
-    constexpr uintptr_t kNodeOff = 0x18;       // rec+0x18: the node (census's name pointer)
-    constexpr uintptr_t kBlockOff = 0x08;      // node+0x08: the bounds block
-    constexpr uintptr_t kPoseOff = 0x190;      // rec+0x190: the pose block A
-    constexpr uintptr_t kMatrixOff = 0x50;     // A+0x50: the matrix B
-    float L[3] = {}, A[15] = {}, B[16] = {}, centre[3] = {};
+    float centre[3] = {};
     float radius = 0.0f;
-    uintptr_t node = 0, block = 0, pose = 0, matrix = 0;
-    bool ok = readVal(&node, rec + kNodeOff) && node && readVal(&block, node + kBlockOff) && block &&
-              readMem(L, block + 0x20, sizeof(L)) && readVal(&radius, block + 0x2C) && readVal(&pose, rec + kPoseOff) && pose &&
-              readMem(A, pose, sizeof(A)) && readVal(&matrix, pose + kMatrixOff) && matrix && readMem(B, matrix, sizeof(B));
-    ok = ok && std::isfinite(radius) && radius > 0.0f && sealed::storeWorldSphere(L, A, B, centre);
+    const bool ok = storeSphereOf(rec, centre, &radius);
     ++g_prodCalls;
+    if (ok) {
+        prodSync();
+        prodPut(rec, centre, radius);   // Built v11: the named rule reads this record's centre from here (the same world centre)
+    }
     if (!ok) {
         ++g_prodUnread;
         ++g_prodKept;
@@ -1054,9 +1390,12 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
     if (cr.rawZero) ++g_zeroCentre;
     if (cr.source == sealed::CentreSource::kRaw) ++g_poseFallback;
     if (cr.dist >= 0.0f && g_centreDist.size() < kCentreDistCap) g_centreDist.push_back(cr.dist);
-    const float* centre = cr.world;
-    float radius = 0.0f;
-    if (cr.source == sealed::CentreSource::kNone || !readVal(&radius, record + kRecRadius) || !std::isfinite(radius) || !(radius > 0.0f) ||
+    // Built v11: the named rule's position is the world centre of worldOfRecord (the producer B cache, the pose, the store-style sphere, raw).
+    const WorldRead wr = worldOfRecord(record);
+    ++g_worldSrc[wr.source];
+    const float* centre = wr.world;
+    const float radius = wr.radius;
+    if (wr.source == 4 || !std::isfinite(radius) || !(radius > 0.0f) ||
         !std::isfinite(centre[0]) || !std::isfinite(centre[1]) || !std::isfinite(centre[2])) {
         g_keptUnknown.fetch_add(1, std::memory_order_relaxed);
     } else {
@@ -1087,6 +1426,9 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
                 x.centre[0] = centre[0];
                 x.centre[1] = centre[1];
                 x.centre[2] = centre[2];
+                char xn[48] = {};
+                if (cachedName(record, xn, sizeof(xn))) std::snprintf(x.name, sizeof(x.name), "%s", xn);
+                else x.name[0] = '\0';
             }
             const sealed::NamedKeep v = sealed::keepNamedCell(centre, radius, cam, trialR, g_cellPrev, g_explicitPrev, g_explicitPrevCount,
                                                               record);

@@ -84,6 +84,8 @@ std::atomic<bool> builderWanted{false};
 // Built v10: the trial's pre-forward veto on producer 0 (kinematic_eval_hook.h DirectVetoFn), and its own want (it holds the relay gate open).
 std::atomic<DirectVetoFn> directVeto{nullptr};
 std::atomic<bool> directVetoWanted{false};
+// Built v11: the draw-list probe's path C observer (producer 1's bracket, after the forward). Null = off.
+std::atomic<ProducerCObserverFn> producerCObserver{nullptr};
 alignas(8) std::atomic<GateProbePartFn> gateProbePart{nullptr};
 // FUN_1442B3FC0's relay gate: a cell of its own, not evalGate, so the
 // per-part patch (installed only for the gate probe) costs the evalGate
@@ -765,6 +767,11 @@ uintptr_t __fastcall directBracket(uint32_t producer,uintptr_t a,uintptr_t b,
         } __except(EXCEPTION_EXECUTE_HANDLER) {items=0;neg=0;fault=true;}
     }
     kinematicEvalProbe.noteDirectBuild(producer,items,neg,fault);
+    // Built v11: the draw-list probe's path C count (producer 1 is FUN_14369C9C0; this bracket is its existing hook, no new detour).
+    if(producer==1) {
+        const auto producerC=producerCObserver.load(std::memory_order_acquire);
+        if(producerC)producerC(items,fault?1u:0u);
+    }
     // Engine-record velocity: FUN_144312E00 (producer 0) only, after the
     // forward, while the records it appended are still this job's alone.
     if(producer==0 && !fault) {
@@ -1285,6 +1292,10 @@ void kinematicEvalBuilderObserverDetach() noexcept {
 
 bool kinematicEvalBuilderGateOpen() noexcept {
     return evalGate.load(std::memory_order_acquire)!=0;
+}
+
+void kinematicEvalSetProducerCObserver(ProducerCObserverFn fn) noexcept {
+    producerCObserver.store(fn,std::memory_order_release);
 }
 
 void kinematicEvalSetDirectVeto(DirectVetoFn fn) noexcept {

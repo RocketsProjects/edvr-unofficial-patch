@@ -85,15 +85,17 @@ constexpr uint64_t kWindowMs = 5000;         // the statistics line's period whi
 constexpr uint32_t kStepCount = 7;
 constexpr float kSteps[kStepCount] = {80.0f, 60.0f, 40.0f, 30.0f, 20.0f, 15.0f, 10.0f};
 
-// Named mode's cell (Built v8.3b). The radii are GUESSES (60 / 90 / 130 m for small, medium, large) until measured on the flight. The ladder
-// is what hotkey.sealed_cell_larger and hotkey.sealed_cell_smaller step the CURRENT size's radius through, ascending.
-constexpr float kCellDefaultM[3] = {60.0f, 90.0f, 130.0f};
+// Named mode's cell (Built v8.3b; Built v11 capsule). The radii are GUESSES until measured on the flight: 30 m for a small pad (Built v11: the
+// capsule's radius, the addendum's guess; was 60), 90 m medium, 130 m large. The ladder is what hotkey.sealed_cell_larger and
+// hotkey.sealed_cell_smaller (PAGEUP and PAGEDOWN) step the CURRENT size's radius through, ascending (Built v11: 15 to 60 m).
+constexpr float kCellDefaultM[3] = {30.0f, 90.0f, 130.0f};
 constexpr float kCellMinM = 10.0f;
 constexpr float kCellMaxM = 400.0f;
-constexpr size_t kCellLadderCount = 10;
-constexpr float kCellLadder[kCellLadderCount] = {30.0f, 40.0f, 50.0f, 60.0f, 70.0f, 80.0f, 100.0f, 120.0f, 150.0f, 200.0f};
+constexpr size_t kCellLadderCount = 7;
+constexpr float kCellLadder[kCellLadderCount] = {15.0f, 20.0f, 25.0f, 30.0f, 40.0f, 50.0f, 60.0f};
 constexpr float kPadFallbackM = 150.0f;      // no pad sphere contains the camera: the nearest pad centre within this
-constexpr float kExplicitM = 200.0f;         // an explicit part's nearest instance to the cell centre must be within this
+constexpr float kExplicitM = 200.0f;         // an explicit part's nearest instance to the cell centre must be within this (no capsule)
+constexpr float kExplicitCapsuleM = 15.0f;   // Built v11: with a capsule, an explicit part's nearest instance must be within this of the axis
 constexpr size_t kPadSlots = 32;             // pad records a frame keeps for the pick
 constexpr size_t kExplicitSlots = 128;       // explicit-part records a frame keeps for the nearest-instance pick
 constexpr size_t kExplicitNodes = 64;        // distinct part nodes the nearest-instance pick tracks
@@ -204,6 +206,14 @@ struct Window {
     uint64_t producerStyle = 0;
     uint64_t producerUnread = 0;
     const char* producerMode = "veto";
+    // Built v11: the named rule's world centre per record, by source: 0 producer B (the veto's store-style sphere, this frame), 1 pose (builder),
+    // 2 store-style (node block and rec+0x190), 3 raw rec+0x240 (fallback), 4 none.
+    uint64_t worldSrc[5] = {};
+    // Built v11 (second addendum): the named cell's box in force at the window's latest frame (boxOn false: the capsule or the pad sphere), its
+    // half-extents (length, width, height) and the margin.
+    bool boxOn = false;
+    float boxHalf[3] = {};
+    float boxMargin = 0.0f;
 };
 
 // The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named is the own-pad cell rule.
@@ -346,6 +356,24 @@ struct OwnCell {
     bool padContains = false;  // the pad's own sphere contains the camera (else it was the fallback within kPadFallbackM)
     char padName[64] = {};
     char reason[80] = {};
+    // Built v11: the capsule. When capsule is true the cell test is the distance to the segment capA..capB (radius kept) instead of the sphere
+    // about centre; capLen is the pad-to-target distance and capTarget the target's name.
+    bool capsule = false;
+    float capA[3] = {};
+    float capB[3] = {};
+    float capLen = 0.0f;
+    char capTarget[48] = {};
+    // Built v11 (second addendum): the oriented box along the shaft. When box is true the named rule's cell is the box: boxCentre, the length
+    // axis boxU, the width axis boxV, the shaft axis boxW (unit vectors), half-extents boxHalf (length, width, height). boxInfo says how it was
+    // built (the pad's axes, extents, the choice), or why it was not (then the capsule or the pad sphere is the cell).
+    bool box = false;
+    float boxCentre[3] = {};
+    float boxU[3] = {};
+    float boxV[3] = {};
+    float boxW[3] = {};
+    float boxHalf[3] = {};
+    float boxMargin = 0.0f;
+    char boxInfo[320] = {};
 };
 
 // The index into radii[] (small, medium, large) for a size; -1 for none.
@@ -404,6 +432,7 @@ struct ExplicitObs {
     uintptr_t addr = 0;
     uintptr_t node = 0;
     float centre[3] = {};
+    char name[48] = {};        // Built v11: the part's name (the capsule's target is picked by it)
 };
 
 // For each part node, the nearest instance to the cell centre within kExplicitM. Writes their addresses to out (at most outCap); returns the count.
@@ -418,6 +447,246 @@ inline size_t pickExplicit(const ExplicitObs* obs, size_t n, const float cellCen
     for (size_t i = 0; i < n; ++i) {
         const float d = distance(obs[i].centre, cellCentre);
         if (d > kExplicitM) continue;
+        size_t k = 0;
+        while (k < nb && best[k].node != obs[i].node) ++k;
+        if (k < nb) {
+            if (d < best[k].d) {
+                best[k].addr = obs[i].addr;
+                best[k].d = d;
+            }
+        } else if (nb < kExplicitNodes) {
+            best[nb++] = Best{obs[i].node, obs[i].addr, d};
+        }
+    }
+    size_t written = 0;
+    for (size_t k = 0; k < nb && written < outCap; ++k) out[written++] = best[k].addr;
+    return written;
+}
+
+// Built v11: the cell capsule. Its target is the nearest BlastShieldBase* explicit instance within kCapsuleMaxM of the pad (else the nearest own
+// HangerSmall, HangerMedium or HangerLarge within the same reach). The axis runs from the pad's centre to the target and on kCapsuleExtendM past
+// it, so a 90 m shaft that a sphere on the pad cannot hold is inside the cell. The cell test is the distance to that segment.
+constexpr float kCapsuleMaxM = 400.0f;
+constexpr float kCapsuleExtendM = 20.0f;
+
+inline bool hasPrefix(const char* s, const char* p) noexcept { return std::strncmp(s, p, std::strlen(p)) == 0; }
+inline bool isBlastBase(const char* name) noexcept { return hasPrefix(name, "BlastShieldBase"); }
+inline bool isOwnHanger(const char* name) noexcept {
+    return hasPrefix(name, "HangerSmall") || hasPrefix(name, "HangerMedium") || hasPrefix(name, "HangerLarge");
+}
+
+// The distance from p to the segment ab (its end points included).
+inline float distToSegment(const float p[3], const float a[3], const float b[3]) noexcept {
+    const float ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    const float ap[3] = {p[0] - a[0], p[1] - a[1], p[2] - a[2]};
+    const float len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+    float t = len2 > 0.0f ? (ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / len2 : 0.0f;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    const float q[3] = {a[0] + t * ab[0], a[1] + t * ab[1], a[2] + t * ab[2]};
+    return distance(p, q);
+}
+
+// The capsule from the pad centre p to the target q, extended past q by extend along the axis. False when the target is not a distance away.
+inline bool buildCapsule(const float p[3], const float q[3], float extend, float a[3], float b[3], float* length) noexcept {
+    const float d[3] = {q[0] - p[0], q[1] - p[1], q[2] - p[2]};
+    const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (!std::isfinite(len) || !(len >= 1.0f)) return false;
+    for (int k = 0; k < 3; ++k) {
+        a[k] = p[k];
+        b[k] = q[k] + d[k] / len * extend;
+    }
+    if (length) *length = len;
+    return finite3(a) && finite3(b);
+}
+
+// The nearest BlastShieldBase* instance within kCapsuleMaxM of p (else the nearest own Hanger*Small/Medium/Large). Writes its centre and name.
+inline bool pickCapsuleTarget(const ExplicitObs* obs, size_t n, const float p[3], float q[3], char* name, size_t cap) noexcept {
+    for (int pass = 0; pass < 2; ++pass) {
+        int best = -1;
+        float bestD = 0.0f;
+        for (size_t i = 0; i < n; ++i) {
+            const bool match = pass == 0 ? isBlastBase(obs[i].name) : isOwnHanger(obs[i].name);
+            if (!match) continue;
+            const float d = distance(obs[i].centre, p);
+            if (d > kCapsuleMaxM) continue;
+            if (best < 0 || d < bestD) {
+                best = static_cast<int>(i);
+                bestD = d;
+            }
+        }
+        if (best >= 0) {
+            for (int k = 0; k < 3; ++k) q[k] = obs[best].centre[k];
+            std::snprintf(name, cap, "%s", obs[best].name);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Built v11 (second addendum): the oriented box. Elite's pad sizes (the wiki), length x width in metres, small, medium, large. The hangar is the
+// pad doubled along one axis (diag.sealed_cell_double), so each half-extent is half the pad's size times 2 on that axis and 1 on the other, plus
+// the margin (diag.sealed_cell_margin_m). Vertically the box runs from kBoxBelowM under the pad's centre up the shaft to kBoxBeyondM past the
+// target (the nearest BlastShieldBase). A round cell cannot hold a rectangular bay without the neighbours: this is the bay's footprint.
+constexpr float kPadWikiM[3][2] = {{66.0f, 55.0f}, {150.0f, 90.0f}, {213.0f, 128.0f}};
+constexpr float kBoxBelowM = 10.0f;
+constexpr float kBoxBeyondM = 20.0f;
+constexpr float kMarginDefaultM = 5.0f;
+constexpr size_t kMarginLadderCount = 7;
+constexpr float kMarginLadder[kMarginLadderCount] = {-10.0f, -5.0f, 0.0f, 5.0f, 10.0f, 20.0f, 40.0f};
+
+// One rung of the margin ladder from m (dir negative: smaller, positive: larger); off the ladder a step lands on the nearest rung that way; at
+// the end m stays (the clamp). *moved says whether it changed.
+inline float stepMarginRung(float m, int dir, bool* moved) noexcept {
+    float out = m;
+    if (dir < 0) {
+        for (size_t i = kMarginLadderCount; i-- > 0;) {
+            if (kMarginLadder[i] < m) {
+                out = kMarginLadder[i];
+                break;
+            }
+        }
+    } else if (dir > 0) {
+        for (size_t i = 0; i < kMarginLadderCount; ++i) {
+            if (kMarginLadder[i] > m) {
+                out = kMarginLadder[i];
+                break;
+            }
+        }
+    }
+    if (moved) *moved = out != m;
+    return out;
+}
+
+// diag.sealed_cell_margin_m: a signed number of metres; empty is the default. False (and the default) for text that is not a finite number.
+inline bool parseMarginM(const char* text, float defaultM, float* out) noexcept {
+    *out = defaultM;
+    if (!text || !*text) return true;
+    char* end = nullptr;
+    const double v = std::strtod(text, &end);
+    if (end == text || !std::isfinite(v)) return false;
+    while (*end == ' ' || *end == '\t') ++end;
+    if (*end != '\0') return false;
+    *out = static_cast<float>(v);
+    return true;
+}
+
+// The local axes of a rotation given as the builder's quaternion (R(q)): axes[k] is R(q) e_k, from builderCentre.
+inline void quatAxes(const float q[4], float axes[3][3]) noexcept {
+    const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float o0[4] = {};
+    builderCentre(q, zero, zero, o0);
+    for (int k = 0; k < 3; ++k) {
+        float e[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        e[k] = 1.0f;
+        float ok[4] = {};
+        builderCentre(q, zero, e, ok);
+        for (int j = 0; j < 3; ++j) axes[k][j] = ok[j] - o0[j];
+    }
+}
+
+// The local axes of a store-style pose (the node block through rec+0x190; decomp_4312040.txt): with A the pose block (3x3 at A[4k+j], translation
+// A[12..14]) and B the matrix at A+0x50 (B[4i+j], translation B[12..14]), the world image of local e_k is axes[k][j] = sum_i B[4i+j] * A[4k+i].
+inline void storeAxes(const float A[15], const float B[16], float axes[3][3]) noexcept {
+    for (int k = 0; k < 3; ++k)
+        for (int j = 0; j < 3; ++j) {
+            float s = 0.0f;
+            for (int i = 0; i < 3; ++i) s += B[4 * i + j] * A[4 * k + i];
+            axes[k][j] = s;
+        }
+}
+
+// The footprint of the pad's box: of its three local axes, the one most along the shaft u is the up axis; of the other two, the one with the
+// larger builder extent is the length axis (lenIdx), the other the width (widIdx). False with no extent: the box cannot tell length from width.
+inline bool footprintAxes(const float axes[3][3], const float u[3], const float* ext, int* lenIdx, int* widIdx) noexcept {
+    if (!ext) return false;
+    int up = 0;
+    float best = -1.0f;
+    for (int k = 0; k < 3; ++k) {
+        const float d = std::fabs(axes[k][0] * u[0] + axes[k][1] * u[1] + axes[k][2] * u[2]);
+        if (d > best) {
+            best = d;
+            up = k;
+        }
+    }
+    int a = -1, b = -1;
+    for (int k = 0; k < 3; ++k) {
+        if (k == up) continue;
+        if (a < 0) a = k;
+        else b = k;
+    }
+    if (ext[a] >= ext[b]) {
+        *lenIdx = a;
+        *widIdx = b;
+    } else {
+        *lenIdx = b;
+        *widIdx = a;
+    }
+    return true;
+}
+
+// The box from the pad's centre to the target along the shaft, with the length axis lenAxis (projected off the shaft). Sets the cell's box fields.
+// False when the target is not a distance away or the length axis is along the shaft.
+inline bool buildBox(const float pad[3], const float target[3], const float lenAxis[3], float halfLen, float halfWid, float margin,
+                     OwnCell* cell) noexcept {
+    float w[3] = {target[0] - pad[0], target[1] - pad[1], target[2] - pad[2]};
+    const float D = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+    if (!std::isfinite(D) || !(D >= 1.0f)) return false;
+    for (float& v : w) v /= D;
+    const float dp = lenAxis[0] * w[0] + lenAxis[1] * w[1] + lenAxis[2] * w[2];
+    float U[3] = {lenAxis[0] - dp * w[0], lenAxis[1] - dp * w[1], lenAxis[2] - dp * w[2]};
+    const float ul = std::sqrt(U[0] * U[0] + U[1] * U[1] + U[2] * U[2]);
+    if (!std::isfinite(ul) || !(ul > 1e-3f)) return false;
+    for (float& v : U) v /= ul;
+    const float V[3] = {w[1] * U[2] - w[2] * U[1], w[2] * U[0] - w[0] * U[2], w[0] * U[1] - w[1] * U[0]};
+    const float along = (D + kBoxBeyondM - kBoxBelowM) * 0.5f;
+    const float half = (D + kBoxBeyondM + kBoxBelowM) * 0.5f;
+    float hx = halfLen + margin, hy = halfWid + margin;
+    if (hx < 1.0f) hx = 1.0f;
+    if (hy < 1.0f) hy = 1.0f;
+    cell->box = true;
+    cell->boxMargin = margin;
+    for (int k = 0; k < 3; ++k) {
+        cell->boxCentre[k] = pad[k] + w[k] * along;
+        cell->boxU[k] = U[k];
+        cell->boxV[k] = V[k];
+        cell->boxW[k] = w[k];
+    }
+    cell->boxHalf[0] = hx;
+    cell->boxHalf[1] = hy;
+    cell->boxHalf[2] = half;
+    return true;
+}
+
+// A record's position in the box: across the length (U), across the width (V), up the shaft (W), metres from the box's centre.
+inline void boxCoords(const float c[3], const OwnCell& cell, float out[3]) noexcept {
+    const float d[3] = {c[0] - cell.boxCentre[0], c[1] - cell.boxCentre[1], c[2] - cell.boxCentre[2]};
+    out[0] = d[0] * cell.boxU[0] + d[1] * cell.boxU[1] + d[2] * cell.boxU[2];
+    out[1] = d[0] * cell.boxV[0] + d[1] * cell.boxV[1] + d[2] * cell.boxV[2];
+    out[2] = d[0] * cell.boxW[0] + d[1] * cell.boxW[1] + d[2] * cell.boxW[2];
+}
+
+// Whether a centre is inside the cell's box (its centre, the three half-extents).
+inline bool inBox(const float c[3], const OwnCell& cell) noexcept {
+    float o[3];
+    boxCoords(c, cell, o);
+    return std::fabs(o[0]) <= cell.boxHalf[0] && std::fabs(o[1]) <= cell.boxHalf[1] && std::fabs(o[2]) <= cell.boxHalf[2];
+}
+
+// Built v11 (addendum): with a capsule, the explicit picks are the nearest instance of each part node to the capsule's AXIS, and only within
+// kExplicitCapsuleM of it. They backstop the own hangar's parts and nothing further: a neighbouring pad's part is farther than that from this
+// axis, so it is not picked. Same shape as pickExplicit.
+inline size_t pickExplicitSegment(const ExplicitObs* obs, size_t n, const float a[3], const float b[3], uintptr_t* out, size_t outCap) noexcept {
+    struct Best {
+        uintptr_t node;
+        uintptr_t addr;
+        float d;
+    };
+    Best best[kExplicitNodes];
+    size_t nb = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const float d = distToSegment(obs[i].centre, a, b);
+        if (d > kExplicitCapsuleM) continue;
         size_t k = 0;
         while (k < nb && best[k].node != obs[i].node) ++k;
         if (k < nb) {
@@ -472,7 +741,11 @@ inline NamedKeep keepNamedCell(const float centre[3], float radius, const float 
         v.why = v.keep ? KeepWhy::kSphere : KeepWhy::kNone;
         return v;
     }
-    if (distance(centre, cell.centre) <= cell.radius) {
+    // The box when one is in force (Built v11, second addendum), else the capsule, else the pad's sphere.
+    const bool inCell = cell.box ? inBox(centre, cell)
+                        : cell.capsule ? distToSegment(centre, cell.capA, cell.capB) <= cell.radius
+                                       : distance(centre, cell.centre) <= cell.radius;
+    if (inCell) {
         v.keep = true;
         v.why = KeepWhy::kCell;
         return v;
@@ -626,7 +899,8 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          "kept_explicit=%llu kept_by_cell=%llu culled_containing=%llu zero_centre=%llu pose_fallback=%llu "
                          "centre_dist_m p50=%.2f p95=%.2f max=%.2f n=%llu ptr290 null=%llu image=%llu other=%llu unread=%llu "
                          "producer_b_calls=%llu producer_b_vetoed=%llu producer_b_kept=%llu world_sphere_store_style=%llu "
-                         "world_sphere_unreadable=%llu producer_mode=%s view source = %s",
+                         "world_sphere_unreadable=%llu producer_mode=%s world_centre producer=%llu pose=%llu store=%llu raw=%llu none=%llu "
+                         "box=%s half_length_m=%.1f half_width_m=%.1f height_m=%.1f margin_m=%.1f view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
                          static_cast<unsigned long long>(w.kept), static_cast<unsigned long long>(w.keptUnknown),
                          static_cast<unsigned long long>(w.sunSkipped), static_cast<double>(w.evalNs) / 1.0e6,
@@ -640,7 +914,12 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          static_cast<unsigned long long>(w.ptrOther), static_cast<unsigned long long>(w.ptrUnread),
                          static_cast<unsigned long long>(w.producerCalls), static_cast<unsigned long long>(w.producerVetoed),
                          static_cast<unsigned long long>(w.producerKept), static_cast<unsigned long long>(w.producerStyle),
-                         static_cast<unsigned long long>(w.producerUnread), w.producerMode, viewSource);
+                         static_cast<unsigned long long>(w.producerUnread), w.producerMode,
+                         static_cast<unsigned long long>(w.worldSrc[0]), static_cast<unsigned long long>(w.worldSrc[1]),
+                         static_cast<unsigned long long>(w.worldSrc[2]), static_cast<unsigned long long>(w.worldSrc[3]),
+                         static_cast<unsigned long long>(w.worldSrc[4]), w.boxOn ? "on" : "off", static_cast<double>(w.boxHalf[0]),
+                         static_cast<double>(w.boxHalf[1]), static_cast<double>(w.boxHalf[2]), static_cast<double>(w.boxMargin),
+                         viewSource);
 }
 
 // "sealed trial: on at frame F (radius R m; camera (x,y,z) or unknown; the sun pair is skipped; records outside the sphere

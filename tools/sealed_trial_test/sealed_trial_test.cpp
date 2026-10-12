@@ -303,6 +303,103 @@ int main(int argc, char** argv) {
         check(se::ptrKindOf(true, 0x9000, 0x1000, 0x2000) == se::PtrKind::kOther, "a pointer outside the image is other");
         check(se::ptrKindOf(false, 0x1800, 0x1000, 0x2000) == se::PtrKind::kUnread, "a failed read is unreadable, whatever the value");
         check(std::strcmp(se::ptrKindName(se::PtrKind::kOther), "other") == 0, "the pointer kind name is other");
+        // Built v11: the capsule cell. The segment distance, the capsule's axis and its extension, the target pick (the BlastShieldBase first,
+        // within the reach), the named keep through a capsule (a record half way up the axis is in the cell; with a sphere on the pad it is not).
+        {
+            const float p[3] = {0, 0, 0}, q[3] = {0, 100, 0}, far[3] = {0, 120, 0};
+            const float beside[3] = {5, 5, 0}, pastEnd[3] = {-3, -4, 0};   // (5,5,0) is 5 m off the axis; (-3,-4,0) projects before the pad end
+            check(std::fabs(se::distToSegment(beside, p, far) - 5.0f) < 1e-4f, "a point beside the middle of a segment is its distance");
+            check(std::fabs(se::distToSegment(pastEnd, p, q) - 5.0f) < 1e-4f, "a point past an end is its distance to that end");
+            float a[3] = {}, b[3] = {}, len = 0.0f;
+            check(se::buildCapsule(p, q, 20.0f, a, b, &len) && std::fabs(len - 100.0f) < 1e-4f && std::fabs(b[1] - 120.0f) < 1e-4f && b[0] == 0.0f,
+                  "the capsule runs from the pad to 20 m past a 100 m target");
+            check(!se::buildCapsule(p, p, 20.0f, a, b, &len), "a target at the pad is no capsule");
+            se::ExplicitObs obs[3];
+            obs[0].centre[0] = 0; obs[0].centre[1] = 50; obs[0].centre[2] = 0;
+            std::snprintf(obs[0].name, sizeof(obs[0].name), "HangerMedium");
+            obs[1].centre[0] = 0; obs[1].centre[1] = 120; obs[1].centre[2] = 0;
+            std::snprintf(obs[1].name, sizeof(obs[1].name), "BlastShieldBase");
+            obs[2].centre[0] = 0; obs[2].centre[1] = 30; obs[2].centre[2] = 0;
+            std::snprintf(obs[2].name, sizeof(obs[2].name), "SmallHangerSkirt");
+            float tq[3] = {};
+            char tn[48] = {};
+            check(se::pickCapsuleTarget(obs, 3, p, tq, tn, sizeof(tn)) && std::strcmp(tn, "BlastShieldBase") == 0 && tq[1] == 120.0f,
+                  "the nearest BlastShieldBase is the target, even past a nearer hanger");
+            obs[1].centre[1] = 500.0f;   // beyond the reach: the own hanger is the target
+            check(se::pickCapsuleTarget(obs, 3, p, tq, tn, sizeof(tn)) && std::strcmp(tn, "HangerMedium") == 0,
+                  "beyond the reach a BlastShieldBase is not the target and the own hanger is");
+            obs[0].centre[1] = 500.0f;
+            check(!se::pickCapsuleTarget(obs, 3, p, tq, tn, sizeof(tn)), "no target within the reach is no capsule");
+            check(se::isBlastBase("BlastShieldBase") && !se::isBlastBase("LandingPadSmallA") && se::isOwnHanger("HangerMedium") &&
+                  !se::isOwnHanger("SmallHangerSkirt"), "the name rules: BlastShieldBase, own hangers, not the skirts");
+            // The named keep: a capsule from the pad (0,0,0) to (0,120,0) with radius 10 keeps a record half way up it; a sphere of the same
+            // radius on the pad does not.
+            se::OwnCell cell;
+            cell.has = true;
+            cell.radius = 10.0f;
+            cell.centre[0] = 0; cell.centre[1] = 0; cell.centre[2] = 0;
+            const float cam[3] = {0, 0, 0};
+            const float half[3] = {0, 60, 0}, pad[3] = {0, 0, 0};
+            const uintptr_t noset[1] = {0};
+            check(!se::keepNamedCell(half, 1.0f, cam, 5.0f, cell, noset, 0, 1).keep, "a sphere on the pad does not hold a record half way up");
+            cell.capsule = true;
+            cell.capA[0] = 0; cell.capA[1] = 0; cell.capA[2] = 0;
+            cell.capB[0] = 0; cell.capB[1] = 120; cell.capB[2] = 0;
+            const se::NamedKeep kc = se::keepNamedCell(half, 1.0f, cam, 5.0f, cell, noset, 0, 1);
+            check(kc.keep && kc.why == se::KeepWhy::kCell, "the capsule keeps a record half way up the axis, by cell");
+            check(se::keepNamedCell(pad, 1.0f, cam, 5.0f, cell, noset, 0, 1).keep, "the capsule keeps the pad's own centre");
+            const float aside[3] = {30, 60, 0};
+            check(!se::keepNamedCell(aside, 1.0f, cam, 5.0f, cell, noset, 0, 1).keep, "a record 30 m off the axis is culled");
+            // The explicit picks with a capsule: within 15 m of the axis only (addendum). A part 10 m off the axis is picked; 30 m off is not.
+            se::ExplicitObs parts[2];
+            parts[0].addr = 11; parts[0].node = 1; parts[0].centre[0] = 10; parts[0].centre[1] = 60; parts[0].centre[2] = 0;
+            parts[1].addr = 22; parts[1].node = 2; parts[1].centre[0] = 30; parts[1].centre[1] = 60; parts[1].centre[2] = 0;
+            uintptr_t picked[4] = {};
+            const size_t np = se::pickExplicitSegment(parts, 2, cell.capA, cell.capB, picked, 4);
+            check(np == 1 && picked[0] == 11, "an explicit part 10 m off the axis is picked; one 30 m off is not (the 15 m limit)");
+            // Built v11 (second addendum): the oriented box. Identity axes; the pad at the origin, the target 100 m up the shaft (y); the length
+            // axis x; the half-extents 66 + 5 (length) and 27.5 + 5 (width); the box runs from 10 m under the pad to 20 m past the target.
+            const float ident[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            float axI[3][3] = {};
+            const float qId[4] = {0, 0, 0, 1};
+            se::quatAxes(qId, axI);
+            check(axI[0][0] == 1.0f && axI[1][1] == 1.0f && axI[2][2] == 1.0f && axI[0][1] == 0.0f && axI[2][0] == 0.0f,
+                  "the identity quaternion's axes are the world axes");
+            float axS[3][3] = {};
+            const float aI[15] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0};
+            se::storeAxes(aI, ident, axS);
+            check(axS[0][0] == 1.0f && axS[1][1] == 1.0f && axS[2][2] == 1.0f && axS[1][0] == 0.0f, "the store-style identity pose has world axes");
+            se::OwnCell box;
+            const float padC[3] = {0, 0, 0}, tgt[3] = {0, 100, 0}, lenAx[3] = {1, 0, 0};
+            check(se::buildBox(padC, tgt, lenAx, 66.0f, 27.5f, 5.0f, &box) && box.box, "a box builds along the shaft");
+            check(box.boxHalf[0] == 71.0f && box.boxHalf[1] == 32.5f && box.boxHalf[2] == 65.0f, "the half-extents are 71 (length), 32.5 (width), 65 (height)");
+            check(box.boxCentre[1] == 55.0f && box.boxCentre[0] == 0.0f, "the box centre is 55 m up the shaft from the pad");
+            const float in1[3] = {60, 55, 0}, out1[3] = {75, 55, 0}, bottomIn[3] = {0, -10, 0}, bottomOut[3] = {0, -11, 0}, topIn[3] = {0, 120, 0},
+                        topOut[3] = {0, 121, 0};
+            check(se::inBox(in1, box) && !se::inBox(out1, box), "a point 60 m across the length is in, 75 m is out");
+            check(se::inBox(bottomIn, box) && !se::inBox(bottomOut, box), "the box's floor is 10 m under the pad");
+            check(se::inBox(topIn, box) && !se::inBox(topOut, box), "the box's top is 20 m past the target");
+            float bc[3] = {};
+            se::boxCoords(in1, box, bc);
+            check(bc[0] == 60.0f && bc[1] == 0.0f && std::fabs(bc[2]) < 1e-4f, "the box coordinates of a point 60 m across are (60, 0, 0)");
+            // The footprint: the up axis is the one along the shaft; the length axis is the footprint axis with the larger extent.
+            const float up[3] = {0, 1, 0};
+            int li = -1, wi = -1;
+            const float extA[3] = {10, 5, 3}, extB[3] = {3, 5, 10};
+            check(se::footprintAxes(axI, up, extA, &li, &wi) && li == 0 && wi == 2, "the larger extent of the two footprint axes is the length");
+            check(se::footprintAxes(axI, up, extB, &li, &wi) && li == 2 && wi == 0, "the other way round when the extents say so");
+            check(!se::footprintAxes(axI, up, nullptr, &li, &wi), "no extent, no footprint: the box is not built");
+            // The margin: a signed number; the ladder -10, -5, 0, 5, 10, 20, 40.
+            float mg = 0.0f;
+            check(se::parseMarginM("", 5.0f, &mg) && mg == 5.0f, "an empty margin is the default 5 m");
+            check(se::parseMarginM("-10", 5.0f, &mg) && mg == -10.0f, "a negative margin parses");
+            check(!se::parseMarginM("wide", 5.0f, &mg), "a margin that is not a number is refused");
+            bool mv = false;
+            check(se::stepMarginRung(5.0f, +1, &mv) == 10.0f && mv, "the margin steps up from 5 m to 10 m");
+            check(se::stepMarginRung(5.0f, -1, &mv) == 0.0f && mv, "the margin steps down from 5 m to 0 m");
+            check(se::stepMarginRung(40.0f, +1, &mv) == 40.0f && !mv, "the margin clamps at 40 m");
+            check(se::stepMarginRung(-10.0f, -1, &mv) == -10.0f && !mv, "the margin clamps at -10 m");
+        }
         // Built v10: producer B's veto mode parses (veto is the default), and the world sphere follows the store's formula.
         se::ProducerMode pm = se::ProducerMode::kCount;
         check(se::parseProducerMode("", &pm) && pm == se::ProducerMode::kVeto, "an empty diag.sealed_trial_producer is veto");
@@ -438,15 +535,15 @@ int main(int argc, char** argv) {
         check(np == 2 && picked[0] == 0xB && picked[1] == 0xD,
               "per part node the nearest instance to the cell centre within 200 m is picked (node 2's 300 m instance is not)");
 
-        // The ladder: 30, 40, 50, 60, 70, 80, 100, 120, 150, 200; off-ladder steps land on the next rung; the ends clamp.
+        // The ladder (Built v11, addendum): 15, 20, 25, 30, 40, 50, 60; off-ladder steps land on the next rung; the ends clamp.
         bool moved = false;
-        check(se::stepCellRadius(60.0f, +1, &moved) == 70.0f && moved, "larger from 60 m is 70 m");
-        check(se::stepCellRadius(60.0f, -1, &moved) == 50.0f && moved, "smaller from 60 m is 50 m");
-        check(se::stepCellRadius(90.0f, +1, &moved) == 100.0f && moved, "larger from 90 m (off the ladder) lands on 100 m");
-        check(se::stepCellRadius(90.0f, -1, &moved) == 80.0f && moved, "smaller from 90 m lands on 80 m");
-        check(se::stepCellRadius(200.0f, +1, &moved) == 200.0f && !moved, "the top of the ladder clamps at 200 m");
-        check(se::stepCellRadius(30.0f, -1, &moved) == 30.0f && !moved, "the bottom of the ladder clamps at 30 m");
-        float rung = 30.0f;
+        check(se::stepCellRadius(30.0f, +1, &moved) == 40.0f && moved, "larger from 30 m is 40 m");
+        check(se::stepCellRadius(30.0f, -1, &moved) == 25.0f && moved, "smaller from 30 m is 25 m");
+        check(se::stepCellRadius(90.0f, +1, &moved) == 90.0f && !moved, "larger from 90 m (above the ladder) clamps and does not move");
+        check(se::stepCellRadius(90.0f, -1, &moved) == 60.0f && moved, "smaller from 90 m (off the ladder) lands on 60 m");
+        check(se::stepCellRadius(60.0f, +1, &moved) == 60.0f && !moved, "the top of the ladder clamps at 60 m");
+        check(se::stepCellRadius(15.0f, -1, &moved) == 15.0f && !moved, "the bottom of the ladder clamps at 15 m");
+        float rung = 15.0f;
         int steps = 0;
         for (;;) {
             const float next = se::stepCellRadius(rung, +1, &moved);
@@ -454,9 +551,9 @@ int main(int argc, char** argv) {
             rung = next;
             ++steps;
         }
-        check(steps == 9 && rung == 200.0f, "nine steps up from 30 m reach 200 m");
-        check(se::kCellDefaultM[0] == 60.0f && se::kCellDefaultM[1] == 90.0f && se::kCellDefaultM[2] == 130.0f,
-              "the cell radius defaults are 60, 90 and 130 m (guesses)");
+        check(steps == 6 && rung == 60.0f, "six steps up from 15 m reach 60 m");
+        check(se::kCellDefaultM[0] == 30.0f && se::kCellDefaultM[1] == 90.0f && se::kCellDefaultM[2] == 130.0f,
+              "the cell radius defaults are 30 (small, a guess; was 60), 90 and 130 m (guesses)");
         float cellR = 0.0f;
         check(se::parseCellRadius("", 60.0f, &cellR) && cellR == 60.0f, "an empty cell key is the default");
         check(se::parseCellRadius("75", 60.0f, &cellR) && cellR == 75.0f, "a cell radius in metres is read");

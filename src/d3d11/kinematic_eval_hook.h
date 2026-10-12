@@ -148,6 +148,9 @@ void kinematicEvalSetDirectVeto(DirectVetoFn fn) noexcept;
 // "installed" or the reason why not.
 const char* kinematicEvalDirectVetoAttach() noexcept;
 void kinematicEvalDirectVetoDetach() noexcept;
+// Built v11: path C's observer (producer 1, FUN_14369C9C0): called after its forward with the items it appended and whether its counters faulted.
+using ProducerCObserverFn = void (*)(uint64_t items, uint32_t fault) noexcept;
+void kinematicEvalSetProducerCObserver(ProducerCObserverFn fn) noexcept;
 // FUN_1442B3FC0's hook: "hooked", or why it stood down ("not requested",
 // "not build 332841 (PE timestamp/size)", "prologue mismatch at RVA 0x42B3FC0",
 // "builder frame/call-site mismatch at RVA 0x...", "CodeHook refused the patch").

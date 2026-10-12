@@ -19,6 +19,7 @@
 #include "engine_velocity.h"
 #include "engine_velocity_families.h"
 #include "sealed_trial.h"
+#include "kinematic_eval_hook.h"
 #include "store_hook.h"
 
 namespace edvr {
@@ -249,7 +250,8 @@ void tapCopy(uintptr_t mapped, uint32_t count) noexcept;
 void tapMerge(uintptr_t destination) noexcept;
 void tapClear(uintptr_t dictionary) noexcept;
 void tapFamily(int family) noexcept;
-const DrawlistTapFns kTapFns{&tapBuilder, &tapEmit, &tapCopy, &tapMerge, &tapClear, &tapFamily};
+void tapProducerC(uint64_t items, uint32_t fault) noexcept;
+const DrawlistTapFns kTapFns{&tapBuilder, &tapEmit, &tapCopy, &tapMerge, &tapClear, &tapFamily, &tapProducerC};
 
 void drawlistRequest(const char* trigger, uint32_t frame) {
     {
@@ -261,6 +263,7 @@ void drawlistRequest(const char* trigger, uint32_t frame) {
         g_phase = Phase::kArmed;
         g_wanted.store(true, std::memory_order_release);
         g_drawlistTaps.store(&kTapFns, std::memory_order_release);
+        kinematicEvalSetProducerCObserver(&tapProducerC);   // path C (producer 1's bracket) counts through the probe's observer
     }
     storeHookRecompute();   // the builder observer attaches with the want (builder_probe.cpp)
     Log::get().note("drawlist probe: armed (trigger %s) at frame %u. Three consecutive frames are collected from the next frame tick and "
@@ -410,6 +413,20 @@ void tapClear(uintptr_t dictionary) noexcept {
 void tapFamily(int family) noexcept {
     if (family < 0 || family >= static_cast<int>(dl::kFamilySlots)) return;
     g_famDraws[family].fetch_add(1, std::memory_order_relaxed);
+}
+
+// Built v11: path C, from the producer-1 bracket after its forward: the owner's count delta is the items the call appended (the bracket's own
+// reading). Under g_mutex, like the other producer taps.
+void tapProducerC(uint64_t items, uint32_t fault) noexcept {
+    if (!g_drawlistCollecting.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_phase != Phase::kCollecting) return;
+    ++g_counts.cCalls;
+    if (fault) {
+        ++g_counts.cFaults;
+        return;
+    }
+    g_counts.cItems += static_cast<int64_t>(items);
 }
 
 }  // namespace edvr

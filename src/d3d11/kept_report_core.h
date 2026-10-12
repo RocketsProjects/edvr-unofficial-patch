@@ -9,13 +9,14 @@
 // its own sphere is far away. The report says which of the three applies to each kept record.
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <cstdio>
 #include <string>
 
 namespace edvr::kept {
 
 constexpr uint32_t kTop = 40;     // records listed per list
-constexpr int kColumns = 26;      // fields in every CSV row, the header included (the name column in Built v8; the six centre columns in Built v8.4; the two
+constexpr int kColumns = 31;      // fields in every CSV row, the header included (the name column in Built v8; the six centre columns in Built v8.4; the two
                                   // rec+0x290 columns in Built v8.5)
 
 // own: the record's own sphere contains the camera or meets the cell. base: an ancestor's sphere does (levelsUp generations up).
@@ -65,6 +66,15 @@ struct Entry {
     // Built v8.5: the raw pointer at rec+0x290 and its kind (0 null, 1 image, 2 other, 3 unreadable; sealed_trial_core.h PtrKind).
     uint64_t ptr290 = 0;
     uint8_t ptr290Kind = 3;
+    // Built v11 (addendum): with a capsule cell in force, the record's distance to the capsule's axis and its position along the axis from the
+    // pad (metres); -1 and 0 when there is no capsule or the centre is unreadable.
+    float axisDist = -1.0f;
+    float axisAlong = 0.0f;
+    // Built v11 (second addendum): the record's position in the named cell's box (across the length, across the width, up the shaft, metres from
+    // the box's centre); NaN when no box is in force.
+    float boxU = std::numeric_limits<float>::quiet_NaN();
+    float boxV = std::numeric_limits<float>::quiet_NaN();
+    float boxUp = std::numeric_limits<float>::quiet_NaN();
 };
 
 // Radius first (largest), then address (smallest): equal radii list in a fixed order.
@@ -144,7 +154,7 @@ inline Stats countKept(const Entry* e, uint32_t n) noexcept {
 inline const char* csvHeader() noexcept {
     return "list,rank,address,radius_m,dx_m,dy_m,dz_m,dist_m,contains_camera,why_kept,levels_up,judged,parent_address,"
            "base_address,child_count,bucket,vtable_rva,name,pose_centre_x,pose_centre_y,pose_centre_z,centre_source,raw_centre_zero,"
-           "centre_dist_m,ptr_290,ptr_290_kind";
+           "centre_dist_m,ptr_290,ptr_290_kind,axis_dist_m,axis_along_m,box_u_m,box_v_m,box_up_m";
 }
 
 // One row: list is "radius" or "base"; rank counts from 1. The name is the 18th field and the centre columns (Built v8.4) the last six; the
@@ -154,7 +164,7 @@ inline int formatRow(char* out, size_t cap, const char* list, uint32_t rank, con
     static const char* const kPtrKinds[] = {"null", "image", "other", "unreadable"};
     return std::snprintf(out, cap,
                          "%s,%u,0x%llX,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%s,%u,%d,0x%llX,0x%llX,%llu,0x%llX,0x%llX,%s,%.2f,%.2f,%.2f,%s,%d,%.2f,"
-                         "0x%llX,%s",
+                         "0x%llX,%s,%.2f,%.2f,%.2f,%.2f,%.2f",
                          list, rank, static_cast<unsigned long long>(e.address), static_cast<double>(e.radius),
                          static_cast<double>(e.rel[0]), static_cast<double>(e.rel[1]), static_cast<double>(e.rel[2]),
                          static_cast<double>(e.dist), e.contains ? 1 : 0, e.label ? e.label : whyName(e.why), e.levelsUp, e.judged ? 1 : 0,
@@ -163,7 +173,9 @@ inline int formatRow(char* out, size_t cap, const char* list, uint32_t rank, con
                          static_cast<unsigned long long>(e.vtableRva), e.name.empty() ? "(none)" : e.name.c_str(),
                          static_cast<double>(e.poseCentre[0]), static_cast<double>(e.poseCentre[1]), static_cast<double>(e.poseCentre[2]),
                          kSources[e.centreSource > 2 ? 2 : e.centreSource], e.rawZero ? 1 : 0, static_cast<double>(e.centreDist),
-                         static_cast<unsigned long long>(e.ptr290), kPtrKinds[e.ptr290Kind > 3 ? 3 : e.ptr290Kind]);
+                         static_cast<unsigned long long>(e.ptr290), kPtrKinds[e.ptr290Kind > 3 ? 3 : e.ptr290Kind],
+                         static_cast<double>(e.axisDist), static_cast<double>(e.axisAlong), static_cast<double>(e.boxU),
+                         static_cast<double>(e.boxV), static_cast<double>(e.boxUp));
 }
 
 }  // namespace edvr::kept

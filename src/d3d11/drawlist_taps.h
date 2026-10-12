@@ -14,6 +14,7 @@ struct DrawlistTapFns {
     void (*merge)(uintptr_t destination);                                                 // the merge observer
     void (*clear)(uintptr_t dictionary);                                                  // the dictionary clear observer
     void (*family)(int family);                                                           // a substituted pool draw of one family
+    void (*producerC)(uint64_t items, uint32_t fault);                                    // Built v11: path C (FUN_14369C9C0, producer 1), after its forward
 };
 
 // True while a window is collecting (set by the probe at the window's first tick, cleared at its last).
@@ -40,6 +41,10 @@ inline void drawlistNoteMerge(uintptr_t destination) noexcept {
 inline void drawlistNoteClear(uintptr_t dictionary) noexcept {
     if (!g_drawlistCollecting.load(std::memory_order_acquire)) return;
     if (const DrawlistTapFns* t = g_drawlistTaps.load(std::memory_order_acquire)) t->clear(dictionary);
+}
+inline void drawlistNoteProducerC(uint64_t items, uint32_t fault) noexcept {
+    if (!g_drawlistCollecting.load(std::memory_order_acquire)) return;
+    if (const DrawlistTapFns* t = g_drawlistTaps.load(std::memory_order_acquire)) t->producerC(items, fault);
 }
 inline void drawlistNoteFamily(int family) noexcept {
     if (!g_drawlistCollecting.load(std::memory_order_acquire)) return;
