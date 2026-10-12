@@ -447,6 +447,45 @@ int main(int argc, char** argv) {
               "a cell step line names the size, the radius and the frame");
     }
 
+    // --- Built v8.4: the builder's centre against two hand-worked cases, and the fallback paths of the record's centre.
+    {
+        // Identity quaternion: the centre is c + t. c = (1,2,3), t = (10,20,30) gives (11,22,33).
+        const float qI[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        const float c[4] = {1.0f, 2.0f, 3.0f, 0.0f};
+        const float t[4] = {10.0f, 20.0f, 30.0f, 0.0f};
+        float out[4] = {};
+        se::builderCentre(qI, t, c, out);
+        check(std::fabs(out[0] - 11.0f) < 1e-4f && std::fabs(out[1] - 22.0f) < 1e-4f && std::fabs(out[2] - 33.0f) < 1e-4f,
+              "the builder centre with the identity quaternion is c + t: (11,22,33)");
+        // A 90 degree turn about z: q = (0, 0, s, s) with s = sqrt(1/2). The rotation of c = (1,2,3) is (-2,1,3); plus t gives (8,21,33).
+        const float s = 0.70710678f;
+        const float qZ[4] = {0.0f, 0.0f, s, s};
+        se::builderCentre(qZ, t, c, out);
+        check(std::fabs(out[0] - 8.0f) < 1e-3f && std::fabs(out[1] - 21.0f) < 1e-3f && std::fabs(out[2] - 33.0f) < 1e-3f,
+              "a 90 degree turn about z rotates c to (-2,1,3) and adds t: (8,21,33)");
+
+        // The record's centre: the pose when readable; else rec+0x240 (the counted fallback); else none.
+        const float poseC[3] = {8.0f, 21.0f, 33.0f};
+        const float rawC[3] = {0.0f, 0.0f, 0.0f};
+        float world[3] = {};
+        check(se::chooseCentre(true, poseC, true, rawC, world) == se::CentreSource::kPose && world[0] == 8.0f,
+              "a readable pose gives the centre, even when rec+0x240 is zero");
+        check(se::chooseCentre(false, poseC, true, rawC, world) == se::CentreSource::kRaw && world[0] == 0.0f,
+              "an unreadable pose falls back to rec+0x240 (the counted fallback)");
+        check(se::chooseCentre(false, poseC, false, rawC, world) == se::CentreSource::kNone, "neither readable: no centre");
+        const float badPose[3] = {std::nanf(""), 0.0f, 0.0f};
+        check(se::chooseCentre(true, badPose, true, poseC, world) == se::CentreSource::kRaw,
+              "a non-finite pose is not used: the fallback is taken");
+        check(se::isZeroCentre(rawC) && !se::isZeroCentre(poseC), "rec+0x240 exactly zero is detected; a real centre is not zero");
+
+        // Percentiles (nearest rank): 1..100 gives p50 50 and p95 95; no values gives 0.
+        std::vector<float> hundred;
+        for (int i = 1; i <= 100; ++i) hundred.push_back(static_cast<float>(i));
+        check(se::percentileOf(hundred, 0.50) == 50.0f && se::percentileOf(hundred, 0.95) == 95.0f,
+              "the nearest-rank percentile of 1..100: p50 is 50 and p95 is 95");
+        check(se::percentileOf(std::vector<float>{}, 0.5) == 0.0f, "no values: the percentile is 0");
+    }
+
     std::printf("sealed_trial_test: %d checks, %d failures\n", g_checks, g_failures);
     if (g_failures) return 1;
     std::printf("sealed trial self-test passed\n");

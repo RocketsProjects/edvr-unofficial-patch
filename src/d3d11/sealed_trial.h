@@ -52,5 +52,9 @@ void sealedTrialNoteBuilderCalls(uint64_t afterCull) noexcept;
 bool sealedTrialRecordName(uintptr_t record, std::string* out) noexcept;
 // The same name, copied into a caller's buffer with no allocation (the hatch geometry probe's store path). False when no name can be read.
 bool sealedTrialRecordNameInto(uintptr_t record, char* out, size_t cap) noexcept;
+// Built v8.4: a record's world centre, from the pose the builder reads (*(rec+0x290): the builder's centre, sealed_trial_core.h), else rec+0x240
+// (a fallback). Returns the source as sealed::CentreSource (0 pose, 1 raw, 2 none); rawZero says whether rec+0x240 was exactly the origin.
+// Lock-free: reads only.
+unsigned char sealedTrialRecordCentre(uintptr_t record, float out[3], bool* rawZero) noexcept;
 
 }  // namespace edvr

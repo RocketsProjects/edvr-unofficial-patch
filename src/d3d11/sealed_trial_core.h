@@ -14,12 +14,67 @@
 #include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace edvr::sealed {
+
+// --- The record's centre (Built v8.4). rec+0x240 is NOT the world centre for many records: the v8.3 flight showed dozens of distinct drones and
+// decals at exactly (0,0,0). The builder's own centre is the pose-derived one: pose = *(rec+0x290) (the builder's rcx), q = pose+0x10 (quaternion
+// x,y,z,w), t = pose+0x20, c = pose+0x80 (float4), and the centre is the rotation of c by q, plus t (decomp_42B4420.txt:196-237). The radius is
+// still rec+0x280 here; the builder's own test (FUN_1404F4E10) is a plane test of a box at this centre with the four floats at pose+0x90 as its
+// extents, not a sphere at rec+0x240, and rec+0x280 is not referenced in that block.
+
+// The builder's transformed centre: out = R(q) * c + t (the same expression as decomp_42B4420.txt:196-237). The identity quaternion gives c + t.
+inline void builderCentre(const float q[4], const float t[4], const float c[4], float out[4]) noexcept {
+    const float w2 = q[3] + q[3];
+    const float dot = q[0] * c[0] + q[1] * c[1] + q[2] * c[2];
+    const float ww = q[3] * q[3] + q[3] * q[3];
+    out[0] = (c[2] * q[1] - c[1] * q[2]) * w2 + ww * c[0] + (-c[0]) + dot * (q[0] + q[0]) + t[0];
+    out[1] = (c[0] * q[2] - c[2] * q[0]) * w2 + ww * c[1] + (-c[1]) + dot * (q[1] + q[1]) + t[1];
+    out[2] = (c[1] * q[0] - c[0] * q[1]) * w2 + ww * c[2] + (-c[2]) + dot * (q[2] + q[2]) + t[2];
+    out[3] = (c[3] * q[3] - c[3] * q[3]) * w2 + ww * c[3] + (-c[3]) + dot * w2 + t[3];
+}
+
+// Where a record's centre came from: the pose (the builder's), the raw rec+0x240 (the pose was unreadable: a counted fallback), or none.
+enum class CentreSource : uint8_t { kPose = 0, kRaw = 1, kNone = 2 };
+
+inline bool finite3(const float v[3]) noexcept { return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]); }
+
+// The record's centre from what was read: the pose centre when it is readable and finite; else rec+0x240 when that is; else none.
+inline CentreSource chooseCentre(bool poseOk, const float pose[3], bool rawOk, const float raw[3], float out[3]) noexcept {
+    if (poseOk && pose && finite3(pose)) {
+        out[0] = pose[0];
+        out[1] = pose[1];
+        out[2] = pose[2];
+        return CentreSource::kPose;
+    }
+    if (rawOk && raw && finite3(raw)) {
+        out[0] = raw[0];
+        out[1] = raw[1];
+        out[2] = raw[2];
+        return CentreSource::kRaw;
+    }
+    out[0] = out[1] = out[2] = 0.0f;
+    return CentreSource::kNone;
+}
+
+// rec+0x240 is exactly the origin: the value the flight showed for dozens of distinct records.
+inline bool isZeroCentre(const float c[3]) noexcept { return c[0] == 0.0f && c[1] == 0.0f && c[2] == 0.0f; }
+
+// The p-quantile (nearest rank, p in [0,1]) of the values; 0 when there are none. The vector is taken by value (sorted here).
+inline float percentileOf(std::vector<float> v, double p) noexcept {
+    if (v.empty()) return 0.0f;
+    std::sort(v.begin(), v.end());
+    double rank = std::ceil(p * static_cast<double>(v.size()));
+    if (rank < 1.0) rank = 1.0;
+    if (rank > static_cast<double>(v.size())) rank = static_cast<double>(v.size());
+    return v[static_cast<size_t>(rank) - 1];
+}
 
 constexpr float kDefaultRadiusM = 80.0f;     // diag.sealed_trial_radius_m
 constexpr float kMinRadiusM = 1.0f;
@@ -126,6 +181,15 @@ struct Window {
     char padName[64] = {};
     float padDist = -1.0f;
     char padReason[80] = {};
+    // Built v8.4: the centre measurements of the window. zeroCentre: records whose rec+0x240 was exactly the origin; poseFallback: records whose
+    // pose could not be read (their centre is rec+0x240, counted); the distance between rec+0x240 and the pose centre over the records where both
+    // were readable and rec+0x240 was not zero (distN of them; p50, p95 and max in metres).
+    uint64_t zeroCentre = 0;
+    uint64_t poseFallback = 0;
+    uint64_t distN = 0;
+    float distP50 = 0.0f;
+    float distP95 = 0.0f;
+    float distMax = 0.0f;
 };
 
 // The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named is the own-pad cell rule.
@@ -471,14 +535,18 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
     return std::snprintf(out, cap,
                          "sealed trial: window %llu s culled=%llu kept=%llu kept_unjudged=%llu sun_pairs_skipped=%llu "
                          "eval_ms=%.3f faults=%llu torn=%llu radius_m=%.1f builder_after_cull=%llu mode=%s %s "
-                         "kept_explicit=%llu kept_by_cell=%llu culled_containing=%llu view source = %s",
+                         "kept_explicit=%llu kept_by_cell=%llu culled_containing=%llu zero_centre=%llu pose_fallback=%llu "
+                         "centre_dist_m p50=%.2f p95=%.2f max=%.2f n=%llu view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
                          static_cast<unsigned long long>(w.kept), static_cast<unsigned long long>(w.keptUnknown),
                          static_cast<unsigned long long>(w.sunSkipped), static_cast<double>(w.evalNs) / 1.0e6,
                          static_cast<unsigned long long>(w.faults), static_cast<unsigned long long>(w.torn), static_cast<double>(radiusM),
                          static_cast<unsigned long long>(w.builderAfterCull), modeName(mode), cell,
                          static_cast<unsigned long long>(w.keptExplicit), static_cast<unsigned long long>(w.keptByCell),
-                         static_cast<unsigned long long>(w.culledContaining), viewSource);
+                         static_cast<unsigned long long>(w.culledContaining), static_cast<unsigned long long>(w.zeroCentre),
+                         static_cast<unsigned long long>(w.poseFallback), static_cast<double>(w.distP50),
+                         static_cast<double>(w.distP95), static_cast<double>(w.distMax), static_cast<unsigned long long>(w.distN),
+                         viewSource);
 }
 
 // "sealed trial: on at frame F (radius R m; camera (x,y,z) or unknown; the sun pair is skipped; records outside the sphere

@@ -174,8 +174,9 @@ void hatchGeometryAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
     hg::Sample s;
     s.addr = record;
     if (!sealedTrialRecordNameInto(record, s.name, sizeof(s.name)) || !hg::isGeometryName(s.name)) return;
-    if (!readMem(s.centre, record + kRecCentre, sizeof(s.centre))) return;
-    if (!std::isfinite(s.centre[0]) || !std::isfinite(s.centre[1]) || !std::isfinite(s.centre[2])) return;
+    // Built v8.4: the world centre (the builder's, from the pose; rec+0x240 only as the counted fallback). 2 is "none".
+    bool rawZero = false;
+    if (sealedTrialRecordCentre(record, s.centre, &rawZero) == 2) return;
     s.poseOk = readMem(s.pose, record + kRecPose, sizeof(s.pose));
     uintptr_t ctx = 0;
     if (bucket) readVal(&ctx, bucket);

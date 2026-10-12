@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -54,6 +55,12 @@ sealed::BuilderPolicy g_builderPolicy = sealed::BuilderPolicy::kCount;   // read
 std::atomic<uint64_t> g_culled{0}, g_kept{0}, g_keptUnknown{0}, g_sunSkipped{0}, g_evalNs{0}, g_faults{0}, g_torn{0};
 std::atomic<uint64_t> g_builderAfterCull{0};
 std::atomic<uint64_t> g_keptByCell{0}, g_keptExplicit{0}, g_culledContaining{0};
+// Built v8.4: the centre measurements of the window (under the lock). rec+0x240 exactly zero; the pose unreadable (the fallback); and the distance
+// between rec+0x240 and the pose centre for the records where both are readable and rec+0x240 is not zero (reserved at a toggle-on; a write past
+// the reserve is not kept, so the hot path never allocates).
+constexpr size_t kCentreDistCap = 8192;
+uint64_t g_zeroCentre = 0, g_poseFallback = 0;
+std::vector<float> g_centreDist;
 std::atomic<uint32_t> g_frameStamp{0};       // advanced at every Present tick: the observer resolves the view once per frame
 std::atomic<bool> g_cameraKnown{false};
 
@@ -145,6 +152,10 @@ void resetWindow() noexcept {
     g_keptByCell.store(0);
     g_keptExplicit.store(0);
     g_culledContaining.store(0);
+    g_zeroCentre = 0;
+    g_poseFallback = 0;
+    g_centreDist.clear();
+    if (g_centreDist.capacity() < kCentreDistCap) g_centreDist.reserve(kCentreDistCap);   // at a window's end, not on the store's hot path
 }
 
 // The window's statistics, with the cell in force at its latest frame. Called under the lock.
@@ -161,6 +172,14 @@ sealed::Window takeWindow() noexcept {
     w.keptByCell = g_keptByCell.load();
     w.keptExplicit = g_keptExplicit.load();
     w.culledContaining = g_culledContaining.load();
+    w.zeroCentre = g_zeroCentre;
+    w.poseFallback = g_poseFallback;
+    w.distN = g_centreDist.size();
+    if (!g_centreDist.empty()) {
+        w.distP50 = sealed::percentileOf(g_centreDist, 0.50);
+        w.distP95 = sealed::percentileOf(g_centreDist, 0.95);
+        w.distMax = *std::max_element(g_centreDist.begin(), g_centreDist.end());
+    }
     const bool named = g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed;
     w.cellHas = named && g_cellPrev.has;
     if (w.cellHas) {
@@ -237,6 +256,49 @@ bool cachedName(uintptr_t record, char* out, size_t cap) noexcept {
     if (!slot.ok) return false;
     std::snprintf(out, cap, "%s", slot.name);
     return true;
+}
+
+// --- Built v8.4: a record's centre. The builder's centre is computed from the pose it reads, *(rec+0x290): q = pose+0x10, t = pose+0x20, c =
+// pose+0x80 (sealed_trial_core.h builderCentre; decomp_42B4420.txt:196-237). rec+0x240 is the fallback when the pose cannot be read (counted).
+constexpr uintptr_t kRecPose = 0x290;     // pointer: the builder's rcx, the pose context
+constexpr uintptr_t kPoseQuat = 0x10;     // float4: the quaternion x, y, z, w
+constexpr uintptr_t kPoseT = 0x20;        // float4: the translation
+constexpr uintptr_t kPoseCentre = 0x80;   // float4: the local centre c
+
+struct CentreRead {
+    sealed::CentreSource source = sealed::CentreSource::kNone;
+    float world[3] = {};      // the centre the rule uses
+    float pose[3] = {};       // the builder's centre (valid when poseOk)
+    bool poseOk = false;
+    float raw[3] = {};        // rec+0x240 (valid when rawOk)
+    bool rawOk = false;
+    bool rawZero = false;     // rec+0x240 is exactly the origin
+    float dist = -1.0f;       // |raw - pose| when both are readable and raw is not zero; else -1
+};
+
+// The builder's centre from the pose (SEH-guarded reads only). False when the pose pointer or any of its fields cannot be read.
+bool poseCentreOf(uintptr_t rec, float out[3]) noexcept {
+    uintptr_t pose = 0;
+    if (!readVal(&pose, rec + kRecPose) || !pose) return false;
+    float q[4] = {}, t[4] = {}, c[4] = {}, w[4] = {};
+    if (!readMem(q, pose + kPoseQuat, sizeof(q)) || !readMem(t, pose + kPoseT, sizeof(t)) ||
+        !readMem(c, pose + kPoseCentre, sizeof(c)))
+        return false;
+    sealed::builderCentre(q, t, c, w);
+    out[0] = w[0];
+    out[1] = w[1];
+    out[2] = w[2];
+    return sealed::finite3(out);
+}
+
+CentreRead recordCentreRead(uintptr_t rec) noexcept {
+    CentreRead r;
+    r.poseOk = poseCentreOf(rec, r.pose);
+    r.rawOk = readMem(r.raw, rec + kRecCentre, sizeof(r.raw)) && sealed::finite3(r.raw);
+    r.rawZero = r.rawOk && sealed::isZeroCentre(r.raw);
+    r.source = sealed::chooseCentre(r.poseOk, r.pose, r.rawOk, r.raw, r.world);
+    if (r.poseOk && r.rawOk && !r.rawZero) r.dist = sealed::distance(r.pose, r.raw);
+    return r;
 }
 
 // The class of a node's name, read from game memory with no lock (the census's accept rules). The miss path of the class cache.
@@ -360,12 +422,19 @@ void writeKeptReport() {
         }
         e.base = bucketBase[w.bucket];
         e.parent = w.parent == kNone ? 0 : entries[w.parent].address;
-        float centre[3] = {};
+        // Built v8.4: the world centre (the builder's, from the pose) and both centres for the columns.
+        const CentreRead cr = recordCentreRead(w.rec);
+        const float* centre = cr.world;
+        for (int c = 0; c < 3; ++c) e.poseCentre[c] = cr.pose[c];
+        e.poseOk = cr.poseOk;
+        e.rawZero = cr.rawZero;
+        e.centreSource = static_cast<uint8_t>(cr.source);
+        e.centreDist = cr.dist;
         float radius = 0.0f;
         uint64_t mask = 0;
         uint64_t children = 0;
         uintptr_t vt = 0;
-        const bool readOk = readMem(centre, w.rec + kRecCentre, sizeof(centre)) && readVal(&radius, w.rec + kRecRadius) &&
+        const bool readOk = cr.source != sealed::CentreSource::kNone && readVal(&radius, w.rec + kRecRadius) &&
                             readVal(&mask, w.rec + kRecMask) && readVal(&children, w.rec + kRecChildCount);
         readVal(&vt, w.rec);
         {
@@ -447,6 +516,21 @@ void writeKeptReport() {
         }
     }
 
+    // Built v8.4: the centre measurements over all walked records: rec+0x240 exactly zero, the pose-unreadable fallback, and the distance between
+    // rec+0x240 and the pose centre where both are readable and rec+0x240 is not zero.
+    uint32_t nRawZero = 0, nPoseFallback = 0;
+    std::vector<float> centreDists;
+    for (const kept::Entry& e : entries) {
+        if (e.rawZero) ++nRawZero;
+        if (e.centreSource == 1) ++nPoseFallback;
+        if (e.centreDist >= 0.0f) centreDists.push_back(e.centreDist);
+    }
+    char centreTotals[320];
+    std::snprintf(centreTotals, sizeof(centreTotals),
+                  "raw_centre_zero %u, pose_fallback %u, centre_dist_m p50 %.2f p95 %.2f max %.2f (n %zu)", nRawZero, nPoseFallback,
+                  static_cast<double>(sealed::percentileOf(centreDists, 0.50)), static_cast<double>(sealed::percentileOf(centreDists, 0.95)),
+                  static_cast<double>(centreDists.empty() ? 0.0f : *std::max_element(centreDists.begin(), centreDists.end())),
+                  centreDists.size());
     const kept::Stats st = kept::countKept(entries.data(), static_cast<uint32_t>(entries.size()));
     uint32_t byRadius[kept::kTop];
     uint32_t byBase[kept::kTop];
@@ -485,6 +569,7 @@ void writeKeptReport() {
                      static_cast<double>(forwardKnown ? g_view.pose.fwd[2] : 0.0f), static_cast<double>(R), g_repFrame,
                      g_observed.size(), static_cast<unsigned>(entries.size()), st.kept, truncated ? 1 : 0);
         std::fprintf(f, "# totals over all %u walked records: kept %u; %s\n", static_cast<unsigned>(entries.size()), st.kept, totals);
+        std::fprintf(f, "# centres over all walked records (Built v8.4): %s\n", centreTotals);
         if (named)
             std::fprintf(f, "# named cell: size %c, radius %.1f m, pad %s, centre (%.2f,%.2f,%.2f); explicit instances kept: %u\n",
                          g_cellPrev.has ? sealed::padSizeLetter(g_cellPrev.size) : 'n', static_cast<double>(g_cellPrev.radius),
@@ -501,10 +586,10 @@ void writeKeptReport() {
 
     std::snprintf(line, sizeof(line),
                   "sealed trial report: frame %u view source = %s camera=(%.2f,%.2f,%.2f) radius_m=%.1f: observed %zu records, "
-                  "walked %u, kept %u; totals %s; top %u by radius, top %u bases by child count (the csv holds those rows; its header "
-                  "carries the full totals); csv=%s%s",
+                  "walked %u, kept %u; totals %s; centres %s; top %u by radius, top %u bases by child count (the csv holds those rows; its "
+                  "header carries the full totals); csv=%s%s",
                   g_repFrame, source, static_cast<double>(cam[0]), static_cast<double>(cam[1]), static_cast<double>(cam[2]),
-                  static_cast<double>(R), g_observed.size(), static_cast<unsigned>(entries.size()), st.kept, totals, nRadius, nBase,
+                  static_cast<double>(R), g_observed.size(), static_cast<unsigned>(entries.size()), st.kept, totals, centreTotals, nRadius, nBase,
                   csvName, truncated ? " (walk truncated)" : "");
     Log::get().note("%s", line);
     if (!f) Log::get().note("sealed trial report: could not open edvr_logs\\%s; the line above is complete.", csvName);
@@ -564,6 +649,15 @@ bool sealedTrialRecordName(uintptr_t record, std::string* out) noexcept {
 }
 
 bool sealedTrialRecordNameInto(uintptr_t record, char* out, size_t cap) noexcept { return cachedName(record, out, cap); }
+
+unsigned char sealedTrialRecordCentre(uintptr_t record, float out[3], bool* rawZero) noexcept {
+    const CentreRead r = recordCentreRead(record);
+    out[0] = r.world[0];
+    out[1] = r.world[1];
+    out[2] = r.world[2];
+    if (rawZero) *rawZero = r.rawZero;
+    return static_cast<unsigned char>(r.source);
+}
 
 void sealedTrialToggle(const char* trigger, uint32_t frame) {
     std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
@@ -780,11 +874,15 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
     const float trialR = g_radius.load(std::memory_order_relaxed);
     const bool named = g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed;
 
-    float centre[3] = {};
+    // Built v8.4: the record's world centre is the builder's (from the pose), with rec+0x240 as the counted fallback; the radius is rec+0x280.
+    const CentreRead cr = recordCentreRead(record);
+    if (cr.rawZero) ++g_zeroCentre;
+    if (cr.source == sealed::CentreSource::kRaw) ++g_poseFallback;
+    if (cr.dist >= 0.0f && g_centreDist.size() < kCentreDistCap) g_centreDist.push_back(cr.dist);
+    const float* centre = cr.world;
     float radius = 0.0f;
-    if (!readMem(centre, record + kRecCentre, sizeof(centre)) || !readVal(&radius, record + kRecRadius) ||
-        !std::isfinite(radius) || !(radius > 0.0f) || !std::isfinite(centre[0]) || !std::isfinite(centre[1]) ||
-        !std::isfinite(centre[2])) {
+    if (cr.source == sealed::CentreSource::kNone || !readVal(&radius, record + kRecRadius) || !std::isfinite(radius) || !(radius > 0.0f) ||
+        !std::isfinite(centre[0]) || !std::isfinite(centre[1]) || !std::isfinite(centre[2])) {
         g_keptUnknown.fetch_add(1, std::memory_order_relaxed);
     } else {
         bool keep = false;

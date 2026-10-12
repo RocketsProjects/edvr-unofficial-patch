@@ -15,7 +15,7 @@
 namespace edvr::kept {
 
 constexpr uint32_t kTop = 40;     // records listed per list
-constexpr int kColumns = 18;      // fields in every CSV row, the header included (the name column was added in Built v8)
+constexpr int kColumns = 24;      // fields in every CSV row, the header included (the name column in Built v8; the six centre columns in Built v8.4)
 
 // own: the record's own sphere contains the camera or meets the cell. base: an ancestor's sphere does (levelsUp generations up).
 // unjudged: no sphere on the way up meets the cell (the record was kept without a sphere that qualifies, or its sphere did not read).
@@ -54,6 +54,13 @@ struct Entry {
     bool readable = false;         // the centre, radius, mask and children were read (Built v8.3b)
     const char* label = nullptr;   // named mode: the reason against the cell (cell, explicit, other_named, sphere_no_cell, unjudged_unreadable); null: why
     std::string name;              // the record's name (rec+0x18 -> node, node+0 -> text); empty when unreadable (written as "(none)")
+    // Built v8.4: the pose-derived centre (the builder's; sealed_trial_core.h builderCentre) beside the raw rec+0x240 centre. rel and dist above
+    // are measured from the centre the rule used (the world centre: the pose when readable, else rec+0x240).
+    float poseCentre[3] = {};
+    bool poseOk = false;           // the pose centre was readable
+    bool rawZero = false;          // rec+0x240 was exactly the origin
+    uint8_t centreSource = 2;      // 0 pose, 1 raw (fallback), 2 none (sealed::CentreSource)
+    float centreDist = -1.0f;      // |rec+0x240 - pose centre| when both are readable and rec+0x240 is not zero; else -1
 };
 
 // Radius first (largest), then address (smallest): equal radii list in a fixed order.
@@ -132,18 +139,24 @@ inline Stats countKept(const Entry* e, uint32_t n) noexcept {
 
 inline const char* csvHeader() noexcept {
     return "list,rank,address,radius_m,dx_m,dy_m,dz_m,dist_m,contains_camera,why_kept,levels_up,judged,parent_address,"
-           "base_address,child_count,bucket,vtable_rva,name";
+           "base_address,child_count,bucket,vtable_rva,name,pose_centre_x,pose_centre_y,pose_centre_z,centre_source,raw_centre_zero,"
+           "centre_dist_m";
 }
 
-// One row: list is "radius" or "base"; rank counts from 1. The name is last; the census's name rules keep it free of commas.
+// One row: list is "radius" or "base"; rank counts from 1. The name is the 18th field and the centre columns (Built v8.4) the last six; the
+// census's name rules keep names free of commas.
 inline int formatRow(char* out, size_t cap, const char* list, uint32_t rank, const Entry& e) noexcept {
-    return std::snprintf(out, cap, "%s,%u,0x%llX,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%s,%u,%d,0x%llX,0x%llX,%llu,0x%llX,0x%llX,%s", list, rank,
-                         static_cast<unsigned long long>(e.address), static_cast<double>(e.radius),
+    static const char* const kSources[] = {"pose", "raw_fallback", "none"};
+    return std::snprintf(out, cap,
+                         "%s,%u,0x%llX,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%s,%u,%d,0x%llX,0x%llX,%llu,0x%llX,0x%llX,%s,%.2f,%.2f,%.2f,%s,%d,%.2f",
+                         list, rank, static_cast<unsigned long long>(e.address), static_cast<double>(e.radius),
                          static_cast<double>(e.rel[0]), static_cast<double>(e.rel[1]), static_cast<double>(e.rel[2]),
                          static_cast<double>(e.dist), e.contains ? 1 : 0, e.label ? e.label : whyName(e.why), e.levelsUp, e.judged ? 1 : 0,
                          static_cast<unsigned long long>(e.parent), static_cast<unsigned long long>(e.base),
                          static_cast<unsigned long long>(e.childCount), static_cast<unsigned long long>(e.bucket),
-                         static_cast<unsigned long long>(e.vtableRva), e.name.empty() ? "(none)" : e.name.c_str());
+                         static_cast<unsigned long long>(e.vtableRva), e.name.empty() ? "(none)" : e.name.c_str(),
+                         static_cast<double>(e.poseCentre[0]), static_cast<double>(e.poseCentre[1]), static_cast<double>(e.poseCentre[2]),
+                         kSources[e.centreSource > 2 ? 2 : e.centreSource], e.rawZero ? 1 : 0, static_cast<double>(e.centreDist));
 }
 
 }  // namespace edvr::kept
