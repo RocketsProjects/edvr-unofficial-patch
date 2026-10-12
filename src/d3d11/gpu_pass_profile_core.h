@@ -282,4 +282,8 @@ inline Summary summarise(const std::vector<Row>& rows, const std::vector<double>
     return s;
 }
 
+// Built v13.6: the shared clock is yielded to the profiler from the press until the batch's last frame is closed: wanted while a capture is armed
+// (requested) or has a batch open. The yield flag (gpuTimingSetYield) follows this state; the frame driver and the timers test the flag.
+inline bool yieldWanted(bool requested, bool batch) noexcept { return requested || batch; }
+
 }  // namespace edvr::gpupass

@@ -4,6 +4,7 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 
 ## Status
 
+- **Built v13.6 (`claude/hangar-test-9`, commit pending; full build green, gpu_pass_profile_test 54 checks, gpu_disjoint_clock_test 192 checks, sealed_trial_test 222 checks, config contract 170 keys; not installed, not flown):** while a GPU pass profile capture is armed or running, the application-frame timing and the census timers yield the shared clock (no new key): an application frame open across the profiler's boundary is ended there, the frames after are not opened (counted, logged once per capture), and the profiler's frames open. See "Built v13.6" and the profiler doc's "The yield (v13.6)".
 - **Built v13.5 (`claude/hangar-test-9`, merge commit 9e910077, DLL v0.19.1-107-g9e910077; the gpu-pass-profile branch (0cdf493c, on origin/main 2d993d2b) merged in; full build green, sealed_trial_test 222 checks, gpu_pass_profile_test 46 checks; not installed, not flown):** the merge changes no behaviour. The profiler and the trial share the DisjointClock only through the census and the application-frame timing; the trial and the drawlist probe take no GPU timing. See "Built v13.5" and the profiler doc's "Interaction".
 - **Built v13.4 (`claude/hangar-test-9`, commit 3a6ea80a, DLL v0.19.1-101-g3a6ea80a; full build green, sealed_trial_test 222 checks, not installed, not flown):** the floor is per pad size (small 85, medium 120, large 145 m; diag.sealed_cell_below_small_m / _medium_m / _large_m; diag.sealed_cell_below_m overrides all three when set), from the measured lift doors (small -72, medium -104, large -126 m) plus margin; the engage logs the deepest lift or door record within 60 m lateral from the previous frame; each engage (and so each re-freeze) logs the pads of the held size with their centres and axes. See "Built v13.4".
 - **Built v13.3 (`claude/hangar-test-9`, commit c5815b6f, DLL v0.19.1-99-gc5815b6f; full build green, sealed_trial_test 218 checks; FLOWN 2026-10-12 (edvr_gfx_20261012_154838): small and large bays fully correct, the re-freeze on ship swaps worked, the medium's back elevator section (TurboLiftDoor at -103 to -104 m) missed by the 85 m floor; not installed):** the below distance defaults to 85 m (measured: the small hangar's lift doors at -72 m); the held cell drops after 30 frames of its pad record being absent, or of another own pad being nearest, and re-freezes from the next pad once lowered (lowest height per pad record); an unreadable centre is kept in named mode (a zero raw centre was being read as the origin and culled); the culled tops are their own "sealed culled top:" line; the culled-near-axis list reaches 90 m. See "Built v13.3".
@@ -942,6 +943,24 @@ Built, not installed, not flown. The branch `origin/claude/gpu-pass-profile` (0c
 *Instrument interaction.* See the profiler doc's "Interaction" section. In short: the trial, the drawlist probe and the look probe take no GPU timing (QPC and counters only), so they cannot contend with the profiler. The census and the application-frame timing (`advanced.app_gpu_timing`, default on) share the one DisjointClock: a profiled frame that opens while one holds it fails with a logged reason, and their own leases are refused during a profiled frame. The profiler does not corrupt or stall the trial's measurements. Expected but not flown: with the application-frame timing on, profiled frames probably fail, because its segment is open at the profiler's frame boundary (read from the code). The remedy is a behaviour change and is not in this merge.
 
 *Not done.* No flight, no install. The application-frame interaction is the flight's to confirm.
+
+## Built v13.6 (2026-10-12, `claude/hangar-test-9`): the GPU pass profiler's yield
+
+Built, not installed, not flown. Full `build.bat` green: `gpu_pass_profile_test` 54 checks (new: the yield's life across the press, the batch and the last close), `gpu_disjoint_clock_test` 192 checks (new: a frame open refuses a second frame and a profiler open; ending it releases the clock; a standalone scope then opens, closes and releases), `sealed_trial_test` 222 checks; config contract 170 keys (no new key).
+
+*Why.* The v13.5 merge's interaction: with the default settings (advanced.app_gpu_timing on) the application-frame segment is open at the profiler's frame boundary, so a press would fail its frames. The coordinator's decision: fix it so a profiler press works with default settings, as a temporary diagnostic behaviour during a capture only.
+
+*The yield.* From the press until the last profiled frame's scope is closed:
+- `gpuTimingSetYield` (gpu_timing.cpp) is set at the press and cleared at the batch's end (the boundary after the last frame closes; also on every failure and at shutdown). The frame driver's begin and GpuTimer's begin refuse new leases while it is set, counted (`gpuTimingTakeYieldRefusals`).
+- `gpuFrameCommand` (gpu_frame_timing.cpp) does not open an application frame while it is set; the skipped frame is counted once (`gpuFrameTakeYieldSkips`).
+- `gpuFrameYieldBegin` (called by the profiler at each boundary while the yield is wanted) ends an application frame open across the boundary. It closes through the span ring to the clock's finishFrame, which clears the open scope, so the profiler's gpuTimingPassScopeOpen finds the clock free.
+- The log at the batch's end: "app gpu timing: paused for the GPU pass profile, N frames; census timer leases refused: M."
+
+*The census.* Its timers are refused the same way. A census timer lease is only open inside a census section, and no boundary runs inside a section, so the census does not hold the clock across a boundary. Not verified in a flight.
+
+*Verification.* The clock's sequence is checked in gpu_disjoint_clock_test (the profiler's open condition scopeOpen() holds while the frame is open and a second frame is refused; finishFrame releases; a standalone scope opens after). The capture's life is checked in gpu_pass_profile_test. The D3D path is not modelled by a rig; it is reasoned in the profiler doc. The flight is the check: a profiled frame should open with app_gpu_timing on (no "not captured" line; the "paused" line counts the frames).
+
+*Not done.* No flight, no install.
 
 ## Early veto (RE, 2026-10-12)
 

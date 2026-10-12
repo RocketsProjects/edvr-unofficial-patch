@@ -246,6 +246,25 @@ void testSummary() {
     const Summary none = summarise(rows, frameMs, std::vector<bool>{false, false, false});
     check(none.frames == 0 && none.top.empty(), "with no frame read there are no means at all");
 }
+
+// Built v13.6: the yield follows the capture. Wanted from the press (armed), through every batch frame, and not after the batch's last frame is
+// closed; never wanted idle. The application frame is refused while it is wanted, and admitted once it is not (modelled by the flag).
+void testYield() {
+    check(!yieldWanted(false, false), "idle: the yield is not wanted, so application frames and census timers are not paused");
+    check(yieldWanted(true, false), "armed (the press, before the first boundary): the yield is wanted");
+    check(yieldWanted(false, true), "a batch running: the yield is wanted through every frame of it");
+    check(yieldWanted(true, true), "armed and running together: still wanted");
+    // The capture's life, boundary by boundary: press, begin frames 1 to 4, close the last one; the flag is cleared at that boundary.
+    bool requested = true, batch = false;
+    check(yieldWanted(requested, batch), "press: wanted");
+    requested = false;
+    batch = true;   // boundary 1: the batch starts
+    check(yieldWanted(requested, batch), "boundary 1: the batch has started, wanted");
+    batch = true;   // boundaries 2 to 4: frames 2 to 4 begin
+    check(yieldWanted(requested, batch), "boundaries 2 to 4: still wanted");
+    batch = false;  // boundary 5: the last frame is closed at its top and the batch ends
+    check(!yieldWanted(requested, batch), "after the last frame's close (boundary 5): not wanted, so the next application frame may open");
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -262,6 +281,7 @@ int main(int argc, char** argv) {
     testHashes();
     testCsv();
     testSummary();
+    testYield();
     std::printf("gpu_pass_profile_test: %u checks, %d failed\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

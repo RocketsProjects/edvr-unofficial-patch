@@ -4,6 +4,7 @@
 #include "gpu_pass_profile_core.h"
 #include "binding_shadow.h"
 #include "gpu_timing.h"
+#include "gpu_frame_timing.h"   // Built v13.6: the application-frame yield (gpuFrameYieldBegin, gpuFrameTakeYieldSkips)
 #include "../common/config.h"
 #include "../common/log.h"
 #include <windows.h>
@@ -412,6 +413,18 @@ void emitBatch() {
 
 }  // namespace
 
+namespace {
+// Built v13.6: the capture is over (its last frame's scope is closed): the shared clock is released to the application-frame timing and the
+// census timers, and the counts of what yielded are logged once for the capture.
+void endYield() {
+    gpuTimingSetYield(false);
+    const uint64_t frames = gpuFrameTakeYieldSkips();
+    const uint64_t refused = gpuTimingTakeYieldRefusals();
+    Log::get().note("app gpu timing: paused for the GPU pass profile, %llu frames; census timer leases refused: %llu.",
+                    static_cast<unsigned long long>(frames), static_cast<unsigned long long>(refused));
+}
+}  // namespace
+
 // ---- hooks (owner context only) ----
 
 void gpuPassProfileRequest() {
@@ -420,8 +433,12 @@ void gpuPassProfileRequest() {
         return;
     }
     g_requested = true;
+    // Built v13.6: from the press until the last profiled frame's scope is closed, the application-frame timing and the census timers yield the
+    // shared clock (gpu_timing.h); the profiler's frame scopes then open. Cleared by endYield at the batch's end.
+    gpuTimingSetYield(true);
     Log::get().note("gpu pass profile: armed. The next %u whole frames are measured from the next frame boundary; "
-                    "the lines follow once the GPU has reported them.",
+                    "the lines follow once the GPU has reported them. The application GPU timing and the census timers pause "
+                    "until the capture's last frame is closed.",
                     kCaptureFrames);
 }
 
@@ -477,16 +494,20 @@ void gpuPassProfileFrameBoundary(ID3D11DeviceContext* ctx, uint32_t frameNo, uin
     if (!gpuTimingOwns(ctx)) {
         if (g_requested) {
             g_requested = false;
+            endYield();
             Log::get().note("gpu pass profile: this context does not own the GPU timing domain, so nothing was captured");
         }
         return;
     }
     const uint64_t now = GetTickCount64();
     if (g_active >= 0) closeFrame(ctx, static_cast<uint32_t>(g_active), now);
+    // Built v13.6: an application frame open across this boundary (its lease holds the clock) is ended here, so this capture's frame can open.
+    if (g_requested || g_batch) gpuFrameYieldBegin(ctx);
     for (uint32_t i = 0; i < g_started && i < kCaptureFrames; ++i) pollFrame(ctx, i, now);
     if (g_requested && !g_batch && !g_haveBatch) {
         g_requested = false;
         if (!ensurePool(ctx)) {
+            endYield();
             Log::get().note("gpu pass profile: the timestamp query pool could not be created; nothing was captured");
             return;
         }
@@ -503,9 +524,12 @@ void gpuPassProfileFrameBoundary(ID3D11DeviceContext* ctx, uint32_t frameNo, uin
             if (!begun) {
                 Log::get().note("gpu pass profile: frame %u not captured: %s", slot + 1, g_frames[slot].failure);
                 g_batch = false;
+                endYield();
             }
         } else {
+            // The last frame's scope was closed at the top of this boundary: the capture holds the clock no longer (Built v13.6).
             g_batch = false;
+            endYield();
         }
     }
     if (g_haveBatch && !g_batch && !unresolved()) {
@@ -523,6 +547,7 @@ void gpuPassProfileShutdown() {
     g_active = -1;
     g_ctx = nullptr;
     detail::g_gpuPassCapturing = false;
+    gpuTimingSetYield(false);   // Built v13.6: no yield outlives the profiler
     releasePool();
 }
 

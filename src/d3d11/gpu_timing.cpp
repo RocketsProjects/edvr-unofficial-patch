@@ -126,6 +126,18 @@ void gpuTimingAbandon() noexcept {
     // Releases. Outstanding timer states retain this domain until reset.
 }
 
+// Built v13.6: the GPU pass profiler's yield (gpu_timing.h). The flag is read by every NEW lease the timers and the frame driver would take; a refusal
+// is counted and returns the same "not taken" a busy clock gives, so the caller's existing failure path runs. The profiler's own scopes are not
+// gated (gpuTimingPassScopeOpen is what the profiler uses).
+namespace {
+std::atomic<bool> g_yieldOn{false};
+std::atomic<uint64_t> g_yieldRefusals{0};
+void noteYieldRefusal() noexcept { g_yieldRefusals.fetch_add(1, std::memory_order_relaxed); }
+}  // namespace
+void gpuTimingSetYield(bool on) noexcept { g_yieldOn.store(on, std::memory_order_release); }
+bool gpuTimingYielding() noexcept { return g_yieldOn.load(std::memory_order_acquire); }
+uint64_t gpuTimingTakeYieldRefusals() noexcept { return g_yieldRefusals.exchange(0, std::memory_order_acq_rel); }
+
 bool gpuTimingPassScopeOpen(ID3D11DeviceContext* ctx, unsigned slot, uint64_t now) noexcept {
     auto d = current();
     if (!d || slot >= kPassScopeSlots || g_passLease[slot] || !d->owns(ctx) ||
@@ -225,6 +237,10 @@ GpuTimer& GpuTimer::operator=(GpuTimer&& other) noexcept {
 bool GpuTimer::beginImpl(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                          bool borrowedFrame) noexcept {
     if (state_ && !state_->domain->owns(ctx)) return false;
+    if (gpuTimingYielding()) {   // Built v13.6: the profiler's capture holds the clock; this timer's lease is refused (counted)
+        noteYieldRefusal();
+        return false;
+    }
     if (!gpuTimingBind(dev, ctx)) return false;
     const auto d = current();
     if (!d || !d->accepts(ctx) || d->device() != dev) return false;
@@ -394,6 +410,10 @@ bool GpuTimingFrameDriver::begin(unsigned i) noexcept {
     auto* s = state_;
     if (!s || !s->domain->accepts(s->context()) || i >= GpuSpanState::kSlots) return false;
     if (s->open >= 0 || s->stopped || s->slots[i].phase != State::Phase::Idle) return false;
+    if (gpuTimingYielding()) {   // Built v13.6: the profiler's capture holds the clock; this frame's lease is refused (counted), nothing is stopped
+        noteYieldRefusal();
+        return false;
+    }
     const auto now = GetTickCount64();
     s->domain->collectExpired(now);
     auto& q = s->slots[i];
