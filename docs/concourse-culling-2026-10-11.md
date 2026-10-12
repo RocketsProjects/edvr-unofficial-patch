@@ -424,6 +424,8 @@ Commit `7a466ee3` (source; the branch also holds the merges of `claude/dynamic-a
 
 Fix before the flight, commit `7a7f7e67` (DLL `v0.19.1-69-g7a7f7e67`, full build and dll-only green): the hatch probe clears its remembered objects on every toggle-on, the cap is 32 (was 8; the first refusal past it is logged once, with the distinct refused objects named), and each change line names the readers r0 to r3 that supplied the object.
 
+v8.1 crash fix, commit `6063d2c8` (DLL `v0.19.1-71-g6063d2c8`, full build and dll-only green). Cause: in the flight with F2 on and docked, the store and builder detours inserted into `builder_probe.cpp`'s unordered sets with no lock, racing the frame tick (heap corruption, then an access violation in the hash insert inside the store's recursion). Fix: with only the trial on, the builder detour does no container work (an atomic count of calls whose rec+0x234 reads 0 at entry feeds `builder_after_cull=`, and `builder_unvisited=` leaves the window line); during the one F9 frame, all shared containers sit behind one collector lock that is never held across `forward()`, with reserves taken before the lock. The shared state of the sealed trial and the look probe is guarded by the same rule (the audit is in the commit message).
+
 ### Part 1: the builder 0x42B4420, arguments and return (PROVEN from the exe bytes, capstone 5.0.7)
 
 - **Prologue** `4C 8B DC 55 56 41 54 41 57 49 8D AB 08 FC FF FF` matches. Both call sites 0x43204F3 and 0x4321ADB are `call 1442b4420`. The return addresses are 0x43204F8 and 0x4321AE0; `builder_probe_core.h` classes a call by them.
