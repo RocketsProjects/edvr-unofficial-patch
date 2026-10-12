@@ -4,6 +4,7 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 
 ## Status
 
+- **Early veto (RE, 2026-10-12, `claude/early-veto-re`, offline, nothing built, installed or flown):** the earliest safe skip is the rig eval 0x431AFE0 (RVA 0x431AFE0, already hooked as `kinematic-rig-eval`). The veto runs the engine's own off-screen branch (three field writes, PROVEN from bytes) and skips for that rig the view loop, the batch dispatch, the store (pose update, sphere, LOD), producer B, the builder and the sub-object integrator. Open before a build: the rig's name and position reads (candidates rig+0x20, +0x50, +0x190, unproven) and the caller of the rig slot (not located). See "Early veto (RE, 2026-10-12)".
 - **Built v10 (`claude/hangar-test-8`, commit 6d348fe5, DLL v0.19.1-85-g6d348fe5; full build and dll-only promotion green, pushed, not installed, not flown):** the trial's veto moves to producer B's entry (FUN_144312E00, pre-forward, on the existing producer-0 bracket). Veto form: SKIP the forward (every write B makes to shared state is in its append branch; the store ignores its return; decomp_4312E00.txt, Built v10). The decision uses the store's rule on B's world sphere (storeWorldSphere, decomp_4312040.txt lines 212-262). `diag.sealed_trial_producer = veto` (default) or `count` (the A/B control). Window: producer_b_calls, producer_b_vetoed, producer_b_kept, world_sphere_store_style, world_sphere_unreadable. Flight: raised pad and sealed hangar, off, sphere, named, all, with F11 and F6; expect the screen to empty under all.
 - **Built v9 (`claude/hangar-test-8`, commit 7cb314d5, DLL v0.19.1-83-g7cb314d5; full build and dll-only promotion green, pushed, FLOWN 2026-10-12: H-PERSIST REFUTED, see Built v9; the bulk path is producer B):** the draw-list probe, `hotkey.drawlist_probe` (TEMPORARY, unbound by default, flat allow-list, commented in the edvr.ini template). Collects three consecutive frames of path A (builder) and path B (producer FUN_144312E00) appends, the pool copy, merge and clear calls, and the substituted pool draws per family, with carried candidates per frame; writes `edvr_logs\drawlist_<stamp>.csv`. The per-draw join is NOT live (the CPU has no draw-to-pool-key map). Tests H-PERSIST: see "Built v9". Flight: raised pad, same view, probe off, then sphere, then all; then the sealed hangar; one capture with a ship in view.
 - **Built v8.5 (`claude/hangar-test-8`, commit 0d55bf4d, DLL v0.19.1-79-g0d55bf4d; full build and dll-only promotion green, pushed, not installed, not flown):** diagnosis of the v8.4 flights (see "Built v8", v8.5). Clear audit: only `sealed_trial.cpp` writes rec+0x208 and rec+0x234, and the write lands before the record loop reads them; unchanged since 7fed41c8. New: `diag.sealed_trial_mode = all` (EVERY visited record loses its flags, no test; the discriminator); F2 keeps the mode (code never resets it); the F9 summary names the live builder path and the bracket's gate; the window and report carry the kind of the pointer at rec+0x290. Next flight: mode all with the census (F6) and a screen capture, then the F9 summary line.
@@ -743,3 +744,90 @@ Commit `6d348fe5` (DLL `v0.19.1-85-g6d348fe5`). Full `build.bat` green: `sealed_
 *How to read it.* The veto works if F11's producer-B appends fall in sphere, named and all against trial off, in step with `producer_b_vetoed`. If the screen does not empty under `all` with producer-B appends at zero, the remaining draws are path A (the builder, cleared by the post-store clear) or pools persisting from earlier frames; the v9 carried count says the second is unlikely, but recheck it. If `producer_b_calls` stays zero, the veto is not live: the toggle line gives the reason.
 
 *Not done.* No flight, no install. The world-sphere formula is a hand reading of the decompile, checked for x only. The untraced callees (`FUN_144c835d0`, `FUN_14431fb20`) and the dictionary insertion on a miss are INFERRED.
+
+## Early veto (RE, 2026-10-12)
+
+Offline, build 332841 (gate matched: TimeDateStamp 1788384820, SizeOfImage 104894464). No C++ changed, no build, no flight, nothing installed. Branch `claude/early-veto-re` from `claude/hangar-test-8` (b7e427a5). **PROVEN** = exe bytes (capstone 5.0.7 reader, scratchpad, not committed), a fresh Ghidra headless decompile of 18 callees (scratchpad `ev_decomp`, read-only project), or the decompiles in `analysis\decomp` and the EDVR source. **INFERRED** = not closed by those.
+
+### Q1. The chain, and which level runs on a job thread
+
+| Level | Site (VA, RVA) | Object at entry | Thread | Status |
+|---|---|---|---|---|
+| L0 | vtable 0x145591CB8, slot 0, thunk 0x1442DF460 | one rig; rdx = rig+0xd0 | caller unknown | PROVEN thunk bytes: `mov rax,r8; lea rcx,[rdx-0xd0]; xor r8d,r8d; test rdx,rdx; mov rdx,rax; cmove rcx,r8; mov r8,r9; jmp 0x14431AFE0`. The slot is the only xref (ghidra_thunk.log). The virtual call site is NOT located. A byte scan (`lea reg,[reg+0xd0]` followed by an indirect call) gave about 70 sites, nearly all rig-class constructors (`call 0x140529500/0x140529550` with rdx = obj+0xd0); none is the per-frame caller. |
+| L1 | 0x14431AFE0 (RVA 0x431AFE0), the rig eval | rcx = rig, rdx = view context `ctx` (views at ctx+0x40, stride 0x6A0, count ctx+0x1A940) | the caller of L0 (INFERRED: the thread that submits) | PROVEN |
+| L2 | `[collection+8]` vtable +0x50 (Submit of a 0x60-byte entry, `call [rax+0x50]` at 14431B21C), or `call 0x144321940` synchronously when collection+8 is null (14431B20D) | the entry: [0] ctx, [2] owner = collection+0x300, [5] record array, [6] count, [8] pipe = collection+0x2E0, [9] mask | caller thread on the sync path; queue otherwise | PROVEN call sites. The Submit class is UNKNOWN (its vtable is not decoded). |
+| L3 | batch body 0x144320340 (RVA 0x4320340), run slot 0x1442DFAF0 (`mov rcx,rdx; jmp 0x144320340`), 8 entries | batch object: entries at +0x00 to +0x2FF (0x60 each), count at +0x300 | job thread (INFERRED from the run slot; EDVR's kinematic_eval_hook.cpp kJobRvas names it "render-data batch", job 1) | PROVEN layout and run slot; the threading is INFERRED |
+| L3' | single body 0x144321940 (RVA 0x4321940), run slot 0x1442DF520 (`mov rcx,rdx; jmp 0x144321940`) | one entry | job thread, or the caller on the sync path | PROVEN |
+| L4 | per group: 0x144331300 (mask and window), then store 0x144312040 on entry[5], then the admission loop over members (stride 0x2F0) | group | inside L3 or L3' | PROVEN (decompile 4320340 lines 40-108) |
+| L5 | store 0x144312040 per record: LOD nibble filter, sphere 0x144308B30, per-view 0x14430EFE0, pose 0x14433DB20 (line 153), child recursion (rec+0x2A8, +0x2B0), producer B 0x144312E00 for kind 2 (line 337) | record | inside the job | PROVEN (draw-path doc, decompile 4312040) |
+| L6 | builder 0x1442B4420 (path A); producer B 0x144312E00 (path B) | instance or rig record | inside the job | PROVEN |
+
+The "8 store threads" of the flight: the bytes fix a batch of 8 entries (0x300 = 8 x 0x60, count at +0x300), not 8 threads. The thread count is INFERRED from the job system and not counted here. L0 to L2 run on the caller; L3 and L3' run where the job system runs them; L4 to L6 never run outside a job body (their call sites are 0x43203F1, 0x43219BB and the store's own recursion, PROVEN).
+
+### Q2. Readable at entry, before this frame's pose update
+
+- **L1 (0x431AFE0)**, PROVEN from the bytes: rig+0x380 (state, must be 4; first instruction, 14431AFEC), rig+0x348 (collection), rig+0x350 (a 64-bit KEY, not a position: FUN_142840840 compares it with the entries of view+0x530), rig+0x190 (pointer, non-null tested; the same offset as a record's pose matrix A), rig+0x188 (int, tested against -1), rig+0x3D1, +0x3D2, +0x3D5, +0x3D6 (flags).
+- **Name at L1**: NOT decoded. EDVR's probe already reads rig+0x20 ("associated game-object interface") and rig+0x50 ("rig descriptor") (kinematic_eval_probe.cpp 435-436). The chain from those to a name is INFERRED and must be read first.
+- **Position at L1**: INFERRED. A rig sphere can be built the way the store builds a record's (node bounds at node+0x08, centre +0x20, radius +0x2C, transformed by A = rig+0x190 and B = *(A+0x50)). The rig pose is not written in 0x431AFE0, and physics writes node matrices rather than records (kmi 19:11 note), so last frame's value is valid at entry.
+- **Record (L5)**: name rec+0x18, then node+0 (draw-path doc, PROVEN). World sphere: the store's own computation (4312040 lines 212-262, EDVR `storeWorldSphere`). The pre-update fields rec+0x240 and +0x280 are not the centre for leaves (draw-path doc Q4, PROVEN).
+- **Open**: whether the rig at L1 is the same object as the "rig record" whose +0x2B8 holds the kind (draw-path doc). Not established.
+
+### Q3. What a skip leaves undone
+
+**The key fact (PROVEN, bytes 14431B221 to 14431B240).** 0x431AFE0 already has a branch for "no view sees this rig" (uVar9 == 0, or collection+0x70 bit 0 clear, decomp 431AFE0 line ~130). It runs every frame for an off-screen rig, and its whole effect is three writes:
+1. `[collection+0x629] = 0` (byte).
+2. `call 0x14434DD50` with rcx = collection+0x300, which is `mov dword [rcx+0x2A4], 0` (owner count = collection+0x5A4).
+3. if `[collection+0x2E0] != 0`: `call 0x1442B5760` with rcx = that pipe, which is `add rcx,0x78; jmp 0x14434DD50` (pipe+0x31C = 0).
+
+Nothing else is written. The view tests are read-only: 0x142840840 reads view+0x530; 0x14432C520 calls 0x142853010, 0x142854840 and 0x142852F80, which read view+0x688 only (decompiled). The branch skips: the group mask (0x4331300), the batch dispatch, the store (LOD, sphere, per-view gate, pose 0x433DB20, children), producer B, the builder, the admission loops, and the sub-object integrator 0x42B53F0. That integrator is called only in the non-empty group path (decomp 4320340: `if (*plVar10 != 0) FUN_1442b53f0` sits in the else of `local_48 == 0`, PROVEN). So a veto that performs this branch is, by construction, the engine's own off-screen handling.
+
+Concerns, one by one:
+- **Pose updates** (0x433DB20 writes record+0x170 and +0x240 to +0x24C for visited records): skipped. Physics does not read record poses (kmi 19:11). EDVR's engine motion sees a gap and re-baselines it (draw-path doc, item d). Safe.
+- **Animation (0x42B53F0)**: writes each sub-object's 4-float state, scaled by `*ctx+0x1A96C` (PROVEN read). Skipped exactly as the engine skips it off-screen. On unseal it resumes without catch-up, so a spinning sub-part may pop (INFERRED).
+- **LOD state** (rec+0x208, +0x234): the store rewrites them before any read on the next visited frame (4312040 line 150 sets rec+0x234 before the sphere test). Safe.
+- **Physics and collision**: the physics job 0x432B2A0 is gated on rig+0x380 == 4 and uses the node matrices, not records (PROVEN gate, decomp 432B2A0 line 107). Not touched.
+- **Owner pool**: the drainer 0x434D790 returns at once when owner+0x2A4 == 0 (decomp line 26, PROVEN). The v9 flight found 0 to 12 carried keys a frame, so no draw list persists (flight numbers, reported by the coordinator). Safe.
+- **Streaming and audio**: audio is unreachable (memory: Wwise linked statically). Streaming not traced: INFERRED none on this path.
+- **0x629**: a byte scan of .text for displacement 0x629 gave 31 candidate hits. The instruction-level uses found are in 0x431AFE0 (the write at 14431B1FC and 14431B228, and the final read). The rest are misaligned bytes (INFERRED from a sample).
+
+**Earliest safe level: L1 (the entry of 0x431AFE0).** Above it:
+- L0 (the thunk) adds nothing: it is a pure jump (bytes above), and the existing hook already sees every call that reaches 0x431AFE0.
+- The virtual caller is not located, so its safety is not known.
+- The other slots of the rig interface are not free to skip (see below).
+
+**One-frame resync.** On unseal, the next frame takes 0x431AFE0's normal branch and rebuilds everything: the store rewrites the flags before the admission reads, the pose is recomputed for every visited record, the owner counts are reset by 0x14434DB60 (`mov [rcx+0x2A4],0`, decomp 434DB60), and the batch is rebuilt. This needs the job to complete in that frame. Only the sub-object integrators keep their frozen state.
+
+**Ruled out:**
+- ruled out: the thunk 0x1442DF460 as the veto point, because it is a pure jump to 0x431AFE0 and the hook there already sees every call.
+- ruled out: a veto above the virtual caller, because slot 1 (thunk 0x1442DF480, which calls 0x14431ABD0) runs for the same rig and the caller is not located.
+- ruled out: skipping slot 1 (0x14431ABD0), because it drains the rig's pending list at rig+0x2D0 (count +0x2C8; the element callback returns 1 to remove, decomp 431ABD0 lines 43-70) and reads rig+0x3D1 (line 109). Not shown safe.
+- ruled out: forcing the empty branch by writing rig+0x3D1 = 0, because 0x14431ABD0 reads that byte in its callbacks (decomp 431ABD0 lines 69 and 109). The veto writes the three fields of the branch instead.
+- ruled out: zeroing the view masks (view+0x570), because every rig reads them.
+- ruled out: L2 (Submit), because it sits after the L1 gate, so it saves less than a veto at L1, and its class is unknown.
+- ruled out: L3 and L3' (the job bodies), because the work is already submitted by then, and writing owner counts from a job thread would add a thread discipline that the engine's own off-screen branch does not use.
+- ruled out: L4 (per group), because the group mask exists only after the dispatch, so a per-group veto keeps the L2 and L3 costs.
+- ruled out: the store entry 0x4312040 (draw-path doc), because zeroing its input skips the pose update the children and the builder need.
+- ruled out: the physics job 0x432B2A0 for render cost, because it is the physics side (node writes), and its mean is about 7.6 us a call (kmi 2026-09-20 job timings).
+
+### Q4. Recommended veto
+
+- **Point**: 0x14431AFE0 (RVA 0x431AFE0), entry. It is EDVR's `kRigEvalRva`, already hooked by `g_rigEvalEntry` (kinematic_eval_hook.cpp 273-274) with `rigEvalObserved`, which calls `noteRigLink` and then forwards. No second detour: add a veto check in `rigEvalObserved` before the forward. A veto returns 0 and performs the three-field branch above. The return value is unused: the slot is `void` (decomp 42DF460 and the thunk `jmp`). `installOne(g_rigEvalEntry)` (line 805) gates it.
+- **Calling convention**: Microsoft x64. rcx = rig, rdx = ctx (the thunk moves the original r8 into rdx), r8 unused by the body. Same shape as the existing `RigEvalFn(uintptr_t,uintptr_t)`.
+- **Prologue, first 16 bytes (exe file bytes)**: `4C 8B DC 55 57 48 81 EC A8 00 00 00 83 B9 80 03`. The first 5 bytes are the CodeHook site; the bytes must be hashed from the file, as the existing hook does.
+- **Identity and position**: not yet. The first step is a read-only probe of rig+0x20, rig+0x50, rig+0x190 and the pointers they reach, plus a check that rig:collection is 1:1 (the riglink dump has the collection per rig).
+- **Expected saving (INFERRED)**: the veto removes all of that rig's non-candidate work: the view loop, the dispatch, the store per record, producer B, the builder and the integrators. The producer-B veto left a floor of 3.3 ms with everything vetoed (flight), and that floor is what this removes for the rigs that are culled. Not measured. The sealed trial's per-record decision (about 0.33 ms a frame) falls to one decision per rig.
+- **Confidence**: high that the three-field branch is the engine's own off-screen behaviour (PROVEN from bytes). Medium on the saving. Low on identity and position (not read).
+
+### Risks
+
+1. Identity and position are unread. The rig at L1 may not be the object whose +0x2B8 holds the kind.
+2. Rig-to-collection sharing. If two rigs share one collection, the veto's write to owner+0x2A4 on one rig's frame could race another rig's batch on another thread. The engine's own off-screen branch makes the same write, but more often. Check 1:1 first.
+3. The caller of L0 and its thread are not known.
+4. The Submit class is unknown. The veto runs before the append, so no half-built entry can exist (PROVEN from the branch order).
+5. Unseal: the sub-object integrators resume without catch-up (a possible visible pop, INFERRED).
+6. Engine-motion gaps: the emit re-baselines; the masked frames count against the flight's motion data.
+7. Any new key is temporary (AGENTS: config values name the functionality). List it in Status and quote it for removal.
+
+### Not done
+
+No build, no install, no flight, no config key, no code. Not decoded: the Submit class, the caller of L0, the name and position reads, the 1:1 collection check. Scratch tools (not committed): `xre.py` (capstone reader), `find_rig_callers.py`, `find629.py`, `ev_scripts\DecompileEV.java` (Ghidra headless, read-only project) in the scratchpad.
