@@ -13,6 +13,7 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 - **Open:** pad and door storage (P9); cell radius; pane draw hashes and ownership; env slot numbers; player_location read path (P10).
 - **Next flight, no engine change:** the Built v7 census in three captures (see Built v7): (a) docked, hatch closed, seated; (b) on foot in the bay; (c) on foot in the concourse. Then the Built v5 plan (with the `torn=` check of Built v6). Older steps, still open: the Built v4 plan in Measurement: docked, step the trial down the ladder one rung at a time with a census (F6) at each rung, and note the smallest radius where everything still looks complete; then the approach state dump (F3, `diag.state_dump_frames = 6000`) and the look probe at the concourse bay windows. The Built v3 and v2 plans still stand for the rest (the open-pad outpost, M3, is in v2). The M1 draw link is the open item.
 - **Probe keys (TEMPORARY):** `hotkey.asset_census` (Built v7; unbound by default; on the flat allow-list), `hotkey.state_dump`, `hotkey.look_probe`, `hotkey.sealed_trial`, `hotkey.sealed_trial_smaller` and `hotkey.sealed_trial_larger` (all unbound by default), `diag.state_dump = off`, `diag.state_dump_frames = 3000` (60 to 6000; 6000 for the approach dump), and `diag.sealed_trial_radius_m = 80`. **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
+- **Dynamic actors (RE, 2026-10-12, offline, no build):** the store is not the only admission. Both record loops (0x4320370 and 0x4321A13) test rec+0x234 and call the one builder 0x42B4420 (two direct call sites, PROVEN). The trial clears inside the store call, before those loops, so H2 (mask re-OR'd after the store) is RULED OUT. Open: H1 (a submitter outside both loops), H3 (other records), H5 (array members the store never visits keep stale flags, new). H4 (containment keeps near-camera actors) is PARTLY PROVEN and explains the on-foot list. Hook candidates: the store (already hooked) and the builder entry. Decide with the one-flight probe in the section "Dynamic actors (RE, 2026-10-12)". Nothing built.
 
 ## Proven
 
@@ -268,3 +269,49 @@ Hypotheses and what would refute them:
 ## Open items
 
 Pad and door storage (M2). Cell radius and hangar record set (M1). Pane hashes and hull or concourse ownership (M1). Env slot numbers (runtime reflection). player_location read path (P10). Status flag names beyond the bits EDVR decodes.
+
+## Dynamic actors (RE, 2026-10-12)
+
+Offline, build 332841 (gate matched). No C++ changed, no build, no flight. The helpers (`xr2.py`: capstone plus the pdata function table; `fieldrefs.py`) are in the session scratchpad and not committed. **PROVEN** means the bytes or a decompile line is cited. **INFERRED** means the bytes do not close the point.
+
+### The admission chain
+
+- **D1. PROVEN: two loops, one builder.** Traversal 0x4320340 (decomp_4320340 lines 40-108) walks up to 8 entries of 0x60 bytes, count at object+0x300. For each entry it calls the store 0x4312040 once for the group base (asm 0x43203F1; the fifth argument is [rdi-0x18], which is entry+0x28, the record array base), then walks the array (entry+0x28, count entry+0x30, stride 0x2F0) and calls builder 0x42B4420 (asm 0x43204F3). The single-entry form 0x4321940 (decomp_4321940 lines 37-94) does the same: store at 0x43219BB, builder call in the pdata-split body at 0x4321ADB (asm 0x4321A13 to 0x4321AE0). That form is fed from 0x431B11D to 0x431B20D: collection rbx = [rdi+0x348], record array rbx+0x280, count rbx+0x298, mask rsi, written to a stack entry (asm 0x431B178 to 0x431B20D, call 0x144321940 at 0x431B20D).
+- **D2. PROVEN: the builder has two direct call sites.** A rel32 and rip-relative scan of .text, verified with capstone operands, finds exactly 0x43204F3 (in the traversal) and 0x4321ADB (in the single-entry body). Both come after the store for the same entry. Indirect (vtable) callers are not covered by this scan.
+- **D3. PROVEN: the per-record admission test** (asm 0x4321A3D to 0x4321AAA; decomp_4320340 lines 64-101). Admit only if rec+0x290 is non-zero, byte rec+0x234 is non-zero, byte rec+0x298 is non-zero, and some set bit v of the 64-bit mask rec+0x208 has its 4-bit nibble (word rec+0x210 + (v>>4)*8, shift (v&15)*4) at most the ushort at [rec+0x218]+0x6A. The builder gets rcx = rec+0x290, rdx = context, r8 = window (from 0x4331300), r9 = rec+0x210, and [rsp+0x20] = callback rec+0x2C0 when global byte DAT_145ea3483 is non-zero. The record base is r9 - 0x210.
+- **D4. PROVEN: the store.** 0x4312040 takes (entry, window, bounds, mask, record); the record is param_5 (decomp_4312040 lines 16-17). It recurses into the child list (rec+0x2A8, count rec+0x2B0; lines 342-353; recursive call at 0x4312650, asm 0x431263B). Per record it calls the callback at rec+0x2C0: vt+0x70 (line 280), vt+0x58 (line 281), and vt+0x80 when the low dword of rec+0 is 0xFFFFFFFF (lines 265-275).
+- **D5. PROVEN: the trial runs inside the store call.** store_hook.cpp lines 106-115: storeObserved calls the original store, then sealedTrialAfterStore(bucket, record). That runs for the group base and for every recursive child call. sealed_trial.cpp lines 442-507 keep a record when sealed::keepRecord holds (sealed_trial_core.h lines 64-66: the camera is inside the sphere, or the sphere meets the 80 m sphere around the camera) or when the sphere is unreadable (keptUnknown). Otherwise cullRecordFaultSafe writes rec+0x208 and rec+0x234 (sealed_trial.cpp lines 430-437). Sphere: centre rec+0x240, radius rec+0x280 (constants lines 26-33).
+
+### Hypotheses
+
+- **H2 (mask re-OR'd after the store): REFUTED.** Ruled out: the record loop reads rec+0x234 and rec+0x208 right after the store of the same entry (D1, D3), with no writer in between, and the trial clears inside the store call (D5), before that read. A second entry reaching the same record calls the store and the trial again, so it is cleared again.
+- **H1 (a second submitter that never goes through 0x4312040): OPEN; the two loops are not it.** Ruled out: a second builder caller that skips the store, because 0x4321ADB sits after the store at 0x43219BB (D2). Still open: a submitter reached by a virtual call (the traversal and the single-entry form have vtable-referenced callers at .rdata 0x5DDB604 to 0x5DDB614 and 0x5DD9F54 in Ghidra's caller list; not enumerated), or a builder with no caller found. The rel32 scan cannot find virtual or indirect callers. The skinned node string fRenderSkinningProcessorNode (0x5A6E170; lea at 0x10D8C54 in 0x10D8BD1 and 0x4C524A6 in 0x4C52320) and ShipRenderManager (0x5315870; lea at 0x2CC11D6 in 0x2CC11C0) are referenced only from functions that look like class registrations (name lea, constructor calls to 0x1401e3c80 and 0x1401fa180, vtable stores). INFERRED: neither is a per-frame submitter. The probe below decides it.
+- **H3 (the visible ships are other records): OPEN.** Under D5 a cleared record cannot reach the builder in its own frame. So a visible ship drawn by the builder had its flag set after the trial, or was submitted by another path (H1). PROVEN from asset_census_20261012_045457.csv (trial on, 623 groups): 593 groups (2058 records) have main_admitted 0 and admitted_flag 0, including CobraMkV* parts at 790 m (for example group 117 onward, node+0 names). The census only names records the store visited, so it cannot say whether the visible hull is other records.
+- **H4 (the trial keeps them: containment, unknown sphere, faults): PARTLY PROVEN.** keepRecord has no test on record type (D5). The same census keeps 11 groups (17 records). Six have no readable name: 416 (camera inside, 13.8 m, radius 38 m), 419 (24 m), 451 (33 m), 459 (21 m), 460 (31 m), and 457 (camera inside, 2,465 m). NPCs in the concourse, animated screens, posters and decals are within 80 m of an on-foot camera, so the trial keeps them by its own rule. INFERRED: this covers the on-foot list and flying ships within 80 m. It does not cover ships beyond about 80 m plus their radius, which the census shows cleared. Counters to read from the flight: keptUnknown, faults and torn in the window line.
+- **H5 (new): stale flags on array members the store never visits.** PROVEN: the record loop covers every array member (count entry+0x30 and rbx+0x298), while the store visits only the group base and its child tree (D1, D4). INFERRED: a member outside that tree keeps the rec+0x234 and rec+0x208 values it last had, the trial never sees it, and the builder draws it each frame. That would explain drawn actors the census cannot name. OPEN. The probe below counts it.
+
+### Hook candidates
+
+- **Store 0x4312040 (already hooked).** Gates every record the store visits, children included, by sphere and not by name. Names are readable: rec+0x18 gives the node, node+0 the C string.
+- **Builder 0x42B4420 entry (candidate for the H5 and H1 cases).** Every loop-admitted record passes it, with the record base at r9 - 0x210. Windows x64 convention: rcx = rec+0x290 (instance), rdx = context, r8 = window, r9 = rec+0x210, [rsp+0x20] = callback. Prologue `4C 8B DC 55 56 41 54 41 57 49 8D AB 08 FC FF FF` (decomp_42B4420 header; a CodeHook would need relocation). Confidence: high that it is a single admission-time point for both loops; low that it sees a submitter outside them.
+
+### One-flight probe (designed, not built)
+
+Read-only observers, no writes:
+1. Builder entry: log the frame, record = r9 - 0x210, the name (node+0 C string), rec+0x208, rec+0x234, whether rec+0x2C0 is non-zero, the instance vtable RVA (rcx), and whether the store observer saw this record in the frame.
+2. Store observer: per frame and per bucket, count the records passed to the store and compare with the bucket's count (bucket+0x30). Log the gap; for each unvisited member, log rec+0x234, rec+0x208 and the name.
+3. Existing look probe on a visible hull: keep the VS hash and the bound vertex buffer, and log whether any builder call in that frame named the ship.
+
+Reading the results:
+- Builder calls for named actors whose store-visited flag was kept by containment: H4. Check the kept sphere distance against 80 m plus radius.
+- Unvisited members with rec+0x234 = 1 and an actor name: H5 proven. The fix is a gate at the builder entry for those records.
+- A visible ship with no builder call in its frame: H1 or H3. Read its VS hash. If it is one of the five known skinned VS (7B0D, 114A, D99A, 61AE, 8B58 in engine_velocity_families.h kSkinPairs), the skin path is the candidate.
+- A zero gap in every frame and no actor-named builder call with flag 1 beyond the sphere: H1 or H3 with a submitter outside the loops.
+
+Known VS in the repo: none of the 15 distinct VS in look_probe_20261012_051015.csv is in the known skinned set. AACFDCF2FB9AD809 is a family entry (engine_velocity_families.h line 30, PS CF534B32F491561A) with no skin flag, and it is not one of the five kSkinPairs (lines 70-76). INFERRED: the centre draws were not a known skinned NPC. This does not decide H1, because the list only holds known skinned VS.
+
+### Not done
+
+- Full reader and writer enumeration of rec+0x208 and rec+0x234. A displacement-only scan finds hundreds of unrelated structs with those offsets (the 0x234 scan printed well over 100 functions), so it needs a base-register anchor per site.
+- The 0x4331300 per-item window and the builder body beyond its first arguments.
+- Virtual callers of the traversal and the single-entry form.
