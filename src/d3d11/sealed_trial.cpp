@@ -859,6 +859,10 @@ bool sealedTrialOn() noexcept { return g_on.load(std::memory_order_acquire); }
 
 bool sealedTrialSkipsSunPair() noexcept { return g_on.load(std::memory_order_acquire); }
 
+const char* sealedTrialModeText() noexcept {
+    return g_on.load(std::memory_order_acquire) ? sealed::modeName(g_mode.load(std::memory_order_relaxed)) : "off";
+}
+
 void sealedTrialNoteSunSkip() noexcept { g_sunSkipped.fetch_add(1, std::memory_order_relaxed); }
 
 void sealedTrialNoteBuilderCalls(uint64_t afterCull) noexcept {

@@ -23,6 +23,7 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include "builder_probe_core.h"
+#include "drawlist_probe.h"
 #include "sealed_trial.h"
 #include "kinematic_eval_hook.h"
 #include "store_hook.h"
@@ -284,6 +285,7 @@ void builderObservedByBracket(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d
     (void)c;
     (void)e;
     (void)f;
+    drawlistNoteBuilder(d - 0x210, a);   // Built v9: the draw-list probe's path A tap (rec = r9 - 0x210, instance = rcx); off costs one load
     if (g_phase.load(std::memory_order_acquire) == kCollecting) noteCall(a, d, reinterpret_cast<void*>(returnAddress));
     else if (sealedTrialOn()) countAfterCull(d);
 }
@@ -407,12 +409,14 @@ void builderProbeInstall(bool flatProfile) {
 }
 
 bool builderProbeWanted() noexcept {
-    return g_phase.load(std::memory_order_acquire) != kIdle || sealedTrialOn();
+    return g_phase.load(std::memory_order_acquire) != kIdle || sealedTrialOn() || drawlistWanted();
 }
 
 bool builderProbeCollecting() noexcept {
     return g_phase.load(std::memory_order_acquire) == kCollecting;
 }
+
+bool builderProbeOnBracket() noexcept { return g_path == Path::kBracket; }
 
 void builderProbeRecompute() noexcept {
     // The path is chosen on a rising edge of the want (never per frame); the own detour's gate follows the want while it is the path.

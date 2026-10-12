@@ -31,6 +31,8 @@ void sealedTrialReportRequest(const char* trigger, uint32_t frame);
 
 // Whether the trial is on (one atomic load).
 bool sealedTrialOn() noexcept;
+// Built v9: the trial's record rule as text ("sphere", "named", "all"), or "off" while the trial is off. A static string.
+const char* sealedTrialModeText() noexcept;
 // Whether the sun pair is skipped (the trial's sun rule; the same as sealedTrialOn).
 bool sealedTrialSkipsSunPair() noexcept;
 // The sun pass probe counts a skipped sun pair here.

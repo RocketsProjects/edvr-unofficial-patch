@@ -134,6 +134,7 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         // TEMPORARY, Built v8 (builder probe, hatch probe, the trial's record rule): their keys and the two diag values, so the flat profile reads
         // them. Each is listed in docs\concourse-culling-2026-10-11.md's Status block (the temporary keys).
         std::strcmp(key, "hotkey.builder_probe") == 0 ||
+        std::strcmp(key, "hotkey.drawlist_probe") == 0 ||   // TEMPORARY, Built v9 (the draw-list probe; Status block of the concourse doc)
         std::strcmp(key, "hotkey.hatch_probe") == 0 ||
         std::strcmp(key, "hotkey.sealed_trial_mode") == 0 ||
         std::strcmp(key, "diag.sealed_trial_mode") == 0 ||

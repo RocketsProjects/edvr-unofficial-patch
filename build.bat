@@ -559,6 +559,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\store_hook.cpp" ^
     "src\d3d11\sealed_trial.cpp" ^
     "src\d3d11\builder_probe.cpp" ^
+    "src\d3d11\drawlist_probe.cpp" "src\d3d11\drawlist_taps.cpp" ^
     "src\d3d11\look_probe.cpp" ^
     "src\d3d11\asset_census.cpp" ^
     "src\d3d11\view_source.cpp" ^
@@ -1382,7 +1383,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
     /DEDVR_ENGINE_VELOCITY_RIG /DEDVR_BINDING_SHADOW_EXTERNAL /I"%GEN%" /I"src\d3d11" ^
     /Fo"%OBJ%\skinengine"\ /Fe"%OBJ%\skinengine\skin_engine_test.exe" ^
-    "tools\skin_engine_test\skin_engine_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" ^
+    "tools\skin_engine_test\skin_engine_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\drawlist_taps.cpp" "src\d3d11\skin_join_gpu.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
 if errorlevel 1 ( echo [edvr] ERROR: skin_engine_test build failed & exit /b 1 )
@@ -1614,6 +1615,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: sealed trial test build failed & exit /b 1 )
 "%BUILD%\sealed_trial_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_drawlist_probe_test
+echo [edvr] === drawlist_probe_test.exe ===
+REM The draw-list probe's pure half (src\d3d11\drawlist_probe_core.h, TEMPORARY, Built v9): the origin classes, the carried-candidate
+REM sets over three frames, the frame line, the CSV header and rows (every row the header's field count), and the join statement. No DLL,
+REM no game.
+if not exist "%OBJ%\drawlistprobe" mkdir "%OBJ%\drawlistprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\drawlistprobe\\" ^
+    /Fe"%BUILD%\drawlist_probe_test.exe" "tools\drawlist_probe_test\drawlist_probe_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: drawlist probe test build failed & exit /b 1 )
+"%BUILD%\drawlist_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_builder_probe_test
@@ -3116,7 +3131,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
     /DEDVR_ENGINE_VELOCITY_RIG /DEDVR_BINDING_SHADOW_EXTERNAL /I"%GEN%" ^
     /Fo"%OBJ%\enginevelocity\\" /Fe"%OBJ%\enginevelocity\engine_velocity_test.exe" ^
-    "tools\engine_velocity_test\engine_velocity_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" ^
+    "tools\engine_velocity_test\engine_velocity_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\drawlist_taps.cpp" "src\d3d11\skin_join_gpu.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
 if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b 1 )

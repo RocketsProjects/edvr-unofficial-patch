@@ -46,6 +46,7 @@
 #include <cstdint>
 
 #include "binding_shadow.h"
+#include "drawlist_probe.h"
 #include "engine_velocity_families.h"
 
 struct ID3D11Buffer;
@@ -170,7 +171,10 @@ inline void engineVelocityBeforeDraw(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         // registered game shader heals the shadow and takes the slow half.
         psShadowProbe(ctx);
     }
-    if (cache.family >= 0) ++familyDraws[cache.family];
+    if (cache.family >= 0) {
+        ++familyDraws[cache.family];
+        drawlistNoteFamily(cache.family);   // Built v9: the draw-list probe's per-family count (one load while it is off)
+    }
 }
 
 // F2: the instanced draws' arguments, told right after engineVelocityBeforeDraw (vscreen's DrawInstanced and DrawIndexedInstanced thunks). A skinned

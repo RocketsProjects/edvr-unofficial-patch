@@ -87,6 +87,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "state_dump_probe.h"     // the state dump (TEMPORARY, M2): install, per-frame, the key
 #include "sealed_trial.h"         // the sealed-hangar trial (TEMPORARY): install, per-frame, the key
 #include "builder_probe.h"        // the builder probe (TEMPORARY, Built v8): install, per-frame, the key
+#include "drawlist_probe.h"       // the draw-list probe (TEMPORARY, Built v9): the key, the frame tick (called from the builder probe's tick)
 #include "look_probe.h"           // the look probe (TEMPORARY): install, per-frame, the key
 #include "asset_census.h"         // the asset census (TEMPORARY): the key, the one-frame collection and its write
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
@@ -304,6 +305,8 @@ struct State {
     // TEMPORARY, Built v8: the builder probe's key (one frame of builder calls), the hatch-state probe's toggle, and the trial's record-rule cycle.
     Hotkey builderProbeKey;
     std::string builderProbeKeyText;
+    Hotkey drawlistProbeKey;          // TEMPORARY, Built v9: the draw-list probe (drawlist_probe.h)
+    std::string drawlistProbeKeyText;
     Hotkey hatchProbeKey;
     std::string hatchProbeKeyText;
     Hotkey sealedTrialModeKey;
@@ -1410,6 +1413,7 @@ void tickHotkeys() {
         sealedTrialReportRequest("hotkey.sealed_trial_report", static_cast<uint32_t>(g_state->frameCounter));
     // TEMPORARY, Built v8: the builder probe arms one frame; the hatch probe toggles; the trial's record rule cycles while it is on.
     if (g_state->builderProbeKey.pressed()) builderProbeRequest("hotkey.builder_probe", static_cast<uint32_t>(g_state->frameCounter));
+    if (g_state->drawlistProbeKey.pressed()) drawlistRequest("hotkey.drawlist_probe", static_cast<uint32_t>(g_state->frameCounter));
     if (g_state->hatchProbeKey.pressed()) hatchProbeToggle("hotkey.hatch_probe", static_cast<uint32_t>(g_state->frameCounter));
     if (g_state->sealedTrialModeKey.pressed())
         sealedTrialModeStep("hotkey.sealed_trial_mode", static_cast<uint32_t>(g_state->frameCounter));
@@ -1652,6 +1656,7 @@ void presentFrameBoundary() {
     // The builder probe's frame tick (TEMPORARY, Built v8): before the trial's tick, so the window line sees this frame's counts.
     tkBuilderProbe.run([] {
         builderProbeFrame(static_cast<uint32_t>(g_state->frameCounter));
+        drawlistFrame(static_cast<uint32_t>(g_state->frameCounter));   // Built v9: the draw-list window's ticks (after the builder probe's)
     });
     // The sealed-hangar trial's frame tick (TEMPORARY): the 10-second line while the trial is on; a branch when off.
     tkSealedTrial.run([] {
@@ -2195,6 +2200,11 @@ void configureDiagnosticHotkeys() {
          "hotkey.builder_probe", "builder probe",
          "hotkey: builder_probe is set but bound nothing, so the builder probe cannot be armed by key this session.",
          " Arms one frame of the record builder's calls (temporary probe); the summary follows in the graphics log and the CSV is in edvr_logs."},
+        // TEMPORARY, Built v9: the draw-list probe (drawlist_probe.h): a press arms a window of three consecutive frames. Empty is off.
+        {&s.drawlistProbeKey, &s.drawlistProbeKeyText, Config::get().getString("hotkey.drawlist_probe", ""),
+         "hotkey.drawlist_probe", "draw-list probe",
+         "hotkey: drawlist_probe is set but bound nothing, so the draw-list probe cannot be armed by key this session.",
+         " Collects three consecutive frames of producer and pool events; the lines follow in the graphics log and the CSV is in edvr_logs."},
         // TEMPORARY, Built v8: the hatch-state probe (state_dump_probe.h): a press toggles it. Empty is off.
         {&s.hatchProbeKey, &s.hatchProbeKeyText, Config::get().getString("hotkey.hatch_probe", ""),
          "hotkey.hatch_probe", "hatch probe",

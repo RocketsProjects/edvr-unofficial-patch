@@ -34,6 +34,7 @@
 #include "exposure_fix.h"   // lookupShaderHash: the PS shadow probe reads the registry
 #include "flat_compute_readback.h"
 #include "flat_query_cut.h"   // the flat bracket's kept answers, and the sampled check of each
+#include "drawlist_probe.h"
 #include "kinematic_eval_hook.h"
 #include "kinematic_eval_probe.h"
 #include "skin_entity_hook.h"   // F2: the read-only observer of the game's skinning job assembly (identity of skinned characters)
@@ -615,6 +616,7 @@ const char* verifyEngine(uintptr_t) noexcept { return nullptr; }
 #endif
 
 void observeEmit(uintptr_t record, uintptr_t owner, int32_t before, int32_t after) noexcept {
+    drawlistNoteEmit(record, owner, before, after);   // Built v9: the draw-list probe's path B tap (one load while it is off)
     if (!live.load(std::memory_order_acquire) || !g_table) return;
     const uint64_t n = g_emit.calls.load(std::memory_order_relaxed);
     const bool sample = (n & 63u) == 0;
@@ -661,17 +663,20 @@ void observePrimaryEmit(const emit::PrimaryIdentity& identity, uintptr_t owner, 
 // last. The engine mutex is held by the render thread across its D3D calls, so
 // taking it here stalled a job thread behind the slow half for a counter.
 void observePoolCopy(uintptr_t mapped,uint32_t stride,uintptr_t source,uint64_t slot,uint32_t count) noexcept {
+    drawlistNoteCopy(mapped,count);   // Built v9: the draw-list probe's copy tap
     if(!live.load(std::memory_order_acquire))return;
     g_primaryCopyCalls.fetch_add(1,std::memory_order_relaxed);
     if(count==UINT32_MAX || slot>UINT32_MAX){primaryCopy::invalidateMapped(mapped);return;}
     primaryCopy::copier(mapped,stride,source,static_cast<uint32_t>(slot),count,frameNow());
 }
 void* observeMergeBegin(uintptr_t destination,uintptr_t source) noexcept {
+    drawlistNoteMerge(destination);   // Built v9: the draw-list probe's merge tap
     if(!live.load(std::memory_order_acquire))return nullptr;
     return primaryCopy::beginMergeOpaque(destination,source,frameNow());
 }
 void observeMergeEnd(void* plan,bool completed) noexcept {primaryCopy::endMergeOpaque(plan,completed);}
 void observeDictionaryClear(uintptr_t dictionary) noexcept {
+    drawlistNoteClear(dictionary);   // Built v9: the draw-list probe's clear tap
     if(live.load(std::memory_order_acquire))primaryCopy::invalidateDictionary(dictionary);
 }
 

@@ -26,6 +26,8 @@ void builderProbeRequest(const char* trigger, uint32_t frame);
 void builderProbeFrame(uint32_t frame);
 // Whether the probe wants the builder detour (armed, collecting, or the sealed trial on).
 bool builderProbeWanted() noexcept;
+// Built v9: whether the builder calls reach the probes through the bracket (the path the draw-list probe's path A taps need).
+bool builderProbeOnBracket() noexcept;
 // Whether a frame is being collected (the store's visits are recorded only then).
 bool builderProbeCollecting() noexcept;
 // The admission store calls this for each record it writes, while a frame is collected (bucket = the collection, record = its record).
