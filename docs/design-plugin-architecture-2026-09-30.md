@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State (2026-10-11):** the architecture has a validated development base on
+- **State (2026-10-12):** the architecture has a validated development base on
   `codex/plugin-architecture`. New feature work may branch from it; no
   feature-to-main merge until Sean is ready to ship. Review: section 11.
 - **Goal (Sean):** every fix/performance item belongs to one selectable plugin.
@@ -23,6 +23,9 @@
   choices and installed-plugin visibility pass full offline integration:
   `build/full-selection-integration-offline-20261011-r3.log` (receipt `3b29c232`).
   Runtime absence/order and CPU/GPU acceptance remain open.
+- **Startup evidence:** production proxy/native-peer WARP cases pass full R2
+  (`ec1557d1`): TAA-only, empty VR and late-peer rejection. Full XR/Pimax order is
+  unverified; Steam Elite delay-imports OpenVR, so imports cannot prove its order.
 - **Offline evidence:** FSS site 1 has a frozen selector oracle, v16 facts,
   seven-base-fact capacity and terminal X/6 fixtures. Capture uses consumed
   values; unarmed paths build no payload. Caught faults after matching reads
@@ -5551,3 +5554,65 @@ Elite/XR startup or install was performed, and no game INI was edited.
 Runtime effective-mode/order, actual XR startup, and the final matched performance
 comparison at rendering-code freeze remain open. This checkpoint does not claim Phase 1
 completion or shipping acceptance. Steam installation remains held.
+
+### 2026-10-12 — Runtime startup admission and offline validation
+
+The fixture narrows the native startup boundary to three fresh child processes.
+Each loads the production `d3d11.dll` proxy against WARP. A scratch graphics
+DLL is loaded without initialization; its `Decision` query returns `E_PENDING`.
+In the Temporal-AA-only and explicit-empty cases, the exact-path native peer is
+preloaded before the first `D3D11CreateDevice` export. The query returns
+`E_PENDING` again, followed by the actual `INIT_ONCE`. Fresh processes keep
+each permanent initialization decision independent.
+
+The cases cover strict VR with Temporal AA as the only selected plugin, an
+explicitly empty selection, and a late peer. They inspect the actual
+`Decision`, contract, snapshot, and provider identity. The native-store probe
+uses `reserved=1` without committing state and distinguishes a committed store
+(`E_ACCESSDENIED`) from an empty store (`E_INVALIDARG`). The late-peer case
+deliberately loads the peer after the first graphics export. It reproduces
+permanent `ProviderRejected`: base `0`, native client denied, and no retry.
+
+The host fixture reaches the real `NativeGraphicsClient` and
+`NativeRuntimeHost` treatment-provider seam through the render/owner
+rendezvous. Core menu ownership remains available; Temporal AA and sharpening
+are present for the selected case and report exact `S_FALSE` absence when
+unselected. This covers the admission decision and its provider boundary, not
+full OpenXR startup or actual startup frames.
+
+The harness isolates its log and `LOCALAPPDATA` state, confines child stdout
+and stderr to logs with `CREATE_NO_WINDOW`, bounds child waits, preserves
+diagnostics on failure, and aborts if environment isolation fails. Successful
+runs clean up temporary state. Ruled out: a speculative reservation-read race,
+because the real device is published only after `ensureInitialised` completes.
+Luna review caught a deadlock; root found an ambiguous ABI constant, which Sol
+replaced with explicit `commit_v1::kAbiVersion`.
+
+Full R1 stopped at 10/169 while compiling the new C++ rig: `kPluginTemporalAa`
+was not visible because the generated plugin manifest include was missing. No
+new child runtime ran. The repair adds only the explicit `plugin_manifest.inc`
+include. Focused R1 then stopped at the CFLAGS guard before compilation; the
+focused helper's compiler environment was corrected.
+
+Focused R2 passed with actual exit 0 in
+`build/focused-runtime-startup-offline-20261012-r2.log`: `openxr_native_test`
+reported 5,225 checks and zero failures, stereo reported 24,352 checks and zero
+failures, and all six stereo source mutants passed. All three fresh production
+child cases passed; the parent exited zero and did not skip them.
+
+Normal full R2 passed with actual exit 0: all 169 jobs (162 pooled and seven
+quiet), both production DLLs, the 127-key config contract, exports, and
+self-contained installer resource checks. Log:
+`build/full-runtime-startup-offline-20261012-r2.log`; receipt input SHA256
+`ec1557d1`.
+
+Read-only Steam PE inspection identifies `EliteDangerous64.exe` as file version
+`332841`, product version `4.4.1.1`, SHA256
+`E6BE8BBE04E6A7AE226D4318945AF7F367DE13DC5A007A261964D9BA8144E988`. Its
+ordinary imports include `d3d11.dll` and `dxgi.dll`; `openvr_api.dll` is a
+delay import, including `VR_InitInternal`. This does not establish whether the
+native peer loads before the first graphics export. The game was not launched.
+
+Actual XR runtime ordering and startup frames, Pimax load order, whole-profile
+runtime absence, whole-ladder replay, and rendering-freeze performance
+acceptance remain open. Steam was not installed or modified.

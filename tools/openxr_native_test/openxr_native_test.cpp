@@ -8,6 +8,7 @@
 #include "../../src/openxr/render_shutdown.h"
 #include "../../src/openxr/native_render_binding.h"
 #include "launch_centre_cases.h"
+#include "admission_startup_integration.h"
 #include "treatment_cases.h"
 #include "temporal_startup_cases.h"
 #include "frame_end_overlap_cases.h"
@@ -21,6 +22,7 @@
 #include "head_pose_cases.h"
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <deque>
 #include <string>
 #include <vector>
@@ -1087,12 +1089,15 @@ int selfTest() {
   check(backend.stop(),"cancelled native startup cleanup and join");
   check(!backend.owner.running()&&backend.host&&backend.host->clean&&backend.host->stops==1&&
     !backend.host->api.module&&!backend.host->runtimeGeneration,"native cleanup finished once before returning");
+  edvr::openxr::test::admission_startup::run(check);
   std::printf("openxr_native_test: %u checks, %u failures (no runtime)\n",checks,failures);return failures?1:0;
 }
 } // namespace
 int wmain(int argc,wchar_t** argv) {
   SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);
   std::setvbuf(stdout,nullptr,_IONBF,0);Options options;
+  if(argc==4&&std::wcscmp(argv[1],L"--plugin-admission-startup-child")==0)
+    return edvr::openxr::test::admission_startup::child(argv[2],argv[3]);
   if(!parse(std::vector<std::wstring>(argv+1,argv+argc),options)) {std::puts("usage: --loader ABSOLUTE_DLL [--seconds 1..60] [--graphics-proxy ABSOLUTE_DLL [--present-boundary]] | --self-test | --dry-run");return 2;}
   if(options.dry) {std::puts("Would create a standalone OpenXR stereo diagnostic; no files, loader, device or runtime used.");return 0;}
   if(options.self) return selfTest();
