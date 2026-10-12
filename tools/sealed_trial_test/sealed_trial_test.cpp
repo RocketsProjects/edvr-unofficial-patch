@@ -300,46 +300,151 @@ int main(int argc, char** argv) {
         check(se::containsNoCase("HangerSmall", "hanger") && se::containsNoCase("BlastShield_A", "BLASTSHIELD"),
               "the keyword test ignores case");
         check(!se::containsNoCase("DockingHub", "Hangar") && !se::containsNoCase("", "Lift"), "a name without the word does not match");
-        check(se::nameKeptByWord("Agricultural_SmallHangar") && se::nameKeptByWord("LandingPadSmall") &&
-                  se::nameKeptByWord("HangarLiftDoors__") && se::nameKeptByWord("SmallHangerSkirt"),
-              "Hangar, Hanger, LandingPad, Lift and Skirt are keep words");
-        check(!se::nameKeptByWord("DockingHub") && !se::nameKeptByWord("HabitatRingA") && !se::nameKeptByWord(nullptr),
-              "DockingHub and HabitatRingA are not keep words, and a null name is none");
+        // Built v8.3b: the name classes, the pad's size from its name, the explicit part names.
+        check(se::isPadName("LandingPadSmallA") && se::isPadName("LandingPadLargeB") && !se::isPadName("LandingPadSmallGuideMarkers1") &&
+                  !se::isPadName("HangerSmall"),
+              "a LandingPad* record is a pad; its GuideMarkers are not");
+        check(se::padSizeOf("LandingPadSmallA") == se::PadSize::kSmall && se::padSizeOf("LandingPadMediumB") == se::PadSize::kMedium &&
+                  se::padSizeOf("LandingPadLarge2") == se::PadSize::kLarge && se::padSizeOf("LandingPadXL") == se::PadSize::kNone &&
+                  se::padSizeOf("LandingPadSmallGuideMarkers") == se::PadSize::kNone && se::padSizeOf(nullptr) == se::PadSize::kNone,
+              "the size comes from the name: Small, Medium or Large; anything else, or GuideMarkers, has none");
+        check(se::isExplicitName("HangerSmall") && se::isExplicitName("Hangar_x") && se::isExplicitName("BlastShield") &&
+                  se::isExplicitName("SmallHangerSkirt") && se::isExplicitName("MediumHangerSkirt") && se::isExplicitName("LargeHangerSkirt") &&
+                  !se::isExplicitName("DockingHub") && !se::isExplicitName("Agricultural_SmallHangar"),
+              "the explicit parts are Hanger, Hangar, BlastShield and the three HangerSkirt sizes, by prefix");
+        check(se::classifyName(true, "LandingPadSmallA") == se::NameClass::kPad && se::classifyName(true, "HangerSmall") == se::NameClass::kExplicit &&
+                  se::classifyName(true, "DockingHub") == se::NameClass::kOther && se::classifyName(false, "x") == se::NameClass::kUnnamed,
+              "the classes are pad, explicit, other named and unnamed");
 
-        const float near100[3] = {150.0f, 0.0f, 0.0f};    // 150 m away
-        const float big[3] = {0.0f, 0.0f, 0.0f};          // centred on the camera
-        check(se::keepRecordNamed(false, nullptr, big, 2000.0f, cam, 80.0f), "named: a record with no readable name is kept");
-        check(!se::keepRecordNamed(true, "DockingHub", big, 2000.0f, cam, 80.0f),
-              "named: a giant record that contains the camera is culled when its name is not a keep word");
-        check(se::keepRecordNamed(true, "HangerSmall", near100, 2000.0f, cam, 80.0f),
-              "named: a keep word keeps the record whatever its sphere");
-        check(se::keepRecordNamed(true, "Panel", near100, 90.0f, cam, 80.0f),
-              "named: a 90 m record meeting the trial sphere (150 <= 90 + 80) is kept");
-        check(!se::keepRecordNamed(true, "Panel", near100, 120.0f, cam, 80.0f),
-              "named: a record over 100 m across is culled even when its sphere meets the trial sphere");
-        const float far200[3] = {200.0f, 0.0f, 0.0f};
-        check(!se::keepRecordNamed(true, "Panel", far200, 50.0f, cam, 80.0f),
-              "named: a 50 m record 200 m out, past 50 + 80, is culled");
-        check(se::keepRecordForMode(se::Mode::kSphere, true, "DockingHub", big, 2000.0f, cam, 80.0f),
-              "sphere mode ignores the name: the same giant record is kept");
-        check(!se::keepRecordForMode(se::Mode::kNamed, true, "DockingHub", big, 2000.0f, cam, 80.0f),
-              "named mode on the same record culls it");
+        // The own pad: the containing pad nearest first; else the nearest pad centre within 150 m; else none. The radius is the size's.
+        const float radii[3] = {60.0f, 90.0f, 130.0f};
+        const float origin[3] = {0.0f, 0.0f, 0.0f};
+        se::PadObs pads[3];
+        pads[0].addr = 0x100;
+        pads[0].centre[0] = 10.0f;
+        pads[0].radius = 5.0f;   // does not contain the camera (10 > 5)
+        pads[0].size = se::PadSize::kSmall;
+        std::snprintf(pads[0].name, sizeof(pads[0].name), "LandingPadSmallA");
+        pads[1].addr = 0x200;
+        pads[1].centre[0] = 3.0f;
+        pads[1].radius = 5.0f;   // contains the camera (3 <= 5)
+        pads[1].size = se::PadSize::kMedium;
+        std::snprintf(pads[1].name, sizeof(pads[1].name), "LandingPadMediumB");
+        pads[2].addr = 0x300;
+        pads[2].centre[2] = 2.0f;
+        pads[2].radius = 1.0f;   // does not contain the camera
+        pads[2].size = se::PadSize::kLarge;
+        std::snprintf(pads[2].name, sizeof(pads[2].name), "LandingPadLargeC");
+        se::OwnCell cellPick;
+        se::pickOwnPad(pads, 3, origin, radii, &cellPick);
+        check(cellPick.has && cellPick.pad == 0x200 && cellPick.size == se::PadSize::kMedium && cellPick.radius == 90.0f && cellPick.padContains,
+              "the own pad is the containing pad; its size gives the cell radius (medium, 90 m)");
+        se::pickOwnPad(pads, 1, origin, radii, &cellPick);
+        check(cellPick.has && cellPick.pad == 0x100 && !cellPick.padContains && cellPick.radius == 60.0f,
+              "with no containing pad, the nearest within 150 m is the fallback (small, 60 m)");
+        pads[0].centre[0] = 200.0f;
+        se::pickOwnPad(pads, 1, origin, radii, &cellPick);
+        check(!cellPick.has && std::strlen(cellPick.reason) > 0, "no pad within 150 m and none containing: no own pad, and the reason is said");
+        se::pickOwnPad(nullptr, 0, origin, radii, &cellPick);
+        check(!cellPick.has && std::strcmp(cellPick.reason, "no LandingPad record this frame") == 0, "no pad records: no own pad, said");
 
+        // The centre test: the cell keeps a record whose CENTRE is within its radius of the cell centre (its sphere may overlap, and that is not
+        // enough); the explicit set keeps the nearest instance outside it; everything else is culled, containing or not.
+        se::OwnCell cell;
+        cell.has = true;
+        cell.radius = 60.0f;
+        const uintptr_t noSet[1] = {0};
+        const float insideC[3] = {30.0f, 0.0f, 0.0f};
+        const float outsideC[3] = {100.0f, 0.0f, 0.0f};
+        check(se::keepNamedCell(insideC, 500.0f, origin, 80.0f, cell, noSet, 0, 0x1).keep, "a centre within the cell radius is kept, even with a huge sphere");
+        check(se::keepNamedCell(insideC, 500.0f, origin, 80.0f, cell, noSet, 0, 0x1).why == se::KeepWhy::kCell, "a centre-test keep is why cell");
+        check(!se::keepNamedCell(outsideC, 500.0f, origin, 80.0f, cell, noSet, 0, 0x2).keep,
+              "a centre outside the cell is culled although its sphere overlaps the cell (the giant station records)");
+        const uintptr_t explicitSet[1] = {0x3};
+        check(se::keepNamedCell(outsideC, 5.0f, origin, 80.0f, cell, explicitSet, 1, 0x3).why == se::KeepWhy::kExplicit,
+              "an explicit part's nearest instance outside the cell is kept (why explicit)");
+        check(!se::keepNamedCell(outsideC, 5.0f, origin, 80.0f, cell, explicitSet, 1, 0x4).keep,
+              "a record outside the cell that is not in the explicit set is culled");
+        const float containingC[3] = {0.0f, 0.0f, 1.0f};
+        const se::NamedKeep cont = se::keepNamedCell(containingC, 10.0f, origin, 80.0f, cell, noSet, 0, 0x5);
+        check(cont.containing && cont.keep, "a record containing the camera inside the cell is kept (the cell decides)");
+        const se::NamedKeep far = se::keepNamedCell(outsideC, 500.0f, origin, 80.0f, cell, noSet, 0, 0x6);
+        check(far.containing && !far.keep,
+              "a far record whose sphere contains the camera (its centre 100 m away, outside the cell) is culled by the centre test");
+        se::OwnCell noCell;
+        check(se::keepNamedCell(insideC, 5.0f, origin, 80.0f, noCell, noSet, 0, 0x7).why == se::KeepWhy::kSphere,
+              "with no own pad the frame is the sphere rule (why sphere)");
+        check(!se::keepNamedCell(outsideC, 5.0f, origin, 80.0f, noCell, noSet, 0, 0x8).keep,
+              "with no own pad, a record outside the trial sphere is culled as in sphere mode");
+
+        // The explicit parts: per part node the nearest instance to the cell centre within 200 m.
+        se::ExplicitObs parts[4];
+        parts[0] = se::ExplicitObs{0xA, 1, {5.0f, 0.0f, 0.0f}};
+        parts[1] = se::ExplicitObs{0xB, 1, {2.0f, 0.0f, 0.0f}};
+        parts[2] = se::ExplicitObs{0xC, 2, {300.0f, 0.0f, 0.0f}};
+        parts[3] = se::ExplicitObs{0xD, 2, {9.0f, 0.0f, 0.0f}};
+        uintptr_t picked[8] = {};
+        const size_t np = se::pickExplicit(parts, 4, origin, picked, 8);
+        check(np == 2 && picked[0] == 0xB && picked[1] == 0xD,
+              "per part node the nearest instance to the cell centre within 200 m is picked (node 2's 300 m instance is not)");
+
+        // The ladder: 30, 40, 50, 60, 70, 80, 100, 120, 150, 200; off-ladder steps land on the next rung; the ends clamp.
+        bool moved = false;
+        check(se::stepCellRadius(60.0f, +1, &moved) == 70.0f && moved, "larger from 60 m is 70 m");
+        check(se::stepCellRadius(60.0f, -1, &moved) == 50.0f && moved, "smaller from 60 m is 50 m");
+        check(se::stepCellRadius(90.0f, +1, &moved) == 100.0f && moved, "larger from 90 m (off the ladder) lands on 100 m");
+        check(se::stepCellRadius(90.0f, -1, &moved) == 80.0f && moved, "smaller from 90 m lands on 80 m");
+        check(se::stepCellRadius(200.0f, +1, &moved) == 200.0f && !moved, "the top of the ladder clamps at 200 m");
+        check(se::stepCellRadius(30.0f, -1, &moved) == 30.0f && !moved, "the bottom of the ladder clamps at 30 m");
+        float rung = 30.0f;
+        int steps = 0;
+        for (;;) {
+            const float next = se::stepCellRadius(rung, +1, &moved);
+            if (!moved) break;
+            rung = next;
+            ++steps;
+        }
+        check(steps == 9 && rung == 200.0f, "nine steps up from 30 m reach 200 m");
+        check(se::kCellDefaultM[0] == 60.0f && se::kCellDefaultM[1] == 90.0f && se::kCellDefaultM[2] == 130.0f,
+              "the cell radius defaults are 60, 90 and 130 m (guesses)");
+        float cellR = 0.0f;
+        check(se::parseCellRadius("", 60.0f, &cellR) && cellR == 60.0f, "an empty cell key is the default");
+        check(se::parseCellRadius("75", 60.0f, &cellR) && cellR == 75.0f, "a cell radius in metres is read");
+        check(!se::parseCellRadius("big", 90.0f, &cellR) && cellR == 90.0f, "a word is the default, and says so");
+        check(se::parseCellRadius("2", 60.0f, &cellR) && cellR == se::kCellMinM, "a cell radius below the floor is the floor");
+
+        // The window line: the cell, its pad, the distances and the counts; with no pad, the size is none and the reason is said.
         se::Window w;
         w.builderAfterCull = 3;
-        char line[640];
+        w.culledContaining = 7;
+        w.keptExplicit = 2;
+        w.keptByCell = 5;
+        w.cellHas = true;
+        w.cellSize = 'M';
+        w.cellRadius = 90.0f;
+        std::snprintf(w.padName, sizeof(w.padName), "LandingPadMediumB");
+        w.padDist = 12.5f;
+        char line[700];
         se::formatWindow(line, sizeof(line), w, 80.0f, "eye rows", se::Mode::kNamed);
-        check(contains(line, "radius_m=80.0 builder_after_cull=3 mode=named view source = eye rows"),
-              "the window line appends builder_after_cull and the mode before the view source (Built v8.1: no unvisited field)");
-        check(!contains(line, "builder_unvisited"), "the window line no longer carries builder_unvisited (the F9 capture has the visit count)");
+        check(contains(line, "builder_after_cull=3 mode=named size=M cell_r=90.0 pad=LandingPadMediumB pad_dist=12.5 pad_reason=- "
+                             "kept_explicit=2 kept_by_cell=5 culled_containing=7"),
+              "the window line names the mode, the size, the cell radius, the pad, its distance and the counts");
+        se::Window noPad;
+        std::snprintf(noPad.padReason, sizeof(noPad.padReason), "no pad sphere contains the camera and none is within 150 m");
+        se::formatWindow(line, sizeof(line), noPad, 80.0f, "eye rows", se::Mode::kNamed);
+        check(contains(line, "mode=named size=none cell_r=0.0 pad=none pad_dist=-1.0 pad_reason=no pad sphere"),
+              "with no own pad the window says size none and why");
         se::formatWindow(line, sizeof(line), w, 80.0f, "eye rows");
         check(contains(line, "builder_after_cull=3 mode=sphere"), "the window line defaults to mode sphere");
 
         se::formatModeLine(line, sizeof(line), se::Mode::kNamed, 12, "hotkey.sealed_trial_mode");
-        check(contains(line, "mode = named at frame 12 (trigger hotkey.sealed_trial_mode)") && contains(line, "Hangar"),
-              "the named mode line names the rule and its keep words");
+        check(contains(line, "mode = named at frame 12 (trigger hotkey.sealed_trial_mode)") && contains(line, "own pad's cell"),
+              "the named mode line names the cell rule");
         se::formatModeLine(line, sizeof(line), se::Mode::kSphere, 13, "hotkey.sealed_trial_mode");
         check(contains(line, "mode = sphere at frame 13"), "the sphere mode line says sphere");
+        se::formatCellStep(line, sizeof(line), 'M', true, 100.0f, +1, 7, "hotkey.sealed_cell_larger");
+        check(std::string(line) == "named cell: medium radius -> 100.0 m at frame 7 (trigger hotkey.sealed_cell_larger)",
+              "a cell step line names the size, the radius and the frame");
     }
 
     std::printf("sealed_trial_test: %d checks, %d failures\n", g_checks, g_failures);

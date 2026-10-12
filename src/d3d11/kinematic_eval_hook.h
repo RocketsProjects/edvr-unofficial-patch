@@ -128,6 +128,15 @@ void kinematicEvalGateProbeDetach() noexcept;
 // True while the builder bracket (FUN_1442B4420) is installed: the probe's
 // builder verdicts depend on it separately from the evaluator.
 bool kinematicEvalBuilderHooked() noexcept;
+// Built v8.3: a second consumer of the same bracket (no second detour). The bracket calls the observer at its entry, before the forward, with
+// the builder's six arguments (a = rig owner / rcx, b = context / rdx, c = mask / r8, d = rec+0x210 / r9, e and f = the stack arguments) and the
+// caller's return address. It is called on the thread that calls the builder, for both call sites. Attach holds the bracket's gate open for
+// the observer; it does NOT install the bracket (it only attaches when the bracket is already installed). "installed" or the reason why not.
+using BuilderObserverFn = void (*)(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f,
+                                   uintptr_t returnAddress) noexcept;
+void kinematicEvalSetBuilderObserver(BuilderObserverFn fn) noexcept;
+const char* kinematicEvalBuilderObserverAttach() noexcept;
+void kinematicEvalBuilderObserverDetach() noexcept;
 // FUN_1442B3FC0's hook: "hooked", or why it stood down ("not requested",
 // "not build 332841 (PE timestamp/size)", "prologue mismatch at RVA 0x42B3FC0",
 // "builder frame/call-site mismatch at RVA 0x...", "CodeHook refused the patch").

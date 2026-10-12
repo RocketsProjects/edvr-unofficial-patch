@@ -24,6 +24,7 @@
 #include "../common/log.h"
 #include "builder_probe_core.h"
 #include "sealed_trial.h"
+#include "kinematic_eval_hook.h"
 #include "store_hook.h"
 #include "view_source.h"
 
@@ -64,6 +65,18 @@ bool readMem(void* dst, uintptr_t src, size_t n) noexcept {
 
 template <typename T>
 bool readVal(T* dst, uintptr_t src) noexcept { return readMem(dst, src, sizeof(T)); }
+
+// Built v8.3: the bytes as "4C 8B DC ..." (or "unreadable"), for the refusal line.
+void formatBytes(char* out, size_t cap, const uint8_t* bytes, size_t n) noexcept {
+    if (!bytes) {
+        std::snprintf(out, cap, "unreadable");
+        return;
+    }
+    size_t at = 0;
+    for (size_t i = 0; i < n && at + 4 < cap; ++i) at += static_cast<size_t>(std::snprintf(out + at, cap - at, "%s%02X", i ? " " : "", bytes[i]));
+}
+
+bool g_refusalLogged = false;   // the prologue refusal is logged once per process
 
 // The relay: the store's pattern (store_hook.cpp), kept as a copy as the other probes keep theirs.
 struct Detour {
@@ -213,8 +226,16 @@ void installBuilderOnce() noexcept {
     }
     if (!readOk || !bytesMatch(got, kBuilderPin, sizeof(kBuilderPin))) {
         g_builder.status.store("the builder's prologue does not match build 332841", std::memory_order_release);
-        Log::get().note("builder probe: refused: the builder's sixteen prologue bytes are not build 332841's; no builder calls are "
-                        "recorded (the trial counts stay at zero).");
+        // Built v8.3: the bytes, once. A leading E9 is a jump: something (EDVR's own bracket, kinematic_eval_hook.cpp) already patched the entry.
+        if (!g_refusalLogged) {
+            g_refusalLogged = true;
+            char got16[64] = {}, want16[64] = {};
+            formatBytes(got16, sizeof(got16), readOk ? got : nullptr, sizeof(got));
+            formatBytes(want16, sizeof(want16), kBuilderPin, sizeof(kBuilderPin));
+            Log::get().note("builder probe: refused: the builder's prologue bytes at 0x42B4420 are [%s], not build 332841's pin [%s]%s. "
+                            "The own detour cannot take the entry; the bracket path is the one that can. Logged once per process.",
+                            got16, want16, (readOk && got[0] == 0xE9) ? " (a leading E9 is a jump: the entry is already patched)" : "");
+        }
         return;
     }
     g_builder.relay = allocateRelay(base + kBuilderRva);
@@ -235,6 +256,51 @@ void installBuilderOnce() noexcept {
     g_builder.ready.store(true, std::memory_order_release);
     g_builder.status.store("installed", std::memory_order_release);
     Log::get().note("builder probe: the builder (0x42B4420) is detoured; the gate is closed until a press or the sealed trial wants it.");
+}
+
+// --- Built v8.3: the path to the builder. EDVR's draw-item-builder bracket (kinematic_eval_hook.cpp) is already installed in the sessions that
+// matter (it installs with the engine-motion consumers), and it has patched the builder's entry, so the own detour is refused there. The probe
+// attaches to the bracket: its observer is called at the bracket's entry with the builder's arguments, for both call sites. The own detour is
+// the fallback when the bracket is not installed. The chosen path is logged on each attach.
+enum class Path : uint8_t { kNone = 0, kBracket = 1, kOwn = 2, kRefused = 3 };
+Path g_path = Path::kNone;      // render thread only (attach and detach run from the tick)
+bool g_wantPrev = false;        // the want at the last recompute (render thread only)
+
+// The bracket's observer: the builder's entry, with the bracket's own arguments (a = rcx, d = r9, the return address is the caller's).
+void builderObservedByBracket(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f,
+                              uintptr_t returnAddress) noexcept {
+    (void)b;
+    (void)c;
+    (void)e;
+    (void)f;
+    if (g_phase.load(std::memory_order_acquire) == kCollecting) noteCall(a, d, reinterpret_cast<void*>(returnAddress));
+    else if (sealedTrialOn()) countAfterCull(d);
+}
+
+void attachPath() noexcept {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    g_imageBase.store(base, std::memory_order_release);
+    const char* bracket = kinematicEvalBuilderObserverAttach();
+    if (std::strcmp(bracket, "installed") == 0) {
+        kinematicEvalSetBuilderObserver(&builderObservedByBracket);
+        g_path = Path::kBracket;
+        Log::get().note("builder probe: path = EDVR's draw-item-builder bracket (kinematic_eval_hook.cpp, its entry hook on 0x42B4420, "
+                        "already installed in this session). It sees both call sites (0x43204F3 and 0x4321ADB): it is an entry hook, "
+                        "with no call-site filter, and it runs on the thread that calls the builder.");
+        return;
+    }
+    installBuilderOnce();   // the own detour; refused (once, with its bytes) when the entry is already patched
+    g_path = g_builder.ready.load(std::memory_order_acquire) ? Path::kOwn : Path::kRefused;
+    Log::get().note("builder probe: path = %s; the bracket said: %s.",
+                    g_path == Path::kOwn ? "own detour (CodeHook on 0x42B4420)" : "none (no path can take the builder)", bracket);
+}
+
+void detachPath() noexcept {
+    if (g_path == Path::kBracket) {
+        kinematicEvalSetBuilderObserver(nullptr);
+        kinematicEvalBuilderObserverDetach();
+    }
+    g_path = Path::kNone;
 }
 
 float distanceTo(const float a[3], const float b[3]) noexcept {
@@ -333,9 +399,15 @@ bool builderProbeCollecting() noexcept {
 }
 
 void builderProbeRecompute() noexcept {
+    // The path is chosen on a rising edge of the want (never per frame); the own detour's gate follows the want while it is the path.
     const bool want = builderProbeWanted();
-    if (want) installBuilderOnce();
-    g_builderGate.store(want && g_builder.ready.load(std::memory_order_acquire) ? 1u : 0u, std::memory_order_release);
+    if (want != g_wantPrev) {
+        g_wantPrev = want;
+        if (want) attachPath();
+        else detachPath();
+    }
+    g_builderGate.store(want && g_path == Path::kOwn && g_builder.ready.load(std::memory_order_acquire) ? 1u : 0u,
+                        std::memory_order_release);
 }
 
 void builderProbeRequest(const char* trigger, uint32_t frame) {

@@ -308,6 +308,11 @@ struct State {
     std::string hatchProbeKeyText;
     Hotkey sealedTrialModeKey;
     std::string sealedTrialModeKeyText;
+    // TEMPORARY, Built v8.3b: the named mode's cell radius, one rung larger or smaller (the current size). Unbound by default.
+    Hotkey sealedCellLargerKey;
+    std::string sealedCellLargerKeyText;
+    Hotkey sealedCellSmallerKey;
+    std::string sealedCellSmallerKeyText;
     // The look probe's key (TEMPORARY; look_probe.h). Unbound by default.
     Hotkey lookProbeKey;
     std::string lookProbeKeyText;
@@ -1408,6 +1413,11 @@ void tickHotkeys() {
     if (g_state->hatchProbeKey.pressed()) hatchProbeToggle("hotkey.hatch_probe", static_cast<uint32_t>(g_state->frameCounter));
     if (g_state->sealedTrialModeKey.pressed())
         sealedTrialModeStep("hotkey.sealed_trial_mode", static_cast<uint32_t>(g_state->frameCounter));
+    // TEMPORARY, Built v8.3b: the named mode's cell radius of the current size, one rung up or down the ladder while named mode is on.
+    if (g_state->sealedCellLargerKey.pressed())
+        sealedTrialCellStep(+1, "hotkey.sealed_cell_larger", static_cast<uint32_t>(g_state->frameCounter));
+    if (g_state->sealedCellSmallerKey.pressed())
+        sealedTrialCellStep(-1, "hotkey.sealed_cell_smaller", static_cast<uint32_t>(g_state->frameCounter));
     // The look probe (TEMPORARY; look_probe.h): a press arms one capture of the next frame.
     if (g_state->lookProbeKey.pressed()) lookProbeRequest("hotkey.look_probe");
     // The asset census (TEMPORARY; asset_census.h): a press arms one frame of records, grouped by identity.
@@ -2191,6 +2201,15 @@ void configureDiagnosticHotkeys() {
          "hotkey: hatch_probe is set but bound nothing, so the hatch-state probe cannot be toggled by key this session.",
          " Toggles the hatch-state probe (temporary): a line each time the docking object's state changes."},
         // TEMPORARY, Built v8: the trial's record-rule cycle (sealed_trial.h): sphere or named, while the trial is on. Empty is off.
+        // TEMPORARY, Built v8.3b: the named mode's cell radius steps (sealed_trial.h). Empty is off; the suggested bindings are PAGEUP and PAGEDOWN.
+        {&s.sealedCellLargerKey, &s.sealedCellLargerKeyText, Config::get().getString("hotkey.sealed_cell_larger", ""),
+         "hotkey.sealed_cell_larger", "sealed cell larger",
+         "hotkey: sealed_cell_larger is set but bound nothing, so the cell's radius cannot be stepped larger by key this session.",
+         " Steps the named mode's cell radius of the current size one rung larger while the trial is on in named mode (temporary probe)."},
+        {&s.sealedCellSmallerKey, &s.sealedCellSmallerKeyText, Config::get().getString("hotkey.sealed_cell_smaller", ""),
+         "hotkey.sealed_cell_smaller", "sealed cell smaller",
+         "hotkey: sealed_cell_smaller is set but bound nothing, so the cell's radius cannot be stepped smaller by key this session.",
+         " Steps the named mode's cell radius of the current size one rung smaller while the trial is on in named mode (temporary probe)."},
         {&s.sealedTrialModeKey, &s.sealedTrialModeKeyText, Config::get().getString("hotkey.sealed_trial_mode", ""),
          "hotkey.sealed_trial_mode", "sealed trial mode",
          "hotkey: sealed_trial_mode is set but bound nothing, so the trial's record rule cannot be cycled by key this session.",

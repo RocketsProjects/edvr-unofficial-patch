@@ -138,6 +138,12 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         std::strcmp(key, "hotkey.sealed_trial_mode") == 0 ||
         std::strcmp(key, "diag.sealed_trial_mode") == 0 ||
         std::strcmp(key, "diag.sealed_trial_builder") == 0 ||
+        // TEMPORARY, Built v8.3b (the named mode's cell): the three cell radii and the two step keys, so the flat profile reads them.
+        std::strcmp(key, "diag.sealed_cell_small_m") == 0 ||
+        std::strcmp(key, "diag.sealed_cell_medium_m") == 0 ||
+        std::strcmp(key, "diag.sealed_cell_large_m") == 0 ||
+        std::strcmp(key, "hotkey.sealed_cell_larger") == 0 ||
+        std::strcmp(key, "hotkey.sealed_cell_smaller") == 0 ||
         std::strcmp(key, "hotkey.look_probe") == 0 ||
         // TEMPORARY, the asset census (asset_census.h): its key, so the flat profile reads it (the census itself is profile-blind).
         std::strcmp(key, "hotkey.asset_census") == 0 ||

@@ -1,6 +1,6 @@
-// The sealed-hangar trial (sealed_trial.h). The sphere rule is in sealed_trial_core.h; the store detour and its gate are in store_hook.cpp;
-// the view the sphere is centred on is resolved by view_source.cpp. This file holds the toggle, the radius and its ladder, the per-record
-// decision in the store's observer, the kept-records report, and the lines.
+// The sealed-hangar trial (sealed_trial.h). The pure rules are in sealed_trial_core.h; the store detour and its gate are in store_hook.cpp; the
+// view the sphere is centred on is resolved by view_source.cpp. This file holds the toggle, the radii and their ladders, the per-record decision
+// in the store's observer (sphere mode, or the own-pad cell of named mode, Built v8.3b), the class cache, the kept-records report, and the lines.
 #include "sealed_trial.h"
 
 #include <windows.h>
@@ -34,41 +34,69 @@ constexpr uintptr_t kRecRadius = 0x280;     // float: the sphere radius
 constexpr uintptr_t kRecChildren = 0x2A8;   // pointer: the child list, an array of 8-byte record pointers
 constexpr uintptr_t kRecChildCount = 0x2B0; // u64: the child count
 constexpr uintptr_t kBucketBase = 0x28;     // the bucket's base record
+constexpr uintptr_t kRecName = 0x18;        // pointer: the record's node (node+0 is the text pointer)
 
 constexpr size_t kObservedCap = 32768;       // records the observer keeps for the report in one frame
 constexpr uint32_t kReportNodeCap = 40000;   // records the report walks at most
 constexpr uint32_t kReportDepth = 6;         // child-list generations the report walks below an observed record
 constexpr uint32_t kReportChildCap = 4096;   // children read from one child list
+constexpr size_t kClassSlots = 4096;         // the class cache: one slot per node (lock-free, valid for one frame)
+constexpr size_t kNameSlots = 512;           // the name cache for the builder probe and the report (under the lock)
+constexpr uint32_t kViewTries = 64;
 
 std::atomic<bool> g_on{false};
-// The live radius: the configured start, then the ladder's rungs while the trial is on. Changed on the render thread (the step keys);
-// the store's observer reads it through the atomic.
+// The live sphere radius (diag.sealed_trial_radius_m, and the ladder while on). Changed on the render thread; read by the store's observer.
 std::atomic<float> g_radius{sealed::kDefaultRadiusM};
-// TEMPORARY (named mode): the record rule. Changed on the render thread (the mode key); the store's observer reads it through the atomic.
+// The record rule (diag.sealed_trial_mode; hotkey.sealed_trial_mode cycles it while on).
 std::atomic<sealed::Mode> g_mode{sealed::Mode::kSphere};
-// TEMPORARY (diag.sealed_trial_builder): read at install. skip is refused in builder_probe.cpp (not proven safe), so it counts only.
-sealed::BuilderPolicy g_builderPolicy = sealed::BuilderPolicy::kCount;
+sealed::BuilderPolicy g_builderPolicy = sealed::BuilderPolicy::kCount;   // read at install; skip is refused in builder_probe.cpp
+// The window's counters (atomics: the store's observer adds to them from its threads).
 std::atomic<uint64_t> g_culled{0}, g_kept{0}, g_keptUnknown{0}, g_sunSkipped{0}, g_evalNs{0}, g_faults{0}, g_torn{0};
-std::atomic<uint64_t> g_builderAfterCull{0};  // TEMPORARY (Built v8.1): builder calls cleared at entry, counted by the builder probe's tick
-// Built v8.1 (the crash fix): every piece of state the store observer and the frame's code share (the view, the view stamp, the render context,
-// the report's observed list, the name cache, the window clock and the report's trigger) is guarded by this lock. It is recursive because the
-// store re-enters the observer through its own recursion; nothing takes it across a call into the game (forward() is never called under it).
-std::recursive_mutex g_sealedMutex;
+std::atomic<uint64_t> g_builderAfterCull{0};
+std::atomic<uint64_t> g_keptByCell{0}, g_keptExplicit{0}, g_culledContaining{0};
 std::atomic<uint32_t> g_frameStamp{0};       // advanced at every Present tick: the observer resolves the view once per frame
 std::atomic<bool> g_cameraKnown{false};
+
+// Built v8.1 (the crash fix): every piece of state the store observer and the frame's code share is guarded by this lock, which is recursive
+// because the store re-enters the observer through its own recursion. It is never held across a call into the game.
+std::recursive_mutex g_sealedMutex;
+
+// The named mode's cell radii (diag.sealed_cell_small_m / _medium_m / _large_m; guesses 60 / 90 / 130 m) and the size last seen. Under the lock.
+float g_cellRadius[3] = {sealed::kCellDefaultM[0], sealed::kCellDefaultM[1], sealed::kCellDefaultM[2]};
+char g_lastSize = 'S';
+
+// The class cache (lock-free): a slot per node, a word per slot (sealed_trial_core.h packs it). Written by any thread that runs the store.
+std::atomic<uint64_t> g_classSlots[kClassSlots] = {};
+
+// The frame's pad and explicit-part records (collected under the lock while named mode runs), and the frame's camera.
+sealed::PadObs g_pads[sealed::kPadSlots];
+size_t g_padCount = 0;
+sealed::ExplicitObs g_explicits[sealed::kExplicitSlots];
+size_t g_explicitCount = 0;
+float g_frameCam[3] = {};
+bool g_frameCamValid = false;
+
+// The cell in force for the frame now being observed (promoted at the frame's first record from the previous frame's pads), and the explicit
+// instances picked for it (the nearest instance of each part node to the cell centre, within 200 m).
+sealed::OwnCell g_cellPrev;
+uintptr_t g_explicitPrev[sealed::kExplicitNodes] = {};
+size_t g_explicitPrevCount = 0;
+uint32_t g_cellStamp = 0;                    // the frame stamp the cell was last promoted at
+bool g_cellLogHas = false;                   // the last logged own-pad state (a change is logged once)
+char g_cellLogName[64] = {};
+
 uint64_t g_windowStartMs = 0;                // render thread only
-uint32_t g_viewStamp = 0;                    // render thread: the frame stamp g_view was resolved in
-bool g_viewReady = false;                    // render thread: g_view holds a resolution
-uint32_t g_viewTries = 0;                    // render thread: resolutions tried in the frame (the rows may be chosen part-way through it)
-constexpr uint32_t kViewTries = 64;
-view::Resolved g_view;                       // render thread: the view the rule's sphere is centred on, this frame
-uintptr_t g_lastCtx = 0;                     // render thread: the render context the observer last read
+uint32_t g_viewStamp = 0;                    // the frame stamp g_view was resolved in
+bool g_viewReady = false;                    // g_view holds a resolution
+uint32_t g_viewTries = 0;                    // resolutions tried in the frame (the rows may be chosen part-way through it)
+view::Resolved g_view;                       // the view the rule's sphere is centred on, this frame
+uintptr_t g_lastCtx = 0;                     // the render context the observer last read
 
 // The kept-records report: arm (a press), collect (the next frame's observer calls), write (the Present after that).
 enum RepPhase : int { kRepIdle = 0, kRepArmed = 1, kRepCollecting = 2 };
 std::atomic<int> g_repPhase{kRepIdle};
-std::string g_repTrigger;                    // render thread
-uint32_t g_repFrame = 0;                     // the frame collected (render thread)
+std::string g_repTrigger;                    // under the lock
+uint32_t g_repFrame = 0;                     // the frame collected (under the lock)
 struct Observed {
     uintptr_t bucket;
     uintptr_t record;
@@ -114,8 +142,12 @@ void resetWindow() noexcept {
     g_faults.store(0);
     g_torn.store(0);
     g_builderAfterCull.store(0);
+    g_keptByCell.store(0);
+    g_keptExplicit.store(0);
+    g_culledContaining.store(0);
 }
 
+// The window's statistics, with the cell in force at its latest frame. Called under the lock.
 sealed::Window takeWindow() noexcept {
     sealed::Window w;
     w.culled = g_culled.load();
@@ -126,24 +158,23 @@ sealed::Window takeWindow() noexcept {
     w.faults = g_faults.load();
     w.torn = g_torn.load();
     w.builderAfterCull = g_builderAfterCull.load();
+    w.keptByCell = g_keptByCell.load();
+    w.keptExplicit = g_keptExplicit.load();
+    w.culledContaining = g_culledContaining.load();
+    const bool named = g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed;
+    w.cellHas = named && g_cellPrev.has;
+    if (w.cellHas) {
+        w.cellSize = sealed::padSizeLetter(g_cellPrev.size);
+        w.cellRadius = g_cellPrev.radius;
+        std::snprintf(w.padName, sizeof(w.padName), "%s", g_cellPrev.padName);
+        w.padDist = g_cellPrev.padDist;
+    } else {
+        std::snprintf(w.padReason, sizeof(w.padReason), "%s", named ? g_cellPrev.reason : "sphere mode (no cell)");
+    }
     return w;
 }
 
-// TEMPORARY (record names). A small direct-mapped cache per node pointer, valid for one frame: the store, the builder probe and the kept
-// report ask for the same node many times in a frame. The text is read with the census's accept rules (asset_census_core.h textName).
-struct NameSlot {
-    uintptr_t node = 0;
-    uint32_t stamp = 0;
-    bool ok = false;
-    char name[64] = {};
-};
-constexpr size_t kNameSlots = 512;
-NameSlot g_nameCache[kNameSlots];
-
 // The camera position the rule centres on: the pose from the view's rows, else the view 0 origin. False when neither is known.
-// The centre the rule uses. In the explorer cam it is the free camera's rows (the view 0 origin may not be the free camera there). Seated and
-// on foot it is the view 0 origin, which the flights have proven; the rows are the fallback where no origin is read. The frame gap between
-// the two is logged at each toggle, so the flight can check that they agree.
 // The rule itself is view::sphereCentre (view_source.h), shared with the asset census.
 bool cameraOf(const view::Resolved& v, float out[3]) noexcept { return view::sphereCentre(v, out); }
 
@@ -156,9 +187,9 @@ const char* viewLabel(const view::Resolved& v) noexcept {
     return label;
 }
 
-// Writes the window's line at the current radius and the view it ran against, then starts a new window.
+// Writes the window's line at the current radius and the view it ran against, then starts a new window. Called under the lock.
 void noteWindow() {
-    char line[480];
+    char line[700];
     sealed::formatWindow(line, sizeof(line), takeWindow(), g_radius.load(std::memory_order_relaxed), viewLabel(g_view),
                          g_mode.load(std::memory_order_relaxed));
     Log::get().note("%s", line);
@@ -172,10 +203,113 @@ void resolveNow() noexcept {
     g_viewReady = true;
 }
 
-// Writes the kept-records report for the frame collected. Walks each observed record's child lists (to a small depth), reads each
-// record's sphere, mask and children from memory, and classifies every kept record against the view the frame's rule used.
+// The name of a record, copied out under the lock (no pointer into the cache escapes: the slot may be reused as soon as the lock is let go).
+// False when no name can be read. Used by the builder probe, the geometry probe and the report.
+bool cachedName(uintptr_t record, char* out, size_t cap) noexcept {
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
+    uintptr_t node = 0;
+    if (!record || !readVal(&node, record + kRecName) || !node) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
+    struct NameSlot {
+        uintptr_t node = 0;
+        uint32_t stamp = 0;
+        bool ok = false;
+        char name[64] = {};
+    };
+    static NameSlot names[kNameSlots];
+    const uint32_t stamp = g_frameStamp.load(std::memory_order_relaxed);
+    NameSlot& slot = names[(node >> 4) % kNameSlots];
+    if (slot.node != node || slot.stamp != stamp) {
+        slot.node = node;
+        slot.stamp = stamp;
+        slot.ok = false;
+        slot.name[0] = '\0';
+        uintptr_t text = 0;
+        uint8_t bytes[census::kNameBytes] = {};
+        std::string name;
+        if (readVal(&text, node) && text && readMem(bytes, text, sizeof(bytes)) &&
+            (census::textName(bytes, sizeof(bytes), false, &name) || census::textName(bytes, sizeof(bytes), true, &name))) {
+            std::snprintf(slot.name, sizeof(slot.name), "%s", name.c_str());
+            slot.ok = true;
+        }
+    }
+    if (!slot.ok) return false;
+    std::snprintf(out, cap, "%s", slot.name);
+    return true;
+}
+
+// The class of a node's name, read from game memory with no lock (the census's accept rules). The miss path of the class cache.
+sealed::NameClass classifyNode(uintptr_t node) noexcept {
+    uintptr_t text = 0;
+    uint8_t bytes[census::kNameBytes] = {};
+    if (!readVal(&text, node) || !text || !readMem(bytes, text, sizeof(bytes))) return sealed::NameClass::kUnnamed;
+    std::string name;
+    const bool ok = census::textName(bytes, sizeof(bytes), false, &name) || census::textName(bytes, sizeof(bytes), true, &name);
+    return sealed::classifyName(ok, name.c_str());
+}
+
+// The class of a record's name and its node. Lock-free: one guarded read of the node pointer and one atomic load on a hit; the name is read only
+// on a miss (once per node per frame).
+sealed::NameClass classOf(uintptr_t record, uintptr_t* nodeOut) noexcept {
+    *nodeOut = 0;
+    uintptr_t node = 0;
+    if (!record || !readVal(&node, record + kRecName) || !node) return sealed::NameClass::kUnnamed;
+    *nodeOut = node;
+    if (!sealed::slotFits(node)) return classifyNode(node);
+    const uint32_t stamp = g_frameStamp.load(std::memory_order_relaxed);
+    std::atomic<uint64_t>& slot = g_classSlots[(uint64_t(node) >> 3) & (kClassSlots - 1)];
+    sealed::NameClass cls = sealed::NameClass::kNone;
+    if (sealed::unpackSlot(slot.load(std::memory_order_acquire), node, stamp, &cls)) return cls;
+    cls = classifyNode(node);
+    slot.store(sealed::packSlot(node, cls, stamp), std::memory_order_release);
+    return cls;
+}
+
+// Logs the own pad when it changes (a change is logged once). Called under the lock.
+void logCellChange(const sealed::OwnCell& cell, uint32_t frame) {
+    const bool named = g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed;
+    if (!named) return;
+    if (cell.has == g_cellLogHas && (!cell.has || std::strcmp(cell.padName, g_cellLogName) == 0)) return;
+    g_cellLogHas = cell.has;
+    std::snprintf(g_cellLogName, sizeof(g_cellLogName), "%s", cell.has ? cell.padName : "");
+    if (cell.has)
+        Log::get().note("sealed cell: own pad %s (size %c, cell radius %.1f m, centre (%.1f,%.1f,%.1f), %.1f m from the camera, %s) at frame %u.",
+                        cell.padName, sealed::padSizeLetter(cell.size), static_cast<double>(cell.radius),
+                        static_cast<double>(cell.centre[0]), static_cast<double>(cell.centre[1]), static_cast<double>(cell.centre[2]),
+                        static_cast<double>(cell.padDist), cell.padContains ? "its sphere contains the camera" : "nearest within the fallback range",
+                        frame);
+    else
+        Log::get().note("sealed cell: no own pad at frame %u (%s); named mode is the sphere rule for those frames.", frame, cell.reason);
+}
+
+// Promotes the previous frame's pads into the cell for the frame now starting, and the explicit instances for that cell. Called under the lock
+// at the frame's first record. The pads and explicit parts are the previous frame's; the camera is the previous frame's too.
+void promoteFrame(uint32_t stamp, uint32_t frame) {
+    sealed::OwnCell next;
+    if (g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed) {
+        if (g_frameCamValid) {
+            const float radii[3] = {g_cellRadius[0], g_cellRadius[1], g_cellRadius[2]};
+            sealed::pickOwnPad(g_pads, g_padCount, g_frameCam, radii, &next);
+        } else {
+            std::snprintf(next.reason, sizeof(next.reason), "no camera for the previous frame");
+        }
+    } else {
+        std::snprintf(next.reason, sizeof(next.reason), "sphere mode");
+    }
+    g_explicitPrevCount = next.has ? sealed::pickExplicit(g_explicits, g_explicitCount, next.centre, g_explicitPrev, sealed::kExplicitNodes) : 0;
+    g_cellPrev = next;
+    g_padCount = 0;
+    g_explicitCount = 0;
+    g_cellStamp = stamp;
+    if (next.has) g_lastSize = sealed::padSizeLetter(next.size);
+    logCellChange(next, frame);
+}
+
+// Writes the kept-records report for the frame collected. Walks each observed record's child lists (to a small depth), reads each record's sphere,
+// mask and children, and classifies every kept record against the view the frame's rule used. Called under the lock.
 void writeKeptReport() {
-    char line[640];
+    char line[900];
     const float R = g_radius.load(std::memory_order_relaxed);
     float cam[3] = {};
     if (!cameraOf(g_view, cam)) {
@@ -185,6 +319,7 @@ void writeKeptReport() {
     }
     const uintptr_t imageBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     constexpr uint32_t kNone = 0xFFFFFFFFu;
+    const bool named = g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed;
 
     std::unordered_map<uintptr_t, uint32_t> index;         // record -> entry
     std::unordered_map<uintptr_t, uintptr_t> observedBucket;  // record -> the bucket the observer saw it in
@@ -234,9 +369,10 @@ void writeKeptReport() {
                             readVal(&mask, w.rec + kRecMask) && readVal(&children, w.rec + kRecChildCount);
         readVal(&vt, w.rec);
         {
-            std::string name;
-            if (sealedTrialRecordName(w.rec, &name)) e.name = name;   // the census's rules; empty when unreadable
+            char name[64];
+            if (cachedName(w.rec, name, sizeof(name))) e.name = name;   // the census's rules; empty when unreadable
         }
+        e.readable = readOk;
         e.radius = readOk ? radius : 0.0f;
         e.childCount = readOk ? children : 0;
         e.vtableRva = vt >= imageBase ? static_cast<uint64_t>(vt - imageBase) : static_cast<uint64_t>(vt);
@@ -284,6 +420,33 @@ void writeKeptReport() {
         entries[i].why = kept::classify(own[i], levelsUp);
     }
 
+    // Named mode (Built v8.3b): each kept record's label is its reason against the cell in force for the frame (cell, explicit, or no cell).
+    uint32_t nCell = 0, nExplicit = 0, nSphereNoCell = 0, nUnreadable = 0, nOtherNamed = 0;
+    if (named) {
+        for (kept::Entry& e : entries) {
+            if (!e.kept) continue;
+            if (!e.readable) {
+                e.label = "unjudged_unreadable";
+                ++nUnreadable;
+            } else if (!g_cellPrev.has) {
+                e.label = "sphere_no_cell";
+                ++nSphereNoCell;
+            } else {
+                const float c[3] = {e.rel[0] + cam[0], e.rel[1] + cam[1], e.rel[2] + cam[2]};
+                if (sealed::distance(c, g_cellPrev.centre) <= g_cellPrev.radius) {
+                    e.label = "cell";
+                    ++nCell;
+                } else if (sealed::inAddrSet(g_explicitPrev, g_explicitPrevCount, e.address)) {
+                    e.label = "explicit";
+                    ++nExplicit;
+                } else {
+                    e.label = "other_named";
+                    ++nOtherNamed;
+                }
+            }
+        }
+    }
+
     const kept::Stats st = kept::countKept(entries.data(), static_cast<uint32_t>(entries.size()));
     uint32_t byRadius[kept::kTop];
     uint32_t byBase[kept::kTop];
@@ -304,7 +467,14 @@ void writeKeptReport() {
 
     const char* source = viewLabel(g_view);
     const bool forwardKnown = g_view.poseOk;
-    char row[512];
+    char row[600];
+    char totals[360];
+    if (named)
+        std::snprintf(totals, sizeof(totals), "named: cell %u, explicit %u, other_named %u, sphere_no_cell %u, unjudged_unreadable %u",
+                      nCell, nExplicit, nOtherNamed, nSphereNoCell, nUnreadable);
+    else
+        std::snprintf(totals, sizeof(totals), "sphere: own %u, base %u, unjudged %u (sphere rule; labels are the why_kept column)",
+                      st.keptOwn, st.keptBase, st.keptUnjudged);
     FILE* f = _wfopen(path.c_str(), L"wb");
     if (f) {
         std::fprintf(f, "# view source = %s camera=(%.2f,%.2f,%.2f) forward=(%.4f,%.4f,%.4f) radius_m=%.1f frame=%u observed=%zu "
@@ -314,6 +484,13 @@ void writeKeptReport() {
                      static_cast<double>(forwardKnown ? g_view.pose.fwd[1] : 0.0f),
                      static_cast<double>(forwardKnown ? g_view.pose.fwd[2] : 0.0f), static_cast<double>(R), g_repFrame,
                      g_observed.size(), static_cast<unsigned>(entries.size()), st.kept, truncated ? 1 : 0);
+        std::fprintf(f, "# totals over all %u walked records: kept %u; %s\n", static_cast<unsigned>(entries.size()), st.kept, totals);
+        if (named)
+            std::fprintf(f, "# named cell: size %c, radius %.1f m, pad %s, centre (%.2f,%.2f,%.2f); explicit instances kept: %u\n",
+                         g_cellPrev.has ? sealed::padSizeLetter(g_cellPrev.size) : 'n', static_cast<double>(g_cellPrev.radius),
+                         g_cellPrev.has ? g_cellPrev.padName : "none", static_cast<double>(g_cellPrev.centre[0]),
+                         static_cast<double>(g_cellPrev.centre[1]), static_cast<double>(g_cellPrev.centre[2]),
+                         static_cast<unsigned>(g_explicitPrevCount));
         std::fprintf(f, "%s\n", kept::csvHeader());
         for (uint32_t k = 0; k < nRadius; ++k)
             if (kept::formatRow(row, sizeof(row), "radius", k + 1, entries[byRadius[k]]) >= 0) std::fprintf(f, "%s\n", row);
@@ -324,43 +501,13 @@ void writeKeptReport() {
 
     std::snprintf(line, sizeof(line),
                   "sealed trial report: frame %u view source = %s camera=(%.2f,%.2f,%.2f) radius_m=%.1f: observed %zu records, "
-                  "walked %u, kept %u (own %u, base %u, unjudged %u); children kept %u, of which %u were kept only because their "
-                  "base was; top %u by radius, top %u bases by child count; csv=%s%s",
+                  "walked %u, kept %u; totals %s; top %u by radius, top %u bases by child count (the csv holds those rows; its header "
+                  "carries the full totals); csv=%s%s",
                   g_repFrame, source, static_cast<double>(cam[0]), static_cast<double>(cam[1]), static_cast<double>(cam[2]),
-                  static_cast<double>(R), g_observed.size(), static_cast<unsigned>(entries.size()), st.kept, st.keptOwn,
-                  st.keptBase, st.keptUnjudged, st.keptChildren, st.keptChildrenByBase, nRadius, nBase, csvName,
-                  truncated ? " (walk truncated)" : "");
+                  static_cast<double>(R), g_observed.size(), static_cast<unsigned>(entries.size()), st.kept, totals, nRadius, nBase,
+                  csvName, truncated ? " (walk truncated)" : "");
     Log::get().note("%s", line);
     if (!f) Log::get().note("sealed trial report: could not open edvr_logs\\%s; the line above is complete.", csvName);
-}
-
-// The name of a record, copied out under the trial's lock (Built v8.1: the slot may be reused by another thread the moment the lock is let go, so
-// no pointer into the cache escapes). False when no name can be read. Allocation-free on a hit: the cache holds the text.
-bool cachedName(uintptr_t record, char* out, size_t cap) noexcept {
-    if (!out || cap == 0) return false;
-    out[0] = '\0';
-    uintptr_t node = 0;
-    if (!record || !readVal(&node, record + 0x18) || !node) return false;
-    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
-    const uint32_t stamp = g_frameStamp.load(std::memory_order_relaxed);
-    NameSlot& slot = g_nameCache[(node >> 4) % kNameSlots];
-    if (slot.node != node || slot.stamp != stamp) {
-        slot.node = node;
-        slot.stamp = stamp;
-        slot.ok = false;
-        slot.name[0] = '\0';
-        uintptr_t text = 0;
-        uint8_t bytes[census::kNameBytes] = {};
-        std::string name;
-        if (readVal(&text, node) && text && readMem(bytes, text, sizeof(bytes)) &&
-            (census::textName(bytes, sizeof(bytes), false, &name) || census::textName(bytes, sizeof(bytes), true, &name))) {
-            std::snprintf(slot.name, sizeof(slot.name), "%s", name.c_str());
-            slot.ok = true;
-        }
-    }
-    if (!slot.ok) return false;
-    std::snprintf(out, cap, "%s", slot.name);
-    return true;
 }
 
 }  // namespace
@@ -378,26 +525,37 @@ void sealedTrialInstall(bool flatProfile) {
     if (!sealed::parseMode(modeText.c_str(), &mode))
         Log::get().note("sealed trial: diag.sealed_trial_mode = '%s' is not sphere or named; the mode is sphere.", modeText.c_str());
     g_mode.store(mode, std::memory_order_relaxed);
+    // Named mode's cell radii (Built v8.3b). The defaults are GUESSES, not measurements.
+    const std::string smallText = Config::get().getString("diag.sealed_cell_small_m", "");
+    const std::string mediumText = Config::get().getString("diag.sealed_cell_medium_m", "");
+    const std::string largeText = Config::get().getString("diag.sealed_cell_large_m", "");
+    if (!sealed::parseCellRadius(smallText.c_str(), sealed::kCellDefaultM[0], &g_cellRadius[0]))
+        Log::get().note("sealed cell: diag.sealed_cell_small_m = '%s' is not a number of metres; the small cell radius is %.1f m (a guess).",
+                        smallText.c_str(), static_cast<double>(g_cellRadius[0]));
+    if (!sealed::parseCellRadius(mediumText.c_str(), sealed::kCellDefaultM[1], &g_cellRadius[1]))
+        Log::get().note("sealed cell: diag.sealed_cell_medium_m = '%s' is not a number of metres; the medium cell radius is %.1f m (a guess).",
+                        mediumText.c_str(), static_cast<double>(g_cellRadius[1]));
+    if (!sealed::parseCellRadius(largeText.c_str(), sealed::kCellDefaultM[2], &g_cellRadius[2]))
+        Log::get().note("sealed cell: diag.sealed_cell_large_m = '%s' is not a number of metres; the large cell radius is %.1f m (a guess).",
+                        largeText.c_str(), static_cast<double>(g_cellRadius[2]));
     const std::string policyText = Config::get().getString("diag.sealed_trial_builder", "");
     sealed::BuilderPolicy policy = sealed::BuilderPolicy::kCount;
     if (!sealed::parseBuilderPolicy(policyText.c_str(), &policy))
         Log::get().note("sealed trial: diag.sealed_trial_builder = '%s' is not count or skip; the builder is counted only.",
                         policyText.c_str());
     g_builderPolicy = policy;
-    // skip is refused: the builder's effects (draw-command appends, the counter at pipeline+0x2A4, the bucket lookup) are not proven absent,
-    // so a skipped record could change the frame. The count runs either way (docs Built v8, the builder's disassembly).
     if (policy == sealed::BuilderPolicy::kSkip)
         Log::get().note("sealed trial: diag.sealed_trial_builder = skip is REFUSED: the builder's side effects are not proven absent "
                         "(draw-command appends, the counter at pipeline+0x2A4, the bucket lookup); the builder is counted only.");
     Log::get().note("sealed trial: off. hotkey.sealed_trial toggles it; the sphere starts at %.1f m (diag.sealed_trial_radius_m); the "
-                    "record rule is %s (diag.sealed_trial_mode; hotkey.sealed_trial_mode cycles it while on). While on, "
-                    "hotkey.sealed_trial_smaller and hotkey.sealed_trial_larger step it through 80, 60, 40, 30, 20, 15 and 10 m, and "
-                    "hotkey.sealed_trial_report writes the kept-records report for one frame. Records outside the rule lose their views in "
-                    "the admission store, and the sun pair is skipped.", static_cast<double>(start), sealed::modeName(mode));
+                    "record rule is %s (diag.sealed_trial_mode; hotkey.sealed_trial_mode cycles it while on). Named mode's cell radii are "
+                    "small %.1f, medium %.1f, large %.1f m (diag.sealed_cell_*_m; guesses until measured); hotkey.sealed_cell_larger and "
+                    "hotkey.sealed_cell_smaller step the current size's radius while named mode is on. hotkey.sealed_trial_report writes "
+                    "the kept-records report for one frame.", static_cast<double>(start), sealed::modeName(mode),
+                    static_cast<double>(g_cellRadius[0]), static_cast<double>(g_cellRadius[1]), static_cast<double>(g_cellRadius[2]));
 }
 
-// The record's name, cached per node for the frame. Needed only by named mode, the builder probe and the kept report; the store does not
-// ask for it otherwise.
+// The record's name (builder probe, geometry probe, report): a copy, no pointer into the cache.
 bool sealedTrialRecordName(uintptr_t record, std::string* out) noexcept {
     char name[64];
     if (!cachedName(record, name, sizeof(name))) return false;
@@ -456,13 +614,39 @@ void sealedTrialModeStep(const char* trigger, uint32_t frame) {
     noteWindow();   // the old rule's window closes here
     const sealed::Mode next = sealed::nextMode(g_mode.load(std::memory_order_relaxed));
     g_mode.store(next, std::memory_order_release);
+    if (next == sealed::Mode::kSphere) {
+        g_cellPrev = sealed::OwnCell{};
+        std::snprintf(g_cellPrev.reason, sizeof(g_cellPrev.reason), "sphere mode");
+    }
     g_windowStartMs = GetTickCount64();
     sealed::formatModeLine(line, sizeof(line), next, frame, trigger);
     Log::get().note("%s", line);
 }
 
-// One rung while the trial is on. A rung that moves closes the window of the old radius first, so the new radius starts a window of its
-// own; a clamp changes nothing and says so. Off, the key logs a refusal.
+// TEMPORARY (named mode, Built v8.3b): steps the CURRENT size's cell radius one rung of the ladder (dir -1 smaller, +1 larger). The current size is
+// the size of the cell in force, or the size last seen. Logs each change with its size; off, or not in named mode, the key logs a refusal.
+void sealedTrialCellStep(int dir, const char* trigger, uint32_t frame) {
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
+    char line[320];
+    const bool named = g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed;
+    if (!g_on.load(std::memory_order_acquire) || !named) {
+        Log::get().note("named cell: the cell keys act only while the trial is on in named mode (trial %s, mode %s); nothing changed "
+                        "(trigger %s).", g_on.load() ? "on" : "off", sealed::modeName(g_mode.load(std::memory_order_relaxed)), trigger);
+        return;
+    }
+    const char size = g_cellPrev.has ? sealed::padSizeLetter(g_cellPrev.size) : g_lastSize;
+    const int index = size == 'S' ? 0 : (size == 'M' ? 1 : 2);
+    bool moved = false;
+    const float before = g_cellRadius[index];
+    const float after = sealed::stepCellRadius(before, dir, &moved);
+    if (moved) {
+        g_cellRadius[index] = after;
+        if (g_cellPrev.has && sealed::padSizeLetter(g_cellPrev.size) == size) g_cellPrev.radius = after;
+    }
+    sealed::formatCellStep(line, sizeof(line), size, moved, moved ? after : before, dir, frame, trigger);
+    Log::get().note("%s", line);
+}
+
 void sealedTrialStep(int dir, const char* trigger, uint32_t frame) {
     std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     char line[320];
@@ -540,8 +724,8 @@ void sealedTrialNoteBuilderCalls(uint64_t afterCull) noexcept {
     if (afterCull) g_builderAfterCull.fetch_add(afterCull, std::memory_order_relaxed);
 }
 
-// The record's view mask and admitted flag through the guarded reads and writes, for the fault-safe cull (sealed_trial_core.h).
 namespace {
+// The record's view mask and admitted flag through the guarded reads and writes, for the fault-safe cull (sealed_trial_core.h).
 struct RecordFields {
     uintptr_t rec;
     bool readMask(uint64_t* out) noexcept { return readVal(out, rec + kRecMask); }
@@ -549,23 +733,13 @@ struct RecordFields {
     bool writeMask(uint64_t v) noexcept { return writeMem(rec + kRecMask, &v, sizeof(v)); }
     bool writeAdmitted(uint8_t v) noexcept { return writeMem(rec + kRecAdmitted, &v, sizeof(v)); }
 };
-// The keep decision for one record, for the mode on (sphere: the sphere rule; named: the name rule over the same sphere). Named mode reads
-// the cached name without allocating.
-bool keepByRule(uintptr_t record, const float centre[3], float radius, const float cam[3], float R) noexcept {
-    const sealed::Mode m = g_mode.load(std::memory_order_relaxed);
-    if (m == sealed::Mode::kSphere) return sealed::keepRecord(centre, radius, cam, R);
-    char name[64];
-    const bool hasName = cachedName(record, name, sizeof(name));
-    return sealed::keepRecordNamed(hasName, name, centre, radius, cam, R);
-}
-
 }  // namespace
 
-// The rule for one record the store has written. Every read and write is validated; a failure leaves the record as the store wrote it and
-// counts a fault. The view the sphere is centred on is resolved once per frame (the first record of the frame).
+// The rule for one record the store has written. Every read and write is validated; a failure leaves the record as the store wrote it and counts
+// a fault. The view the sphere is centred on is resolved once per frame (the first record of the frame).
 void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
-    // The lock covers the view, the render context, the observed list and the name cache. It is never held across a call into the game (this
-    // observer runs after the store's forward has returned), and it is recursive for the store's own recursion.
+    // The lock covers the view, the context, the cell, the pad and explicit lists and the observed list. It is never held across a call into the
+    // game (this observer runs after the store's forward has returned); it is recursive for the store's own recursion.
     std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     LARGE_INTEGER t0{}, t1{};
     QueryPerformanceCounter(&t0);
@@ -599,7 +773,12 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
         return;
     }
     g_cameraKnown.store(true, std::memory_order_relaxed);
+    // The frame's first record: the previous frame's pads become this frame's cell (the camera used is the previous frame's, still in g_frameCam).
+    if (g_cellStamp != stamp) promoteFrame(stamp, stamp);
+    std::memcpy(g_frameCam, cam, sizeof(g_frameCam));
+    g_frameCamValid = true;
     const float trialR = g_radius.load(std::memory_order_relaxed);
+    const bool named = g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed;
 
     float centre[3] = {};
     float radius = 0.0f;
@@ -607,24 +786,67 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
         !std::isfinite(radius) || !(radius > 0.0f) || !std::isfinite(centre[0]) || !std::isfinite(centre[1]) ||
         !std::isfinite(centre[2])) {
         g_keptUnknown.fetch_add(1, std::memory_order_relaxed);
-    } else if (keepByRule(record, centre, radius, cam, trialR)) {
-        g_kept.fetch_add(1, std::memory_order_relaxed);
     } else {
-        RecordFields fields{record};
-        sealed::CullField failed = sealed::CullField::kMaskRead;
-        uint64_t value = 0;
-        switch (sealed::cullRecordFaultSafe(fields, &failed, &value)) {
-            case sealed::Cull::kCulled:
-                g_culled.fetch_add(1, std::memory_order_relaxed);
-                break;
-            case sealed::Cull::kUntouched:
-            case sealed::Cull::kRestored:
-                g_faults.fetch_add(1, std::memory_order_relaxed);   // the record is as the store wrote it: kept, not judged
-                break;
-            case sealed::Cull::kTorn:
-                g_faults.fetch_add(1, std::memory_order_relaxed);
-                g_torn.fetch_add(1, std::memory_order_relaxed);     // the one case the record may be left half culled
-                break;
+        bool keep = false;
+        sealed::KeepWhy why = sealed::KeepWhy::kNone;
+        bool containing = false;
+        bool sphereJudged = false;
+        if (named) {
+            uintptr_t node = 0;
+            const sealed::NameClass cls = classOf(record, &node);
+            if (cls == sealed::NameClass::kPad && g_padCount < sealed::kPadSlots) {
+                sealed::PadObs& p = g_pads[g_padCount];
+                char name[64] = {};
+                if (cachedName(record, name, sizeof(name))) {
+                    p.addr = record;
+                    p.centre[0] = centre[0];
+                    p.centre[1] = centre[1];
+                    p.centre[2] = centre[2];
+                    p.radius = radius;
+                    p.size = sealed::padSizeOf(name);
+                    std::snprintf(p.name, sizeof(p.name), "%s", name);
+                    if (p.size != sealed::PadSize::kNone) ++g_padCount;
+                }
+            } else if (cls == sealed::NameClass::kExplicit && g_explicitCount < sealed::kExplicitSlots) {
+                sealed::ExplicitObs& x = g_explicits[g_explicitCount++];
+                x.addr = record;
+                x.node = node;
+                x.centre[0] = centre[0];
+                x.centre[1] = centre[1];
+                x.centre[2] = centre[2];
+            }
+            const sealed::NamedKeep v = sealed::keepNamedCell(centre, radius, cam, trialR, g_cellPrev, g_explicitPrev, g_explicitPrevCount,
+                                                              record);
+            keep = v.keep;
+            why = v.why;
+            containing = v.containing;
+            sphereJudged = v.sphereJudged;
+        } else {
+            keep = sealed::keepRecord(centre, radius, cam, trialR);
+            why = keep ? sealed::KeepWhy::kSphere : sealed::KeepWhy::kNone;
+        }
+        if (keep) {
+            g_kept.fetch_add(1, std::memory_order_relaxed);
+            if (why == sealed::KeepWhy::kCell && !sphereJudged) g_keptByCell.fetch_add(1, std::memory_order_relaxed);
+            if (why == sealed::KeepWhy::kExplicit) g_keptExplicit.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            RecordFields fields{record};
+            sealed::CullField failed = sealed::CullField::kMaskRead;
+            uint64_t value = 0;
+            switch (sealed::cullRecordFaultSafe(fields, &failed, &value)) {
+                case sealed::Cull::kCulled:
+                    g_culled.fetch_add(1, std::memory_order_relaxed);
+                    if (named && g_cellPrev.has && containing) g_culledContaining.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                case sealed::Cull::kUntouched:
+                case sealed::Cull::kRestored:
+                    g_faults.fetch_add(1, std::memory_order_relaxed);   // the record is as the store wrote it: kept, not judged
+                    break;
+                case sealed::Cull::kTorn:
+                    g_faults.fetch_add(1, std::memory_order_relaxed);
+                    g_torn.fetch_add(1, std::memory_order_relaxed);     // the one case the record may be left half culled
+                    break;
+            }
         }
     }
     if (g_repPhase.load(std::memory_order_relaxed) == kRepCollecting && g_observed.size() < g_observed.capacity())

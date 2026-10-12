@@ -1630,6 +1630,19 @@ if errorlevel 1 ( echo [edvr] ERROR: builder probe test build failed & exit /b 1
 "%BUILD%\builder_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_hatch_geometry_test
+echo [edvr] === hatch_geometry_test.exe ===
+REM The hatch geometry probe's pure half (src\d3d11\hatch_geometry_core.h, TEMPORARY, Built v8.2, revised v8.3): the name rules, the 400 m camera
+REM filter, the tracker's change and settled lines on a caller's clock, the disappearance after 30 samples, the track cap, the nearest Hanger
+REM vector, the line text, and the sample box. No DLL and no game.
+if not exist "%OBJ%\hatchgeometry" mkdir "%OBJ%\hatchgeometry"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\hatchgeometry\\" ^
+    /Fe"%BUILD%\hatch_geometry_test.exe" "tools\hatch_geometry_test\hatch_geometry_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: hatch geometry test build failed & exit /b 1 )
+"%BUILD%\hatch_geometry_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_look_probe_test
 echo [edvr] === look_probe_test.exe ===
 REM The look probe's pure half (src\d3d11\look_probe_core.h, TEMPORARY, docs\concourse-culling-2026-10-11.md): the ray test, the

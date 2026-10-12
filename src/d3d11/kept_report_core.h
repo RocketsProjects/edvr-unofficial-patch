@@ -51,6 +51,8 @@ struct Entry {
     uint32_t levelsUp = 0;         // generations up to the ancestor whose test met the cell (0 when none did, or own did)
     uint64_t childCount = 0;
     uint64_t vtableRva = 0;
+    bool readable = false;         // the centre, radius, mask and children were read (Built v8.3b)
+    const char* label = nullptr;   // named mode: the reason against the cell (cell, explicit, other_named, sphere_no_cell, unjudged_unreadable); null: why
     std::string name;              // the record's name (rec+0x18 -> node, node+0 -> text); empty when unreadable (written as "(none)")
 };
 
@@ -138,7 +140,7 @@ inline int formatRow(char* out, size_t cap, const char* list, uint32_t rank, con
     return std::snprintf(out, cap, "%s,%u,0x%llX,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%s,%u,%d,0x%llX,0x%llX,%llu,0x%llX,0x%llX,%s", list, rank,
                          static_cast<unsigned long long>(e.address), static_cast<double>(e.radius),
                          static_cast<double>(e.rel[0]), static_cast<double>(e.rel[1]), static_cast<double>(e.rel[2]),
-                         static_cast<double>(e.dist), e.contains ? 1 : 0, whyName(e.why), e.levelsUp, e.judged ? 1 : 0,
+                         static_cast<double>(e.dist), e.contains ? 1 : 0, e.label ? e.label : whyName(e.why), e.levelsUp, e.judged ? 1 : 0,
                          static_cast<unsigned long long>(e.parent), static_cast<unsigned long long>(e.base),
                          static_cast<unsigned long long>(e.childCount), static_cast<unsigned long long>(e.bucket),
                          static_cast<unsigned long long>(e.vtableRva), e.name.empty() ? "(none)" : e.name.c_str());

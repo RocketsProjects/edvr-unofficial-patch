@@ -1,13 +1,16 @@
 #pragma once
-// The sealed-hangar trial's pure half (sealed_trial.cpp; TEMPORARY, the manual trial of docs/concourse-culling-2026-10-11.md).
-// No Windows, no engine memory: the sphere rule that decides which records the store keeps, the radius clamp, the radius ladder
-// that hotkey.sealed_trial_smaller and hotkey.sealed_trial_larger step through, and the text of the lines. The rig
-// tools\sealed_trial_test compiles it alone.
+// The sealed-hangar trial's pure half (sealed_trial.cpp; TEMPORARY, the manual trial of docs/concourse-culling-2026-10-11.md). No Windows, no
+// engine memory: the sphere rule (sphere mode), the own-pad cell rule (named mode, Built v8.3b), the radius clamps and ladders, the fault-safe
+// cull, and the text of the lines. The rig tools\sealed_trial_test compiles it alone.
 //
-// The rule, applied in the admission store (FUN_144312040) to each record it writes:
-//   keep when the record's sphere CONTAINS the camera (the hull, the hangar) or INTERSECTS the sphere of radius R around
-//   the camera; otherwise clear the record's view mask (rec+0x208) and its admitted flag (rec+0x234), in every view.
+// Sphere mode (the default), applied in the admission store (FUN_144312040) to each record it writes: keep when the record's sphere CONTAINS the
+// camera or INTERSECTS the sphere of radius R round the camera; otherwise clear the record's view mask (rec+0x208) and admitted flag (rec+0x234).
 //   Sphere: centre rec+0x240 (world), radius rec+0x280. Camera: the main view's origin, render context + 0x40 + 0x540.
+//
+// Named mode (Built v8.3b). Each frame's own PAD (a LandingPad* record, size from its name) gives the cell: its centre, and a radius per size
+// (diag.sealed_cell_*_m). A record is kept when its sphere CENTRE lies within the cell radius of the cell centre, or when it is the nearest
+// instance of an explicit part name (Hanger/Hangar/BlastShield/*HangerSkirt) to the cell centre within 200 m. Everything else is culled, named or
+// unnamed, including records whose sphere contains the camera. With no own pad, the frame is the sphere rule.
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -23,9 +26,22 @@ constexpr float kMinRadiusM = 1.0f;
 constexpr float kMaxRadiusM = 5000.0f;
 constexpr uint64_t kWindowMs = 5000;         // the statistics line's period while the trial is on (every 5 s, so a radius step has its own line)
 
-// The radius ladder, largest first. hotkey.sealed_trial_smaller and hotkey.sealed_trial_larger walk it one rung at a time.
+// The radius ladder, largest first. hotkey.sealed_trial_smaller and hotkey.sealed_trial_larger walk it one rung at a time (sphere radius).
 constexpr uint32_t kStepCount = 7;
 constexpr float kSteps[kStepCount] = {80.0f, 60.0f, 40.0f, 30.0f, 20.0f, 15.0f, 10.0f};
+
+// Named mode's cell (Built v8.3b). The radii are GUESSES (60 / 90 / 130 m for small, medium, large) until measured on the flight. The ladder
+// is what hotkey.sealed_cell_larger and hotkey.sealed_cell_smaller step the CURRENT size's radius through, ascending.
+constexpr float kCellDefaultM[3] = {60.0f, 90.0f, 130.0f};
+constexpr float kCellMinM = 10.0f;
+constexpr float kCellMaxM = 400.0f;
+constexpr size_t kCellLadderCount = 10;
+constexpr float kCellLadder[kCellLadderCount] = {30.0f, 40.0f, 50.0f, 60.0f, 70.0f, 80.0f, 100.0f, 120.0f, 150.0f, 200.0f};
+constexpr float kPadFallbackM = 150.0f;      // no pad sphere contains the camera: the nearest pad centre within this
+constexpr float kExplicitM = 200.0f;         // an explicit part's nearest instance to the cell centre must be within this
+constexpr size_t kPadSlots = 32;             // pad records a frame keeps for the pick
+constexpr size_t kExplicitSlots = 128;       // explicit-part records a frame keeps for the nearest-instance pick
+constexpr size_t kExplicitNodes = 64;        // distinct part nodes the nearest-instance pick tracks
 
 // Parses diag.sealed_trial_radius_m: a number of metres, clamped to [kMinRadiusM, kMaxRadiusM]. Empty or not a number
 // gives the default and returns false, so the caller can say so once.
@@ -47,6 +63,26 @@ inline bool parseRadius(const char* text, float* out) noexcept {
     return true;
 }
 
+// Parses diag.sealed_cell_small_m (and the medium and large keys): a number of metres in [kCellMinM, kCellMaxM]; empty or invalid gives the
+// given default and returns false.
+inline bool parseCellRadius(const char* text, float defaultM, float* out) noexcept {
+    if (!text || !*text) {
+        *out = defaultM;
+        return true;
+    }
+    char* end = nullptr;
+    const double v = std::strtod(text, &end);
+    if (end == text || *end != '\0' || !std::isfinite(v)) {
+        *out = defaultM;
+        return false;
+    }
+    float r = static_cast<float>(v);
+    if (r < kCellMinM) r = kCellMinM;
+    if (r > kCellMaxM) r = kCellMaxM;
+    *out = r;
+    return true;
+}
+
 inline float distance(const float a[3], const float b[3]) noexcept {
     const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
     return std::sqrt(dx * dx + dy * dy + dz * dz);
@@ -62,7 +98,7 @@ inline bool intersectsCameraSphere(const float centre[3], float radius, const fl
     return distance(centre, camera) <= radius + R;
 }
 
-// The rule: keep a record that contains the camera or intersects the camera's sphere.
+// The sphere rule: keep a record that contains the camera or intersects the camera's sphere.
 inline bool keepRecord(const float centre[3], float radius, const float camera[3], float R) noexcept {
     return containsCamera(centre, radius, camera) || intersectsCameraSphere(centre, radius, camera, R);
 }
@@ -71,17 +107,28 @@ inline bool keepRecord(const float centre[3], float radius, const float camera[3
 struct Window {
     uint64_t culled = 0;
     uint64_t kept = 0;
-    uint64_t keptUnknown = 0;     // a record whose sphere could not be read: kept, not judged
+    uint64_t keptUnknown = 0;     // a record whose centre or radius could not be read: kept, not judged (kept_unjudged)
     uint64_t sunSkipped = 0;      // sun pair draws the trial skipped in the window
     uint64_t evalNs = 0;
     uint64_t faults = 0;          // reads or writes that failed (the record is left as it was)
     uint64_t torn = 0;            // a cull whose put-back failed too: the record may be left half culled (see cullRecordFaultSafe)
-    // TEMPORARY (builder probe, builder_probe.cpp, Built v8.1): builder calls in the window whose record was cleared at the builder's entry
-    // (rec+0x234 reads 0). Should be 0 when the cull holds. The visit count (H5) is in the F9 frame's capture, not in this line.
+    // TEMPORARY (builder probe, Built v8.1): builder calls whose record was cleared at the builder's entry (rec+0x234 reads 0).
     uint64_t builderAfterCull = 0;
+    // Named mode (Built v8.3b): kept by the centre test while the sphere does not meet the trial sphere (kept_by_cell); kept as an explicit
+    // part's nearest instance (kept_explicit); culled because the sphere contains the camera (culled_containing); and the cell in force for the
+    // window's latest frame (cellHas false: the frame had no own pad, and padReason says why).
+    uint64_t keptByCell = 0;
+    uint64_t keptExplicit = 0;
+    uint64_t culledContaining = 0;
+    bool cellHas = false;
+    char cellSize = 'n';          // 'S', 'M', 'L' or 'n' (none)
+    float cellRadius = 0.0f;
+    char padName[64] = {};
+    float padDist = -1.0f;
+    char padReason[80] = {};
 };
 
-// The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named adds the name rule (see keepRecordNamed).
+// The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named is the own-pad cell rule.
 enum class Mode : uint8_t { kSphere = 0, kNamed = 1 };
 
 // Parses diag.sealed_trial_mode: "sphere" or "named" (empty is sphere). False for any other text: the caller says so and keeps sphere.
@@ -103,8 +150,7 @@ inline const char* modeName(Mode m) noexcept { return m == Mode::kNamed ? "named
 // The other mode: hotkey.sealed_trial_mode cycles sphere, named, sphere.
 inline Mode nextMode(Mode m) noexcept { return m == Mode::kNamed ? Mode::kSphere : Mode::kNamed; }
 
-// TEMPORARY (diag.sealed_trial_builder): count leaves the builder calls alone and counts them; skip returns without calling the builder for a
-// record the named trial culled, and only if the builder's disassembly shows that is safe (builder_probe.cpp decides and logs it).
+// TEMPORARY (diag.sealed_trial_builder): count leaves the builder calls alone and counts them; skip is refused (builder_probe.cpp).
 enum class BuilderPolicy : uint8_t { kCount = 0, kSkip = 1 };
 
 inline bool parseBuilderPolicy(const char* text, BuilderPolicy* out) noexcept {
@@ -122,9 +168,13 @@ inline bool parseBuilderPolicy(const char* text, BuilderPolicy* out) noexcept {
 
 inline const char* builderPolicyName(BuilderPolicy p) noexcept { return p == BuilderPolicy::kSkip ? "skip" : "count"; }
 
-// The name rule (named mode). A record whose name contains one of these words (case-insensitive) is kept whatever its sphere says.
-constexpr const char* kKeepWords[] = {"Hanger", "Hangar", "BlastShield", "LandingPad", "Lift", "Skirt"};
-constexpr float kNamedSmallRadiusM = 100.0f;   // a named record of this radius or less is judged by the sphere; larger ones are culled
+// Case-insensitive prefix test on ASCII text.
+inline bool hasPrefixNoCase(const char* text, const char* word) noexcept {
+    for (size_t k = 0; word[k]; ++k) {
+        if (!text[k] || std::tolower(static_cast<unsigned char>(text[k])) != std::tolower(static_cast<unsigned char>(word[k]))) return false;
+    }
+    return true;
+}
 
 // Case-insensitive substring test on ASCII text.
 inline bool containsNoCase(const char* text, const char* word) noexcept {
@@ -139,54 +189,296 @@ inline bool containsNoCase(const char* text, const char* word) noexcept {
     return false;
 }
 
-// True when the name holds one of the keep words.
-inline bool nameKeptByWord(const char* name) noexcept {
-    if (!name || !*name) return false;
-    for (const char* w : kKeepWords)
-        if (containsNoCase(name, w)) return true;
+// The class of a record's name, as the lock-free cache stores it. kPad: a LandingPad* record (GuideMarkers excluded). kExplicit: a part whose
+// centre is judged against the cell by its nearest instance (Hanger, Hangar, BlastShield, SmallHangerSkirt, MediumHangerSkirt, LargeHangerSkirt).
+// kOther: any other readable name. kUnnamed: no readable name. kNone is the empty cache slot, never a verdict.
+enum class NameClass : uint8_t { kNone = 0, kPad = 1, kExplicit = 2, kOther = 3, kUnnamed = 4 };
+
+inline bool isPadName(const char* name) noexcept {
+    return name && hasPrefixNoCase(name, "LandingPad") && !containsNoCase(name, "GuideMarkers");
+}
+
+inline bool isExplicitName(const char* name) noexcept {
+    if (!name) return false;
+    static const char* const kPrefixes[] = {"Hanger", "Hangar", "BlastShield", "SmallHangerSkirt", "MediumHangerSkirt", "LargeHangerSkirt"};
+    for (const char* p : kPrefixes)
+        if (hasPrefixNoCase(name, p)) return true;
     return false;
 }
 
-// Named mode's keep rule for a record whose sphere could be read (an unreadable sphere is kept, unjudged, before this is asked).
-// Kept when: its name holds a keep word; or it has no readable name (conservative); or its radius is <= 100 m and its sphere meets the
-// sphere of radius R round the camera. Everything else is culled, even a giant record whose sphere contains the camera.
-inline bool keepRecordNamed(bool hasName, const char* name, const float centre[3], float radius, const float camera[3], float R) noexcept {
-    if (!hasName || !name || !*name) return true;
-    if (nameKeptByWord(name)) return true;
-    return radius <= kNamedSmallRadiusM && intersectsCameraSphere(centre, radius, camera, R);
+inline NameClass classifyName(bool readable, const char* name) noexcept {
+    if (!readable || !name || !*name) return NameClass::kUnnamed;
+    if (isPadName(name)) return NameClass::kPad;
+    if (isExplicitName(name)) return NameClass::kExplicit;
+    return NameClass::kOther;
 }
 
-// The keep decision for the chosen mode. Sphere mode ignores the name.
-inline bool keepRecordForMode(Mode m, bool hasName, const char* name, const float centre[3], float radius, const float camera[3], float R) noexcept {
-    if (m == Mode::kNamed) return keepRecordNamed(hasName, name, centre, radius, camera, R);
-    return keepRecord(centre, radius, camera, R);
+// The own pad's size, from its name: LandingPadSmall*, LandingPadMedium*, LandingPadLarge* (GuideMarkers and other names: none).
+enum class PadSize : uint8_t { kNone = 0, kSmall = 1, kMedium = 2, kLarge = 3 };
+
+inline PadSize padSizeOf(const char* name) noexcept {
+    if (!isPadName(name)) return PadSize::kNone;
+    const char* rest = name + 10;   // past "LandingPad"
+    if (hasPrefixNoCase(rest, "Small")) return PadSize::kSmall;
+    if (hasPrefixNoCase(rest, "Medium")) return PadSize::kMedium;
+    if (hasPrefixNoCase(rest, "Large")) return PadSize::kLarge;
+    return PadSize::kNone;
+}
+
+inline char padSizeLetter(PadSize s) noexcept {
+    switch (s) {
+        case PadSize::kSmall: return 'S';
+        case PadSize::kMedium: return 'M';
+        case PadSize::kLarge: return 'L';
+        default: return 'n';
+    }
+}
+
+// One pad record of a frame, for the pick.
+struct PadObs {
+    uintptr_t addr = 0;
+    float centre[3] = {};
+    float radius = 0.0f;       // the pad's own sphere (rec+0x280)
+    PadSize size = PadSize::kNone;
+    char name[64] = {};
+};
+
+// The own cell of a frame. has false: no own pad this frame (named mode is the sphere rule for it) and reason says why.
+struct OwnCell {
+    bool has = false;
+    PadSize size = PadSize::kNone;
+    float centre[3] = {};      // the pad's centre
+    float radius = 0.0f;       // the cell radius for the pad's size
+    uintptr_t pad = 0;
+    float padDist = -1.0f;     // the camera to the pad's centre
+    bool padContains = false;  // the pad's own sphere contains the camera (else it was the fallback within kPadFallbackM)
+    char padName[64] = {};
+    char reason[80] = {};
+};
+
+// The index into radii[] (small, medium, large) for a size; -1 for none.
+inline int sizeIndex(PadSize s) noexcept { return s == PadSize::kNone ? -1 : static_cast<int>(s) - 1; }
+
+// The own pad: among the frame's pad records with a size, the one whose own sphere contains the camera, nearest centre first; else the nearest
+// centre within kPadFallbackM. The cell's radius is radii[size]. With no candidate, has is false and reason says why.
+inline void pickOwnPad(const PadObs* obs, size_t n, const float camera[3], const float radii[3], OwnCell* out) noexcept {
+    *out = OwnCell{};
+    if (n == 0) {
+        std::snprintf(out->reason, sizeof(out->reason), "no LandingPad record this frame");
+        return;
+    }
+    int best = -1;
+    float bestD = 0.0f;
+    bool bestContains = false;
+    for (size_t i = 0; i < n; ++i) {
+        if (obs[i].size == PadSize::kNone) continue;
+        const float d = distance(obs[i].centre, camera);
+        const bool contains = d <= obs[i].radius;
+        if (!contains) continue;
+        if (best < 0 || d < bestD) {
+            best = static_cast<int>(i);
+            bestD = d;
+            bestContains = true;
+        }
+    }
+    if (best < 0) {
+        for (size_t i = 0; i < n; ++i) {
+            if (obs[i].size == PadSize::kNone) continue;
+            const float d = distance(obs[i].centre, camera);
+            if (d > kPadFallbackM) continue;
+            if (best < 0 || d < bestD) {
+                best = static_cast<int>(i);
+                bestD = d;
+            }
+        }
+    }
+    if (best < 0) {
+        std::snprintf(out->reason, sizeof(out->reason), "no pad sphere contains the camera and none is within %.0f m", static_cast<double>(kPadFallbackM));
+        return;
+    }
+    const PadObs& p = obs[best];
+    out->has = true;
+    out->size = p.size;
+    for (int k = 0; k < 3; ++k) out->centre[k] = p.centre[k];
+    out->radius = radii[sizeIndex(p.size)];
+    out->pad = p.addr;
+    out->padDist = bestD;
+    out->padContains = bestContains;
+    std::snprintf(out->padName, sizeof(out->padName), "%s", p.name);
+}
+
+// One explicit-part record of a frame: its node identifies the part name (records of one part share it).
+struct ExplicitObs {
+    uintptr_t addr = 0;
+    uintptr_t node = 0;
+    float centre[3] = {};
+};
+
+// For each part node, the nearest instance to the cell centre within kExplicitM. Writes their addresses to out (at most outCap); returns the count.
+inline size_t pickExplicit(const ExplicitObs* obs, size_t n, const float cellCentre[3], uintptr_t* out, size_t outCap) noexcept {
+    struct Best {
+        uintptr_t node;
+        uintptr_t addr;
+        float d;
+    };
+    Best best[kExplicitNodes];
+    size_t nb = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const float d = distance(obs[i].centre, cellCentre);
+        if (d > kExplicitM) continue;
+        size_t k = 0;
+        while (k < nb && best[k].node != obs[i].node) ++k;
+        if (k < nb) {
+            if (d < best[k].d) {
+                best[k].addr = obs[i].addr;
+                best[k].d = d;
+            }
+        } else if (nb < kExplicitNodes) {
+            best[nb++] = Best{obs[i].node, obs[i].addr, d};
+        }
+    }
+    size_t written = 0;
+    for (size_t k = 0; k < nb && written < outCap; ++k) out[written++] = best[k].addr;
+    return written;
+}
+
+// Why a record is kept in named mode.
+enum class KeepWhy : uint8_t { kNone = 0, kCell = 1, kExplicit = 2, kSphere = 3 };
+
+inline const char* keepWhyName(KeepWhy w) noexcept {
+    switch (w) {
+        case KeepWhy::kCell: return "cell";
+        case KeepWhy::kExplicit: return "explicit";
+        case KeepWhy::kSphere: return "sphere";
+        default: return "culled";
+    }
+}
+
+struct NamedKeep {
+    bool keep = false;
+    KeepWhy why = KeepWhy::kNone;
+    bool containing = false;      // the record's sphere contains the camera
+    bool sphereJudged = false;    // the sphere rule alone would keep it (so a cell keep is "by cell" only when this is false)
+};
+
+inline bool inAddrSet(const uintptr_t* set, size_t n, uintptr_t addr) noexcept {
+    for (size_t i = 0; i < n; ++i)
+        if (set[i] == addr) return true;
+    return false;
+}
+
+// The named rule for one record (Built v8.3b). No own cell: the sphere rule for the frame. With one: kept when the record's centre lies within
+// the cell radius of the cell centre (why cell), or when it is an explicit part's nearest instance (why explicit). Otherwise culled, including a
+// record whose sphere contains the camera.
+inline NamedKeep keepNamedCell(const float centre[3], float radius, const float camera[3], float R, const OwnCell& cell,
+                               const uintptr_t* explicitSet, size_t explicitN, uintptr_t addr) noexcept {
+    NamedKeep v;
+    v.containing = containsCamera(centre, radius, camera);
+    v.sphereJudged = keepRecord(centre, radius, camera, R);
+    if (!cell.has) {
+        v.keep = v.sphereJudged;
+        v.why = v.keep ? KeepWhy::kSphere : KeepWhy::kNone;
+        return v;
+    }
+    if (distance(centre, cell.centre) <= cell.radius) {
+        v.keep = true;
+        v.why = KeepWhy::kCell;
+        return v;
+    }
+    if (inAddrSet(explicitSet, explicitN, addr)) {
+        v.keep = true;
+        v.why = KeepWhy::kExplicit;
+    }
+    return v;
+}
+
+// One rung of the cell ladder from radius r (dir negative: smaller, positive: larger). Off the ladder, a step lands on the nearest rung that way;
+// at the end of the ladder r stays (the clamp). *moved says whether it changed.
+inline float stepCellRadius(float r, int dir, bool* moved) noexcept {
+    float out = r;
+    if (dir < 0) {
+        for (size_t i = kCellLadderCount; i-- > 0;) {
+            if (kCellLadder[i] < r) {
+                out = kCellLadder[i];
+                break;
+            }
+        }
+    } else if (dir > 0) {
+        for (size_t i = 0; i < kCellLadderCount; ++i) {
+            if (kCellLadder[i] > r) {
+                out = kCellLadder[i];
+                break;
+            }
+        }
+    }
+    if (moved) *moved = out != r;
+    return out;
+}
+
+// "named cell: small radius -> 80.0 m at frame N (trigger T)"; the clamp line names the end of the ladder.
+inline int formatCellStep(char* out, size_t cap, char sizeLetter, bool moved, float radiusM, int dir, uint32_t frame, const char* trigger) noexcept {
+    const char* word = sizeLetter == 'S' ? "small" : (sizeLetter == 'M' ? "medium" : "large");
+    if (moved)
+        return std::snprintf(out, cap, "named cell: %s radius -> %.1f m at frame %u (trigger %s)", word, static_cast<double>(radiusM), frame,
+                             trigger);
+    return std::snprintf(out, cap, "named cell: %s radius stays %.1f m at frame %u: the %s step is %.1f m (trigger %s)", word,
+                         static_cast<double>(radiusM), frame, dir < 0 ? "smallest" : "largest",
+                         static_cast<double>(dir < 0 ? kCellLadder[0] : kCellLadder[kCellLadderCount - 1]), trigger);
+}
+
+// The class cache's slot (lock-free): node>>3 in bits 0..43, the class in bits 44..46 (never 0 for a stored slot), the frame's stamp in bits
+// 47..63. A zero word is an empty slot. A node that is not 8-aligned or is out of the 47-bit user range is not cached.
+constexpr uint64_t kSlotNodeMask = (uint64_t(1) << 44) - 1;
+constexpr uint32_t kSlotStampMask = (1u << 17) - 1;
+
+inline bool slotFits(uintptr_t node) noexcept { return (node & 7u) == 0 && (uint64_t(node) >> 3) <= kSlotNodeMask; }
+
+inline uint64_t packSlot(uintptr_t node, NameClass cls, uint32_t stamp) noexcept {
+    return (uint64_t(node) >> 3) | (uint64_t(static_cast<uint8_t>(cls)) << 44) | (uint64_t(stamp & kSlotStampMask) << 47);
+}
+
+// True when the slot holds this node's class in this frame; the class is written to *out.
+inline bool unpackSlot(uint64_t v, uintptr_t node, uint32_t stamp, NameClass* out) noexcept {
+    if (v == 0) return false;
+    if ((v & kSlotNodeMask) != (uint64_t(node) >> 3)) return false;
+    if (((v >> 47) & kSlotStampMask) != (stamp & kSlotStampMask)) return false;
+    const uint32_t c = static_cast<uint32_t>((v >> 44) & 7u);
+    if (c == 0) return false;
+    *out = static_cast<NameClass>(c);
+    return true;
 }
 
 // "sealed trial: mode = named at frame N (...)" and the sphere equivalent, when hotkey.sealed_trial_mode changes the rule while on.
 inline int formatModeLine(char* out, size_t cap, Mode m, uint32_t frame, const char* trigger) noexcept {
     if (m == Mode::kNamed)
-        return std::snprintf(out, cap, "sealed trial: mode = named at frame %u (trigger %s): records whose name holds Hanger, Hangar, "
-                                       "BlastShield, LandingPad, Lift or Skirt are kept; so is a record with no readable name; a record "
-                                       "of 100 m or less that meets the sphere is kept; every other record is culled",
-                             frame, trigger);
-    return std::snprintf(out, cap, "sealed trial: mode = sphere at frame %u (trigger %s): the sphere rule alone",
-                         frame, trigger);
+        return std::snprintf(out, cap, "sealed trial: mode = named at frame %u (trigger %s): the own pad's cell (LandingPad small, medium or large; "
+                                       "radius per size, diag.sealed_cell_*_m) keeps records whose centre lies within it, plus the nearest instance of "
+                                       "each explicit part within 200 m; everything else is culled, including records whose sphere contains the "
+                                       "camera; with no own pad the frame is the sphere rule", frame, trigger);
+    return std::snprintf(out, cap, "sealed trial: mode = sphere at frame %u (trigger %s): the sphere rule alone", frame, trigger);
 }
 
 // "sealed trial: window 5 s culled=.. kept=.. kept_unjudged=.. sun_pairs_skipped=.. eval_ms=.. faults=.. torn=.. radius_m=.. builder_after_cull=..
-// mode=.. view source = ..". The radius is the one the window ran at (a step closes the window of the old radius first).
-// The view the rule's sphere was centred on is named at the end: "view source = explorer cam" (or eye rows, vscreen, origin).
+// mode=.. size=.. cell_r=.. pad=.. pad_dist=.. pad_reason=.. kept_explicit=.. kept_by_cell=.. culled_containing=.. view source = ..". The radius is the
+// one the window ran at (a step closes the window of the old radius first). The view the rule's sphere was centred on is named at the end.
 inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, const char* viewSource, Mode mode = Mode::kSphere) noexcept {
+    char cell[200];
+    if (w.cellHas)
+        std::snprintf(cell, sizeof(cell), "size=%c cell_r=%.1f pad=%s pad_dist=%.1f pad_reason=-", w.cellSize, static_cast<double>(w.cellRadius),
+                      w.padName, static_cast<double>(w.padDist));
+    else
+        std::snprintf(cell, sizeof(cell), "size=none cell_r=0.0 pad=none pad_dist=-1.0 pad_reason=%s", w.padReason);
     return std::snprintf(out, cap,
                          "sealed trial: window %llu s culled=%llu kept=%llu kept_unjudged=%llu sun_pairs_skipped=%llu "
-                         "eval_ms=%.3f faults=%llu torn=%llu radius_m=%.1f builder_after_cull=%llu mode=%s "
-                         "view source = %s",
+                         "eval_ms=%.3f faults=%llu torn=%llu radius_m=%.1f builder_after_cull=%llu mode=%s %s "
+                         "kept_explicit=%llu kept_by_cell=%llu culled_containing=%llu view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
                          static_cast<unsigned long long>(w.kept), static_cast<unsigned long long>(w.keptUnknown),
                          static_cast<unsigned long long>(w.sunSkipped), static_cast<double>(w.evalNs) / 1.0e6,
-                         static_cast<unsigned long long>(w.faults), static_cast<unsigned long long>(w.torn),
-                         static_cast<double>(radiusM), static_cast<unsigned long long>(w.builderAfterCull), modeName(mode),
-                         viewSource);
+                         static_cast<unsigned long long>(w.faults), static_cast<unsigned long long>(w.torn), static_cast<double>(radiusM),
+                         static_cast<unsigned long long>(w.builderAfterCull), modeName(mode), cell,
+                         static_cast<unsigned long long>(w.keptExplicit), static_cast<unsigned long long>(w.keptByCell),
+                         static_cast<unsigned long long>(w.culledContaining), viewSource);
 }
 
 // "sealed trial: on at frame F (radius R m; camera (x,y,z) or unknown; the sun pair is skipped; records outside the sphere

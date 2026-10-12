@@ -78,6 +78,9 @@ std::atomic<bool> schedulerWanted{false};
 std::atomic<bool> gateProbeWanted{false};
 alignas(8) std::atomic<GateProbeGateFn> gateProbeGate{nullptr};
 alignas(8) std::atomic<GateProbeBuilderFn> gateProbeBuilder{nullptr};
+// Built v8.3: the hatch/builder probe's observer on this bracket, and its want (holds the eval gate open with the other consumers).
+std::atomic<BuilderObserverFn> builderObserver{nullptr};
+std::atomic<bool> builderWanted{false};
 alignas(8) std::atomic<GateProbePartFn> gateProbePart{nullptr};
 // FUN_1442B3FC0's relay gate: a cell of its own, not evalGate, so the
 // per-part patch (installed only for the gate probe) costs the evalGate
@@ -537,6 +540,9 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
                                                               uintptr_t e,uintptr_t f) noexcept {
     const auto forward=reinterpret_cast<BucketFn>(g_bucketEntry.forward.load(std::memory_order_acquire));
     if(!forward)return 0; // stood down at install; the relay is unreachable then
+    // Built v8.3: the attached observer sees every builder call, from both sites, before the forward (the return address is the caller's).
+    if(const auto observe=builderObserver.load(std::memory_order_acquire))
+        observe(a,b,c,d,e,f,reinterpret_cast<uintptr_t>(_ReturnAddress()));
     // EDVR's own work in this bracket (engine_motion_cpu.h): a POD token, since
     // the function has __try; paused around the builder, left at each return.
     emcpu::Token engineMotion;
@@ -1092,7 +1098,8 @@ void recomputeGateLocked() noexcept {
     const bool open=observer.load(std::memory_order_acquire)!=nullptr ||
                     emitWanted.load(std::memory_order_acquire) ||
                     schedulerWanted.load(std::memory_order_acquire) ||
-                    gateProbeWanted.load(std::memory_order_acquire);
+                    gateProbeWanted.load(std::memory_order_acquire) ||
+                    builderWanted.load(std::memory_order_acquire);
     evalGate.store(open?uintptr_t(1):uintptr_t(0),std::memory_order_release);
     primaryGate.store(emitWanted.load(std::memory_order_acquire) &&
         g_primaryEntry.ready.load(std::memory_order_acquire) &&
@@ -1237,6 +1244,33 @@ void kinematicEvalGateProbeDetach() noexcept {
 bool kinematicEvalBuilderHooked() noexcept {
     return g_bucketEntry.ready.load(std::memory_order_acquire) &&
            g_bucketEntry.forward.load(std::memory_order_acquire)!=0;
+}
+
+void kinematicEvalSetBuilderObserver(BuilderObserverFn fn) noexcept {
+    builderObserver.store(fn,std::memory_order_release);
+}
+
+// Attaches to the bracket only when it is already installed in this session (its own install comes with the engine-motion consumers, in VR
+// with temporal AA on). It never installs the bracket or the eval hooks itself.
+const char* kinematicEvalBuilderObserverAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        if(!kinematicEvalBuilderHooked())
+            return "the builder bracket is not installed in this session (it installs with the engine-motion consumers)";
+        if(!g_evalEntry.ready.load(std::memory_order_acquire))
+            return "the eval hook is not installed in this session";
+        builderWanted.store(true,std::memory_order_release);
+        recomputeGateLocked();
+        return "installed";
+    } catch(...) {return "install_failed";}
+}
+
+void kinematicEvalBuilderObserverDetach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        builderWanted.store(false,std::memory_order_release);
+        recomputeGateLocked();
+    } catch(...) {}
 }
 
 const char* kinematicEvalPartTestStatus() noexcept {
