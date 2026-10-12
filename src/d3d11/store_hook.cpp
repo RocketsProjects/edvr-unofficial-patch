@@ -14,6 +14,7 @@
 #include "../common/log.h"
 #include "asset_census.h"
 #include "builder_probe.h"
+#include "hatch_geometry.h"
 #include "look_probe.h"
 #include "sealed_trial.h"
 
@@ -113,6 +114,7 @@ __declspec(noinline) uintptr_t __fastcall storeObserved(uintptr_t bucket, uintpt
     if (lookProbeCollecting()) lookProbeAfterStore(bucket, record);
     if (assetCensusCollecting()) assetCensusAfterStore(bucket, record);
     if (builderProbeCollecting()) builderProbeAfterStore(bucket, record);   // the probe's visit set: only while a frame is collected
+    if (hatchGeometryCollecting()) hatchGeometryAfterStore(bucket, record); // the geometry sample: only on a sampled frame
     return result;
 }
 
@@ -160,7 +162,7 @@ void installOnce() noexcept {
 }  // namespace
 
 void storeHookRecompute() noexcept {
-    const bool want = sealedTrialOn() || lookProbeCollecting() || assetCensusWanted() || builderProbeWanted();
+    const bool want = sealedTrialOn() || lookProbeCollecting() || assetCensusWanted() || builderProbeWanted() || hatchGeometryWanted();
     if (want) installOnce();
     g_storeGate.store(want && g_store.ready.load(std::memory_order_acquire) ? 1u : 0u, std::memory_order_release);
     builderProbeRecompute();   // the builder's gate follows the same toggles (builder_probe.cpp)

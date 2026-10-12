@@ -47,5 +47,7 @@ void sealedTrialNoteBuilderCalls(uint64_t afterCull) noexcept;
 // TEMPORARY, shared by the trial, the builder probe and the kept report: a record's name (rec+0x18 -> node, node+0 -> text, the census's accept
 // rules), cached per node for the frame. False when no name can be read. Takes the trial's lock, so it is safe from any thread.
 bool sealedTrialRecordName(uintptr_t record, std::string* out) noexcept;
+// The same name, copied into a caller's buffer with no allocation (the hatch geometry probe's store path). False when no name can be read.
+bool sealedTrialRecordNameInto(uintptr_t record, char* out, size_t cap) noexcept;
 
 }  // namespace edvr

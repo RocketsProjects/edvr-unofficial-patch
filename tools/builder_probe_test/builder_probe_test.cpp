@@ -4,8 +4,10 @@
 // No DLL and no game.
 #include "../../src/d3d11/builder_probe_core.h"
 #include "../../src/d3d11/hatch_probe_core.h"
+#include "../../src/d3d11/hatch_geometry_core.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -350,6 +352,117 @@ int main(int argc, char** argv) {
               "under the stress every builder call is in a taken storage or counted as a drop (no call lost, none twice)");
         check(takenSeen.load() + takenSeenDrops.load() == attempts,
               "under the stress every store visit is in a taken storage or counted as a drop (no visit lost, none twice)");
+    }
+
+    // --- Built v8.2: the hatch geometry core. The name rules, the tracker's appear, change (centre and pose, measured from the last logged
+    //     value), disappear (after 30 absent samples) and reappear, the track cap, the nearest Hanger, the first-sample names, the line text, and
+    //     the sample box (one kept per record; drops past the reserve).
+    {
+        namespace hg = edvr::hatchgeo;
+        check(hg::isGeometryName("BlastShield_A") && hg::isGeometryName("LandingPadSmall") && hg::isGeometryName("HangarLiftDoors__") &&
+                  hg::isGeometryName("SmallHangerSkirt") && hg::isGeometryName("door_lift_01"),
+              "the five words select a record, in any case");
+        check(!hg::isGeometryName("DockingHub") && !hg::isGeometryName("HabitatRingA") && !hg::isGeometryName("") &&
+                  !hg::isGeometryName(nullptr),
+              "other names are not followed");
+        check(hg::isHangerName("HangerSmall") && hg::isHangerName("hangar_x") && !hg::isHangerName("Agricultural_SmallHangar") &&
+                  !hg::isHangerName("BlastShield"),
+              "the Hanger and Hangar prefixes are the distance references; a word inside a name is not");
+        check(hg::kSampleEvery == 6 && hg::kSampleCap == 64 && hg::kMissLimit == 30 && hg::kLineCap == 600,
+              "one frame in six, 64 records a sample, 30 absent samples, 600 lines a session");
+
+        auto sampleAt = [](uintptr_t addr, const char* name, float x, float y, float z) {
+            hg::Sample s;
+            s.addr = addr;
+            std::snprintf(s.name, sizeof(s.name), "%s", name);
+            s.centre[0] = x;
+            s.centre[1] = y;
+            s.centre[2] = z;
+            s.poseOk = true;
+            return s;
+        };
+
+        hg::Tracker tr;
+        std::vector<hg::Event> ev;
+        hg::Sample a = sampleAt(0x1000, "BlastShield_A", 0, 0, 0);
+        tr.apply(&a, 1, &ev);
+        check(ev.size() == 1 && ev[0].kind == hg::Kind::kAppear && ev[0].sample == 0, "a new record appears once");
+        ev.clear();
+        tr.apply(&a, 1, &ev);
+        check(ev.empty(), "the same record, unmoved, logs nothing");
+        a.centre[0] = 0.02f;
+        tr.apply(&a, 1, &ev);
+        check(ev.empty(), "a move of 0.02 m (under 0.05) logs nothing");
+        a.centre[0] = 0.1f;
+        tr.apply(&a, 1, &ev);
+        check(ev.size() == 1 && ev[0].kind == hg::Kind::kChange && std::fabs(ev[0].centreDelta - 0.1f) < 1e-4f,
+              "a move of 0.1 m is a change, measured from the last logged centre (the origin)");
+        ev.clear();
+        a.pose[3] = 0.002f;
+        tr.apply(&a, 1, &ev);
+        check(ev.size() == 1 && ev[0].kind == hg::Kind::kChange && std::fabs(ev[0].poseDelta - 0.002f) < 1e-5f && ev[0].centreDelta < 1e-6f,
+              "a pose float moving 0.002 is a change, with the pose delta named");
+        ev.clear();
+        for (int i = 0; i < 29; ++i) tr.apply(nullptr, 0, &ev);
+        check(ev.empty(), "absent for 29 samples: nothing yet");
+        tr.apply(nullptr, 0, &ev);
+        check(ev.size() == 1 && ev[0].kind == hg::Kind::kDisappear && ev[0].missed == 30 && ev[0].addr == 0x1000 &&
+                  ev[0].sample == hg::kNoSample,
+              "absent for 30 samples: disappeared, with no sample index");
+        check(std::fabs(ev[0].centre[0] - 0.1f) < 1e-6f, "the disappearance shows the last logged centre");
+        ev.clear();
+        tr.apply(&a, 1, &ev);
+        check(ev.size() == 1 && ev[0].kind == hg::Kind::kAppear, "the record back again appears again");
+
+        hg::Tracker full;
+        std::vector<hg::Sample> many(hg::kTrackCap + 1);
+        for (size_t i = 0; i < many.size(); ++i) many[i] = sampleAt(0x2000u + i * 0x10u, "Hanger", static_cast<float>(i), 0, 0);
+        std::vector<hg::Event> fe;
+        full.apply(many.data(), many.size(), &fe);
+        check(fe.size() == hg::kTrackCap && full.refused() == 1,
+              "the tracker follows kTrackCap records; the next is refused and counted");
+
+        const float origin[3] = {0.0f, 0.0f, 0.0f};
+        hg::Sample near3[3] = {sampleAt(1, "HangerSmall", 10, 0, 0), sampleAt(2, "Hangar_b", 3, 4, 0), sampleAt(3, "BlastShield", 0, 0, 1)};
+        float d = 0.0f;
+        check(hg::nearestHanger(origin, near3, 3, 0, &d) && std::fabs(d - 5.0f) < 1e-5f,
+              "the nearest Hanger record is 5 m away (the BlastShield is not a reference)");
+        check(hg::nearestHanger(origin, near3, 3, 2, &d) && std::fabs(d - 10.0f) < 1e-5f, "the record itself is skipped");
+        check(!hg::nearestHanger(origin, near3 + 2, 1, 0, &d), "no Hanger record: none");
+
+        hg::Sample names3[3] = {sampleAt(1, "HangerSmall", 0, 0, 0), sampleAt(2, "BlastShield", 0, 0, 0), sampleAt(3, "HangerSmall", 0, 0, 0)};
+        char nm[256];
+        hg::formatNameCounts(nm, sizeof(nm), names3, 3);
+        check(std::string(nm) == "HangerSmall x2, BlastShield x1", "the first-sample names: most first, with counts");
+
+        hg::Event ce;
+        ce.kind = hg::Kind::kChange;
+        ce.addr = 0xABC;
+        std::snprintf(ce.name, sizeof(ce.name), "BlastShield_A");
+        ce.centre[0] = 1.0f;
+        ce.centre[1] = 2.0f;
+        ce.centre[2] = 3.0f;
+        ce.centreDelta = 0.1f;
+        ce.poseOk = false;
+        char evLine[1000];
+        hg::formatEvent(evLine, sizeof(evLine), ce, true, 5.0f, 7, 99, true, 3, 4);
+        check(contains(evLine, "hatch geometry: changed frame 7 t=99 ms: rec 0xABC name=BlastShield_A centre (1.000,2.000,3.000)") &&
+                  contains(evLine, "moved 0.100 m") && contains(evLine, "nearest_hangar=5.00 m") && contains(evLine, "pose=unreadable") &&
+                  contains(evLine, "status flags=3 flags2=4"),
+              "a change line names the record, its centre, its move, the nearest Hanger, the pose state and the Status words");
+
+        hg::SampleBox<std::mutex> box;
+        {
+            hg::SampleStorage s;
+            s.reserve(2);
+            (void)box.exchange(std::move(s));
+        }
+        box.add(sampleAt(0x10, "Lift", 0, 0, 0));
+        box.add(sampleAt(0x10, "Lift", 0, 0, 0));
+        box.add(sampleAt(0x20, "Lift", 0, 0, 0));
+        box.add(sampleAt(0x30, "Lift", 0, 0, 0));
+        hg::SampleStorage got = box.exchange(hg::SampleStorage{});
+        check(got.items.size() == 2 && got.drops == 1, "a record twice is kept once; past the reserve it is a drop");
     }
 
     std::printf("builder_probe_test: %d checks, %d failures\n", g_checks, g_failures);

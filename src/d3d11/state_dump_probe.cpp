@@ -24,7 +24,9 @@
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "hatch_probe_core.h"
+#include "hatch_geometry.h"
 #include "journal_watch.h"
+#include "store_hook.h"
 #include "state_dump_core.h"
 
 #include <algorithm>
@@ -477,6 +479,7 @@ void hatchProbeFrame(uint32_t frame) {
         Log::get().note("%s", line);
     }
     if (!g_hatchOn.load(std::memory_order_acquire)) return;
+    hatchGeometryFrame(frame);   // Built v8.2: the geometry sample (one frame in six), while the hatch probe is on
     for (uint32_t i = 0; i < table.count; ++i) {
         const uintptr_t obj = table.obj[i];
         if (!obj) continue;
@@ -701,6 +704,8 @@ void hatchProbeToggle(const char* trigger, uint32_t frame) {
     if (g_hatchOn.load(std::memory_order_acquire)) {
         g_hatchOn.store(false, std::memory_order_release);
         updateGate();
+        hatchGeometryOff(frame);
+        storeHookRecompute();
         uint32_t n = 0, refused = 0, overflow = 0;
         {
             std::lock_guard<std::mutex> lock(g_rememberMutex);
@@ -734,6 +739,8 @@ void hatchProbeToggle(const char* trigger, uint32_t frame) {
     Log::get().note("%s", clearLine);
     g_hatchOn.store(true, std::memory_order_release);
     updateGate();
+    hatchGeometryOn(frame);   // Built v8.2: the geometry tracks and the first-sample count start with the hatch probe
+    storeHookRecompute();     // the store is wanted while the hatch probe is on (the geometry sample is taken there)
     // The state-name table's pointers, once, so the +0x340 bytes can be compared with them offline.
     uint64_t ptrs[hatch::kTableCount] = {};
     for (uint32_t i = 0; i < hatch::kTableCount; ++i) {

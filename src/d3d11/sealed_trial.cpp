@@ -405,6 +405,8 @@ bool sealedTrialRecordName(uintptr_t record, std::string* out) noexcept {
     return true;
 }
 
+bool sealedTrialRecordNameInto(uintptr_t record, char* out, size_t cap) noexcept { return cachedName(record, out, cap); }
+
 void sealedTrialToggle(const char* trigger, uint32_t frame) {
     std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     char line[480];

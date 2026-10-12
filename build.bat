@@ -555,6 +555,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\sun_pass_probe.cpp" ^
     "src\d3d11\shadow_gate_probe.cpp" ^
     "src\d3d11\state_dump_probe.cpp" ^
+    "src\d3d11\hatch_geometry.cpp" ^
     "src\d3d11\store_hook.cpp" ^
     "src\d3d11\sealed_trial.cpp" ^
     "src\d3d11\builder_probe.cpp" ^
