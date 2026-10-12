@@ -10,6 +10,7 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 - **Concourse:** the SocialSpace sub-area under StationInteriorHub, created at station load (P1).
 - **Triggers now:** seated = Status Flags bits 24-26 or Flags2 bits 1-2 (EDVR `journalSeatedFromFlags`). Disembark = journal Disembark with SRV, Taxi and Multicrew false (P5). Status OnFoot lags about 6 s, so it is not a restore trigger.
 - **Ruled out:** Status.json as the sealed signal; ToggleCockpitRender as a render switch; InteriorStateChangeActivity as a switch (P7).
+- **Hangar state (RE 2026-10-12, offline):** the four docking readers are virtual methods of one class O, reached through vtable 0x51A9F00 at O+0x58, which is the AAB8 object (`this`). Its state byte is this+0x3C8 (2 on the readers' docked path), its state name is a typed value at this+0x340, and its owner is at this-8 (occupancy count at owner+0x10). EDVR's reader detours already receive `this`. PadRetraction and HangarLiftDoors__ storage is still not located, and no link from a render record to O is found. Next flight: the state dump over a launch cycle, with owner+0x10 added (see "Hangar door state (RE, 2026-10-12)").
 - **Open:** pad and door storage (P9); cell radius; pane draw hashes and ownership; env slot numbers; player_location read path (P10).
 - **Next flight, no engine change:** the Built v7 census in three captures (see Built v7): (a) docked, hatch closed, seated; (b) on foot in the bay; (c) on foot in the concourse. Then the Built v5 plan (with the `torn=` check of Built v6). Older steps, still open: the Built v4 plan in Measurement: docked, step the trial down the ladder one rung at a time with a census (F6) at each rung, and note the smallest radius where everything still looks complete; then the approach state dump (F3, `diag.state_dump_frames = 6000`) and the look probe at the concourse bay windows. The Built v3 and v2 plans still stand for the rest (the open-pad outpost, M3, is in v2). The M1 draw link is the open item.
 - **Probe keys (TEMPORARY):** `hotkey.asset_census` (Built v7; unbound by default; on the flat allow-list), `hotkey.state_dump`, `hotkey.look_probe`, `hotkey.sealed_trial`, `hotkey.sealed_trial_smaller` and `hotkey.sealed_trial_larger` (all unbound by default), `diag.state_dump = off`, `diag.state_dump_frames = 3000` (60 to 6000; 6000 for the approach dump), and `diag.sealed_trial_radius_m = 80`. **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
@@ -315,3 +316,104 @@ Known VS in the repo: none of the 15 distinct VS in look_probe_20261012_051015.c
 - Full reader and writer enumeration of rec+0x208 and rec+0x234. A displacement-only scan finds hundreds of unrelated structs with those offsets (the 0x234 scan printed well over 100 functions), so it needs a base-register anchor per site.
 - The 0x4331300 per-item window and the builder body beyond its first arguments.
 - Virtual callers of the traversal and the single-entry form.
+
+## Hangar door state (RE, 2026-10-12)
+
+Offline and read-only. Build 332841 (TimeDateStamp 1788384820, SizeOfImage 104894464, base 0x140000000), checked on the game-directory copy. Branch `claude/hangar-door-state` from `388289b3`. Nothing built, installed or flown. Scratch tools (not committed): a PE reader, a capstone linear sweep of `.text` (21.2 M instructions, rip-relative and direct call/jmp xrefs), and a `.pdata` function finder.
+
+**Question.** Where is the docked / pad-lowered / hatch-closed value stored, and can EDVR reach it at render time?
+
+**Answer in brief.** The four docking readers (0x12C3C20, 0x12CAF80, 0x12CADE0, 0x12CB320) are virtual methods of one class, called O here. Its name is not recoverable from the exe. The reader's `this` is the AAB8 object, which is O+0x58. The state byte is this+0x3C8. The docking name is a typed value at this+0x340. The owner is at this-8, and the owner's occupancy count is at owner+0x10. EDVR's reader detours already receive `this`. PadRetraction and HangarLiftDoors__ storage is not located. Byte offsets and reader logic are PROVEN from the exe bytes. The meaning of the values is INFERRED.
+
+### Ruled out
+
+- **RTTI route.** ruled out, because the exe has 19 `.?AV` type descriptors, all third-party (Wwise, MaskedOcclusion, std), and none is an Elite class.
+- **Census vtable columns as a class key.** ruled out, because all 2583 rows of the four 20261012 census CSVs carry the same triple (model 0x50C7DE8, component 0x5596438, source 0x55967C0), hangar parts included, and record_vtable is 0 on every row. 0x50C7DE8 is not a vtable: the word before it is 0x6c and slots 2 and up are text.
+- **Hangar part names as exe strings.** ruled out, because "HangerSmall", "BlastShield", "HangarComponent", "SmallHangerSkirt" and "LandingPadSmall" are not in the exe. They are asset data (node+0x0 names in the census).
+- **Direct callers of the registrars and readers.** ruled out, because 0x12C8C54, 0x12C93A0, 0x12C0F11 and the four readers have no direct call xref. They are reached through vtable slots or the registry.
+- **A +0x3C8 byte alone as the docked flag.** ruled out, because the reader return code also depends on the owner count, the owner flags and the name.
+- **"Blast Shield Rotation Reset" and "Delay After Launch" as read by the four readers.** ruled out, because no rip-relative code reads 0x5E78C70 or 0x5E78C78. They may be indexed, and no reader uses them.
+
+### PROVEN: the state-name table (0x5E78C40 to 0x5E78C98)
+
+Pointers in .data to C strings:
+0x5E78C40 State_Occupied; 0x5E78C48 State_LocalPlayerOccupied; 0x5E78C50 Ready for landing; 0x5E78C58 Inside_Hangar; 0x5E78C60 Outside_Hangar; 0x5E78C68 null; 0x5E78C70 Blast Shield Rotation Reset; 0x5E78C78 Delay After Launch; 0x5E78C80 Ready for landing; 0x5E78C88 StateTeleport_Inside_Hangar; 0x5E78C90 Outside_Hangar; 0x5E78C98 Inside_Hangar.
+
+Code reads: 0x5E78C50 at 0x12C3C57 (reader 0x12C3C20) and 0x12CB336 (0x12CB320). 0x5E78C58 at 0x12C3C79, 0x12CAF96 and 0x12C6F95 (the "StateTeleport_%s" formatter 0x12C6F1F). 0x5E78C60 at 0x12C3C94, 0x12CADF6 and 0x12CB350.
+
+### PROVEN: the object O
+
+- **Vtables.** Constructor 0x12BA240 (2323 bytes, called from factory 0x12C0C70) stores vtable 0x51A9F00 at O+0x58 (0x12BA2F9, 0x12BA375) and vtable 0x51A9DD0 at O+0x0 (0x12BA34E). Deleting destructor 0x12BD010 is slot 0 of vtable 0x51A9DD0 and is reached through thunks 0x12BC304, 0x12BC310 and 0x12BC31C.
+- **Owner.** The constructor stores its argument rdi at O+0x50 (0x12BA2D1). The readers reach it as [this-8].
+- **Slots of vtable 0x51A9F00 (this = O+0x58).** +0x38 is 0x12CB310, which returns `this+0x3C8 == 2` (`cmp byte [rcx+0x3c8],2; sete al`). +0x88 is the getter 0x12C65A0. +0x90 is reader 0x12CAF80, +0x98 is 0x12CB320, +0xA0 is 0x12CADE0 and +0xC0 is 0x12C3C20. The census labels r0 to r3 are not yet mapped to these four addresses.
+- **Getter (+0x88, 0x12C65A0).** `mov rax,[rcx-8]; cmp dword [rax+0x10],0; seta al`. It returns owner count > 0. The meaning of the count is INFERRED (occupancy of the pad).
+- **State byte.** The constructor writes a word from bp at this+0x3C8 (0x12BAA02, `mov word [r14+0x420], bp`). Readers read the byte: 0x12C3C46 (`cmp byte [rbx+0x3c8], 2`), 0x12CB310 and 0x12CA510. Inside the class's virtual methods there is no writer. The writers outside the constructor are not found.
+- **Name value.** this+0x340 holds a typed value. The readers call 0xA21560 (rcx = this+0x340, rdx = C string) for an equality test. 0xA21560 calls 0xA22140, which switches on a tag from 0x6495D0, and then reads the text through the value's vtable slot +0x10 (INFERRED from the instruction pattern). 0xA22380 checks that two accessors agree, vt+0x10 against vt+0x8 (INFERRED: a settled check).
+
+### PROVEN: the four readers
+
+Let N be true when owner count > 0, or owner+0x2C != 0, or owner+0x2F != 0. Name means the value at this+0x340.
+
+- **0x12C3C20.** If not N: return 2 when this+0x3C8 == 2, else return 0. If N: name "Ready for landing" gives 0, "Inside_Hangar" gives 1, "Outside_Hangar" gives 2, and anything else gives 3.
+- **0x12CAF80.** If owner count == 0: return 0. Otherwise return 1 when name == "Inside_Hangar" and the A22380 check holds, else 0.
+- **0x12CB320 and 0x12CADE0.** Use "Ready for landing" and "Outside_Hangar" (see the table above). Not read in full.
+
+### PROVEN: census rows (20261012 CSVs)
+
+| capture | group | names | recs | dist min m | cam | admitted | mask0 |
+|---|---|---|---|---|---|---|---|
+| 045313 docked, seated | g1 | BlastShield / Door_ModularStyle | 48 | 1717 | 0 | 0 | 48 |
+| 045313 docked, seated | g2 | BlastShieldBase / HangerSmall | 48 | 71.3 | 0 | 1 | 47 |
+| 045313 docked, seated | g58 | SmallHangerSkirt / Agricultural_SmallHangar | 10 | 7.9 | 1 | 1 | 9 |
+| 045313 docked, seated | g60 | HangerSmall / BlastShield | 10 | 25.3 | 1 | 1 | 9 |
+| 045357 on foot in bay | g0 | BlastShield / Door_ModularStyle | 48 | 1.6 | 48 | 48 | 0 |
+| 045357 on foot in bay | g1 | BlastShieldBase / HangerSmall | 48 | 131.9 | 0 | 0 | 48 |
+| 045457 concourse | g1 | BlastShield_A / BlastShield_B | 48 | 790.5 | 0 | 0 | 48 |
+
+The view mask of the blast-shield records follows the camera: masked from the seated view, admitted on foot in the bay. INFERRED: view bits are not a hatch signal.
+
+### Access path
+
+- **Render record to O.** Not found. Record to SRC (rec+0x2B8), then to X (SRC+0x160). X has the shared class (vtable 0x5596438) on every row. No pointer from X or the record to O was found.
+- **Runtime path that exists.** The four readers are already detoured (`src\d3d11\state_dump_probe.cpp`), and the detour receives rcx = `this` = the AAB8 object. From `this`, the plain reads are: byte this+0x3C8, owner = [this-8], dword owner+0x10, bytes owner+0x2C and owner+0x2F. None of these needs a call, so they are safe inside the detour. The name at this+0x340 needs the A22140 decode before its text can be read. Until then, use the reader return codes as the name class.
+
+### Value meanings (INFERRED, to be confirmed by the flight)
+
+- this+0x3C8 = 2: docked, pad lowered. Evidence: the census's 02 02 02 02 while docked, and the reader's 2 branch.
+- this+0x3C8 = 1: launch cue. Evidence: the earlier 01 01 00 00 at the launch cue.
+- owner+0x10 > 0: a ship on the pad.
+- Names: "Ready for landing", "Inside_Hangar" and "Outside_Hangar" are pad states. "Blast Shield Rotation Reset" and "Delay After Launch" are launch-sequence names. No code reads the last two yet.
+
+### Not found
+
+- **PadRetraction** (0x51AA198; also "PadRetractionCSM" at 0x5238598, lea at 0x1D7D5B0) and **HangarLiftDoors__** (0x51AA1C0). Both are registered by 0x12C8C54 with 16-byte inline names copied at 0x12C9165, and a default byte read at 0x12C9170 from 0x51AA1D0. Their storage is not located. The registrar and the readers are in the same module (0x12BA to 0x12CB), so O is the likely owner (INFERRED).
+- **O's class name.** The registry table at 0x51AB2F0 pairs factory 0x12C0C70 (slot at 0x51AB338) with the descriptor vtable 0x51AB330. Registration 0x12B2415 (inside 0x12AF5B0) builds the descriptor from a runtime hash (`imul ..., 0x21`). The name object at 0x5EFD5C0 is zero in the file, so the name is not recoverable from the bytes.
+- **Writers** of this+0x3C8 and this+0x340 outside the constructor.
+
+### Probe (one flight, no new code beyond one logged field)
+
+Use `hotkey.state_dump` (built: AAB8 pinned, +0x000 to +0x3FF tracked, the `AAB8.key3C0=` quad, reader codes per frame) with `diag.state_dump_frames = 6000`. The flight:
+
+1. Docked and seated, pad lowered (Inside_Hangar), hatch closed. Press F3 and wait 10 s.
+2. Take off: raise the pad, close the doors, launch. The dump keeps running. 6000 frames is about 100 s at 60 fps.
+
+Per frame the dump already logs the reader codes and the `changes` column for AAB8. Add one field the dump does not yet track: owner dword +0x10, and owner bytes +0x2C and +0x2F.
+
+Signatures:
+
+- **S1 (this+0x3C8 is the docked enum).** Reads 2 while seated and docked, changes to 1 at the launch cue, before the pad moves. Refuted if it stays 2 through the pad raise and the launch.
+- **S2 (owner+0x10 is the occupancy count).** Reads 1 when docked and 0 after undock. Refuted if it does not change on dock or undock.
+- **S3 (names).** The reader codes move from 1 (Inside_Hangar) through 2 or 3 to 0 across the launch. Refuted if no reader code changes.
+- **S4 (earlier trigger than geometry).** If this+0x3C8 changes before the LandingPad records move, the byte is an earlier trigger than geometry. Measure the lag in frames.
+- **Control.** Repeat at a second station with the same pad type, to check that the value 2 is not station-specific.
+
+Decision rule for the sealed cull (not yet decided): this+0x3C8 == 2, owner count > 0, and reader code 1, released on the first frame where the byte changes.
+
+### Open
+
+1. Find the writers of this+0x3C8 and of the name at this+0x340 in O's non-virtual methods and in the constructor's callers.
+2. Decode A22140 and A21560 (variant tag and text) so EDVR can read the name safely.
+3. Link O to the render records: find a field in X or SRC that points to O or to its owner.
+4. Find the storage of PadRetraction and HangarLiftDoors__ (P9).
+
+Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
