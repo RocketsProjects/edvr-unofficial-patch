@@ -21,6 +21,7 @@
 #include "../common/iniedit.h"
 #include "probe.h"
 #include "state.h"
+#include "plugin_components.h"
 
 namespace edvr::installer {
 
@@ -134,6 +135,8 @@ struct Options {
     bool repair = false;        // rewrite our files even when they look right
     bool convertProfile = false; // explicit edition conversion
     bool removeSettings = false;  // uninstall: delete the installed edition's settings file too
+    bool pluginSelectionSpecified = false;
+    std::vector<std::string> pluginIds;
     std::wstring backupStamp;   // folder name under edvr_backup\; caller supplies the clock
     std::string  nowUtc;        // stamped into the install record
 };
@@ -185,6 +188,8 @@ struct Plan {
 };
 
 Plan planInstall(const Survey& survey, const Options& options, const PayloadInfo& payload);
+Plan planInstall(const Survey& survey, const Options& options, const PayloadInfo& payload,
+                 plugin_components::CatalogView catalog);
 Plan planUninstall(const Survey& survey, const Options& options);
 
 // The one-paragraph summary shown before anything is done.

@@ -33,6 +33,22 @@ const char* kRunStateUnknown =
 
 std::string say(const std::wstring& w) { return toUtf8(w); }
 
+std::string pluginSelectionNames(plugin_components::CatalogView catalog,
+                                 const std::string& profile,
+                                 const std::vector<std::string>& ids) {
+    if (ids.empty()) return "none";
+    const auto rows = plugin_components::components(catalog, profile);
+    std::string names;
+    for (const auto& id : ids) {
+        if (!names.empty()) names += ", ";
+        const auto row = std::find_if(rows.begin(), rows.end(), [&](const auto& item) {
+            return item.id == id;
+        });
+        names += row == rows.end() ? id : row->name;
+    }
+    return names;
+}
+
 std::vector<std::wstring> subdirsOf(const std::wstring& dir) {
     std::vector<std::wstring> out;
     WIN32_FIND_DATAW fd{};
@@ -196,6 +212,11 @@ Survey surveyTarget(const GameInstall& game) {
 }
 
 Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
+    return planInstall(s, o, p, plugin_components::compiledCatalog());
+}
+
+Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p,
+                 plugin_components::CatalogView catalog) {
     Plan plan;
     plan.backupDir =
         joinPath(backupRootPath(s.game.dir), o.backupStamp.empty() ? L"backup" : o.backupStamp);
@@ -238,6 +259,70 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         plan.problems.push_back("This folder has the " + existingProfile + " edition. Use --convert-profile or confirm edition conversion in the window.");
         return plan;
     }
+    PluginSelectionRecord desiredSelection = s.state.pluginSelection;
+    bool selectionChanged = false;
+    if (o.pluginSelectionSpecified) {
+        const auto resolved = plugin_components::resolve(catalog, p.profile, o.pluginIds);
+        if (!resolved.error.empty()) {
+            plan.blocked = true;
+            plan.problems.push_back(resolved.error);
+            return plan;
+        }
+        desiredSelection.state = PluginSelectionRecordState::Supported;
+        desiredSelection.schemaVersion = 1;
+        desiredSelection.catalogSchemaVersion = catalog.schemaVersion;
+        desiredSelection.profile = p.profile;
+        desiredSelection.selectedIds = resolved.selectedIds;
+        desiredSelection.opaqueText.clear();
+        if (!resolved.autoSelectedIds.empty()) {
+            std::string ids;
+            for (const auto& id : resolved.autoSelectedIds) {
+                if (!ids.empty()) ids += ", ";
+                ids += id;
+            }
+            plan.notes.push_back("Required by those choices: " + ids + ".");
+        }
+        for (const auto& notice : resolved.softNotices)
+            plan.notes.push_back("Optional plugin note: " + notice);
+    } else if (((s.state.pluginSelection.state == PluginSelectionRecordState::Absent &&
+                 (!s.state.present || conversion)) ||
+               (s.state.pluginSelection.state == PluginSelectionRecordState::Supported &&
+                s.state.pluginSelection.profile != p.profile)) &&
+               plugin_components::profileSelectionReady(catalog, p.profile)) {
+        const auto resolved = plugin_components::defaults(catalog, p.profile);
+        if (!resolved.error.empty()) {
+            plan.blocked = true;
+            plan.problems.push_back(resolved.error);
+            return plan;
+        }
+        desiredSelection.state = PluginSelectionRecordState::Supported;
+        desiredSelection.schemaVersion = 1;
+        desiredSelection.catalogSchemaVersion = catalog.schemaVersion;
+        desiredSelection.profile = p.profile;
+        desiredSelection.selectedIds = resolved.selectedIds;
+        desiredSelection.opaqueText.clear();
+        plan.notes.push_back("Using the " + p.profile + " profile's default plugin selection.");
+        for (const auto& id : resolved.autoSelectedIds)
+            plan.notes.push_back("Required by the defaults: " + id + ".");
+        for (const auto& notice : resolved.softNotices)
+            plan.notes.push_back("Optional plugin note: " + notice);
+    }
+    if (desiredSelection.state == PluginSelectionRecordState::Supported) {
+        const std::string selectedProfile = desiredSelection.profile;
+        const std::string subject = selectedProfile == p.profile
+            ? "Resulting plugin selection for the " + selectedProfile + " profile: "
+            : "Existing plugin selection remains bound to the " + selectedProfile + " profile: ";
+        plan.notes.push_back(subject + pluginSelectionNames(catalog, selectedProfile,
+                                                             desiredSelection.selectedIds) + ".");
+    } else if (desiredSelection.state == PluginSelectionRecordState::Opaque)
+        plan.notes.push_back("The existing opaque plugin selection metadata is preserved.");
+    const auto& oldSelection = s.state.pluginSelection;
+    selectionChanged = desiredSelection.state != oldSelection.state ||
+        (desiredSelection.state == PluginSelectionRecordState::Supported &&
+         (desiredSelection.schemaVersion != oldSelection.schemaVersion ||
+          desiredSelection.catalogSchemaVersion != oldSelection.catalogSchemaVersion ||
+          desiredSelection.profile != oldSelection.profile ||
+          desiredSelection.selectedIds != oldSelection.selectedIds));
     const std::string oldDescriptor = "[install]\r\nschema = 1\r\nprofile = " +
                                       existingProfile + "\r\n";
     if (s.descriptorPresent && (s.descriptorSha.empty() ||
@@ -310,11 +395,13 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     next.edvrVersion = p.version;
     next.installedUtc = o.nowUtc;
     next.profile = p.profile;
+    next.pluginSelection = desiredSelection;
     next.descriptorSha = p.descriptorSha;
     next.components = flat ? "graphics,profile,ini,ngx-optional" :
         "graphics,profile,ini,openvr,openxr-loader,openxr-license,openxr-config,ngx-optional";
     next.openvrDir = flat ? std::wstring() : relativeOpenvr(s.game.dir, nativeDir);
     next.nativeInstalled=!flat;
+    changed = selectionChanged;
 
     // The chain is DECIDED by this run, not inherited from the record. The
     // record says what was true last time, and whether it is still true is the
@@ -788,13 +875,15 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         mkState.why = "holds the install record";
         plan.steps.push_back(mkState);
 
-        Step base;
-        base.action = Action::WriteText;
-        base.text = p.iniText;
-        base.to = baseIniPath(s.game.dir);
-        base.why = "keeps this version's default " + toUtf8(settingsLeafFor(p.profile)) +
-                   ", so the next update can tell your changes from a changed default";
-        plan.steps.push_back(base);
+        if (o.repair || s.baseIniText != p.iniText) {
+            Step base;
+            base.action = Action::WriteText;
+            base.text = p.iniText;
+            base.to = baseIniPath(s.game.dir);
+            base.why = "keeps this version's default " + toUtf8(settingsLeafFor(p.profile)) +
+                       ", so the next update can tell your changes from a changed default";
+            plan.steps.push_back(base);
+        }
 
         Step rec;
         rec.action = Action::WriteText;

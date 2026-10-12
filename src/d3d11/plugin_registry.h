@@ -109,6 +109,11 @@ typedef uint32_t (*EdvrLegacyDrawGateFn)(void* state);
 
 namespace edvr {
 
+#ifdef EDVR_SELECTION_ADMISSION_TEST
+bool pluginRegistryImplementationStatusAllowedForTest(const char* status,
+                                                       bool lifecycle) noexcept;
+#endif
+
 namespace detail {
 extern std::atomic<uint64_t> g_pluginShaderCandidates;
 extern std::atomic<draw_interest::InterestMask> g_legacyDrawInterestMask;

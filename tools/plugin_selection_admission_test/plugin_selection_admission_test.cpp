@@ -49,8 +49,8 @@ void wireAndGeneratedCatalog() {
           wire.catalogSchemaVersion == edvr::plugins::kSelectionCatalogSchemaVersion &&
           wire.capabilities == kCapabilities && wire.reserved == 0,
           "contract has the fixed ABI and generated catalog schema");
-    check(wire.supportedProfileMask == 0,
-          "current generated catalog advertises no profile until every group is ready");
+    check(wire.supportedProfileMask == 3,
+          "generated catalog advertises VR and Flat after every applicable group is ready");
     check(std::memcmp(wire.catalogFingerprint, edvr::plugins::kSelectionCatalogFingerprint, 32) == 0,
           "contract fingerprints the generated catalog");
     auto current = PluginSelectionSnapshotV1{};
@@ -62,12 +62,21 @@ void wireAndGeneratedCatalog() {
     current.recordCatalogSchemaVersion = current.compiledCatalogSchemaVersion =
         edvr::plugins::kSelectionCatalogSchemaVersion;
     std::memcpy(current.catalogFingerprint, edvr::plugins::kSelectionCatalogFingerprint, 32);
-    const auto dormant = decide(S_OK, &current, PluginSelectionProfileV1::Vr, 0x12345000);
-    check(dormant.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
-          dormant.reason == static_cast<std::uint32_t>(Reason::ProfileNotReady) &&
-          dormant.selectedPluginMask == 0 && !selected(dormant, 0) &&
-          ownerEnabled(dormant, 0),
-          "generated all-unready catalog keeps an empty supported mask Legacy");
+    const auto generatedEmpty = decide(S_OK, &current, PluginSelectionProfileV1::Vr, 0x12345000);
+    check(generatedEmpty.mode == static_cast<std::uint32_t>(Mode::AdmittedSelection) &&
+          generatedEmpty.reason == static_cast<std::uint32_t>(Reason::None) &&
+          generatedEmpty.selectedPluginMask == 0 && !selected(generatedEmpty, 0) &&
+          !ownerEnabled(generatedEmpty, 0),
+          "generated VR catalog admits the explicit empty selection without enabling an owner");
+    auto generatedPerformance = current;
+    generatedPerformance.recordedPluginMask = 1u << edvr::plugins::kPluginPerformance;
+    const auto generatedSelected = decide(S_OK, &generatedPerformance,
+        PluginSelectionProfileV1::Vr, 0x12345000);
+    check(generatedSelected.mode == static_cast<std::uint32_t>(Mode::AdmittedSelection) &&
+          selected(generatedSelected, edvr::plugins::kPluginPerformance) &&
+          ownerAllowedForStartup(generatedSelected, edvr::plugins::kPluginPerformance) &&
+          !ownerAllowedForStartup(generatedSelected, edvr::plugins::kPluginTemporalAa),
+          "generated VR selection enables only its selected Performance owner");
 
     const auto remainsLegacy = [&](PluginSelectionSnapshotV1 malformed,
                                    PluginSelectionProfileV1 active) {
@@ -105,11 +114,11 @@ void wireAndGeneratedCatalog() {
     check(unknown.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
           !ownerEnabled(unknown, 0) && !ownerEnabled(unknown, 7),
           "unknown active profile keeps all profile-specific owners disabled");
-    check(!ownerEnabled(dormant, 32) &&
-          !ownerEnabled(dormant, (std::numeric_limits<std::uint32_t>::max)()),
-          "out-of-range Legacy owner indices are disabled");
-    check(ownerAllowedForStartup(dormant, edvr::plugins::kPluginPerformance),
-          "a valid Legacy VR decision allows the startup owner path");
+    check(!ownerEnabled(generatedEmpty, 32) &&
+          !ownerEnabled(generatedEmpty, (std::numeric_limits<std::uint32_t>::max)()),
+          "out-of-range admitted owner indices are disabled");
+    check(!ownerAllowedForStartup(generatedEmpty, edvr::plugins::kPluginPerformance),
+          "an explicit empty admitted VR selection disables Performance startup");
 
     auto flatSource = snapshot(PluginSelectionProfileV1::Flat);
     const auto flatLegacy = decideWithCatalog(S_OK, &flatSource,
@@ -125,28 +134,28 @@ void wireAndGeneratedCatalog() {
           ownerAllowedForStartupWithCatalog(unknownLegacy, 0, readyCatalog),
           "Legacy Unknown preserves the existing VR-only startup call-site guard");
 
-    auto badWire = dormant;
+    auto badWire = generatedSelected;
     badWire.structSize--;
     check(!ownerAllowedForStartup(badWire, edvr::plugins::kPluginPerformance),
           "startup owner adapter rejects malformed decision wire size");
-    badWire = dormant;
+    badWire = flatLegacy;
     badWire.reason = static_cast<std::uint32_t>(Reason::None);
-    check(!ownerAllowedForStartup(badWire, edvr::plugins::kPluginPerformance),
+    check(!ownerAllowedForStartupWithCatalog(badWire, 0, readyCatalog),
           "startup owner adapter rejects a Legacy reason the producer never emits");
-    badWire = dormant;
+    badWire = generatedSelected;
     badWire.abiVersion++;
     check(!ownerAllowedForStartup(badWire, edvr::plugins::kPluginPerformance),
           "startup owner adapter rejects an unknown decision ABI");
-    badWire = dormant;
+    badWire = generatedSelected;
     badWire.reserved[4] = 1;
     check(!ownerAllowedForStartup(badWire, edvr::plugins::kPluginPerformance),
           "startup owner adapter rejects nonzero reserved decision data");
-    badWire = dormant;
+    badWire = generatedSelected;
     badWire.mode = 99;
     check(!ownerAllowedForStartup(badWire, edvr::plugins::kPluginPerformance),
           "startup owner adapter rejects an unknown decision mode");
-    check(!ownerAllowedForStartup(dormant, edvr::plugins::kPluginCount) &&
-          !ownerAllowedForStartup(dormant, 32),
+    check(!ownerAllowedForStartup(generatedSelected, edvr::plugins::kPluginCount) &&
+          !ownerAllowedForStartup(generatedSelected, 32),
           "startup owner adapter rejects unknown and out-of-range group indices");
 
     const auto unavailable = decide(E_FAIL, &current, PluginSelectionProfileV1::Vr, 0);

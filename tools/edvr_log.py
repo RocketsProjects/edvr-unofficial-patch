@@ -3,6 +3,7 @@
 
     python tools/edvr_log.py --target steam --version
     python tools/edvr_log.py --target steam --expect-build HEAD
+    python tools/edvr_log.py --target steam --expect-plugins temporal-aa,cockpit-visuals
     python tools/edvr_log.py --target steam --grep "Stats\\[4[0-9]\\]"
     python tools/edvr_log.py --target steam --tail 80
     python tools/edvr_log.py --target frontier --tally vh
@@ -267,6 +268,7 @@ import argparse
 import bisect
 import calendar
 import datetime
+import json
 import math
 import os
 import re
@@ -433,6 +435,98 @@ def version_line(text):
         if m:
             return line.strip(), m.group("ver"), None
     return None, None, None
+
+
+PLUGIN_SELECTION_RE = re.compile(
+    r"^(?:\[[^\]]+\]\s*)?plugin selection: mode=(selected|legacy) "
+    r"profile=(vr|flat|unknown) plugins=((?:[a-z0-9]+(?:-[a-z0-9]+)*)"
+    r"(?:,(?:[a-z0-9]+(?:-[a-z0-9]+)*))*)? "
+    r"reason=([a-z-]+) record=([a-z-]+) validation=0x([0-9A-Fa-f]{8})$")
+PLUGIN_ID_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+PLUGIN_SELECTION_PREFIX = "plugin selection:"
+
+
+def canonical_plugin_ids():
+    """Load the current IDs from the canonical source catalog; fail closed."""
+    path = os.path.join(repo_root(), "src", "plugins", "plugin_manifest.json")
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            manifest = json.load(stream)
+    except (OSError, ValueError) as exc:
+        return None, "cannot read canonical plugin catalog: %s" % exc
+    if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 2:
+        return None, "canonical plugin catalog has an unsupported shape or schema"
+    plugins = manifest.get("plugins")
+    if not isinstance(plugins, list) or not plugins:
+        return None, "canonical plugin catalog has no plugin list"
+    ids = []
+    for index, plugin in enumerate(plugins):
+        if not isinstance(plugin, dict):
+            return None, "canonical plugin catalog plugins[%d] is malformed" % index
+        plugin_id = plugin.get("id")
+        if not isinstance(plugin_id, str) or not PLUGIN_ID_RE.fullmatch(plugin_id):
+            return None, "canonical plugin catalog plugins[%d].id is malformed" % index
+        if plugin_id in ids:
+            return None, "canonical plugin catalog has duplicate ID %s" % plugin_id
+        ids.append(plugin_id)
+    return set(ids), None
+
+
+def plugin_selection_line(text):
+    """Return the unique effective startup plugin selection, or its failure."""
+    found = []
+    known_ids, catalog_error = canonical_plugin_ids()
+    if catalog_error:
+        return None, catalog_error
+    for raw_line in text.splitlines():
+        if PLUGIN_SELECTION_PREFIX not in raw_line:
+            continue
+        match = PLUGIN_SELECTION_RE.match(raw_line)
+        if not match:
+            return None, "malformed plugin selection startup line"
+        ids = match.group(3).split(",") if match.group(3) else []
+        if len(ids) != len(set(ids)):
+            return None, "duplicate plugin ID in startup set"
+        unknown = sorted(set(ids) - known_ids)
+        if unknown:
+            return None, "unknown plugin ID(s) in startup set: %s" % ",".join(unknown)
+        found.append((match.group(1), match.group(2), ids,
+                      match.group(4), match.group(5), int(match.group(6), 16)))
+    if not found:
+        return None, "no plugin selection startup line"
+    if len(found) != 1:
+        return None, "multiple plugin selection startup lines"
+    return found[0], None
+
+
+def verify_expected_plugins(text, expected):
+    actual, error = plugin_selection_line(text)
+    if error:
+        print("[edvr] PLUGIN SET MISMATCH: %s" % error)
+        return 2
+    expected_ids = expected.split(",") if expected else []
+    if any(not PLUGIN_ID_RE.fullmatch(item) for item in expected_ids):
+        print("[edvr] invalid --expect-plugins: malformed plugin ID list")
+        return 2
+    if len(expected_ids) != len(set(expected_ids)):
+        print("[edvr] invalid --expect-plugins: duplicate ID")
+        return 2
+    known_ids, catalog_error = canonical_plugin_ids()
+    if catalog_error:
+        print("[edvr] invalid --expect-plugins: %s" % catalog_error)
+        return 2
+    unknown = sorted(set(expected_ids) - known_ids)
+    if unknown:
+        print("[edvr] invalid --expect-plugins: unknown plugin ID(s): %s" %
+              ",".join(unknown))
+        return 2
+    if set(actual[2]) != set(expected_ids):
+        print("[edvr] PLUGIN SET MISMATCH\n       log says   %s (%s, %s)\n       expected   %s" %
+              (",".join(actual[2]), actual[0], actual[1], ",".join(expected_ids)))
+        return 2
+    print("[edvr] plugin set matches: mode=%s profile=%s plugins=%s" %
+          (actual[0], actual[1], ",".join(actual[2])))
+    return 0
 
 
 DLSS_RUNTIME_RE = re.compile(
@@ -10047,6 +10141,9 @@ def main(argv=None):
     ap.add_argument("--expect-build", default=None,
                     help="a git ref (HEAD) or literal version; exit 2 if the "
                          "log was not written by that build")
+    ap.add_argument("--expect-plugins", default=None,
+                    help="comma-separated installed plugin IDs; exit 2 if the "
+                         "startup selection line is absent, malformed, or differs")
     ap.add_argument("--grep", default=None,
                     help="print only lines matching this regular expression")
     ap.add_argument("--tail", type=int, default=None,
@@ -10267,6 +10364,11 @@ def main(argv=None):
                   % (ver or "(nothing)", want))
             return 2
 
+    if args.expect_plugins is not None:
+        plugin_status = verify_expected_plugins(text, args.expect_plugins)
+        if plugin_status:
+            return plugin_status
+
     if args.version:
         selected = LOG_RE.match(os.path.basename(path))
         if selected and selected.group("tag").lower() == "gfx":
@@ -10418,6 +10520,103 @@ def self_test_map_bounce():
 
 def self_test():
     ok = True
+
+    selected_line = ("[00:00:00.001] plugin selection: mode=selected profile=vr "
+                     "plugins=temporal-aa,on-foot-panel reason=none "
+                     "record=supported validation=0x00000000")
+    legacy_absent_line = ("[00:00:00.001] plugin selection: mode=legacy profile=flat "
+                          "plugins=temporal-aa,performance reason=invalid-snapshot "
+                          "record=absent validation=0x00000000")
+    for fixture, want_mode, want_ids in (
+            (selected_line, "selected", ["temporal-aa", "on-foot-panel"]),
+            (legacy_absent_line, "legacy", ["temporal-aa", "performance"])):
+        parsed, error = plugin_selection_line(fixture)
+        if error or parsed[0] != want_mode or parsed[2] != want_ids:
+            print("plugin_selection_line -> %r %r" % (parsed, error))
+            ok = False
+    malformed, error = plugin_selection_line(
+        selected_line.replace("on-foot-panel", "temporal-aa"))
+    if malformed is not None or error != "duplicate plugin ID in startup set":
+        print("plugin_selection_line accepted duplicate IDs: %r %r" % (malformed, error))
+        ok = False
+    unknown_log, error = plugin_selection_line(
+        selected_line.replace("on-foot-panel", "not-in-catalog"))
+    if unknown_log is not None or "unknown plugin ID" not in error:
+        print("plugin_selection_line accepted unknown catalog ID: %r %r" %
+              (unknown_log, error))
+        ok = False
+    invalid_grammar, error = plugin_selection_line(
+        selected_line.replace("on-foot-panel", "on--foot-panel"))
+    if invalid_grammar is not None or error != "malformed plugin selection startup line":
+        print("plugin_selection_line accepted invalid ID grammar: %r %r" %
+              (invalid_grammar, error))
+        ok = False
+    valid_and_malformed = (selected_line + "\n" +
+                           selected_line.replace("plugins=temporal-aa,on-foot-panel",
+                                                 "plugins=bad,,temporal-aa"))
+    parsed, error = plugin_selection_line(valid_and_malformed)
+    if parsed is not None or error != "malformed plugin selection startup line":
+        print("plugin_selection_line ignored malformed reserved line: %r %r" %
+              (parsed, error))
+        ok = False
+    missing, error = plugin_selection_line("ordinary startup log\n")
+    if missing is not None or error != "no plugin selection startup line":
+        print("plugin_selection_line missing-line result -> %r %r" % (missing, error))
+        ok = False
+    import contextlib
+    import io
+    expected_output = io.StringIO()
+    with contextlib.redirect_stdout(expected_output):
+        matched = verify_expected_plugins(selected_line,
+                                          "on-foot-panel,temporal-aa")
+    if matched != 0 or "plugin set matches" not in expected_output.getvalue():
+        print("--expect-plugins exact set did not match: %r %r" %
+              (matched, expected_output.getvalue()))
+        ok = False
+    mismatch_output = io.StringIO()
+    with contextlib.redirect_stdout(mismatch_output):
+        mismatch = verify_expected_plugins(selected_line, "temporal-aa")
+    if mismatch != 2 or "PLUGIN SET MISMATCH" not in mismatch_output.getvalue():
+        print("--expect-plugins mismatch did not fail: %r %r" %
+              (mismatch, mismatch_output.getvalue()))
+        ok = False
+    unknown_expected_output = io.StringIO()
+    with contextlib.redirect_stdout(unknown_expected_output):
+        unknown_expected = verify_expected_plugins(selected_line, "not-in-catalog")
+    if unknown_expected != 2 or "unknown plugin ID" not in unknown_expected_output.getvalue():
+        print("--expect-plugins accepted unknown catalog ID: %r %r" %
+              (unknown_expected, unknown_expected_output.getvalue()))
+        ok = False
+    invalid_expected_output = io.StringIO()
+    with contextlib.redirect_stdout(invalid_expected_output):
+        invalid_expected = verify_expected_plugins(selected_line, "on--foot-panel")
+    if invalid_expected != 2 or "malformed plugin ID list" not in invalid_expected_output.getvalue():
+        print("--expect-plugins accepted invalid ID grammar: %r %r" %
+              (invalid_expected, invalid_expected_output.getvalue()))
+        ok = False
+    import tempfile
+    plugin_tmp = tempfile.mkdtemp(prefix="edvr_expect_plugins_test_")
+    try:
+        plugin_log = os.path.join(plugin_tmp, "edvr_gfx_20261011_010203.log")
+        with open(plugin_log, "w", encoding="utf-8") as stream:
+            stream.write(selected_line + "\n")
+        cli_out = io.StringIO()
+        with contextlib.redirect_stdout(cli_out):
+            cli_rc = main(["--file", plugin_log, "--expect-plugins",
+                           "temporal-aa,on-foot-panel"])
+        if cli_rc != 0 or "plugin set matches" not in cli_out.getvalue():
+            print("--expect-plugins CLI failed: %r %r" % (cli_rc, cli_out.getvalue()))
+            ok = False
+        cli_out = io.StringIO()
+        with contextlib.redirect_stdout(cli_out):
+            cli_rc = main(["--file", plugin_log, "--expect-plugins", "temporal-aa"])
+        if cli_rc != 2 or "PLUGIN SET MISMATCH" not in cli_out.getvalue():
+            print("--expect-plugins CLI mismatch failed: %r %r" %
+                  (cli_rc, cli_out.getvalue()))
+            ok = False
+    finally:
+        import shutil
+        shutil.rmtree(plugin_tmp, ignore_errors=True)
 
     for name, want in (("edvr_gfx_20260910_042313.log", "gfx"),
                        ("edvr_vr_20260910_042313.log", "vr"),

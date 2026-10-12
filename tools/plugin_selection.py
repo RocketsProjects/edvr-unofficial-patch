@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Pure, offline model for profile-filtered EDVR plugin selection.
 
-This is groundwork for installer selection. Selection commands do not write
-files and do not turn design target defaults into currently usable selections.
-The self-test uses and removes temporary fixtures.
+Selection commands do not write files and do not turn design target defaults
+into selected plugins. The self-test uses and removes temporary fixtures.
 
 Usage:
   python tools/plugin_selection.py --self-test
@@ -61,6 +60,10 @@ def _plugin_index(manifest):
         if plugin.get('selectionAvailableProfiles') and plugin.get('implementationStatus') != SELECTABLE_STATUS:
             raise SelectionError('%s is marked selectable without implementationStatus %s' %
                                  (plugin_id, SELECTABLE_STATUS))
+        if plugin.get('implementationStatus') == SELECTABLE_STATUS and set(
+                plugin.get('selectionAvailableProfiles', [])) != supported:
+            raise SelectionError('%s selection-ready availability must match supported profiles' %
+                                 plugin_id)
         for field in ('dependencies', 'conflicts'):
             values = plugin.get(field, [])
             if not isinstance(values, list):
@@ -259,6 +262,30 @@ def self_test():
              'dependencies': [], 'conflicts': [{'id': 'panel', 'kind': 'hard'}]},
         ]
     }
+    canonical = _load_manifest(DEFAULT_MANIFEST)
+    canonical_index = _plugin_index(canonical)
+    check('canonical catalog exposes every selection-ready supported profile',
+          len(canonical_index) == 8 and all(
+              plugin.get('implementationStatus') == SELECTABLE_STATUS and
+              set(plugin.get('selectionAvailableProfiles', [])) == set(plugin.get('profiles', []))
+              for plugin in canonical['plugins']))
+    check('canonical Flat availability is limited to Temporal-AA and Diagnostics',
+          profile_targets(canonical, 'flat')['availableIds'] == ['temporal-aa', 'diagnostics'])
+    check('canonical Flat recommendation retains Temporal-AA',
+          profile_targets(canonical, 'flat')['recommendedIds'] == ['temporal-aa'])
+    check('canonical VR availability covers all eight generated owners',
+          profile_targets(canonical, 'vr')['availableIds'] ==
+          [plugin['id'] for plugin in canonical['plugins']])
+    try:
+        on_foot = resolve_selection(canonical, 'vr', ['on-foot-panel'])
+        check('canonical On-foot selection leaves soft Temporal-AA unselected',
+              on_foot['selectedIds'] == ['on-foot-panel'] and
+              'temporal-aa' not in on_foot['selectedIds'] and
+              on_foot['softDependencies'] == [{
+                  'pluginId': 'on-foot-panel', 'dependencyId': 'temporal-aa',
+                  'state': 'not selected', 'reason': "weapon stability's motion half"}])
+    except SelectionError:
+        check('canonical On-foot selection leaves soft Temporal-AA unselected', False)
     try:
         vr = resolve_selection(base, 'vr', ['panel'])
         check('hard dependency is auto-selected in manifest order',
@@ -276,6 +303,7 @@ def self_test():
 
         unavailable_default = copy.deepcopy(base)
         unavailable_default['plugins'][0]['selectionAvailableProfiles'] = []
+        unavailable_default['plugins'][0]['implementationStatus'] = 'catalog-only'
         target = profile_targets(unavailable_default, 'vr')
         check('unavailable target default is reported but not selected',
               target['targetDefaultIds'] == ['core-aa', 'panel'] and
@@ -307,6 +335,7 @@ def self_test():
 
         bad_dep_availability = copy.deepcopy(base)
         bad_dep_availability['plugins'][0]['selectionAvailableProfiles'] = []
+        bad_dep_availability['plugins'][0]['implementationStatus'] = 'phase1-lifecycle'
         try:
             resolve_selection(bad_dep_availability, 'vr', ['panel'])
             check('unavailable hard dependency rejected', False)
@@ -321,6 +350,15 @@ def self_test():
             check('catalog-only metadata cannot be selected', False)
         except SelectionError as exc:
             check('catalog-only metadata cannot be selected', 'without implementationStatus' in str(exc))
+
+        partial_ready = copy.deepcopy(base)
+        partial_ready['plugins'][0]['selectionAvailableProfiles'] = ['vr']
+        try:
+            resolve_selection(partial_ready, 'vr', ['core-aa'])
+            check('selection-ready profile availability must be complete', False)
+        except SelectionError as exc:
+            check('selection-ready profile availability must be complete',
+                  'selection-ready availability must match supported profiles' in str(exc))
 
         later_hard = copy.deepcopy(base)
         later_hard['plugins'][2]['selectionAvailableProfiles'] = ['vr']

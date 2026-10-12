@@ -19,8 +19,10 @@
   `build/full-diagnostics-absence-offline-20261011-r9.log` (receipt `5cdd1948`).
   Temporal-AA startup/provider/callback gates pass full offline validation:
   `build/full-temporal-absence-offline-20261011-r10.log` (receipt `8d003869`).
-- **Module progress:** all eight owners pass offline. Selections remain
-  unavailable; runtime absence/order and CPU/GPU acceptance remain open.
+- **Module progress:** all eight owners pass offline. Catalog selection, installer
+  choices and installed-plugin visibility pass full offline integration:
+  `build/full-selection-integration-offline-20261011-r3.log` (receipt `3b29c232`).
+  Runtime absence/order and CPU/GPU acceptance remain open.
 - **Offline evidence:** FSS site 1 has a frozen selector oracle, v16 facts,
   seven-base-fact capacity and terminal X/6 fixtures. Capture uses consumed
   values; unarmed paths build no payload. Caught faults after matching reads
@@ -5477,3 +5479,75 @@ All eight owners have offline checkpoints. Selections remain unavailable;
 runtime absence/order and the final matched CPU/GPU comparison remain open.
 Steam installation remains held. No DLL promotion, live settings edit, flight
 or feature-to-main merge occurred.
+
+### 2026-10-11 — Installer plugin choices and installed visibility
+
+Phase 3 adds profile-specific plugin selection to install/repair and reports the
+installed selection at startup. Catalog schema 2 describes eight first-party plugins:
+Temporal AA and Diagnostics support VR and Flat; the other six support VR only.
+Defaults/recommendations exclude Diagnostics. On-foot Panel's Temporal-AA dependency is
+soft and does not auto-select TAA.
+
+The receipt uses selection schema 1 and catalog schema 2, plus profile and resolved IDs.
+Explicit empty is distinct from legacy absence. No INI key changed and no independent
+plugin-version field was added. Core settings remain editable and unselected plugin
+settings remain byte-preserved. A selection-only Modify is metadata-only and leaves
+user/base INIs untouched. Unchanged same-profile legacy absence and opaque metadata stay
+preserved. On profile conversion, absent or supported prior selection resolves the
+target profile defaults only when the target catalog is ready. An unready target keeps
+the prior receipt bound to its original profile. Opaque records stay opaque unless an
+explicit selection is requested.
+
+CLI install/repair accepts repeatable known `--plugin` IDs or `--no-plugins`;
+malformed/empty IDs, mixed choices, and selection on other actions fail validation. GUI
+choices are profile-filtered, preselected from defaults or a supported saved
+same-profile set, and can be cancelled without applying partial choices. Plans and
+confirmation show the exact resolved human-readable names, hard dependencies, and
+soft-dependency notices. Invalid/conflicting choices block before apply. Elevation
+forwards validated IDs or explicit empty. Uninstall clears pending selection flags;
+declining confirmation leaves changes unapplied.
+
+F8 shows owned config rows only for installed plugins while Core rows remain editable.
+Startup logging reports effective mode, profile, exact installed set, reason, and
+receipt state. `edvr_log.py --expect-plugins` verifies the exact known-ID set and
+rejects malformed or repeated structured selection records.
+
+All nine frozen-stage Python gates passed after fixture-link repair: catalog, selection,
+UI self-test and mutants, visibility (10 checks), log parser, lifecycle wiring (187
+mutations), runtime-admission source (10 mutations), and selection-transport source (5
+mutations). R3 guard source test then passed 12 mutations. The combined input manifest
+SHA256 remained `93218DC92D70D3E0A117AF15563B563650C21921EBA6D0EDB19FC71B3E0F1194`.
+
+Focused repair history: focused R1 exposed a transport/global-namespace compile error
+and stale installer, dispatch, and selection-admission fixture expectations. Focused R2
+exposed a runtime-graphics fixture linkage gap for real `Log::get`/`Log::note` calls.
+Focused R3 exposed the actual unreserved `ProviderRejected` startup bug: the client now
+denies before paired exports. The guard preserves committed-client binding and
+exact-provider source-Legacy handling for absent, opaque, and stale-schema receipts;
+old-peer no-query fallback remains. Focused R4 passed all five rigs at
+`build/focused-selection-integration-offline-20261011-r4.log`.
+
+The full normal R1 attempt stopped at 89/169: `hotkey_capture_test` failed 1/629 because
+its source pin expected the pre-selection `addSettingRows` arity. Only the stale tool
+fixture pin was changed; it now asserts the Explorer Cam page, Fix tier, `explorer_cam`
+filter, and selection-decision argument. Audit found no other `addSettingRows` or
+`buildPages` pins under `tools/`. Failure log:
+build/full-selection-integration-offline-20261011-r1.log. The bounded runtime-graphics
+fixture exercises capture, publication, and native-peer commit wiring, but does not
+establish full OpenXR startup or actual runtime ordering. A published `ProviderRejected`
+now fails native startup closed. Full R2 stopped at 94/169 when
+`plugin_selection_transport_test` failed its known-ID unavailable assertion: Performance
+is now selection-available for VR. The fixture now checks exact VR availability and
+retains a matching Flat-record unavailable-plugin negative. It passes 33 checks. The
+hotkey fixture passes all 629 checks at
+`build/focused-plugin-selection-hotkey-20261011-r1.log`. The remaining 75-rig slice,
+including all seven quiet checks, passes in
+`build/focused-selection-r2-remainder-20261011-r1.log`; installer embedding was reserved
+for the full rebuild. Full-build evidence: Full R3 passes both production DLLs, the
+complete test pool, config contract, export checks and self-contained installer gates in
+`build/full-selection-integration-offline-20261011-r3.log` (receipt `3b29c232`). No live
+Elite/XR startup or install was performed, and no game INI was edited.
+
+Runtime effective-mode/order, actual XR startup, and the final matched performance
+comparison at rendering-code freeze remain open. This checkpoint does not claim Phase 1
+completion or shipping acceptance. Steam installation remains held.

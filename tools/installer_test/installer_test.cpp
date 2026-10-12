@@ -21,6 +21,7 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cwctype>
 #include <stdexcept>
@@ -29,6 +30,7 @@
 #include <vector>
 
 #include "../../src/common/iniedit.h"
+#include "plugin_manifest.inc"
 #include "../../src/installer/apply.h"
 #include "../../src/installer/plan.h"
 #include "../../src/installer/probe.h"
@@ -1861,10 +1863,14 @@ static void testFlatPlanner() {
     o.convertProfile = true;
     Plan conversion = planInstall(s, o, flat);
     check(!conversion.blocked, "owned VR to flat conversion plans");
+    const auto compiledFlatDefaults = plugin_components::defaults(
+        plugin_components::compiledCatalog(), "flat");
     check(conversion.nextState.profile == "flat" &&
-              conversion.nextState.pluginSelection.profile == "vr" &&
-              conversion.nextState.pluginSelection.selectedIds == std::vector<std::string>{"temporal-aa"},
-          "VR to flat conversion preserves selection metadata bound to VR");
+              compiledFlatDefaults.error.empty() &&
+              conversion.nextState.pluginSelection.state == PluginSelectionRecordState::Supported &&
+              conversion.nextState.pluginSelection.profile == "flat" &&
+              conversion.nextState.pluginSelection.selectedIds == compiledFlatDefaults.selectedIds,
+          "VR to flat conversion uses ready Flat defaults instead of the old VR selection");
     const std::string futurePluginText = "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa\r\nfuture_field = keep-me\r\n";
     s.state.pluginSelection = parseState("[edvr]\r\nversion = v0.10.1\r\n" + futurePluginText).pluginSelection;
     Plan opaqueConversion = planInstall(s, o, flat);
@@ -1902,6 +1908,302 @@ static void testFlatPlanner() {
           "conversion restores the game's original runtime");
     s.openvrOrig = fakeDll(DllKind::Absent, joinPath(s.game.openvrDir, L"openvr_api_orig.dll"), "");
     check(planInstall(s, o, flat).blocked, "missing original blocks VR to flat conversion");
+}
+
+static void testPluginSelectionPolicy() {
+    printf("\nplugin selection policy and planner\n");
+    const auto compiled = plugin_components::compiledCatalog();
+    check(plugin_components::profileSelectionReady(compiled, "vr") &&
+              plugin_components::profileSelectionReady(compiled, "flat"),
+          "current catalog has every applicable owner ready for VR and Flat");
+    const auto compiledEmpty = plugin_components::resolve(compiled, "vr", {});
+    check(compiledEmpty.error.empty() && compiledEmpty.selectedIds.empty(),
+          "current ready VR catalog admits an explicit empty selection");
+    const auto compiledVrDefaults = plugin_components::defaults(compiled, "vr");
+    check(compiledVrDefaults.error.empty(),
+          "current ready VR catalog resolves its defaults");
+
+    std::vector<plugins::PluginRecord> records(plugins::kManifest,
+                                               plugins::kManifest + plugins::kPluginCount);
+    for (auto& row : records) {
+        row.implementationStatus = "selection-ready";
+        row.selectionAvailableProfileMask = row.profileMask;
+    }
+    plugin_components::CatalogView ready{records.data(), static_cast<std::uint32_t>(records.size()),
+                                         plugins::kSelectionCatalogSchemaVersion};
+    check(plugin_components::profileSelectionReady(ready, "vr") &&
+              plugin_components::profileSelectionReady(ready, "flat"),
+          "fixture catalog is ready for both profiles");
+    plugin_components::CatalogView wrongSchema{records.data(), static_cast<std::uint32_t>(records.size()), 3};
+    check(!plugin_components::profileSelectionReady(wrongSchema, "vr") &&
+              !plugin_components::resolve(wrongSchema, "vr", {}).error.empty() &&
+              !plugin_components::defaults(wrongSchema, "vr").error.empty(),
+          "unsupported nonzero catalog schemas fail closed");
+    Options invalidCatalogOptions = testOptions();
+    invalidCatalogOptions.pluginSelectionSpecified = true;
+    Survey invalidCatalogSurvey = baseSurvey(L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64");
+    check(planInstall(invalidCatalogSurvey, invalidCatalogOptions,
+                      testPayload(kNextIni), wrongSchema).blocked,
+          "planner refuses explicit selection against an unsupported catalog schema");
+    std::vector<plugins::PluginRecord> missingDependencyTable = records;
+    missingDependencyTable[0].dependencyCount = 1;
+    missingDependencyTable[0].dependencies = nullptr;
+    plugin_components::CatalogView missingDependencies{missingDependencyTable.data(),
+        static_cast<std::uint32_t>(missingDependencyTable.size()),
+        plugins::kSelectionCatalogSchemaVersion};
+    check(!plugin_components::profileSelectionReady(missingDependencies, "vr") &&
+              !plugin_components::resolve(missingDependencies, "vr", {}).error.empty(),
+          "catalog with a missing dependency array fails closed");
+    std::vector<plugins::PluginRecord> missingConflictTable = records;
+    missingConflictTable[0].conflictCount = 1;
+    missingConflictTable[0].conflicts = nullptr;
+    plugin_components::CatalogView missingConflicts{missingConflictTable.data(),
+        static_cast<std::uint32_t>(missingConflictTable.size()),
+        plugins::kSelectionCatalogSchemaVersion};
+    check(!plugin_components::profileSelectionReady(missingConflicts, "vr") &&
+              !plugin_components::resolve(missingConflicts, "vr", {}).error.empty(),
+          "catalog with a missing conflict array fails closed");
+    const std::uint32_t vrAvailability = records[0].selectionAvailableProfileMask;
+    records[0].selectionAvailableProfileMask &= ~1u;
+    plugin_components::CatalogView partial{records.data(), static_cast<std::uint32_t>(records.size()),
+                                           plugins::kSelectionCatalogSchemaVersion};
+    check(!plugin_components::profileSelectionReady(partial, "vr"),
+          "one unavailable applicable owner closes VR selection for the whole profile");
+    check(!plugin_components::resolve(partial, "vr", {}).error.empty() &&
+              !plugin_components::defaults(partial, "vr").error.empty(),
+          "partial catalog rejects explicit none and target defaults");
+    check(!plugin_components::resolve(partial, "vr", {"cockpit-visuals"}).error.empty(),
+          "partial catalog rejects an otherwise-ready VR subset");
+    std::vector<std::string> recommended;
+    for (const auto& row : records)
+        if (row.recommendedProfileMask & 1u) recommended.emplace_back(row.id);
+    check(!plugin_components::resolve(partial, "vr", recommended).error.empty(),
+          "partial catalog rejects the recommendation set");
+    Options closedOptions = testOptions();
+    closedOptions.pluginSelectionSpecified = true;
+    Survey closedSurvey = baseSurvey(L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64");
+    check(planInstall(closedSurvey, closedOptions, testPayload(kNextIni), partial).blocked,
+          "planner refuses an explicit empty selection before whole-profile readiness");
+    closedOptions.pluginIds = {"cockpit-visuals"};
+    check(planInstall(closedSurvey, closedOptions, testPayload(kNextIni), partial).blocked,
+          "planner refuses a ready-subset choice before whole-profile readiness");
+    records[0].selectionAvailableProfileMask = vrAvailability;
+    const auto none = plugin_components::resolve(ready, "vr", {});
+    check(none.error.empty() && none.selectedIds.empty(),
+          "a fully ready profile permits an explicit empty selection");
+    const auto diagnostic = plugin_components::resolve(ready, "vr", {"diagnostics"});
+    check(diagnostic.error.empty() && diagnostic.selectedIds == std::vector<std::string>{"diagnostics"},
+          "Diagnostics remains an opt-in selection");
+    const auto duplicateRequests = plugin_components::resolve(
+        ready, "vr", {"temporal-aa", "diagnostics", "temporal-aa", "diagnostics"});
+    std::vector<std::string> canonicalDuplicateIds;
+    for (const auto& row : records)
+        if (row.id == std::string("diagnostics") || row.id == std::string("temporal-aa"))
+            canonicalDuplicateIds.emplace_back(row.id);
+    check(duplicateRequests.error.empty() &&
+              duplicateRequests.requestedIds == canonicalDuplicateIds &&
+              duplicateRequests.selectedIds == canonicalDuplicateIds,
+          "repeated requested IDs deduplicate into one canonical catalog-ordered selection");
+    check(!plugin_components::resolve(ready, "flat", {"cockpit-visuals"}).error.empty(),
+          "profile filtering rejects a VR-only component in flat");
+    PayloadInfo flat = testPayload(kNextIni);
+    flat.profile = "flat";
+    flat.descriptorText = "[install]\r\nschema = 1\r\nprofile = flat\r\n";
+    flat.descriptorSha = sha256Bytes(flat.descriptorText.data(), flat.descriptorText.size());
+    flat.nativeGraphicsValid = true;
+    flat.haveOpenvr = false;
+    flat.haveOpenxrLoader = false;
+    flat.haveOpenxrLicense = false;
+    flat.nativePairValid = false;
+    Survey conversionSurvey = baseSurvey(L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64");
+    conversionSurvey.state.present = true;
+    conversionSurvey.state.profile = "vr";
+    conversionSurvey.state.pluginSelection.state = PluginSelectionRecordState::Supported;
+    conversionSurvey.state.pluginSelection.schemaVersion = 1;
+    conversionSurvey.state.pluginSelection.catalogSchemaVersion = ready.schemaVersion;
+    conversionSurvey.state.pluginSelection.profile = "vr";
+    conversionSurvey.state.pluginSelection.selectedIds = {"cockpit-visuals"};
+    conversionSurvey.state.openvrInstalled = true;
+    conversionSurvey.state.openvrSha = "installed-vr";
+    conversionSurvey.state.openvrOrigSha = "game-vr";
+    conversionSurvey.openvrCurrent = fakeDll(DllKind::Edvr,
+        joinPath(conversionSurvey.game.openvrDir, L"openvr_api.dll"), "installed-vr");
+    conversionSurvey.openvrOrig = fakeDll(DllKind::OpenVrRuntime,
+        joinPath(conversionSurvey.game.openvrDir, L"openvr_api_orig.dll"), "game-vr");
+    Options convertOptions = testOptions();
+    convertOptions.convertProfile = true;
+    const Plan flatConversion = planInstall(conversionSurvey, convertOptions, flat, ready);
+    const auto flatDefaults = plugin_components::defaults(ready, "flat");
+    check(!flatConversion.blocked && flatConversion.nextState.pluginSelection.profile == "flat" &&
+              flatConversion.nextState.pluginSelection.selectedIds == flatDefaults.selectedIds,
+          "conversion to a selection-ready profile uses that profile's defaults");
+    Survey conversionAbsent = conversionSurvey;
+    conversionAbsent.state.pluginSelection = PluginSelectionRecord{};
+    const Plan flatConversionAbsent = planInstall(conversionAbsent, convertOptions, flat, ready);
+    check(!flatConversionAbsent.blocked &&
+              flatConversionAbsent.nextState.pluginSelection.state == PluginSelectionRecordState::Supported &&
+              flatConversionAbsent.nextState.pluginSelection.selectedIds == flatDefaults.selectedIds,
+          "profile conversion from an absent legacy receipt uses target-profile defaults");
+    check(!plugin_components::resolve(ready, "vr", {"not-a-plugin"}).error.empty(),
+          "unknown IDs are refused");
+
+    const plugins::Dependency hard[] = {{"temporal-aa", 1, "required"}};
+    const plugins::Dependency soft[] = {{"temporal-aa", 2, "works better together"}};
+    const plugins::Conflict conflict[] = {{"cockpit-visuals", 1, "mutually exclusive"}};
+    int cockpit = -1, temporal = -1;
+    for (std::uint32_t i = 0; i < ready.count; ++i) {
+        if (records[i].id == std::string("cockpit-visuals")) cockpit = static_cast<int>(i);
+        if (records[i].id == std::string("temporal-aa")) temporal = static_cast<int>(i);
+    }
+    check(cockpit >= 0 && temporal >= 0, "fixture catalog contains policy rows");
+    if (cockpit >= 0 && temporal >= 0) {
+        records[cockpit].dependencies = hard;
+        records[cockpit].dependencyCount = 1;
+        auto closure = plugin_components::resolve(ready, "vr", {"cockpit-visuals"});
+        check(closure.error.empty() && closure.selectedIds.size() == 2 &&
+                  closure.autoSelectedIds == std::vector<std::string>{"temporal-aa"},
+              "hard dependencies are closed and reported as auto-selected");
+        records[cockpit].dependencies = soft;
+        auto advisory = plugin_components::resolve(ready, "vr", {"cockpit-visuals"});
+        check(advisory.error.empty() && advisory.selectedIds.size() == 1 &&
+                  advisory.softNotices.size() == 1,
+              "soft dependencies stay advisory");
+        records[cockpit].dependencies = nullptr;
+        records[cockpit].dependencyCount = 0;
+        records[temporal].conflicts = conflict;
+        records[temporal].conflictCount = 1;
+        check(!plugin_components::resolve(ready, "vr", {"cockpit-visuals", "temporal-aa"}).error.empty(),
+              "conflicting rows cannot be selected together");
+        records[temporal].conflicts = nullptr;
+        records[temporal].conflictCount = 0;
+        records[cockpit].dependencies = hard;
+        records[cockpit].dependencyCount = 1;
+        records[temporal].dependencies = hard;
+        const plugins::Dependency reverse[] = {{"cockpit-visuals", 1, "cycle"}};
+        records[temporal].dependencies = reverse;
+        records[temporal].dependencyCount = 1;
+        check(!plugin_components::resolve(ready, "vr", {"cockpit-visuals"}).error.empty(),
+              "hard dependency cycles are rejected");
+        records[cockpit].dependencies = nullptr;
+        records[cockpit].dependencyCount = 0;
+        records[temporal].dependencies = nullptr;
+        records[temporal].dependencyCount = 0;
+    }
+
+    const std::wstring dir = L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64";
+    PayloadInfo payload = testPayload(kNextIni);
+    Options options = testOptions();
+    Survey fresh = baseSurvey(dir);
+    const Plan defaultNew = planInstall(fresh, options, payload, ready);
+    const auto vrDefaults = plugin_components::defaults(ready, "vr");
+    check(!defaultNew.blocked && defaultNew.nextState.pluginSelection.state ==
+              PluginSelectionRecordState::Supported &&
+              defaultNew.nextState.pluginSelection.selectedIds == vrDefaults.selectedIds,
+          "new installs choose the ready profile's default selection");
+    const auto planNamesId = [&](const Plan& plan, const std::string& id) {
+        for (const auto& row : records)
+            if (id == row.id) return notesMention(plan, row.name);
+        return false;
+    };
+    std::vector<plugins::PluginRecord> flatNotReadyRecords = records;
+    for (auto& row : flatNotReadyRecords)
+        if (row.profileMask & plugins::kFlatProfileBit) {
+            row.selectionAvailableProfileMask &= ~plugins::kFlatProfileBit;
+            break;
+        }
+    plugin_components::CatalogView flatNotReady{flatNotReadyRecords.data(),
+        static_cast<std::uint32_t>(flatNotReadyRecords.size()),
+        plugins::kSelectionCatalogSchemaVersion};
+    const Plan flatConversionPreserved = planInstall(conversionSurvey, convertOptions, flat, flatNotReady);
+    check(!flatConversionPreserved.blocked &&
+              flatConversionPreserved.nextState.pluginSelection.state == PluginSelectionRecordState::Supported &&
+              flatConversionPreserved.nextState.pluginSelection.profile == "vr" &&
+              notesMention(flatConversionPreserved, "remains bound to the vr profile") &&
+              planNamesId(flatConversionPreserved, "cockpit-visuals"),
+          "conversion with target selection unavailable reports the preserved supported receipt");
+    check(notesMention(defaultNew, "Resulting plugin selection") &&
+              (vrDefaults.selectedIds.empty() ? notesMention(defaultNew, "none") :
+               planNamesId(defaultNew, vrDefaults.selectedIds.front())),
+          "fresh-install plan names the complete resulting plugin set");
+    Survey legacyAbsent = fresh;
+    legacyAbsent.state.present = true;
+    legacyAbsent.state.profile = "vr";
+    const Plan legacyUpgrade = planInstall(legacyAbsent, options, payload, ready);
+    check(!legacyUpgrade.blocked && legacyUpgrade.nextState.pluginSelection.state ==
+              PluginSelectionRecordState::Absent,
+          "same-profile legacy upgrades preserve an absent selection receipt");
+    Survey savedChoice = fresh;
+    savedChoice.state.present = true;
+    savedChoice.state.profile = "vr";
+    savedChoice.state.pluginSelection.state = PluginSelectionRecordState::Supported;
+    savedChoice.state.pluginSelection.schemaVersion = 1;
+    savedChoice.state.pluginSelection.catalogSchemaVersion = ready.schemaVersion;
+    savedChoice.state.pluginSelection.profile = "vr";
+    savedChoice.state.pluginSelection.selectedIds = {"diagnostics", "temporal-aa"};
+    const Plan preservedChoice = planInstall(savedChoice, options, payload, ready);
+    check(!preservedChoice.blocked &&
+              preservedChoice.nextState.pluginSelection.schemaVersion == 1 &&
+              preservedChoice.nextState.pluginSelection.catalogSchemaVersion == ready.schemaVersion &&
+              preservedChoice.nextState.pluginSelection.profile == "vr" &&
+              preservedChoice.nextState.pluginSelection.selectedIds ==
+                  std::vector<std::string>{"diagnostics", "temporal-aa"},
+          "same-profile Modify preserves an unopened supported selection and its ID order");
+    check(notesMention(preservedChoice, "Resulting plugin selection") &&
+              planNamesId(preservedChoice, "diagnostics") &&
+              planNamesId(preservedChoice, "temporal-aa"),
+          "same-profile plan names every preserved plugin in the resulting set");
+    savedChoice.state.pluginSelection.selectedIds.clear();
+    const Plan preservedNone = planInstall(savedChoice, options, payload, ready);
+    check(preservedNone.nextState.pluginSelection.state == PluginSelectionRecordState::Supported &&
+              preservedNone.nextState.pluginSelection.selectedIds.empty() &&
+              notesMention(preservedNone, "Resulting plugin selection") &&
+              notesMention(preservedNone, "none"),
+          "same-profile Modify preserves an explicit empty selection");
+    const std::string opaqueReceipt =
+        "[plugins]\r\nselection_schema_version = 8\r\ncatalog_schema_version = 99\r\nfuture = retain\r\n";
+    savedChoice.state.pluginSelection = parseState(
+        "[edvr]\r\nversion = v0.10.1\r\n" + opaqueReceipt).pluginSelection;
+    const Plan preservedOpaque = planInstall(savedChoice, options, payload, ready);
+    check(preservedOpaque.nextState.pluginSelection.state == PluginSelectionRecordState::Opaque &&
+              preservedOpaque.nextState.pluginSelection.opaqueText == opaqueReceipt,
+          "same-profile Modify preserves an unopened opaque receipt byte-for-byte");
+    options.pluginSelectionSpecified = true;
+    Plan explicitNone = planInstall(fresh, options, payload, ready);
+    check(!explicitNone.blocked && explicitNone.nextState.pluginSelection.state ==
+              PluginSelectionRecordState::Supported && explicitNone.nextState.pluginSelection.selectedIds.empty() &&
+              notesMention(explicitNone, "Resulting plugin selection") &&
+              notesMention(explicitNone, "none"),
+          "new explicit-empty choice becomes a separate supported plugin record");
+
+    options.pluginIds = {"diagnostics"};
+    Plan first = planInstall(fresh, options, payload, ready);
+    Survey installed = fresh;
+    installed.state = first.nextState;
+    installed.state.present = true;
+    installed.d3d11 = fakeDll(DllKind::Edvr, joinPath(dir, L"d3d11.dll"), payload.d3d11Sha);
+    installed.openvrCurrent = fakeDll(DllKind::Edvr, joinPath(installed.game.openvrDir, L"openvr_api.dll"), payload.openvrSha);
+    installed.openvrOrig = fakeDll(DllKind::OpenVrRuntime, joinPath(installed.game.openvrDir, L"openvr_api_orig.dll"), "game-vr");
+    installed.iniPresent = true;
+    installed.iniText = kNextIni;
+    installed.baseIniText = kNextIni;
+    installed.descriptorPresent = true;
+    installed.descriptorSha = payload.descriptorSha;
+    installed.openxrLoader = fakeDll(DllKind::Foreign, joinPath(installed.game.openvrDir, L"openxr_loader.dll"), installed.state.openxrLoaderSha);
+    installed.openxrLicense = fakeDll(DllKind::Foreign, joinPath(installed.game.openvrDir, L"OPENXR-LOADER-LICENSE.txt"), installed.state.openxrLicenseSha);
+    installed.nativeConfig = fakeDll(DllKind::Foreign, joinPath(installed.game.openvrDir, L"edvr_openxr.ini"), installed.state.nativeConfigSha);
+    options.pluginIds = {"temporal-aa"};
+    const Plan metadataOnly = planInstall(installed, options, payload, ready);
+    bool recordWritten = false, payloadWritten = false, iniWritten = false, baseIniWritten = false;
+    for (const auto& step : metadataOnly.steps) {
+        if (step.action == Action::WriteText && leafOf(step.to) == L"state.ini") recordWritten = true;
+        if (step.action == Action::WritePayload) payloadWritten = true;
+        if (step.action == Action::WriteText && leafOf(step.to) == L"edvr.ini") iniWritten = true;
+        if (step.action == Action::WriteText && leafOf(step.to) == L"edvr.ini.base") baseIniWritten = true;
+    }
+    check(!metadataOnly.blocked && !metadataOnly.nothingToDo && recordWritten &&
+              !payloadWritten && !iniWritten && !baseIniWritten &&
+              metadataOnly.nextState.pluginSelection.selectedIds == std::vector<std::string>{"temporal-aa"},
+          "selection-only Modify writes state metadata without replacing DLLs or settings");
 }
 
 // ---------------------------------------------------------------------------
@@ -5191,6 +5493,7 @@ int wmain(int argc, wchar_t** argv) {
     testPlanner();
     testNativePlanner();
     testFlatPlanner();
+    testPluginSelectionPolicy();
     testFlatSettingsPlanner();
     testApply(scratch);
     testMirror(scratch);

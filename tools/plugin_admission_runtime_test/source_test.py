@@ -84,6 +84,11 @@ def check(sources):
     ordered(acquire, "std::memcmp(&decision, expectedAdmission", "GetProcAddress(retained, name)")
     ordered(acquire, "if (queried != S_OK) return FAILED(queried) ? queried : E_ACCESSDENIED;",
             "publishedLegacyForProvider(decision, retained)", "GetProcAddress(retained, name)")
+    legacy = body(client, "static bool publishedLegacyForProvider(")
+    ordered(legacy,
+            "if (decision.reason == static_cast<std::uint32_t>(Reason::ProviderRejected))\n      return false;",
+            "if (base != reinterpret_cast<std::uint64_t>(provider)) return false;",
+            "if (decision.reason == static_cast<std::uint32_t>(Reason::SnapshotUnavailable))")
 
     native = sources["native_module"]
     start = body(native, "vr::EVRInitError start(")
@@ -119,10 +124,26 @@ def check(sources):
         "malformed late Decision is rejected before paired exports",
         "Legacy response cannot downgrade an earlier positive reservation",
         "matching late Decision passes the guard and reaches the paired export",
-        "current all-unready generated profile stays Legacy",
-        "invalid selected snapshot stays Legacy",
+        "valid generated VR selection with rejected native peer falls back to Legacy",
+        "failed native commit produces provider-zero Legacy and strict unreserved startup rejects before paired exports",
+        "missing native peer publishes provider-zero Legacy for a valid VR selection",
+        "missing native peer produces provider-zero Legacy and strict unreserved startup rejects before paired exports",
+        "absent VR source record publishes provider-backed Legacy",
+        "opaque VR source record publishes provider-backed Legacy",
+        "stale VR catalog schema publishes provider-backed Legacy",
+        "provider-backed VR source Legacy passes the native guard and reaches the paired graphics callback",
+        "unknown selected ID remains a provider-backed Legacy source record",
+        "actual Flat transport admits selected Temporal-AA without Diagnostics",
+        "actual Flat transport accepts an explicit empty selection",
+        "Flat/profile mismatch is a provider-backed Legacy record",
+        "Flat selection rejects a VR-only plugin while preserving Legacy owners",
+        "opaque Flat source record stays Legacy with the real provider identity",
+        "stale catalog schema stays an opaque provider-backed Legacy record",
+        "absent Flat source record preserves Legacy owners",
+        "real VR capture and publish reaches the generated-catalog peer commit",
+        "generated VR Diagnostics selection publishes only after validated peer commit",
         "unpublished Deferred decision blocks Performance startup",
-        "published current-generated Legacy permits Performance startup",
+        "published Legacy decision retains the active profile's Performance owner fallback",
         "published Legacy rejects an unknown out-of-range startup owner",
         "startup-owner queries do not call optional paired graphics exports",
         "exact loaded fake DLL commits a validated immutable reservation",
@@ -135,7 +156,8 @@ def check(sources):
         if label not in fixture:
             raise AssertionError("runtime fixture omits required assertion: " + label)
     for required in ("GetTickCount64() + 9000", "std::_Exit(9)",
-                     "FixturePublishCandidate", "AdmissionPeer::acquire"):
+                     "FixturePublishCandidate", "FixturePublishFlatCandidate",
+                     "AdmissionPeer::acquire"):
         if required not in fixture:
             raise AssertionError("runtime fixture omits bounded real-DLL seam: " + required)
     ordered(fixture, "ScopedModule peerModule(", "const auto reset =", "ResetScope",
@@ -159,18 +181,47 @@ def check(sources):
             if "noexcept" in signature:
                 raise AssertionError("paired export fixture conflicts with shared C header: " + name)
     if "FixturePublishCandidate" not in sources["graphics_fixture"] or \
+       "FixturePublishFlatCandidate" not in sources["graphics_fixture"] or \
        "publishCandidate(directory, graphics" not in sources["graphics_fixture"]:
-        raise AssertionError("generated readiness case must call production publishCandidate")
+        raise AssertionError("generated-profile cases must call production publishCandidate")
     if "FixtureOwnerAllowedForStartup" not in sources["graphics_fixture_def"] or \
        "FixtureOwnerAllowedForStartup" not in sources["graphics_fixture"] or \
        "plugin_admission_transport::ownerAllowedForStartup" not in sources["graphics_fixture"]:
         raise AssertionError("runtime fixture must export the actual graphics transport startup predicate")
+    if "FixturePublishFlatCandidate" not in sources["graphics_fixture_def"]:
+        raise AssertionError("Flat production candidate route must be exported to the runtime fixture")
     owner_case = body(fixture, "void generatedLegacy(")
     ordered(owner_case, "FixtureOwnerAllowedForStartup",
             "check(!ownerAllowed(kPerformancePluginIndex)", "publish(directory.c_str()",
             "check(ownerAllowed(kPerformancePluginIndex)",
             "check(!ownerAllowed(0xffffffffu)",
-            "pairCalls() == 0", "count() == 0")
+            "pairCalls() == 0", "count() == expectedPeerCalls")
+    ordered(owner_case, "expectedReason == Reason::ProviderRejected",
+            "unreservedStartup.acquire(", "graphicsPath, nullptr, true);",
+            "providerBase == 0 && startup == E_ACCESSDENIED &&", "pairDelta == 0")
+    missing_peer = body(fixture, "void generatedVrMissingPeer(")
+    ordered(missing_peer, 'writeState(root, "performance", "vr")',
+            'root / L"Openvr" / L"win64"', "FixturePublishCandidate",
+            "Reason::ProviderRejected", "providerBase == 0",
+            "unreservedStartup.acquire(graphicsPath, nullptr, true)",
+            "startup == E_ACCESSDENIED && pairCalls() - beforePairs == 0")
+    vr_source = body(fixture, "void generatedVrSourceLegacyCase(")
+    ordered(vr_source, "FixturePublishCandidate", "Reason::InvalidSnapshot",
+            "reinterpret_cast<std::uintptr_t>(graphicsModule.get())",
+            "acceptedLegacy.acquire(graphicsPath, nullptr, true)",
+            "startup == E_FAIL && pairCalls() - beforePairs == 1")
+    main = body(fixture, "int wmain(")
+    ordered(main, "generatedVrMissingPeer(graphics)",
+            "VrSourceKind::Missing", "VrSourceKind::Opaque",
+            "VrSourceKind::StaleSchema")
+    flat_case = body(fixture, "void generatedFlatCase(")
+    ordered(flat_case, "FixturePublishFlatCandidate", "publish(root.c_str()",
+            "decision.activeProfile", "decision.selectedPluginMask",
+            "providerBase == static_cast<std::uint64_t>", "pairCalls() == 0")
+    peer_case = body(fixture, "void generatedVrPeerCommit(")
+    ordered(peer_case, "FixtureUseGeneratedCatalogForCommit", "useGenerated();",
+            "publish(directory.c_str()", "Mode::AdmittedSelection",
+            "commits() == 1 && readCommit(&stored)", "resetCommit();")
     if "store.commitWithCatalogForTest" not in sources["peer_fixture"]:
         raise AssertionError("positive DLL fixture must call the actual commit store through its test catalog seam")
     if "FixtureResetCommit" not in sources["peer_fixture"]:
@@ -203,6 +254,12 @@ def self_test(sources):
     mutants.append(dict(sources, native_client=sources["native_client"].replace(
         "if (queried != S_OK) return FAILED(queried) ? queried : E_ACCESSDENIED;",
         "if (queried == S_OK) return E_ACCESSDENIED;", 1)))
+    mutants.append(dict(sources, native_client=sources["native_client"].replace(
+        "if (decision.reason == static_cast<std::uint32_t>(Reason::ProviderRejected))\n      return false;",
+        "if (decision.reason == static_cast<std::uint32_t>(Reason::ProviderRejected))\n      return true;", 1)))
+    mutants.append(dict(sources, native_client=sources["native_client"].replace(
+        "if (base != reinterpret_cast<std::uint64_t>(provider)) return false;",
+        "if (base == reinterpret_cast<std::uint64_t>(provider)) return false;", 1)))
     mutants.append(dict(sources, runtime_fixture=sources["runtime_fixture"].replace(
         "commit.abiVersion = commit_v1::kAbiVersion",
         "commit.abiVersion = kAbiVersion", 1)))

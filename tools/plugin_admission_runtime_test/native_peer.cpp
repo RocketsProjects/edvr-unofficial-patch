@@ -11,8 +11,14 @@ using namespace edvr::plugin_selection::commit_v1;
 const std::uint8_t fingerprint[32] = {0x29, 0x10, 0x77};
 test_seam::GroupV1 groups[] = {{0, 3, 3}, {1, 1, 1}, {2, 2, 2}};
 test_seam::CatalogViewV1 catalog{groups, 3, 2, fingerprint};
+test_seam::GroupV1 generatedGroups[] = {
+    {0, 3, 3}, {1, 1, 1}, {2, 1, 1}, {3, 1, 1},
+    {4, 1, 1}, {5, 1, 1}, {6, 1, 1}, {7, 3, 3},
+};
+std::uint8_t generatedFingerprint[32]{};
 std::atomic<unsigned> commitCalls{0};
 HMODULE expectedGraphics = nullptr;
+bool useGeneratedCatalog = false;
 
 bool loadedExpected(void*, std::uint64_t base) noexcept {
     return reinterpret_cast<HMODULE>(static_cast<std::uintptr_t>(base)) == expectedGraphics;
@@ -54,6 +60,9 @@ CommitStoreV1 store;
 extern "C" __declspec(dllexport) void WINAPI FixtureSetExpectedGraphics(HMODULE module) noexcept {
     expectedGraphics = module;
 }
+extern "C" __declspec(dllexport) void WINAPI FixtureUseGeneratedCatalogForCommit() noexcept {
+    useGeneratedCatalog = true;
+}
 extern "C" __declspec(dllexport) unsigned WINAPI FixtureCommitCalls() noexcept {
     return commitCalls.load();
 }
@@ -68,5 +77,19 @@ extern "C" __declspec(dllexport) HRESULT WINAPI edvrCommitPluginSelectionAdmissi
     const AdmissionCommitRequestV1* request) noexcept {
     ++commitCalls;
     if (!request) return E_INVALIDARG;
+    if (useGeneratedCatalog) {
+        GraphicsContractV1 graphicsContract{};
+        const HRESULT queried = queryContract(nullptr,
+            (static_cast<std::uint64_t>(request->decision.graphicsProviderBaseHigh) << 32) |
+                request->decision.graphicsProviderBaseLow,
+            &graphicsContract);
+        if (queried != S_OK) return FAILED(queried) ? queried : E_ACCESSDENIED;
+        std::memcpy(generatedFingerprint, graphicsContract.catalogFingerprint,
+                    sizeof(generatedFingerprint));
+        const test_seam::CatalogViewV1 generated{
+            generatedGroups, 8,
+            graphicsContract.catalogSchemaVersion, generatedFingerprint};
+        return store.commitWithCatalogForTest(*request, generated, hooks);
+    }
     return store.commitWithCatalogForTest(*request, catalog, hooks);
 }

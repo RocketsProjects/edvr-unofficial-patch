@@ -142,11 +142,11 @@ class NativeGraphicsClient final {
     const std::uint64_t base =
         (static_cast<std::uint64_t>(decision.graphicsProviderBaseHigh) << 32) |
         decision.graphicsProviderBaseLow;
-    if (decision.reason == static_cast<std::uint32_t>(Reason::ProviderRejected)) {
-      if (base != 0 || decision.captureStatus != S_OK) return false;
-    } else if (base != reinterpret_cast<std::uint64_t>(provider)) {
+    // A rejected native commit cannot authorize a paired graphics startup,
+    // even though Legacy owners remain available through the graphics module.
+    if (decision.reason == static_cast<std::uint32_t>(Reason::ProviderRejected))
       return false;
-    }
+    if (base != reinterpret_cast<std::uint64_t>(provider)) return false;
     if (decision.reason == static_cast<std::uint32_t>(Reason::SnapshotUnavailable))
       return decision.captureStatus != S_OK && decision.recordState == 0 &&
           decision.validationFlags == 0 && decision.selectedPluginMask == 0;

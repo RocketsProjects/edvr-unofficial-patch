@@ -1510,7 +1510,7 @@ void testCaptureWiringPins(const char* root) {
     {
         const std::string pages = bodyOf("void buildPages() {");
         const size_t at = pages.find("p.name = \"Explorer Cam\";");
-        const size_t rows = at == std::string::npos ? at : pages.find("addSettingRows(p, MenuTier::Fix, \"explorer_cam\", false);", at);
+        const size_t rows = at == std::string::npos ? at : pages.find("addSettingRows(p, MenuTier::Fix, \"explorer_cam\", false, selection);", at);
         const size_t developer = pages.find("if (s.developer) {");
         check(at != std::string::npos && rows != std::string::npos && rows - at < 200,
               "menu.cpp: buildPages makes a page named Explorer Cam from the Fix-tier rows of the explorer_cam page");

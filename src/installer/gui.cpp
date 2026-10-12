@@ -26,6 +26,7 @@
 #include "logbundle.h"
 #include "mirror.h"
 #include "payload.h"
+#include "plugin_components.h"
 #include "settings.h"
 #include "settings_view.h"
 #include "ui.h"
@@ -40,6 +41,7 @@ enum : int {
     kIdCombo = 1001,
     kIdBrowse = 1002,
     kIdChkKeep = 1012,
+    kIdPluginSelect = 1013,
     kIdInstall = 1020,
     kIdRepair = 1021,
     kIdUninstall = 1022,
@@ -88,6 +90,7 @@ struct Gui {
     HWND combo = nullptr;
     HWND report = nullptr;
     HWND chkKeep = nullptr;
+    HWND pluginSelect = nullptr;
     HWND install = nullptr;
     HWND repair = nullptr;
     HWND uninstall = nullptr;
@@ -702,6 +705,12 @@ void runAction(AppArgs::Act action) {
     args.dir = g.survey.game.dir;
     args.keepSettings = ui::checkboxChecked(g.chkKeep);
     args.removeSettings = false;
+    if (action == AppArgs::Act::Uninstall) {
+        args.pluginSelectionSpecified = false;
+        args.noPlugins = false;
+        args.pluginIds.clear();
+        args.pluginSelectionValidated = false;
+    }
 
     const std::wstring mirrorDir = mirrorDirFor(g.survey.game);
     const bool canMirror = action != AppArgs::Act::Uninstall;
@@ -799,6 +808,7 @@ void runAction(AppArgs::Act action) {
             L"EDVR installer", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
         if (answer != IDYES) return;
         AppArgs elevated = args;
+        elevated.pluginSelectionValidated = !plan.blocked;
         elevated.autorun = true;
         if (relaunchElevated(elevated)) {
             PostMessageW(g.window, WM_CLOSE, 0, 0);
@@ -841,6 +851,108 @@ void runAction(AppArgs::Act action) {
 
     g.survey = surveyTarget(g.survey.game);
     showSurvey();
+}
+
+bool choosePlugins(HWND owner) {
+    const auto catalog = plugin_components::compiledCatalog();
+    const std::string profile = payloadInfo().profile;
+    const std::uint32_t bit = profile == "flat" ? 2u : 1u;
+    const auto rows = plugin_components::components(catalog, profile);
+    const bool ready = plugin_components::profileSelectionReady(catalog, profile);
+    const bool pendingChoice = g.args.pluginSelectionSpecified;
+    std::vector<std::string> installed;
+    const auto& saved = g.survey.state.pluginSelection;
+    const bool hasSavedProfileSelection = g.survey.state.present &&
+        saved.state == PluginSelectionRecordState::Supported && saved.profile == profile;
+    if (pendingChoice)
+        installed = g.args.pluginIds;
+    else if (hasSavedProfileSelection)
+        installed = saved.selectedIds;
+    else if (ready)
+        installed = plugin_components::defaults(catalog, profile).selectedIds;
+
+    std::string listing = "Plugins for the " + profile + " profile:\n\n";
+    for (const auto& row : rows) {
+        const bool selected = std::find(installed.begin(), installed.end(), row.id) != installed.end();
+        const bool savedInstalled = selected && hasSavedProfileSelection && !pendingChoice;
+        listing += row.name + ((row.recommendedProfileMask & bit) ? "  [Recommended]" : "") +
+                   ((row.defaultProfileMask & bit) ? "  [Default]" : "") +
+                   (selected ? (savedInstalled ? "  [Installed]" : "  [Selected]") : "") +
+                   "\n" + row.description + "\n";
+    }
+    if (!ready) {
+        listing += "\nSelection is unavailable until every plugin that supports this profile is ready. "
+                   "The current receipt will be preserved.";
+        MessageBoxW(owner, fromUtf8(listing).c_str(), L"Plugin selection", MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+    const TASKDIALOG_BUTTON buttons[] = {
+        {1001, L"Defaults\nUse this profile's default plugin set."},
+        {1002, L"Recommended\nUse the recommended plugin set."},
+        {1003, L"No optional plugins\nInstall an explicit empty plugin selection."},
+        {1004, L"Choose plugins\nReview each plugin and choose whether to include it."},
+    };
+    TASKDIALOGCONFIG dialog{};
+    dialog.cbSize = sizeof(dialog);
+    dialog.hwndParent = owner;
+    dialog.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION;
+    dialog.pszWindowTitle = L"EDVR plugin selection";
+    dialog.pszMainInstruction = L"Choose the plugins for this install";
+    const std::wstring content = fromUtf8(listing);
+    dialog.pszContent = content.c_str();
+    dialog.cButtons = static_cast<UINT>(sizeof(buttons) / sizeof(buttons[0]));
+    dialog.pButtons = buttons;
+    int selectedButton = 0;
+    if (FAILED(TaskDialogIndirect(&dialog, &selectedButton, nullptr, nullptr))) return false;
+
+    std::vector<std::string> ids;
+    if (selectedButton == 1001) ids = plugin_components::defaults(catalog, profile).selectedIds;
+    else if (selectedButton == 1002) {
+        std::vector<std::string> recommended;
+        for (const auto& row : rows)
+            if (row.recommendedProfileMask & (profile == "flat" ? 2u : 1u))
+                recommended.push_back(row.id);
+        const auto resolved = plugin_components::resolve(catalog, profile, recommended);
+        if (!resolved.error.empty()) {
+            MessageBoxW(owner, fromUtf8(resolved.error).c_str(), L"Plugin selection", MB_OK | MB_ICONWARNING);
+            return false;
+        }
+        ids = resolved.selectedIds;
+    } else if (selectedButton == 1003) {
+        const auto resolved = plugin_components::resolve(catalog, profile, {});
+        if (!resolved.error.empty()) return false;
+    } else if (selectedButton == 1004) {
+        ids = installed;
+        for (const auto& row : rows) {
+            const bool wasSelected = std::find(ids.begin(), ids.end(), row.id) != ids.end();
+            const bool savedInstalled = wasSelected && hasSavedProfileSelection && !pendingChoice;
+            std::string prompt = row.name + "\n\n" + row.description + "\n\n";
+            prompt += (row.recommendedProfileMask & bit) ? "Recommended for this profile. " : "";
+            prompt += (row.defaultProfileMask & bit) ? "Included in this profile's defaults. " : "";
+            prompt += wasSelected ? (savedInstalled ? "Currently installed.\n\nInclude it?"
+                                                     : "Selected for this install.\n\nInclude it?")
+                                  : "Not selected for this install.\n\nInclude it?";
+            const int answer = MessageBoxW(owner, fromUtf8(prompt).c_str(), L"Choose plugins",
+                                           MB_YESNOCANCEL | MB_ICONQUESTION);
+            if (answer == IDCANCEL) return false;
+            if (answer == IDYES && !wasSelected) ids.push_back(row.id);
+            if (answer == IDNO && wasSelected)
+                ids.erase(std::remove(ids.begin(), ids.end(), row.id), ids.end());
+        }
+        const auto resolved = plugin_components::resolve(catalog, profile, ids);
+        if (!resolved.error.empty()) {
+            MessageBoxW(owner, fromUtf8(resolved.error).c_str(), L"Plugin selection", MB_OK | MB_ICONWARNING);
+            return false;
+        }
+        ids = resolved.selectedIds;
+    } else {
+        return false;
+    }
+    g.args.pluginSelectionSpecified = true;
+    g.args.noPlugins = ids.empty();
+    g.args.pluginIds = std::move(ids);
+    setReport(listing + "\nSelection updated. The next plan shows the resolved set and any dependencies.");
+    return true;
 }
 
 // One zip on the Desktop with the logs, the breadcrumbs, any fatal note, the
@@ -917,6 +1029,10 @@ void createControls(HWND window) {
     g.chkKeep = ui::makeCheckbox(window, L"Keep the settings I have changed", kIdChkKeep,
                                  g.args.keepSettings, f.body);
     place(g.chkKeep, kMargin + kCardPad, 366, 420, 24, Screen::Install);
+
+    g.pluginSelect = ui::makeButton(window, L"Plugins...", kIdPluginSelect,
+                                    ui::ButtonStyle::Secondary, f.body);
+    place(g.pluginSelect, 520, 398, 176, 34, Screen::Install);
 
     g.install = ui::makeButton(window, L"Install", kIdInstall, ui::ButtonStyle::Primary, f.body);
     g.repair = ui::makeButton(window, L"Repair", kIdRepair, ui::ButtonStyle::Secondary, f.body);
@@ -1064,6 +1180,9 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                     return 0;
                 case kIdChkKeep:
                     ui::toggleCheckbox(reinterpret_cast<HWND>(lparam));
+                    return 0;
+                case kIdPluginSelect:
+                    choosePlugins(window);
                     return 0;
                 default: return 0;
             }

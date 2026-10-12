@@ -61,15 +61,16 @@ EXPECTED_PROFILES = {
     'diagnostics': ('vr', 'flat'),
 }
 EXPECTED_IMPLEMENTATION = {
-    'temporal-aa': 'catalog-only',
-    'cockpit-visuals': 'phase1-pilot',
-    'intro': 'phase1-lifecycle',
-    'on-foot-panel': 'catalog-only',
-    'comfort': 'phase1-lifecycle',
-    'explorer-cam': 'phase1-lifecycle',
-    'performance': 'catalog-only',
-    'diagnostics': 'phase1-lifecycle',
+    'temporal-aa': 'selection-ready',
+    'cockpit-visuals': 'selection-ready',
+    'intro': 'selection-ready',
+    'on-foot-panel': 'selection-ready',
+    'comfort': 'selection-ready',
+    'explorer-cam': 'selection-ready',
+    'performance': 'selection-ready',
+    'diagnostics': 'selection-ready',
 }
+EXPECTED_SELECTION_AVAILABLE = EXPECTED_PROFILES
 EXPECTED_HOOK_POINTS = {
     'cockpit-visuals': ('draw.classify', 'lifecycle.configure', 'lifecycle.frame',
                         'lifecycle.shutdown'),
@@ -342,8 +343,9 @@ def validate_manifest(data, documented_keys=None):
         for profile in selectable:
             if profile not in supported:
                 problems.append('%s.selectionAvailableProfiles references unsupported profile %s' % (pid, profile))
-        if selectable:
-            problems.append('%s selection is not available during Phase 1' % pid)
+        expected_available = EXPECTED_SELECTION_AVAILABLE.get(pid)
+        if expected_available is not None and tuple(selectable) != expected_available:
+            problems.append('%s.selectionAvailableProfiles must match its supported selection-ready profiles' % pid)
         for field, values in (('profiles', supported), ('recommendedProfiles', recommended),
                               ('defaultInstallProfiles', defaults)):
             for profile in values:
@@ -353,7 +355,7 @@ def validate_manifest(data, documented_keys=None):
                     problems.append('%s.%s references unsupported profile %s' % (pid, field, profile))
         if not set(recommended).issubset(set(defaults)):
             problems.append('%s recommendedProfiles must be a subset of defaultInstallProfiles' % pid)
-        if pid in DEFAULT_INSTALL:
+        if any(pid in values for values in DEFAULT_INSTALL.values()):
             expected_defaults = tuple(p for p in PROFILES if pid in DEFAULT_INSTALL[p])
             if set(defaults) != set(expected_defaults):
                 problems.append('%s.defaultInstallProfiles must be %s' %
@@ -391,8 +393,8 @@ def validate_manifest(data, documented_keys=None):
         if not isinstance(claims, list):
             problems.append(pid + '.claims must be an array')
             claims = []
-        if status == 'phase1-lifecycle' and claims:
-            problems.append('%s phase1-lifecycle implementation cannot declare draw claims' % pid)
+        if pid in ('intro', 'comfort', 'explorer-cam', 'diagnostics') and claims:
+            problems.append('%s lifecycle module cannot declare draw claims' % pid)
         claim_ids = set()
         for ci, claim in enumerate(claims):
             clabel = '%s.claims[%d]' % (pid, ci)
@@ -838,20 +840,29 @@ def self_test():
         original = load_json()
         documented = ini_documented_keys()
         check('canonical manifest validates', not validate_manifest(original, documented))
+        temporal = original['plugins'][EXPECTED_IDS.index('temporal-aa')]
+        check('Temporal-AA is recommended for both supported profiles without changing defaults',
+              temporal['recommendedProfiles'] == ['vr', 'flat'] and
+              temporal['defaultInstallProfiles'] == ['vr', 'flat'])
+        bad_recommendation = copy.deepcopy(original)
+        bad_recommendation['plugins'][EXPECTED_IDS.index('temporal-aa')]['recommendedProfiles'] = ['vr']
+        check('Temporal-AA Flat recommendation is required by the manifest contract',
+              any('temporal-aa.recommendedProfiles must be vr, flat' in problem
+                  for problem in validate_manifest(bad_recommendation, documented)))
         intro_index = EXPECTED_IDS.index('intro')
         intro = original['plugins'][intro_index]
-        check('intro is explicitly lifecycle-only and stays non-selectable',
-              intro['implementationStatus'] == 'phase1-lifecycle' and
-              intro['selectionAvailableProfiles'] == [] and
+        check('intro is selection-ready while preserving lifecycle metadata',
+              intro['implementationStatus'] == 'selection-ready' and
+              intro['selectionAvailableProfiles'] == ['vr'] and
               tuple(intro['hookPoints']) == EXPECTED_HOOK_POINTS['intro'] and
               intro['claims'] == [] and
               all(rig in intro['rigs'] for rig in
                   ('plugin_dispatch_test', 'intro_lifecycle_test')))
         cockpit_index = EXPECTED_IDS.index('cockpit-visuals')
         cockpit = original['plugins'][cockpit_index]
-        check('Cockpit Visuals keeps its night-vision pilot claim and declares the real RemLok lifecycle',
-              cockpit['implementationStatus'] == 'phase1-pilot' and
-              cockpit['selectionAvailableProfiles'] == [] and
+        check('Cockpit Visuals keeps its night-vision claim and declares the real RemLok lifecycle',
+              cockpit['implementationStatus'] == 'selection-ready' and
+              cockpit['selectionAvailableProfiles'] == ['vr'] and
               tuple(cockpit['hookPoints']) == EXPECTED_HOOK_POINTS['cockpit-visuals'] and
               [claim['id'] for claim in cockpit['claims']] == ['night-vision'] and
               all(rig in cockpit['rigs'] for rig in
@@ -865,9 +876,9 @@ def self_test():
               'fix.space_dust' not in all_owned_keys and 'fix.space_dust' not in documented)
         comfort_index = EXPECTED_IDS.index('comfort')
         comfort = original['plugins'][comfort_index]
-        check('comfort lifecycle owns Exposure, Scanners, and Transition Flash while remaining non-selectable',
-              comfort['implementationStatus'] == 'phase1-lifecycle' and
-              comfort['selectionAvailableProfiles'] == [] and
+        check('comfort lifecycle owns Exposure, Scanners, and Transition Flash and is selection-ready',
+              comfort['implementationStatus'] == 'selection-ready' and
+              comfort['selectionAvailableProfiles'] == ['vr'] and
               tuple(comfort['hookPoints']) == EXPECTED_HOOK_POINTS['comfort'] and
               comfort['runtimeRequirement']['vr'] == 'partial' and
               comfort['claims'] == [] and
@@ -877,8 +888,8 @@ def self_test():
         explorer_index = EXPECTED_IDS.index('explorer-cam')
         explorer = original['plugins'][explorer_index]
         check('Explorer Cam is a required independent lifecycle module with no configure hook',
-              explorer['implementationStatus'] == 'phase1-lifecycle' and
-              explorer['selectionAvailableProfiles'] == [] and
+              explorer['implementationStatus'] == 'selection-ready' and
+              explorer['selectionAvailableProfiles'] == ['vr'] and
               tuple(explorer['hookPoints']) == EXPECTED_HOOK_POINTS['explorer-cam'] and
               explorer['runtimeRequirement']['vr'] == 'required' and
               explorer['claims'] == [] and
@@ -891,9 +902,9 @@ def self_test():
               not any(retired in performance['description'].lower()
                       for retired in ('guard', 'settlement', 'static props')) and
               not {'exposure', 'scanners'} & set(EXPECTED_IDS))
-        check('Performance lists actual policy rigs while remaining catalog-only',
-              performance['implementationStatus'] == 'catalog-only' and
-              performance['selectionAvailableProfiles'] == [] and
+        check('Performance lists actual policy rigs and is selection-ready',
+              performance['implementationStatus'] == 'selection-ready' and
+              performance['selectionAvailableProfiles'] == ['vr'] and
               performance['hookPoints'] == [] and
               performance['costBudget']['state'] == 'unmeasured' and
               tuple(performance['rigs']) == EXPECTED_RIGS['performance'])
@@ -902,9 +913,9 @@ def self_test():
                'experimental.fov_trim_nasal'} <= set(performance['ownedConfigKeys']))
         diagnostics_index = EXPECTED_IDS.index('diagnostics')
         diagnostics = original['plugins'][diagnostics_index]
-        check('Diagnostics lifecycle owns scheduler probes while remaining non-selectable',
-              diagnostics['implementationStatus'] == 'phase1-lifecycle' and
-              diagnostics['selectionAvailableProfiles'] == [] and
+        check('Diagnostics lifecycle owns scheduler probes and is selection-ready',
+              diagnostics['implementationStatus'] == 'selection-ready' and
+              diagnostics['selectionAvailableProfiles'] == ['vr', 'flat'] and
               tuple(diagnostics['hookPoints']) == EXPECTED_HOOK_POINTS['diagnostics'] and
               diagnostics['claims'] == [] and
               all(rig in diagnostics['rigs'] for rig in EXPECTED_RIGS['diagnostics']))
@@ -912,9 +923,9 @@ def self_test():
                            ('diagnostics', diagnostics_index)):
             plugin = original['plugins'][index]
             bad = copy.deepcopy(original)
-            bad['plugins'][index]['selectionAvailableProfiles'] = ['vr']
-            check('%s lifecycle remains unavailable for selection' % pid,
-                  any('%s selection is not available during Phase 1' % pid in p
+            bad['plugins'][index]['selectionAvailableProfiles'] = []
+            check('%s availability must match declared supported profiles' % pid,
+                  any('%s.selectionAvailableProfiles must match its supported selection-ready profiles' % pid in p
                       for p in validate_manifest(bad, documented)))
             bad = copy.deepcopy(original)
             bad['plugins'][index]['hookPoints'] = ['draw.classify']
@@ -930,13 +941,13 @@ def self_test():
                       for p in validate_manifest(bad, documented)))
         bad = copy.deepcopy(original)
         bad['plugins'][intro_index]['implementationStatus'] = 'complete'
-        check('lifecycle module cannot claim pilot or completed implementation status',
-              any('intro.implementationStatus must be phase1-lifecycle' in p
+        check('module cannot claim an unknown implementation status',
+              any('intro.implementationStatus must be selection-ready' in p
                   for p in validate_manifest(bad, documented)))
         bad = copy.deepcopy(original)
-        bad['plugins'][intro_index]['selectionAvailableProfiles'] = ['vr']
-        check('lifecycle module remains unavailable for selection',
-              any('intro selection is not available during Phase 1' in p
+        bad['plugins'][intro_index]['selectionAvailableProfiles'] = []
+        check('selection readiness requires availability for supported profiles',
+              any('intro.selectionAvailableProfiles must match its supported selection-ready profiles' in p
                   for p in validate_manifest(bad, documented)))
         bad = copy.deepcopy(original)
         bad['plugins'][intro_index]['hookPoints'] = ['draw.classify']
@@ -946,7 +957,7 @@ def self_test():
         bad = copy.deepcopy(original)
         bad['plugins'][intro_index]['claims'] = [{}]
         check('lifecycle module rejects misrepresented draw claims',
-              any('intro phase1-lifecycle implementation cannot declare draw claims' in p
+              any('intro lifecycle module cannot declare draw claims' in p
                   for p in validate_manifest(bad, documented)))
         bad = copy.deepcopy(original)
         bad['plugins'][intro_index]['selectionAvailableProfiles'] = ['flat']
@@ -1090,6 +1101,9 @@ def self_test():
         on_foot_index = EXPECTED_IDS.index('on-foot-panel')
         bad['plugins'][on_foot_index]['dependencies'][0]['kind'] = 'hard'
         bad['plugins'][on_foot_index]['selectionAvailableProfiles'] = ['vr']
+        temporal_index = EXPECTED_IDS.index('temporal-aa')
+        bad['plugins'][temporal_index]['selectionAvailableProfiles'] = []
+        bad['plugins'][temporal_index]['implementationStatus'] = 'catalog-only'
         check('hard dependency availability checked for selectable profiles',
               any('hard dependency temporal-aa is unavailable in a selectable profile' in p
                   for p in validate_manifest(bad, documented)))
@@ -1158,37 +1172,37 @@ def self_test():
         check('selection fingerprint changes when index mapping changes',
               selection_contract_fingerprint(contract_change) != fingerprint)
         intro_record = next((line for line in content.splitlines()
-                             if '"phase1-lifecycle"' in line), '')
-        check('generated intro metadata stays lifecycle-only and non-selectable',
-              '"phase1-lifecycle"' in intro_record and '0x0u' in intro_record and
+                             if '"intro"' in line), '')
+        check('generated intro metadata retains lifecycle hooks and VR availability',
+              '"selection-ready"' in intro_record and '0x1u' in intro_record and
               'k_intro_hook_points[] = {\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
               'k_intro_claims, 0' in content and 'k_intro_rigs, 2' in content and
               'k_intro_rigs[] = {\n    "plugin_dispatch_test",\n    "intro_lifecycle_test",' in content)
         cockpit_record = next((line for line in content.splitlines()
-                               if '"cockpit-visuals"' in line and '"phase1-pilot"' in line), '')
+                               if '"cockpit-visuals"' in line and '"selection-ready"' in line), '')
         check('generated Cockpit metadata keeps its draw claim and adds lifecycle hooks',
-              '"phase1-pilot"' in cockpit_record and
+              '"selection-ready"' in cockpit_record and '0x1u' in cockpit_record and
               'k_cockpit_visuals_hook_points[] = {\n    "draw.classify",\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
               'k_cockpit_visuals_claims, 1' in content and
               'k_cockpit_visuals_rigs[] = {\n    "night_vision_test",\n    "plugin_dispatch_test",\n    "remlok_predicate_test",\n    "cockpit_api_test",' in content)
         comfort_record = next((line for line in content.splitlines()
-                               if '"comfort"' in line and '"phase1-lifecycle"' in line), '')
+                               if '"comfort"' in line and '"selection-ready"' in line), '')
         check('generated Comfort metadata carries merged lifecycle rigs',
-              '"phase1-lifecycle"' in comfort_record and '0x0u' in comfort_record and
+              '"selection-ready"' in comfort_record and '0x1u' in comfort_record and
               'k_comfort_hook_points[] = {\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
               'k_comfort_claims, 0' in content and
               'k_comfort_rigs[] = {\n    "exposure_dispatch_test",\n    "exposure_cost_test",\n    "native_fss_gpu_test",' in content)
         explorer_record = next((line for line in content.splitlines()
-                                if '"explorer-cam"' in line and '"phase1-lifecycle"' in line), '')
+                                if '"explorer-cam"' in line and '"selection-ready"' in line), '')
         check('generated Explorer Cam metadata has only real frame/shutdown hooks',
-              '"phase1-lifecycle"' in explorer_record and '0x0u' in explorer_record and
+              '"selection-ready"' in explorer_record and '0x1u' in explorer_record and
               'k_explorer_cam_hook_points[] = {\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
               'k_explorer_cam_claims, 0' in content and
               'k_explorer_cam_rigs[] = {\n    "explorer_cam_test",\n    "explorer_cam_fade_test",' in content)
         diagnostics_record = next((line for line in content.splitlines()
-                                   if '"diagnostics"' in line and '"phase1-lifecycle"' in line), '')
+                                   if '"diagnostics"' in line and '"selection-ready"' in line), '')
         check('generated Diagnostics metadata declares its lifecycle and real rigs',
-              '"phase1-lifecycle"' in diagnostics_record and '0x0u' in diagnostics_record and
+              '"selection-ready"' in diagnostics_record and '0x3u' in diagnostics_record and
               'k_diagnostics_hook_points[] = {\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
               'k_diagnostics_claims, 0' in content and
               'k_diagnostics_rigs[] = {\n    "pixel_probe_test",\n    "scheduler_stack_probe_test",' in content)

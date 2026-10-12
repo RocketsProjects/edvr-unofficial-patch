@@ -3,6 +3,7 @@
 #include "../../src/common/native_graphics.h"
 #include "../../src/common/graphics_bridge.h"
 #include "../../src/common/render_boundary.h"
+#include "../../src/common/runtime_profile.h"
 
 #include <atomic>
 #include <thread>
@@ -52,10 +53,21 @@ extern "C" __declspec(dllexport) BOOL WINAPI FixtureOwnerAllowedForStartup(
 extern "C" __declspec(dllexport) HRESULT WINAPI FixturePublishCandidate(
     const wchar_t* moduleDirectory, HMODULE graphics) noexcept {
     if (!moduleDirectory) return E_INVALIDARG;
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Vr;
     const std::wstring directory(moduleDirectory);
     const HRESULT capture = edvr::plugin_selection_transport::captureFromModuleDirectory(directory);
     edvr::plugin_admission_transport::publishCandidate(directory, graphics,
         edvr::plugin_selection::PluginSelectionProfileV1::Vr);
+    return capture;
+}
+extern "C" __declspec(dllexport) HRESULT WINAPI FixturePublishFlatCandidate(
+    const wchar_t* moduleDirectory, HMODULE graphics) noexcept {
+    if (!moduleDirectory) return E_INVALIDARG;
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    const std::wstring directory(moduleDirectory);
+    const HRESULT capture = edvr::plugin_selection_transport::captureFromModuleDirectory(directory);
+    edvr::plugin_admission_transport::publishCandidate(directory, graphics,
+        edvr::plugin_selection::PluginSelectionProfileV1::Flat);
     return capture;
 }
 extern "C" HRESULT WINAPI edvrAcquireNativeGraphics(

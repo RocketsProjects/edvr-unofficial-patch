@@ -2,6 +2,7 @@ LIBRARY plugin_admission_runtime_peer
 EXPORTS
     edvrCommitPluginSelectionAdmissionV1
     FixtureSetExpectedGraphics
+    FixtureUseGeneratedCatalogForCommit
     FixtureCommitCalls
     FixtureReadCommitted
     FixtureResetCommit

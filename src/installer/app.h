@@ -11,6 +11,7 @@
 #include <windows.h>
 
 #include <string>
+#include <vector>
 
 #include "plan.h"
 
@@ -25,6 +26,10 @@ struct AppArgs {
     bool         removeSettings = false; // --remove-settings (uninstall)
     bool         dryRun = false;         // --dry-run
     bool         convertProfile = false; // --convert-profile
+    bool         pluginSelectionSpecified = false;
+    bool         noPlugins = false;
+    bool         pluginSelectionValidated = false;
+    std::vector<std::string> pluginIds;
     bool         autorun = false;        // set on the elevated relaunch: already confirmed
     bool         help = false;
     bool         badArg = false;

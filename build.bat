@@ -257,6 +257,10 @@ python "tools\check_config_contract.py" --quiet --emit "%GEN%\config_contract_ge
 if errorlevel 1 ( echo [edvr] ERROR: contract header generation failed & exit /b 1 )
 python "tools\plugin_catalog.py" --self-test || exit /b 1
 python "tools\plugin_selection.py" --self-test || exit /b 1
+python "tools\plugin_selection_ui_test.py" --self-test || exit /b 1
+python "tools\plugin_selection_ui_test.py" --mutants || exit /b 1
+python "tools\plugin_visibility_test.py" --self-test || exit /b 1
+python "tools\edvr_log.py" --self-test || exit /b 1
 python "tools\draw_ladder_replay.py" --self-test || exit /b 1
 python "tools\plugin_catalog.py" --emit-cpp "%GEN%\plugin_manifest.inc" --dry-run || exit /b 1
 python "tools\plugin_catalog.py" --emit-cpp "%GEN%\plugin_manifest.inc"
@@ -837,7 +841,7 @@ set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
     "src\installer\apply.cpp" "src\installer\detect.cpp" ^
     "src\installer\probe.cpp" "src\common\iniedit.cpp" "src\common\plugin_selection_snapshot.cpp" ^
     "src\installer\state.cpp" "src\installer\mirror.cpp" ^
-    "src\installer\payload.cpp"
+    "src\installer\payload.cpp" "src\installer\plugin_components.cpp"
 set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
     shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib dxgi.lib kernel32.lib
 
@@ -1237,6 +1241,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX
     "src\d3d11\plugin_admission_transport.cpp" "src\d3d11\plugin_selection_transport.cpp" ^
     "src\common\plugin_selection_snapshot.cpp" "src\common\plugin_selection_admission.cpp" ^
     "src\common\plugin_admission_peer.cpp" "src\common\iniedit.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" ^
     /link /INCREMENTAL:NO /DEF:"tools\plugin_admission_runtime_test\runtime_graphics_fixture.def"
 if errorlevel 1 ( echo [edvr] ERROR: admission graphics integration fixture build failed & exit /b 1 )
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
@@ -3926,7 +3931,7 @@ if not exist "%OBJ%\insttest" mkdir "%OBJ%\insttest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
     /Fo"%OBJ%\insttest"\ /Fe"%BUILD%\installer_test.exe" ^
-    "tools\installer_test\installer_test.cpp" ^
+    "tools\installer_test\installer_test.cpp" "src\installer\plugin_components.cpp" ^
     "src\installer\plan.cpp" "src\installer\apply.cpp" ^
     "src\installer\detect.cpp" "src\installer\probe.cpp" ^
     "src\common\iniedit.cpp" "src\common\plugin_selection_snapshot.cpp" "src\installer\state.cpp" ^

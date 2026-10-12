@@ -1,6 +1,7 @@
 #include "../../src/common/plugin_admission_peer.h"
 #include "../../src/common/plugin_admission_commit.h"
 #include "../../src/openxr/native_graphics_client.h"
+#include "plugin_manifest.inc"
 
 #include <atomic>
 #include <chrono>
@@ -96,14 +97,23 @@ void cleanupRoot(const fs::path& root) {
     fs::remove_all(root);
 }
 
-void writeState(const fs::path& root, const char* selectedIds) {
+void writeState(const fs::path& root, const char* selectedIds,
+                const char* profile = "vr") {
     const fs::path install = root / L"edvr_install";
     fs::create_directories(install);
     std::ofstream file(install / L"state.ini", std::ios::binary | std::ios::trunc);
     if (!file) throw std::runtime_error("could not write temporary fixture state");
     file << "[plugins]\r\nselection_schema_version = 1\r\n"
-         << "catalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = "
+         << "catalog_schema_version = 2\r\nprofile = " << profile << "\r\nselected_ids = "
          << selectedIds << "\r\n";
+}
+
+void writeRawState(const fs::path& root, const char* contents) {
+    const fs::path install = root / L"edvr_install";
+    fs::create_directories(install);
+    std::ofstream file(install / L"state.ini", std::ios::binary | std::ios::trunc);
+    if (!file) throw std::runtime_error("could not write temporary fixture state");
+    file << contents;
 }
 
 using QueryAdmission = HRESULT (WINAPI *)(std::uint32_t, std::uint32_t,
@@ -112,6 +122,7 @@ using FixtureBegin = BOOL (WINAPI *)();
 using FixtureRelease = void (WINAPI *)();
 using FixtureCount = unsigned (WINAPI *)();
 using FixturePublish = HRESULT (WINAPI *)(const wchar_t*, HMODULE);
+using FixturePublishFlat = HRESULT (WINAPI *)(const wchar_t*, HMODULE);
 using FixtureOwnerAllowed = BOOL (WINAPI *)(std::uint32_t);
 
 class ScopedModule final {
@@ -196,7 +207,8 @@ void nativePreflight(const std::wstring& graphicsPath) {
 }
 
 void generatedLegacy(const std::wstring& graphicsPath, const std::wstring& peerPath,
-                     const char* selectedIds, Reason expectedReason, const char* label) {
+                     const char* selectedIds, Reason expectedReason, const char* label,
+                     unsigned expectedPeerCalls = 0) {
     const fs::path root = makeRoot(graphicsPath);
     try {
         writeState(root, selectedIds);
@@ -229,13 +241,277 @@ void generatedLegacy(const std::wstring& graphicsPath, const std::wstring& peerP
                           "published Decision is available to a late native reader");
                     check(decision.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
                           decision.reason == static_cast<std::uint32_t>(expectedReason), label);
+                    const std::uint64_t providerBase =
+                        (static_cast<std::uint64_t>(decision.graphicsProviderBaseHigh) << 32) |
+                        decision.graphicsProviderBaseLow;
+                    check(providerBase == (expectedReason == Reason::ProviderRejected ? 0u :
+                          static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(graphicsModule.get()))),
+                          "Legacy preserves provider identity for source failures and clears it after peer rejection");
+                    if (expectedReason == Reason::ProviderRejected) {
+                        const unsigned beforePairs = pairCalls();
+                        NativeGraphicsClient unreservedStartup;
+                        const HRESULT startup = unreservedStartup.acquire(
+                            graphicsPath, nullptr, true);
+                        const unsigned pairDelta = pairCalls() - beforePairs;
+                        check(providerBase == 0 && startup == E_ACCESSDENIED &&
+                              pairDelta == 0,
+                              "failed native commit produces provider-zero Legacy and strict unreserved startup rejects before paired exports");
+                    }
                     check(ownerAllowed(kPerformancePluginIndex),
-                          "published current-generated Legacy permits Performance startup");
+                          "published Legacy decision retains the active profile's Performance owner fallback");
                     check(!ownerAllowed(0xffffffffu),
                           "published Legacy rejects an unknown out-of-range startup owner");
                     check(pairCalls() == 0,
                           "startup-owner queries do not call optional paired graphics exports");
-                    check(count() == 0, "all-unready or invalid snapshot never calls native peer commit");
+                    check(count() == expectedPeerCalls,
+                          "only a valid generated VR selection reaches the fake native peer commit");
+                }
+            }
+        }
+        cleanupRoot(root);
+    } catch (...) {
+        cleanupRoot(root);
+        throw;
+    }
+}
+
+void generatedVrMissingPeer(const std::wstring& graphicsPath) {
+    const fs::path root = makeRoot(graphicsPath);
+    try {
+        writeState(root, "performance", "vr");
+        fs::create_directories(root / L"Openvr" / L"win64");
+        ScopedModule graphicsModule(LoadLibraryExW(graphicsPath.c_str(), nullptr,
+                                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR));
+        check(graphicsModule.get() != nullptr,
+              "load generated-catalog graphics provider for missing-peer VR startup");
+        if (graphicsModule.get()) {
+            auto publish = reinterpret_cast<FixturePublish>(
+                GetProcAddress(graphicsModule.get(), "FixturePublishCandidate"));
+            auto query = reinterpret_cast<QueryAdmission>(
+                GetProcAddress(graphicsModule.get(), "edvrQueryPluginAdmissionV1"));
+            auto pairCalls = reinterpret_cast<FixtureCount>(
+                GetProcAddress(graphicsModule.get(), "FixturePairCalls"));
+            check(publish && query && pairCalls,
+                  "missing-peer case has real capture, published Decision, and paired-call counters");
+            if (publish && query && pairCalls) {
+                check(publish(root.c_str(), graphicsModule.get()) == S_OK,
+                      "capture valid VR selection while the exact native peer file is absent");
+                DecisionV1 decision{};
+                check(query(1, 2, sizeof(decision), &decision) == S_OK,
+                      "missing-peer Legacy Decision is queryable");
+                const std::uint64_t providerBase =
+                    (static_cast<std::uint64_t>(decision.graphicsProviderBaseHigh) << 32) |
+                    decision.graphicsProviderBaseLow;
+                check(decision.activeProfile == static_cast<std::uint32_t>(
+                          PluginSelectionProfileV1::Vr) &&
+                      decision.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
+                      decision.reason == static_cast<std::uint32_t>(Reason::ProviderRejected) &&
+                      providerBase == 0,
+                      "missing native peer publishes provider-zero Legacy for a valid VR selection");
+                const unsigned beforePairs = pairCalls();
+                NativeGraphicsClient unreservedStartup;
+                const HRESULT startup = unreservedStartup.acquire(graphicsPath, nullptr, true);
+                check(startup == E_ACCESSDENIED && pairCalls() - beforePairs == 0,
+                      "missing native peer produces provider-zero Legacy and strict unreserved startup rejects before paired exports");
+            }
+        }
+        cleanupRoot(root);
+    } catch (...) {
+        cleanupRoot(root);
+        throw;
+    }
+}
+
+enum class VrSourceKind { Missing, Opaque, StaleSchema };
+
+void generatedVrSourceLegacyCase(const std::wstring& graphicsPath,
+                                 VrSourceKind sourceKind, const char* label) {
+    const fs::path root = makeRoot(graphicsPath);
+    try {
+        if (sourceKind == VrSourceKind::Opaque) {
+            writeRawState(root,
+                "[plugins]\r\nselection_schema_version = 1\r\n"
+                "catalog_schema_version = 2\r\nprofile = vr\r\n"
+                "selected_ids = diagnostics\r\nunknown = opaque\r\n");
+        } else if (sourceKind == VrSourceKind::StaleSchema) {
+            writeRawState(root,
+                "[plugins]\r\nselection_schema_version = 1\r\n"
+                "catalog_schema_version = 1\r\nprofile = vr\r\n"
+                "selected_ids = diagnostics\r\n");
+        }
+        ScopedModule graphicsModule(LoadLibraryExW(graphicsPath.c_str(), nullptr,
+                                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR));
+        check(graphicsModule.get() != nullptr,
+              "load generated-catalog graphics provider for VR source Legacy case");
+        if (graphicsModule.get()) {
+            auto publish = reinterpret_cast<FixturePublish>(
+                GetProcAddress(graphicsModule.get(), "FixturePublishCandidate"));
+            auto query = reinterpret_cast<QueryAdmission>(
+                GetProcAddress(graphicsModule.get(), "edvrQueryPluginAdmissionV1"));
+            auto pairCalls = reinterpret_cast<FixtureCount>(
+                GetProcAddress(graphicsModule.get(), "FixturePairCalls"));
+            check(publish && query && pairCalls,
+                  "VR source case exposes actual capture, query, and NativeGraphicsClient callback counter");
+            if (publish && query && pairCalls) {
+                check(publish(root.c_str(), graphicsModule.get()) == S_OK,
+                      "publish production candidate for VR source-state case");
+                DecisionV1 decision{};
+                check(query(1, 2, sizeof(decision), &decision) == S_OK,
+                      "VR source Legacy Decision is queryable");
+                const std::uint64_t providerBase =
+                    (static_cast<std::uint64_t>(decision.graphicsProviderBaseHigh) << 32) |
+                    decision.graphicsProviderBaseLow;
+                check(decision.activeProfile == static_cast<std::uint32_t>(
+                          PluginSelectionProfileV1::Vr) &&
+                      decision.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
+                      decision.reason == static_cast<std::uint32_t>(Reason::InvalidSnapshot) &&
+                      providerBase == static_cast<std::uint64_t>(
+                          reinterpret_cast<std::uintptr_t>(graphicsModule.get())),
+                      label);
+                const unsigned beforePairs = pairCalls();
+                NativeGraphicsClient acceptedLegacy;
+                const HRESULT startup = acceptedLegacy.acquire(graphicsPath, nullptr, true);
+                check(startup == E_FAIL && pairCalls() - beforePairs == 1,
+                      "provider-backed VR source Legacy passes the native guard and reaches the paired graphics callback");
+            }
+        }
+        cleanupRoot(root);
+    } catch (...) {
+        cleanupRoot(root);
+        throw;
+    }
+}
+
+enum class FlatSourceKind { Supported, Opaque, Missing };
+
+void generatedFlatCase(const std::wstring& graphicsPath, const char* selectedIds,
+                       const char* stateProfile, FlatSourceKind sourceKind,
+                       Reason expectedReason, std::uint32_t expectedMask,
+                       std::uint32_t expectedOwnerMask, const char* label) {
+    const fs::path root = makeRoot(graphicsPath);
+    try {
+        if (sourceKind == FlatSourceKind::Supported) {
+            writeState(root, selectedIds, stateProfile);
+        } else if (sourceKind == FlatSourceKind::Opaque) {
+            writeRawState(root, selectedIds);
+        }
+        ScopedModule graphicsModule(LoadLibraryExW(graphicsPath.c_str(), nullptr,
+                                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR));
+        check(graphicsModule.get() != nullptr,
+              "load actual generated-catalog graphics transport for Flat case");
+        if (graphicsModule.get()) {
+            auto publish = reinterpret_cast<FixturePublishFlat>(
+                GetProcAddress(graphicsModule.get(), "FixturePublishFlatCandidate"));
+            auto query = reinterpret_cast<QueryAdmission>(
+                GetProcAddress(graphicsModule.get(), "edvrQueryPluginAdmissionV1"));
+            auto pairCalls = reinterpret_cast<FixtureCount>(
+                GetProcAddress(graphicsModule.get(), "FixturePairCalls"));
+            auto ownerAllowed = reinterpret_cast<FixtureOwnerAllowed>(
+                GetProcAddress(graphicsModule.get(), "FixtureOwnerAllowedForStartup"));
+            check(publish && query && pairCalls && ownerAllowed,
+                  "actual Flat candidate, decision and owner exports are present");
+            if (publish && query && pairCalls && ownerAllowed) {
+                check(publish(root.c_str(), graphicsModule.get()) == S_OK,
+                      "capture the temporary Flat record and publish the production candidate");
+                DecisionV1 decision{};
+                check(query(1, 2, sizeof(decision), &decision) == S_OK,
+                      "published Flat generated-catalog Decision is queryable");
+                check(decision.activeProfile == static_cast<std::uint32_t>(PluginSelectionProfileV1::Flat) &&
+                      decision.reason == static_cast<std::uint32_t>(expectedReason) &&
+                      decision.selectedPluginMask == expectedMask,
+                      label);
+                const bool admitted = expectedReason == Reason::None;
+                check(decision.mode == static_cast<std::uint32_t>(admitted ?
+                      Mode::AdmittedSelection : Mode::Legacy),
+                      "Flat source state selects the expected admission/Legacy mode");
+                check(ownerAllowed(edvr::plugins::kPluginTemporalAa) ==
+                          ((expectedOwnerMask & (1u << edvr::plugins::kPluginTemporalAa)) != 0) &&
+                      ownerAllowed(edvr::plugins::kPluginDiagnostics) ==
+                          ((expectedOwnerMask & (1u << edvr::plugins::kPluginDiagnostics)) != 0),
+                      "Flat startup owner results match the selected mask or safe Legacy profile fallback");
+                const std::uint64_t providerBase =
+                    (static_cast<std::uint64_t>(decision.graphicsProviderBaseHigh) << 32) |
+                    decision.graphicsProviderBaseLow;
+                check(providerBase == static_cast<std::uint64_t>(
+                          reinterpret_cast<std::uintptr_t>(graphicsModule.get())),
+                      "Flat candidate retains the real loaded graphics provider identity");
+                check(pairCalls() == 0,
+                      "Flat publication does not attempt the VR-only native peer commit");
+            }
+        }
+        cleanupRoot(root);
+    } catch (...) {
+        cleanupRoot(root);
+        throw;
+    }
+}
+
+void generatedVrPeerCommit(const std::wstring& graphicsPath,
+                           const std::wstring& peerPath) {
+    const fs::path root = makeRoot(graphicsPath);
+    try {
+        writeState(root, "diagnostics", "vr");
+        const fs::path peerDirectory = root / L"Openvr" / L"win64";
+        fs::create_directories(peerDirectory);
+        const fs::path fakePeer = peerDirectory / L"openvr_api.dll";
+        fs::copy_file(peerPath, fakePeer);
+        {
+            ScopedModule peerModule(LoadLibraryExW(fakePeer.c_str(), nullptr,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR));
+            ScopedModule graphicsModule(LoadLibraryExW(graphicsPath.c_str(), nullptr,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR));
+            check(peerModule.get() && graphicsModule.get(),
+                  "load actual generated-catalog VR graphics and exact-path native peer fixtures");
+            if (peerModule.get() && graphicsModule.get()) {
+                using SetGraphics = void (WINAPI *)(HMODULE);
+                using EnableGeneratedCatalog = void (WINAPI *)();
+                using ReadCommit = BOOL (WINAPI *)(AdmissionCommitRequestV1*);
+                auto setGraphics = reinterpret_cast<SetGraphics>(
+                    GetProcAddress(peerModule.get(), "FixtureSetExpectedGraphics"));
+                auto useGenerated = reinterpret_cast<EnableGeneratedCatalog>(
+                    GetProcAddress(peerModule.get(), "FixtureUseGeneratedCatalogForCommit"));
+                auto commits = reinterpret_cast<FixtureCount>(
+                    GetProcAddress(peerModule.get(), "FixtureCommitCalls"));
+                auto readCommit = reinterpret_cast<ReadCommit>(
+                    GetProcAddress(peerModule.get(), "FixtureReadCommitted"));
+                auto resetCommit = reinterpret_cast<FixtureRelease>(
+                    GetProcAddress(peerModule.get(), "FixtureResetCommit"));
+                auto publish = reinterpret_cast<FixturePublish>(
+                    GetProcAddress(graphicsModule.get(), "FixturePublishCandidate"));
+                auto query = reinterpret_cast<QueryAdmission>(
+                    GetProcAddress(graphicsModule.get(), "edvrQueryPluginAdmissionV1"));
+                auto ownerAllowed = reinterpret_cast<FixtureOwnerAllowed>(
+                    GetProcAddress(graphicsModule.get(), "FixtureOwnerAllowedForStartup"));
+                auto pairCalls = reinterpret_cast<FixtureCount>(
+                    GetProcAddress(graphicsModule.get(), "FixturePairCalls"));
+                check(setGraphics && useGenerated && commits && readCommit && resetCommit &&
+                      publish && query && ownerAllowed && pairCalls,
+                      "generated VR commit fixture exposes transport and peer store controls");
+                if (setGraphics && useGenerated && commits && readCommit && resetCommit &&
+                    publish && query && ownerAllowed && pairCalls) {
+                    setGraphics(graphicsModule.get());
+                    useGenerated();
+                    const std::wstring directory = root.wstring();
+                    check(publish(directory.c_str(), graphicsModule.get()) == S_OK,
+                          "real VR capture and publish reaches the generated-catalog peer commit");
+                    DecisionV1 decision{};
+                    check(query(1, 2, sizeof(decision), &decision) == S_OK &&
+                          decision.mode == static_cast<std::uint32_t>(Mode::AdmittedSelection) &&
+                          decision.reason == static_cast<std::uint32_t>(Reason::None) &&
+                          decision.activeProfile == static_cast<std::uint32_t>(PluginSelectionProfileV1::Vr) &&
+                          decision.selectedPluginMask == (1u << edvr::plugins::kPluginDiagnostics),
+                          "generated VR Diagnostics selection publishes only after validated peer commit");
+                    check(ownerAllowed(edvr::plugins::kPluginDiagnostics) &&
+                          !ownerAllowed(edvr::plugins::kPluginTemporalAa) && pairCalls() == 0,
+                          "committed VR decision enables only Diagnostics without paired graphics calls");
+                    AdmissionCommitRequestV1 stored{};
+                    check(commits() == 1 && readCommit(&stored) &&
+                          stored.activeProfile == static_cast<std::uint32_t>(PluginSelectionProfileV1::Vr) &&
+                          stored.snapshot.recordedPluginMask ==
+                              (1u << edvr::plugins::kPluginDiagnostics) &&
+                          stored.supportedProfileMask == 3,
+                          "native peer stores the actual generated snapshot and complete profile mask");
+                    resetCommit();
                 }
             }
         }
@@ -409,10 +685,47 @@ int wmain(int argc, wchar_t** argv) {
         const std::wstring positive(argv[4]);
         heldContractQuery(graphics);
         nativePreflight(graphics);
-        generatedLegacy(graphics, native, "", Reason::ProfileNotReady,
-                        "current all-unready generated profile stays Legacy");
-        generatedLegacy(graphics, native, "performance", Reason::InvalidSnapshot,
-                        "invalid selected snapshot stays Legacy");
+        generatedLegacy(graphics, native, "performance", Reason::ProviderRejected,
+                        "valid generated VR selection with rejected native peer falls back to Legacy", 1);
+        generatedLegacy(graphics, native, "unknown-plugin", Reason::InvalidSnapshot,
+                        "unknown selected ID remains a provider-backed Legacy source record");
+        generatedVrMissingPeer(graphics);
+        generatedVrSourceLegacyCase(graphics, VrSourceKind::Missing,
+            "absent VR source record publishes provider-backed Legacy");
+        generatedVrSourceLegacyCase(graphics, VrSourceKind::Opaque,
+            "opaque VR source record publishes provider-backed Legacy");
+        generatedVrSourceLegacyCase(graphics, VrSourceKind::StaleSchema,
+            "stale VR catalog schema publishes provider-backed Legacy");
+        constexpr std::uint32_t kFlatTemporalAa = 1u << edvr::plugins::kPluginTemporalAa;
+        constexpr std::uint32_t kFlatDiagnostics = 1u << edvr::plugins::kPluginDiagnostics;
+        constexpr std::uint32_t kFlatOwners = kFlatTemporalAa | kFlatDiagnostics;
+        generatedFlatCase(graphics, "temporal-aa", "flat", FlatSourceKind::Supported,
+                          Reason::None, kFlatTemporalAa, kFlatTemporalAa,
+                          "actual Flat transport admits selected Temporal-AA without Diagnostics");
+        generatedFlatCase(graphics, "", "flat", FlatSourceKind::Supported,
+                          Reason::None, 0, 0,
+                          "actual Flat transport accepts an explicit empty selection");
+        generatedFlatCase(graphics, "temporal-aa", "vr", FlatSourceKind::Supported,
+                          Reason::InvalidSnapshot, kFlatTemporalAa, kFlatOwners,
+                          "Flat/profile mismatch is a provider-backed Legacy record");
+        generatedFlatCase(graphics, "performance", "flat", FlatSourceKind::Supported,
+                          Reason::InvalidSnapshot, 1u << edvr::plugins::kPluginPerformance,
+                          kFlatOwners,
+                          "Flat selection rejects a VR-only plugin while preserving Legacy owners");
+        generatedFlatCase(graphics,
+                          "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = flat\r\nselected_ids = temporal-aa\r\nunknown = opaque\r\n",
+                          "flat", FlatSourceKind::Opaque, Reason::InvalidSnapshot, 0,
+                          kFlatOwners,
+                          "opaque Flat source record stays Legacy with the real provider identity");
+        generatedFlatCase(graphics,
+                          "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 1\r\nprofile = flat\r\nselected_ids = temporal-aa\r\n",
+                          "flat", FlatSourceKind::Opaque, Reason::InvalidSnapshot, 0,
+                          kFlatOwners,
+                          "stale catalog schema stays an opaque provider-backed Legacy record");
+        generatedFlatCase(graphics, "", "flat", FlatSourceKind::Missing,
+                          Reason::InvalidSnapshot, 0, kFlatOwners,
+                          "absent Flat source record preserves Legacy owners");
+        generatedVrPeerCommit(graphics, native);
         exactLoadedPositiveCommit(positive, native);
     } catch (const std::exception& error) {
         std::fprintf(stderr, "fixture error: %s\n", error.what());

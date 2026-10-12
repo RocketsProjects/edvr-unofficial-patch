@@ -974,11 +974,8 @@ void lifecycleRegistryDispatch() {
     invalid.configureState = nullptr;
     check(!edvr::pluginRegistryRegisterLifecycle(&invalid),
           "lifecycle registry rejects records with neither configure callback");
-    EdvrPluginLifecycleOps catalogOnly = {
-        sizeof(EdvrPluginLifecycleOps), edvr::plugins::kPluginPerformance, "performance", &lifecycleState,
-        &lifecycleConfigure, &lifecycleFrame, &lifecycleShutdown};
-    check(!edvr::pluginRegistryRegisterLifecycle(&catalogOnly),
-          "lifecycle registry rejects catalog-only implementations");
+    check(!edvr::pluginRegistryImplementationStatusAllowedForTest("catalog-only", true),
+          "lifecycle registry policy rejects catalog-only implementations");
 
     const auto savedProfile = edvr::g_runtimeProfile;
     edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
@@ -1587,9 +1584,9 @@ void testDiagnosticsTemporalStartupAdmissionPolicy() {
     using namespace edvr::plugin_selection::admission_v1;
     using namespace edvr::plugin_selection::admission_v1::test_seam;
 
-    // The generated catalog currently has no selectable groups. This ready
-    // eight-row catalog exercises the shared policy algorithm only; it is not
-    // a published wire decision or a runtime-admission claim.
+    // This controlled ready eight-row catalog exercises the shared policy
+    // algorithm. Generated-catalog transport and VR peer publication are
+    // covered separately by the runtime admission fixture.
     GroupV1 readyGroups[edvr::plugins::kPluginCount]{};
     for (std::uint32_t i = 0; i < edvr::plugins::kPluginCount; ++i) {
         readyGroups[i] = {i,
@@ -1697,19 +1694,33 @@ void testDiagnosticsTemporalStartupAdmissionPolicy() {
         generated.catalogSchemaVersion;
     std::memcpy(current.catalogFingerprint, generated.catalogFingerprint,
                 sizeof(current.catalogFingerprint));
-    const DecisionV1 generatedLegacy = decide(S_OK, &current,
+    const DecisionV1 generatedEmpty = decide(S_OK, &current,
         PluginSelectionProfileV1::Vr, 0x12345000u);
-    const auto legacy = edvr::introStartupAdmission(generatedLegacy, true);
-    check(generated.supportedProfileMask == 0 &&
-              generatedLegacy.mode == static_cast<std::uint32_t>(Mode::Legacy) &&
-              legacy.ownerAllowed && !legacy.strictSelection &&
-              !legacy.strictModeSelection &&
-              ownerAllowedForStartup(generatedLegacy,
+    const auto emptyAdmission = edvr::introStartupAdmission(generatedEmpty, true);
+    check(generated.supportedProfileMask == 3 &&
+              generatedEmpty.mode == static_cast<std::uint32_t>(Mode::AdmittedSelection) &&
+              !emptyAdmission.ownerAllowed && !emptyAdmission.strictSelection &&
+              !emptyAdmission.strictModeSelection &&
+              !ownerAllowedForStartup(generatedEmpty,
+                                      edvr::plugins::kPluginDiagnostics) &&
+              !ownerAllowedForStartup(generatedEmpty,
+                                      edvr::plugins::kPluginTemporalAa) &&
+              !edvr::strictAdmissionNeedsVScreenHooks(emptyAdmission, true, true),
+          "real generated explicit empty selection admits no owner and supplies no strict-positive evidence");
+    current.recordedPluginMask = 1u << edvr::plugins::kPluginDiagnostics;
+    const DecisionV1 generatedDiagnostics = decide(S_OK, &current,
+        PluginSelectionProfileV1::Vr, 0x12345000u);
+    const auto diagnosticsAdmission = edvr::introStartupAdmission(generatedDiagnostics, true);
+    check(generatedDiagnostics.mode == static_cast<std::uint32_t>(Mode::AdmittedSelection) &&
+              ownerAllowedForStartup(generatedDiagnostics,
                                      edvr::plugins::kPluginDiagnostics) &&
-              ownerAllowedForStartup(generatedLegacy,
-                                     edvr::plugins::kPluginTemporalAa) &&
-              !edvr::strictAdmissionNeedsVScreenHooks(legacy, true, true),
-          "real generated empty catalog remains Legacy-compatible and supplies no strict-positive runtime evidence");
+              !ownerAllowedForStartup(generatedDiagnostics,
+                                      edvr::plugins::kPluginTemporalAa) &&
+              !diagnosticsAdmission.strictSelection &&
+              diagnosticsAdmission.strictModeSelection &&
+              edvr::strictAdmissionNeedsVScreenHooks(diagnosticsAdmission, true, false) &&
+              !edvr::strictAdmissionNeedsVScreenHooks(diagnosticsAdmission, false, false),
+          "real generated Diagnostics selection supplies strict-startup evidence only for its selected owner");
 
     const auto failedQuery = edvr::introStartupAdmissionWithCatalog(
         diagnosticsOnly, false, readyCatalog);
@@ -1750,6 +1761,27 @@ void pilotAndDiagnosticsLifecycleAdmission() {
         &lifecycleShutdown, nullptr, nullptr, nullptr,
         &lifecycleConfigureState, 0};
 
+    check(edvr::pluginRegistryImplementationStatusAllowedForTest(
+              "selection-ready", false) &&
+              edvr::pluginRegistryImplementationStatusAllowedForTest(
+                  "selection-ready", true) &&
+              edvr::pluginRegistryImplementationStatusAllowedForTest(
+                  "phase1-pilot", false) &&
+              edvr::pluginRegistryImplementationStatusAllowedForTest(
+                  "phase1-lifecycle", true),
+          "selection-ready rows and historical pilot/lifecycle rows pass their registry status policy");
+    check(!edvr::pluginRegistryImplementationStatusAllowedForTest(
+              "catalog-only", false) &&
+              !edvr::pluginRegistryImplementationStatusAllowedForTest(
+                  "catalog-only", true) &&
+              !edvr::pluginRegistryImplementationStatusAllowedForTest(
+                  "unknown", false) &&
+              !edvr::pluginRegistryImplementationStatusAllowedForTest(
+                  "unknown", true) &&
+              !edvr::pluginRegistryImplementationStatusAllowedForTest(
+                  "phase1-lifecycle", false),
+          "catalog-only, unknown, and lifecycle-only draw statuses remain rejected");
+
     EdvrPluginLifecycleOps invalidDiagnosticsComponent = diagnosticsLifecycle;
     invalidDiagnosticsComponent.componentIndex = 1;
     check(!edvr::pluginRegistryRegisterLifecycle(&invalidDiagnosticsComponent) &&
@@ -1767,7 +1799,7 @@ void pilotAndDiagnosticsLifecycleAdmission() {
     check(edvr::pluginRegistryRegister(&nightVision) &&
               edvr::pluginRegistryRegisterLifecycle(&cockpitLifecycle) &&
               edvr::pluginRegistryRegisterLifecycle(&diagnosticsLifecycle),
-          "Cockpit pilot and Diagnostics lifecycle records register independently");
+          "selection-ready Cockpit draw and Diagnostics lifecycle records register independently");
     check(edvr::pluginRegistryHasLifecycle(kCockpit) &&
               edvr::pluginRegistryHasLifecycle(kDiagnostics),
           "Cockpit component zero and Diagnostics component zero occupy separate lifecycle slots");

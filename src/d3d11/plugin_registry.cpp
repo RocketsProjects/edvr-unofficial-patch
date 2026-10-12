@@ -54,6 +54,14 @@ size_t g_legacyShaderFilterCount = 0;
 
 void rebuildCandidates();
 
+bool implementationStatusAllowed(const char* status, bool lifecycle) {
+    if (!status) return false;
+    if (std::strcmp(status, "selection-ready") == 0 ||
+        std::strcmp(status, "phase1-pilot") == 0)
+        return true;
+    return lifecycle && std::strcmp(status, "phase1-lifecycle") == 0;
+}
+
 bool legacyInterestNeedsShaderObserver() {
     for (size_t i = 0; i < g_legacyShaderFilterCount; ++i) {
         if (draw_interest::contains(g_configuredLegacyInterests,
@@ -188,6 +196,13 @@ bool validateAndAppendClaims(const EdvrPluginOps* ops) {
 }
 }  // namespace
 
+#ifdef EDVR_SELECTION_ADMISSION_TEST
+bool pluginRegistryImplementationStatusAllowedForTest(const char* status,
+                                                       bool lifecycle) noexcept {
+    return implementationStatusAllowed(status, lifecycle);
+}
+#endif
+
 bool pluginRegistryRegister(const EdvrPluginOps* ops) {
     if (!ops || ops->structSize < sizeof(EdvrPluginOps) || !ops->manifestId ||
         !*ops->manifestId || !ops->drawGateName || !*ops->drawGateName ||
@@ -200,7 +215,7 @@ bool pluginRegistryRegister(const EdvrPluginOps* ops) {
     const plugins::PluginRecord& record = plugins::kManifest[ops->manifestIndex];
     if (!record.id || !record.implementationStatus || record.index != ops->manifestIndex ||
         std::strcmp(record.id, ops->manifestId) != 0 ||
-        std::strcmp(record.implementationStatus, "phase1-pilot") != 0) return false;
+        !implementationStatusAllowed(record.implementationStatus, false)) return false;
     for (uint32_t i = 0; i < g_registeredPluginCount; ++i)
         if (std::strcmp(g_registeredPlugins[i]->drawGateName, ops->drawGateName) == 0)
             return false;
@@ -247,8 +262,7 @@ bool pluginRegistryRegisterLifecycle(const EdvrPluginLifecycleOps* ops) {
     if (!record.id || !record.implementationStatus ||
         record.index != ops->manifestIndex ||
         std::strcmp(record.id, ops->manifestId) != 0 ||
-        (std::strcmp(record.implementationStatus, "phase1-lifecycle") != 0 &&
-         std::strcmp(record.implementationStatus, "phase1-pilot") != 0))
+        !implementationStatusAllowed(record.implementationStatus, true))
         return false;
     if (lifecycleDeclaresConfigure(record) &&
         !ops->configure && !hasStatefulConfigure)

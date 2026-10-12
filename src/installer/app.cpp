@@ -8,6 +8,7 @@
 #include "logbundle.h"
 #include "mirror.h"
 #include "payload.h"
+#include "plugin_components.h"
 
 namespace edvr::installer {
 namespace {
@@ -54,6 +55,8 @@ std::string usageText() {
            "                       installer finds your installs itself and uses the only one.\r\n"
            "  --dry-run            say what would happen; touch nothing.\r\n"
            "  --convert-profile    explicitly convert the installed VR/flat edition.\r\n"
+           "  --plugin <id>        select a plugin; repeat for more than one.\r\n"
+           "  --no-plugins         explicitly install with no optional plugins.\r\n"
            "  --replace-settings   overwrite " + ini + " instead of keeping your values.\r\n"
            "  --remove-settings    with --uninstall, delete the installed edition's settings file too.\r\n"
            "  --help               this.\r\n"
@@ -98,6 +101,34 @@ AppArgs parseArgs(int argc, wchar_t** argv) {
             a.keepSettings = false;
         else if (arg == L"--remove-settings")
             a.removeSettings = true;
+        else if (arg == L"--plugin") {
+            if (i + 1 >= argc || !argv[i + 1] || argv[i + 1][0] == L'-') {
+                a.badArg = true;
+                a.badArgText = L"--plugin needs a plugin ID";
+            } else {
+                const std::wstring wideId = argv[++i];
+                const std::string id = toUtf8(wideId);
+                if (!plugin_components::validPluginId(id)) {
+                    a.badArg = true;
+                    a.badArgText = L"--plugin needs a strict lowercase plugin ID";
+                } else {
+                    a.pluginSelectionSpecified = true;
+                    a.pluginIds.push_back(id);
+                }
+            }
+        } else if (arg.rfind(L"--plugin=", 0) == 0) {
+            const std::string id = toUtf8(arg.substr(9));
+            if (!plugin_components::validPluginId(id)) {
+                a.badArg = true;
+                a.badArgText = L"--plugin= needs a strict lowercase plugin ID";
+            } else {
+                a.pluginSelectionSpecified = true;
+                a.pluginIds.push_back(id);
+            }
+        } else if (arg == L"--no-plugins") {
+            a.pluginSelectionSpecified = true;
+            a.noPlugins = true;
+        }
         else if (arg == L"--autorun")
             a.autorun = true;
         else if (arg == L"--help" || arg == L"-h" || arg == L"/?")
@@ -106,6 +137,15 @@ AppArgs parseArgs(int argc, wchar_t** argv) {
             a.badArg = true;
             a.badArgText = L"unknown argument: " + arg;
         }
+    }
+    if (a.noPlugins && !a.pluginIds.empty()) {
+        a.badArg = true;
+        a.badArgText = L"--no-plugins cannot be mixed with --plugin";
+    }
+    if (a.pluginSelectionSpecified && a.action != AppArgs::Act::Install &&
+        a.action != AppArgs::Act::Repair) {
+        a.badArg = true;
+        a.badArgText = L"plugin selection requires --install or --repair";
     }
     return a;
 }
@@ -116,6 +156,8 @@ Options optionsFor(const AppArgs& args, bool repair) {
     o.removeSettings = args.removeSettings;
     o.repair = repair;
     o.convertProfile = args.convertProfile;
+    o.pluginSelectionSpecified = args.pluginSelectionSpecified;
+    o.pluginIds = args.pluginIds;
     o.backupStamp = timestampName();
     o.nowUtc = utcNow();
     return o;
@@ -241,6 +283,14 @@ bool relaunchElevated(const AppArgs& args) {
     if (args.removeSettings) cmd += L"--remove-settings ";
     if (args.dryRun) cmd += L"--dry-run ";
     if (args.convertProfile) cmd += L"--convert-profile ";
+    if (args.pluginSelectionSpecified) {
+        if (!args.pluginSelectionValidated || args.noPlugins && !args.pluginIds.empty()) return false;
+        if (args.noPlugins) cmd += L"--no-plugins ";
+        else for (const auto& id : args.pluginIds) {
+            if (!plugin_components::validPluginId(id)) return false;
+            cmd += L"--plugin=" + fromUtf8(id) + L" ";
+        }
+    }
     cmd += L"--autorun";
 
     SHELLEXECUTEINFOW info{};

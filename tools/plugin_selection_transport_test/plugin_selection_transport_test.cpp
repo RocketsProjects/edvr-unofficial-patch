@@ -74,6 +74,7 @@ void snapshotCodecCases() {
     const char absent[] = "[install]\r\nversion = test\r\n";
     const char empty[] = "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids =\r\n";
     const char known[] = "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = performance\r\n";
+    const char flatUnavailable[] = "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = flat\r\nselected_ids = performance\r\n";
     const char unknown[] = "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = not-a-plugin\r\n";
     const char malformedSchema[] = "[plugins]\r\nselection_schema_version = 9\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids =\r\n";
     PluginSelectionSnapshotV1 value{};
@@ -89,8 +90,13 @@ void snapshotCodecCases() {
     result = decodePluginSelectionSnapshotV1(known, sizeof(known)-1,
         PluginSelectionProfileV1::Vr, &value);
     check(result==S_OK && value.recordState==static_cast<uint32_t>(PluginSelectionSnapshotStateV1::Supported) &&
-          (value.recordedPluginMask & (1u << 6)) != 0 && (value.validationFlags & kSelectionUnavailablePlugin) != 0,
-          "known catalog ID records its mask and current unavailability");
+          value.recordedPluginMask==(1u << 6) && value.validationFlags==0,
+          "known selection-ready VR ID records its mask without an availability error");
+    result = decodePluginSelectionSnapshotV1(flatUnavailable, sizeof(flatUnavailable)-1,
+        PluginSelectionProfileV1::Flat, &value);
+    check(result==S_OK && value.recordState==static_cast<uint32_t>(PluginSelectionSnapshotStateV1::Supported) &&
+          value.recordedPluginMask==(1u << 6) && value.validationFlags==kSelectionUnavailablePlugin,
+          "VR-only Performance remains unavailable for a matching Flat record");
     result = decodePluginSelectionSnapshotV1(unknown, sizeof(unknown)-1,
         PluginSelectionProfileV1::Vr, &value);
     check(result==S_OK && value.recordState==static_cast<uint32_t>(PluginSelectionSnapshotStateV1::Supported) &&

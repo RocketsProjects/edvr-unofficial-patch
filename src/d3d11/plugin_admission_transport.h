@@ -21,6 +21,11 @@ void publishCandidate(const std::wstring& moduleDirectory, HMODULE graphicsModul
 // captures a snapshot, or contacts the native peer.
 bool ownerAllowedForStartup(std::uint32_t generatedGroupIndex) noexcept;
 
+// Copies the immutable startup decision for low-frequency status/reporting.
+// This does not initialize admission or contact the native peer.
+bool readDecisionForReporting(
+    plugin_selection::admission_v1::DecisionV1* output) noexcept;
+
 } // namespace edvr::plugin_admission_transport
 
 extern "C" __declspec(dllexport) HRESULT WINAPI edvrQueryPluginAdmissionV1(

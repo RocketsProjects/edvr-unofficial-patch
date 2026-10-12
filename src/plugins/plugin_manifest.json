@@ -49,7 +49,8 @@
         "flat"
       ],
       "recommendedProfiles": [
-        "vr"
+        "vr",
+        "flat"
       ],
       "defaultInstallProfiles": [
         "vr",
@@ -74,8 +75,11 @@
       "rigs": [
         "flat_sharpen_pass_test"
       ],
-      "implementationStatus": "catalog-only",
-      "selectionAvailableProfiles": [],
+      "implementationStatus": "selection-ready",
+      "selectionAvailableProfiles": [
+        "vr",
+        "flat"
+      ],
       "costBudget": {
         "state": "unmeasured",
         "reference": null,
@@ -170,8 +174,10 @@
         "remlok_predicate_test",
         "cockpit_api_test"
       ],
-      "implementationStatus": "phase1-pilot",
-      "selectionAvailableProfiles": [],
+      "implementationStatus": "selection-ready",
+      "selectionAvailableProfiles": [
+        "vr"
+      ],
       "costBudget": {
         "state": "unmeasured",
         "reference": null,
@@ -231,8 +237,10 @@
         "plugin_dispatch_test",
         "intro_lifecycle_test"
       ],
-      "implementationStatus": "phase1-lifecycle",
-      "selectionAvailableProfiles": [],
+      "implementationStatus": "selection-ready",
+      "selectionAvailableProfiles": [
+        "vr"
+      ],
       "costBudget": {
         "state": "unmeasured",
         "reference": null,
@@ -299,8 +307,10 @@
       "rigs": [
         "weapon_motion_test"
       ],
-      "implementationStatus": "catalog-only",
-      "selectionAvailableProfiles": [],
+      "implementationStatus": "selection-ready",
+      "selectionAvailableProfiles": [
+        "vr"
+      ],
       "costBudget": {
         "state": "unmeasured",
         "reference": null,
@@ -370,8 +380,10 @@
         "transition_flash_prevent_test",
         "plugin_dispatch_test"
       ],
-      "implementationStatus": "phase1-lifecycle",
-      "selectionAvailableProfiles": [],
+      "implementationStatus": "selection-ready",
+      "selectionAvailableProfiles": [
+        "vr"
+      ],
       "costBudget": {
         "state": "unmeasured",
         "reference": null,
@@ -437,8 +449,10 @@
         "explorer_cam_fade_test",
         "plugin_dispatch_test"
       ],
-      "implementationStatus": "phase1-lifecycle",
-      "selectionAvailableProfiles": [],
+      "implementationStatus": "selection-ready",
+      "selectionAvailableProfiles": [
+        "vr"
+      ],
       "costBudget": {
         "state": "unmeasured",
         "reference": null,
@@ -499,8 +513,10 @@
         "performance_sampler_test",
         "fov_trim_settings_test"
       ],
-      "implementationStatus": "catalog-only",
-      "selectionAvailableProfiles": [],
+      "implementationStatus": "selection-ready",
+      "selectionAvailableProfiles": [
+        "vr"
+      ],
       "costBudget": {
         "state": "unmeasured",
         "reference": null,
@@ -594,8 +610,11 @@
         "kinematic_probe_test",
         "plugin_dispatch_test"
       ],
-      "implementationStatus": "phase1-lifecycle",
-      "selectionAvailableProfiles": [],
+      "implementationStatus": "selection-ready",
+      "selectionAvailableProfiles": [
+        "vr",
+        "flat"
+      ],
       "costBudget": {
         "state": "unmeasured",
         "reference": null,
@@ -619,5 +638,5 @@
       }
     }
   ],
-  "selectionSemantics": "defaultInstallProfiles records the design target defaults from the architecture decision. Phase 1 does not expose plugin selection; implementationStatus records what the registry currently implements."
+  "selectionSemantics": "selectionAvailableProfiles declares the supported profiles for which the validated plugin set may be explicitly selected; defaults and recommendations remain separate install targets."
 }

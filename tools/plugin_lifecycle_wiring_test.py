@@ -837,10 +837,12 @@ def check_module_slices(sources: dict[str, str]) -> None:
     if classification_start < 0 or '/I"%GEN%"' not in classification_rig:
         raise AssertionError("object classification fixture must resolve the generated manifest dependency")
 
+    status_policy = body(registry, "bool implementationStatusAllowed(")
+    if 'std::strcmp(status, "selection-ready") == 0' not in status_policy or \
+            'std::strcmp(status, "phase1-lifecycle") == 0' not in status_policy or \
+            'std::strcmp(status, "phase1-pilot") == 0' not in status_policy:
+        raise AssertionError("registry status policy must admit ready rows and preserve historical lifecycle statuses")
     register = body(registry, "bool pluginRegistryRegisterLifecycle(")
-    if 'std::strcmp(record.implementationStatus, "phase1-lifecycle") != 0' not in register or \
-            'std::strcmp(record.implementationStatus, "phase1-pilot") != 0' not in register:
-        raise AssertionError("lifecycle registry must accept both lifecycle modules and the Cockpit pilot")
     if "componentIndex != 0 && ops->manifestIndex != plugins::kPluginComfort" not in register:
         raise AssertionError("nonzero lifecycle components must remain restricted to Comfort")
     registry_draws = body(registry, "bool pluginRegistryWantsDraws(void* legacyState)")
@@ -1630,7 +1632,7 @@ def check_module_slices(sources: dict[str, str]) -> None:
                   "controlled strict Diagnostics-only selection keeps the shared startup path awake",
                   "controlled strict Temporal-AA-only selection keeps the shared startup path awake",
                   "strict Intro-only selection retains Intro startup without waking the Diagnostics/Temporal-AA exception",
-                  "real generated empty catalog remains Legacy-compatible and supplies no strict-positive runtime evidence",
+                  "real generated explicit empty selection admits no owner and supplies no strict-positive evidence",
                   "failed and malformed snapshots fail closed even when cached Diagnostics and Temporal-AA owner flags are present"):
         if token not in strict_policy_fixture:
             raise AssertionError(f"controlled strict-policy fixture lost {token}")
@@ -2174,10 +2176,10 @@ def self_test_slices(sources: dict[str, str]) -> None:
 
     changed = dict(sources)
     changed["registry"] = replace_body(changed["registry"],
-        "bool pluginRegistryRegisterLifecycle(",
-        'std::strcmp(record.implementationStatus, "phase1-pilot") != 0',
-        'std::strcmp(record.implementationStatus, "disabled") != 0')
-    expect_slice("Cockpit pilot lifecycle admission", changed)
+        "bool implementationStatusAllowed(",
+        'std::strcmp(status, "selection-ready") == 0',
+        'false')
+    expect_slice("selection-ready registry admission", changed)
 
     changed = dict(sources)
     changed["native_settings"] = replace_body(changed["native_settings"],

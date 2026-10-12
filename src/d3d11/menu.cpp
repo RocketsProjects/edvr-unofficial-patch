@@ -32,6 +32,8 @@
 #include "../common/vr_supersample_notice.h"
 #include "../common/vscreen_fit.h"
 #include "device_hook.h"
+#include "plugin_admission_transport.h"
+#include "plugin_registry.h"
 #include "elite_binds.h"
 #include "flat_elite_settings.h"
 #include "flat_runtime.h"
@@ -73,6 +75,32 @@ namespace edvr {
 namespace {
 
 constexpr int kRowDefCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
+
+using SelectionDecision = plugin_selection::admission_v1::DecisionV1;
+
+bool pluginAllowedForMenu(const SelectionDecision& decision, uint32_t index) {
+    if (index >= plugins::kPluginCount) return false;
+    const uint32_t profileBit = runtimeFlatProfile() ? plugins::kProfileFlat
+        : runtimeFeaturesAllowed() ? plugins::kProfileVr : 0;
+    return profileBit && (plugins::kManifest[index].profileMask & profileBit) &&
+        plugin_selection::admission_v1::ownerAllowedForStartup(decision, index);
+}
+
+bool menuRowInstalled(const SelectionDecision& decision, const MenuRowDef& row) {
+    if (decision.structSize == 0) return true;
+    char key[160] = {};
+    const int written = snprintf(key, sizeof(key), "%s.%s", row.section, row.key);
+    if (written < 0 || static_cast<size_t>(written) >= sizeof(key)) return true;
+    for (uint32_t i = 0; i < plugins::kPluginCount; ++i) {
+        const auto& owner = plugins::kManifest[i];
+        for (uint32_t k = 0; k < owner.ownedConfigKeyCount; ++k) {
+            if (strcmp(owner.ownedConfigKeys[k], key) == 0)
+                return pluginAllowedForMenu(decision, i);
+        }
+    }
+    // Core-owned settings have no plugin owner and remain editable.
+    return true;
+}
 
 // How many rows a page shows at once; the rest scroll.
 constexpr int kVisibleRows = 9;
@@ -1380,12 +1408,14 @@ void stopWriter() {
 // ---------------------------------------------------------------------------
 // Pages
 
-void addSettingRows(Page& p, MenuTier tier, const char* page, bool grouped) {
+void addSettingRows(Page& p, MenuTier tier, const char* page, bool grouped,
+                    const SelectionDecision& decision) {
     const char* lastGroup = nullptr;
     for (int i = 0; i < kRowDefCount; ++i) {
         const MenuRowDef& d = kMenuRows[i];
         if (d.tier != tier) continue;
         if (page && _stricmp(d.page, page) != 0) continue;
+        if (!menuRowInstalled(decision, d)) continue;
         if (grouped && d.group[0] && (!lastGroup || strcmp(lastGroup, d.group) != 0)) {
             Entry h;
             h.kind = EntryKind::Heading;
@@ -1412,6 +1442,9 @@ void firstSelectable(Page& p) {
 
 void buildPages() {
     State& s = g_s;
+    SelectionDecision selection{};
+    const bool haveSelection =
+        plugin_admission_transport::readDecisionForReporting(&selection);
     const int keepPage = s.page;
     // The page being read keeps its place through a rebuild. The developer
     // switch sits at the BOTTOM of the Performance page and rebuilds the
@@ -1431,6 +1464,7 @@ void buildPages() {
             // against the flat profile's key gate: a row listed there whose key
             // is refused fails the build instead of reading a silent 0.
             if (!flatPageHasRow(d.section, d.key)) continue;
+            if (haveSelection && !menuRowInstalled(selection, d)) continue;
             Entry e;
             e.kind = EntryKind::Setting;
             e.def = i;
@@ -1446,14 +1480,14 @@ void buildPages() {
     {
         Page p;
         p.name = "Performance";
-        addSettingRows(p, MenuTier::Fix, "performance", false);
+        addSettingRows(p, MenuTier::Fix, "performance", false, selection);
         firstSelectable(p);
         s.pages.push_back(p);
     }
     {
         Page p;
         p.name = "Fixes";
-        addSettingRows(p, MenuTier::Fix, "fixes", true);
+        addSettingRows(p, MenuTier::Fix, "fixes", true, selection);
         firstSelectable(p);
         s.pages.push_back(p);
     }
@@ -1462,7 +1496,7 @@ void buildPages() {
         // The rows are the `menu explorer_cam` rows of edvr.ini; no group headings, the page is the group.
         Page p;
         p.name = "Explorer Cam";
-        addSettingRows(p, MenuTier::Fix, "explorer_cam", false);
+        addSettingRows(p, MenuTier::Fix, "explorer_cam", false, selection);
         firstSelectable(p);
         s.pages.push_back(p);
     }
@@ -1479,6 +1513,7 @@ void buildPages() {
             Entry e;
             e.kind = EntryKind::Setting;
             e.def = rows[i];
+            if (haveSelection && !menuRowInstalled(selection, kMenuRows[rows[i]])) continue;
             p.entries.push_back(e);
         }
         firstSelectable(p);
@@ -1502,14 +1537,14 @@ void buildPages() {
             Page p;
             p.name = "Advanced";
             // By page name: a developer hotkey row is Advanced tier too, and belongs to the Hotkeys page.
-            addSettingRows(p, MenuTier::Advanced, "advanced", true);
+            addSettingRows(p, MenuTier::Advanced, "advanced", true, selection);
             firstSelectable(p);
             s.pages.push_back(p);
         }
         {
             Page p;
             p.name = "Experimental";
-            addSettingRows(p, MenuTier::Experimental, "experimental", true);
+            addSettingRows(p, MenuTier::Experimental, "experimental", true, selection);
             firstSelectable(p);
             s.pages.push_back(p);
         }
@@ -1579,6 +1614,19 @@ void buildStatus(MenuContent& c) {
     char buf[200];
     snprintf(buf, sizeof(buf), "%s / game build %s", EDVR_VERSION_STRING, gameBuildVersion().c_str());
     statusLine(c, "EDVR", buf);
+    SelectionDecision selection{};
+    if (plugin_admission_transport::readDecisionForReporting(&selection)) {
+        uint32_t installedCount = 0;
+        for (uint32_t i = 0; i < plugins::kPluginCount; ++i)
+            installedCount += pluginAllowedForMenu(selection, i) ? 1u : 0u;
+        const bool selected = selection.mode == static_cast<uint32_t>(
+            plugin_selection::admission_v1::Mode::AdmittedSelection);
+        snprintf(buf, sizeof(buf), "%s (%u installed)",
+                 selected ? "selected" : "legacy", installedCount);
+        statusLine(c, "Plugin selection", buf);
+    } else {
+        statusLine(c, "Plugin selection", "unavailable; legacy behavior");
+    }
     statusLine(c, "Runtime",
                nativeMenuActive() ? "native OpenXR (experimental)"
                : (glitchConsumerPresent() ? "not identified" : "no compositor consumer"));
