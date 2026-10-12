@@ -2653,8 +2653,10 @@ void testFlatWarningWiring() {
     };
     struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
     const Pin pins[] = {
-        {&menuCpp, "const bool refusing = flatRuntimeStructuralRefusal(&reason, &standing) &&", 1,
-         "the warning follows the runtime's structural-refusal state and nothing else"},
+        {&menuCpp, "const bool refusing = temporalAAOwnerAllowed() &&", 1,
+         "the warning first requires the cached Temporal AA owner gate"},
+        {&menuCpp, "flatRuntimeStructuralRefusal(&reason, &standing) &&", 1,
+         "an allowed owner still requires the runtime's structural-refusal state"},
         // The hold on a changed cause (flat_elite_settings.h, FlatWarnHold; the rule and its controls are in flat_elite_settings_tests.h).
         {&menuCpp, "if (!s.flatWarnHold.admit(refusing, s.flatWarnActive, s.flatWarnKey, key, now)) {", 1,
          "a cause that differs from the one on show waits out its hold: the helper is asked once a tick with the shown key, the computed "
@@ -2706,6 +2708,22 @@ void testFlatWarningWiring() {
             without.erase(at, std::strlen(pin.needle));
         check(count(without, pin.needle) == 0, "warning wiring control: a source with the line removed no longer contains it");
     }
+    const auto warningGateOrder = [](const std::string& text) {
+        const size_t owner = text.find("const bool refusing = temporalAAOwnerAllowed() &&");
+        const size_t refusal = text.find("flatRuntimeStructuralRefusal(&reason, &standing) &&", owner);
+        const size_t mode = text.find("temporalModeEnabled(Config::get().requestedTemporalMode());", refusal);
+        return owner != std::string::npos && refusal != std::string::npos && mode != std::string::npos &&
+               refusal - owner < 100 && mode - refusal < 100;
+    };
+    check(warningGateOrder(menuCpp),
+          "the warning requires owner, structural refusal and selected mode in one short-circuit chain");
+    std::string ownerBypass = menuCpp;
+    const size_t ownerAt = ownerBypass.find("const bool refusing = temporalAAOwnerAllowed() &&");
+    if (ownerAt != std::string::npos)
+        ownerBypass.replace(ownerAt, std::strlen("const bool refusing = temporalAAOwnerAllowed() &&"),
+                            "const bool refusing = true &&");
+    check(ownerAt != std::string::npos && !warningGateOrder(ownerBypass),
+          "warning gate control rejects bypassing Temporal AA ownership");
     // ORDER of the hold on a changed cause. It is asked after the key is computed and before the comparison that leaves the tick:
     // asked on every tick, so a cause that comes back to the one on show drops the change that was waiting, and a held change
     // returns before the switch, so it neither replaces what is on show nor is logged as changed. Two controls: the same text with
@@ -2811,7 +2829,8 @@ void testFlatCpuWiring() {
         {&runtimeCpp, "if (owner()) gpuFrameClose(state());", 1, "and closes just before the real Present"},
         {&runtimeCpp, "s.census.onFrame(censusNow, censusFreq, endedPaused);", 1, "the Present cuts the census once a frame"},
         {&runtimeCpp, "s.census.idle();", 1, "and stops it when no temporal mode is selected"},
-        {&runtimeCpp, "const EngineVelocityWrapperCounts wrapper = engineVelocityTakeWrapperCounts();", 1, "the draw wrapper's counts are drained every frame"},
+        {&runtimeCpp, "EngineVelocityWrapperCounts wrapper{};", 1, "the owner-denied frame starts with empty draw-wrapper counts"},
+        {&runtimeCpp, "if (temporalAAOwnerAllowed) wrapper = engineVelocityTakeWrapperCounts();", 1, "only the admitted Temporal-AA owner drains its draw-wrapper counts"},
         {&runtimeCpp, "if (censusWasRunning) s.census.noteWrapper(", 1, "and handed to the census only while it runs: no backlog"},
         {&runtimeCpp, "const FlatQueryCounts queries = flatQueryCut().take();", 1, "the query shortcuts' counts are drained every frame too"},
         {&runtimeCpp, "if (censusWasRunning) s.census.noteQueries(queries);", 1, "and handed over only while the census runs"},
@@ -2832,6 +2851,30 @@ void testFlatCpuWiring() {
             without.erase(at, std::strlen(pin.needle));
         check(count(without, pin.needle) == 0, "census wiring control: a source with the line removed no longer contains it");
     }
+    const char* const wrapperDrainGate =
+        "if (temporalAAOwnerAllowed) wrapper = engineVelocityTakeWrapperCounts();";
+    const auto wrapperDrainIsOwnerGated = [&](const std::string& source) {
+        const size_t block = source.find("const bool censusWasRunning = s.census.running();");
+        const size_t end = block == std::string::npos ? std::string::npos
+            : source.find("flatQueryCut().beginFrame(frame);", block);
+        if (block == std::string::npos || end == std::string::npos) return false;
+        const std::string censusBlock = source.substr(block, end - block);
+        const size_t initialized = censusBlock.find("EngineVelocityWrapperCounts wrapper{};");
+        const size_t gatedDrain = censusBlock.find(wrapperDrainGate);
+        const size_t reported = censusBlock.find("if (censusWasRunning) s.census.noteWrapper(");
+        return initialized != std::string::npos && gatedDrain != std::string::npos &&
+            reported != std::string::npos && initialized < gatedDrain && gatedDrain < reported &&
+            count(censusBlock, "engineVelocityTakeWrapperCounts()") == 1;
+    };
+    check(wrapperDrainIsOwnerGated(runtimeCpp),
+          "the TAA-owned draw-wrapper drain is gated while zero counts still reach the census");
+    std::string unconditionalWrapperDrain = runtimeCpp;
+    const size_t ownerGateAt = unconditionalWrapperDrain.find(wrapperDrainGate);
+    if (ownerGateAt != std::string::npos)
+        unconditionalWrapperDrain.replace(ownerGateAt, std::strlen(wrapperDrainGate),
+                                          "wrapper = engineVelocityTakeWrapperCounts();");
+    check(ownerGateAt != std::string::npos && !wrapperDrainIsOwnerGated(unconditionalWrapperDrain),
+          "negative control: an unconditional owner-denied wrapper drain fails the gate check");
     check(count(engineCpp, "engineVelocityNoteStateCalls(") >= 30,
           "the draw wrapper counts its D3D calls at every call site (thirty and more)");
     // ORDER. The census's whole-frame span opens before the Paused return (a stood-down frame is
@@ -3114,7 +3157,7 @@ void testFlatSubstitutionWiring() {
         // Who reaches the runtime's scopes.
         {&vscreenCpp, "FlatRuntimeDrawScope flatDraw(self,", 7, "every draw entry point (D, A, I, N, X, and the two indirect ones) opens the draw scope"},
         {&exposureCpp, "FlatRuntimeDispatchScope flatDispatch(self);", 2, "Dispatch and DispatchIndirect open the dispatch scope"},
-        {&deviceCpp, "menuFlatResize(); flatRuntimeResize(); refs = flatResizeBackBufferRefs(self); }", 2, "both ResizeBuffers hooks tell the runtime (then measure the back buffer's references) before the real call"},
+        {&deviceCpp, "menuFlatResize(); flatRuntimeResize(g_state->temporalAAOwnerAllowed); refs = flatResizeBackBufferRefs(self); }", 2, "both ResizeBuffers hooks pass the cached Temporal-AA owner into runtime cleanup before measuring references"},
     };
     for (const Pin& pin : pins) {
         check(count(*pin.text, pin.needle) == pin.times, pin.what);
@@ -3213,7 +3256,7 @@ void testFlatSubstitutionWiring() {
     }
     check(ordered, "in the draw scope the lazy switch and the flushes precede every read of the context, and the bracket opens after the coverage reads");
     // The frame's end: the flush comes before the census closes its span, and the menu and the real Present follow it.
-    const size_t before = runtimeCpp.find("void flatRuntimeBeforePresent() {");
+    const size_t before = runtimeCpp.find("void flatRuntimeBeforePresent(bool temporalAAOwnerAllowed) {");
     const size_t flushAt = runtimeCpp.find("flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);", before);
     const size_t closeAt = runtimeCpp.find("gpuFrameClose(state());", before);
     check(before != std::string::npos && flushAt != std::string::npos && closeAt != std::string::npos && flushAt < closeAt,
@@ -3222,7 +3265,7 @@ void testFlatSubstitutionWiring() {
     const size_t hookTo = hookFrom == std::string::npos ? std::string::npos : deviceCpp.find("\n}\n", hookFrom);
     if (hookFrom != std::string::npos && hookTo != std::string::npos) {
         const std::string body = deviceCpp.substr(hookFrom, hookTo - hookFrom);
-        const size_t flush = body.find("flatRuntimeBeforePresent();");
+        const size_t flush = body.find("flatRuntimeBeforePresent(g_state->temporalAAOwnerAllowed);");
         const size_t menu = body.find("menuFlatBeforePresent(self, flags);");
         const size_t real = body.rfind("g_state->realPresent(self, syncInterval, flags);");   // (the first is the foreign swap chain's)
         check(flush != std::string::npos && menu != std::string::npos && real != std::string::npos && flush < menu && menu < real,
@@ -3779,6 +3822,8 @@ void testFlatWrapperNoteWiring() {
         {&proxyCpp, "const char* contextWrapperFile() {", 1, "and read back through one accessor"},
         {&hookH, "const char* contextWrapperFile();", 1, "which the header declares"},
         {&menuCpp, "#include \"flat_wrapper_note.h\"", 1, "the panel takes the words from the same header"},
+        {&menuCpp, "if (runtimeFlatProfile() && temporalAAOwnerAllowed()) {", 1,
+         "the wrapper note requires both the flat profile and cached Temporal AA ownership"},
         {&menuCpp, "const char* wrapper = contextWrapperFile();", 1, "the panel reads the published name"},
         {&menuCpp, "flatComposeWrapperNote(temporalModeEnabled(Config::get().requestedTemporalMode()), wrapper,", 1,
          "and composes the note only for a selected temporal mode"},
@@ -3802,11 +3847,23 @@ void testFlatWrapperNoteWiring() {
     const size_t flagged = proxyCpp.find("g_wrapperFileSet.store(true, std::memory_order_release);");
     check(written != std::string::npos && flagged != std::string::npos && written < flagged,
           "the probe writes the name before it publishes it");
-    const size_t block = menuCpp.find("The graphics-wrapper note (flat only");
-    const size_t flatOnly = block == std::string::npos ? std::string::npos : menuCpp.find("if (runtimeFlatProfile()) {", block);
-    const size_t reads = block == std::string::npos ? std::string::npos : menuCpp.find("contextWrapperFile()", block);
-    check(block != std::string::npos && flatOnly != std::string::npos && reads != std::string::npos && flatOnly < reads && reads - flatOnly < 200,
-          "the panel reads the wrapper's name only in the flat profile");
+    const auto wrapperGuarded = [](const std::string& text) {
+        const size_t block = text.find("The graphics-wrapper note (flat only");
+        const size_t gate = block == std::string::npos ? std::string::npos :
+            text.find("if (runtimeFlatProfile() && temporalAAOwnerAllowed()) {", block);
+        const size_t reads = block == std::string::npos ? std::string::npos : text.find("contextWrapperFile()", block);
+        return block != std::string::npos && gate != std::string::npos && reads != std::string::npos &&
+               gate < reads && reads - gate < 200;
+    };
+    check(wrapperGuarded(menuCpp),
+          "the panel reads the wrapper's name only for the flat Temporal AA owner");
+    std::string wrapperBypass = menuCpp;
+    const size_t wrapperGate = wrapperBypass.find("if (runtimeFlatProfile() && temporalAAOwnerAllowed()) {");
+    if (wrapperGate != std::string::npos)
+        wrapperBypass.replace(wrapperGate, std::strlen("if (runtimeFlatProfile() && temporalAAOwnerAllowed()) {"),
+                              "if (runtimeFlatProfile()) {");
+    check(wrapperGate != std::string::npos && !wrapperGuarded(wrapperBypass),
+          "wrapper note control rejects a flat-only guard that bypasses ownership");
 }
 
 // The query shortcuts in the runtime and the engine motion wrapper (flat_query_cut.h holds the policy and the rig above
@@ -3838,7 +3895,8 @@ void testFlatQueryCutWiring() {
         {&runtimeCpp, "flatQueryCut().beginFrame(frame);", 1, "the Present tells the policy which frame starts (one in 64 checks)"},
         {&runtimeCpp, "(s.projectionFrames != 0 || !flatCameraInjectUpstreamOwns());", 1,
          "the coverage reads that still ask the context (an F10 audit, the legacy route) put the game's state back first, and nothing else does"},
-        {&runtimeCpp, "if (owner()) engineVelocityFlatFrameEndWithCost();", 1, "the owner routes frame-end release through the existing sampled CPU family"},
+        {&runtimeCpp, "if (temporalAAOwnerAllowed && owner()) engineVelocityFlatFrameEndWithCost();", 1,
+         "the allowed owner routes frame-end release through the existing sampled CPU family"},
         {&frameEndCostH, "flatcpu::Scope cleanup(flatcpu::kEngineDraw);", 1, "the shared frame-end wrapper uses the existing engine-draw family"},
         {&frameEndCostH, "release();", 1, "the shared timing wrapper encloses its release callback"},
         {&frameEndCostH, "engineVelocityFlatFrameEnd();", 1, "the no-argument production wrapper calls the real cleanup"},
@@ -3917,13 +3975,29 @@ void testFlatQueryCutWiring() {
               "(control: the delimited text is the classification, and asks through the policy)");
     }
     // The frame's end comes after the Present's flush, inside the same function.
-    const size_t before = runtimeCpp.find("void flatRuntimeBeforePresent() {");
-    const size_t flush = runtimeCpp.find("flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);", before);
-    const size_t end = runtimeCpp.find("if (owner()) engineVelocityFlatFrameEndWithCost();", before);
-    const size_t gpuClose = runtimeCpp.find("if (owner()) gpuFrameClose(state());", end);
-    check(before != std::string::npos && flush != std::string::npos && end != std::string::npos &&
-              gpuClose != std::string::npos && flush < end && end < gpuClose && gpuClose - flush < 500,
-          "owner-only frame-end cleanup is timed after the Present flush and before GPU span close");
+    const std::string beforePresentBody = functionBody(
+        runtimeCpp, "void flatRuntimeBeforePresent(bool temporalAAOwnerAllowed)");
+    const auto cleanupOrdered = [&](const std::string& body) {
+        const size_t flush = body.find(
+            "flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);");
+        const size_t end = body.find(
+            "if (temporalAAOwnerAllowed && owner()) engineVelocityFlatFrameEndWithCost();");
+        const size_t gpuClose = body.find("if (owner()) gpuFrameClose(state());");
+        return !body.empty() && flush != std::string::npos && end != std::string::npos &&
+               gpuClose != std::string::npos && flush < end && end < gpuClose &&
+               gpuClose - flush < 500 && count(body, "if (temporalAAOwnerAllowed && owner())") == 2;
+    };
+    check(cleanupOrdered(beforePresentBody),
+          "allowed-owner frame-end cleanup is timed after the Present flush and before GPU span close");
+    std::string bypassedCleanup = beforePresentBody;
+    const size_t gatedCleanup = bypassedCleanup.find(
+        "if (temporalAAOwnerAllowed && owner()) engineVelocityFlatFrameEndWithCost();");
+    if (gatedCleanup != std::string::npos)
+        bypassedCleanup.replace(gatedCleanup,
+            std::strlen("if (temporalAAOwnerAllowed && owner()) engineVelocityFlatFrameEndWithCost();"),
+            "if (owner()) engineVelocityFlatFrameEndWithCost();");
+    check(gatedCleanup != std::string::npos && !cleanupOrdered(bypassedCleanup),
+          "cleanup timing control rejects bypassing the cached owner gate");
     const std::string presentBody = functionBody(runtimeCpp, "void flatRuntimePresent(");
     const char* const testPresentGuardText =
         "if (!runtimeFlatProfile() || !swap || (flags & DXGI_PRESENT_TEST)) return;";

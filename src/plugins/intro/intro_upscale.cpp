@@ -14,6 +14,7 @@
 #include "../../common/guard.h"
 #include "../../common/log.h"
 #include "../../d3d11/shader_swap.h"
+#include "../../d3d11/device_hook.h"  // temporalAAOwnerAllowed: the cached admission fact for shared resolution
 #include "../../d3d11/vscreen_res.h"
 
 // AMD's own FSR, CPU side: A_CPU gives FsrEasuCon and FsrRcasCon, which
@@ -562,7 +563,7 @@ void introUpscaleConfigure(Config& cfg) {
         // width the on-foot screen does instead of falling back to a plain
         // "auto is not a number" warning on every default-config launch.
         uint32_t vw = 0, vh = 0;
-        resolveVScreenTargetResolution(cfg, &vw, &vh, /*announce=*/false);
+        resolveVScreenTargetResolution(cfg, &vw, &vh, temporalAAOwnerAllowed(), /*announce=*/false);
         g_targetW = vw;
     }
     const bool first = !g_configured;

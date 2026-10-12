@@ -55,6 +55,7 @@ using Microsoft::WRL::ComPtr;
 VrWorldMachine g_machine;
 VrWorldKey g_key = VrWorldKey::Off;
 bool g_routeEnabled = true;                // the rigs' off switch (vrWorldRouteSetEnabledForTest); always true in the DLL
+bool g_temporalAAOwnerAllowed = false;
 VrWorldWindow g_win;
 bool g_census = false;
 const char* g_notLiveNoted = nullptr;        // the reason the route last said it stays off (one line per reason)
@@ -148,6 +149,10 @@ struct DepthViews {
 DepthViews g_depthViews;
 
 FlatMonoResolveMode resolveModeFromConfig(bool* known) {
+    if (!g_temporalAAOwnerAllowed) {
+        if (known) *known = false;
+        return FlatMonoResolveMode::Taa;
+    }
     const std::string m = Config::get().getString("fix.temporal_aa", "off");
     if (known) *known = temporalModeEnabled(m);
     if (_stricmp(m.c_str(), "fsr") == 0) return FlatMonoResolveMode::Fsr;
@@ -259,6 +264,10 @@ WorldFirstPerson worldFirstPerson() {
 void treatWorld(ID3D11DeviceContext* ctx) {
     Frame& fr = g_f;
     const FlatHdrTrigger& t = fr.hdr.trigger;
+    if (!g_temporalAAOwnerAllowed) {
+        declineLine("temporal-aa-owner-absent");
+        return;
+    }
     if (g_machine.state == VrWorldState::Latched) { declineLine("latched-off"); return; }
     if (g_key != VrWorldKey::Auto) return;   // the detector runs for the census alone; nothing to treat
 
@@ -679,7 +688,8 @@ void windDownInjector() {
 }  // namespace
 
 // ---- the frame boundary ------------------------------------------------------------------------------------------------------------
-void vrWorldRouteFrameBoundary() {
+void vrWorldRouteFrameBoundary(bool temporalAAOwnerAllowed) {
+    g_temporalAAOwnerAllowed = temporalAAOwnerAllowed;
     // The route is on in the DLL; only the rigs switch it off (vrWorldRouteSetEnabledForTest), to start a scenario from a cleared route.
     const VrWorldKey key = g_routeEnabled ? VrWorldKey::Auto : VrWorldKey::Off;
     g_key = key;
@@ -882,7 +892,7 @@ void vrWorldRouteFrameBoundary() {
     // jittered at the source) and every condition that makes it watch draws must hold.
     if (key == VrWorldKey::Auto) {
         const bool routeWorks = g_machine.state == VrWorldState::Warming || g_machine.state == VrWorldState::Owned;
-        driveInjector(routeWorks && g_vrWorldWants && gate && layerLive);
+        driveInjector(g_temporalAAOwnerAllowed && routeWorks && g_vrWorldWants && gate && layerLive);
     }
 
     // Arm the detector for the frame that starts now.

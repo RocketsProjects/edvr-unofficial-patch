@@ -422,29 +422,37 @@ void pins() {
               nt.find("vrWorldRouteDoorLayerOnly(") == std::string::npos && ns.find("vrWorldRouteDoorLayerOnly(") == std::string::npos,
           "P3b: the temporal door and the sharpen door each ask the layer's one predicate once, and neither asks the route's directly any more");
 
-    // P4: the recognition. The existing call site is untouched; the new one is behind the gate and only for a taken 2D screen; and the curved
+    // P4: the recognition. The route call sites retain their order behind cached Temporal AA admission;
+    // the taken 2D screen is also behind the maps gate, and the curved
     // screen's (curvedScreenSwallowed: the curve substitution returns before the flat tail, so for a frame the route owns it runs the
     // recognition itself, behind the route's gate) is the third and last.
     const auto recognitionPlaces = [](const std::string& squeezed) {
         return countOf(squeezed, "screenMotionRecognize()") == 3 &&
-               has(squeezed, "if(uiLayer&&uiFamily==UiLayerFamily::kScreen&&uiLayerMapsOn()&&screenMotionLive()&&screenMotionRecognize())uiLayerMapsNoteRecognised();") &&
-               has(squeezed, "if(screenMotionLive()&&uiLayerWorldReissuePending())screenMotionRecognize();") &&
-               has(squeezed, "if(!routeOwns)return;if(screenMotionLive())screenMotionRecognize();worldScreenReissueCurved(trace,self,'X',count,instances,args);");
+                has(squeezed, "if(uiLayer&&uiFamily==UiLayerFamily::kScreen&&uiLayerMapsOn()&&screenMotionOwnerLive()&&screenMotionRecognize())uiLayerMapsNoteRecognised();") &&
+                has(squeezed, "if(screenMotionOwnerLive()&&uiLayerWorldReissuePending())screenMotionRecognize();") &&
+                has(squeezed, "if(!routeOwns)return;if(screenMotionOwnerLive())screenMotionRecognize();worldScreenReissueCurved(trace,self,'X',count,instances,args);") &&
+                has(squeezed, "boolscreenMotionOwnerLive()noexcept{returntemporalAAOwnerActive()&&screenMotionLive();}") &&
+                has(squeezed, "booltemporalAAOwnerActive()noexcept{returng_state&&g_state->temporalAAOwnerAllowed;}");
     };
     check(recognitionPlaces(squeeze(vs)),
-          "P4a: the recognition is called in exactly three places in vscreen.cpp: the route's (unchanged), a taken 2D screen's behind uiLayerMapsOn(), and the curved screen's after the substitution (behind routeOwns)");
+           "P4a: recognition has exactly three admitted call sites: the route's, a taken 2D screen's behind uiLayerMapsOn(), and the curved screen's after routeOwns");
     {   // controls: the same predicate over copies with one edit each must fail, so P4a can fail
         const std::string sq = squeeze(vs);
-        const std::string third = "if(!routeOwns)return;if(screenMotionLive())screenMotionRecognize();worldScreenReissueCurved(trace,self,'X',count,instances,args);";
+        const std::string third = "if(!routeOwns)return;if(screenMotionOwnerLive())screenMotionRecognize();worldScreenReissueCurved(trace,self,'X',count,instances,args);";
         const size_t at = sq.find(third);
         std::string without = sq, extra = sq, ungated = sq;
         if (at != std::string::npos) {
             without.replace(at, third.size(), "if(!routeOwns)return;worldScreenReissueCurved(trace,self,'X',count,instances,args);");
             extra.replace(at, third.size(), third + "screenMotionRecognize();");
-            ungated.replace(at, third.size(), "if(screenMotionLive())screenMotionRecognize();worldScreenReissueCurved(trace,self,'X',count,instances,args);");
+            ungated.replace(at, third.size(), "if(screenMotionOwnerLive())screenMotionRecognize();worldScreenReissueCurved(trace,self,'X',count,instances,args);");
         }
         check(at != std::string::npos && !recognitionPlaces(without) && !recognitionPlaces(extra) && !recognitionPlaces(ungated),
               "P4a control: without the curved screen's recognition, with a fourth, or with the curved screen's ungated by routeOwns, the pin fails");
+        const std::string ownerBypass = "if(!routeOwns)return;if(screenMotionLive())screenMotionRecognize();worldScreenReissueCurved(trace,self,'X',count,instances,args);";
+        std::string unowned = sq;
+        if (at != std::string::npos) unowned.replace(at, third.size(), ownerBypass);
+        check(at != std::string::npos && !recognitionPlaces(unowned),
+              "P4a control: the curved screen's recognition cannot bypass cached Temporal AA admission");
     }
     const std::string fwd = functionBody(vs, "void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdict v,");
     check(inOrder(fwd, {"uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily)", "worldReissue.on = uiLayerWorldReissuePending();",

@@ -40,6 +40,7 @@
 #include "../../src/d3d11/intro_curve.h"
 #include "../../src/d3d11/intro_panel.h"
 #include "../../src/d3d11/panel_curve.h"
+#include "../../src/d3d11/scrim_fix.h"
 #include "../../src/d3d11/vscreen_footprint.h"
 #include "../../src/d3d11/sunglare_fix.h"
 #include "../../src/d3d11/sunglare_nomination_observation.h"
@@ -2784,29 +2785,31 @@ bool testDiagnosticsOwnerLegacyGateRegistration() {
         const bool diagnostics = (mask & 16u) != 0;
         const bool temporalAA = (mask & 32u) != 0;
         std::uint32_t rows = 0, gotCockpit = 0, gotComfort = 0, gotIntro = 0;
-        std::uint32_t glare = 0, gotOnFoot = 0, gotDiagnostics = 0, temporalShared = 0;
+        std::uint32_t glare = 0, gotOnFoot = 0, gotDiagnostics = 0;
+        std::uint32_t temporalShared = 0, temporalOwner = 0;
         const bool registered = edvr::vScreenLegacyGateRegistrationTest(
             cockpit, comfort, intro, onFoot, diagnostics, temporalAA,
             &rows, &gotCockpit, &gotComfort, &gotIntro, &glare, &gotOnFoot,
-            &gotDiagnostics, &temporalShared);
-        const std::uint32_t expectedRows = 2u + (cockpit ? 6u : 0u) +
-            (comfort ? 4u : 0u) + (intro ? 5u : 0u) + (onFoot ? 3u : 0u) +
+            &gotDiagnostics, &temporalShared, &temporalOwner);
+        const std::uint32_t expectedRows = (cockpit ? 6u : 0u) +
+            (comfort ? 4u : 0u) + (intro ? 6u : 0u) + (onFoot ? 3u : 0u) +
             ((cockpit || comfort) ? 1u : 0u) + (diagnostics ? 7u : 0u) +
-            ((diagnostics || temporalAA) ? 2u : 0u);
+            (temporalAA ? 1u : 0u) + ((diagnostics || temporalAA) ? 2u : 0u);
         const bool exact = registered && rows == expectedRows &&
             gotCockpit == (cockpit ? 6u : 0u) &&
             gotComfort == (comfort ? 4u : 0u) &&
-            gotIntro == (intro ? 5u : 0u) &&
+            gotIntro == (intro ? 6u : 0u) &&
             glare == ((cockpit || comfort) ? 1u : 0u) &&
             gotOnFoot == (onFoot ? 3u : 0u) &&
             gotDiagnostics == (diagnostics ? 7u : 0u) &&
-            temporalShared == ((diagnostics || temporalAA) ? 2u : 0u);
+            temporalShared == ((diagnostics || temporalAA) ? 2u : 0u) &&
+            temporalOwner == (temporalAA ? 1u : 0u);
         if (!exact) {
             std::fprintf(stderr,
                 "Diagnostics owner registry mismatch mask=%u rows=%u expected=%u "
-                "callbacks=%u/%u/%u glare=%u onfoot=%u diagnostics=%u temporal-shared=%u\n",
+                "callbacks=%u/%u/%u glare=%u onfoot=%u diagnostics=%u temporal-shared=%u temporal-owner=%u\n",
                 mask, rows, expectedRows, gotCockpit, gotComfort, gotIntro,
-                glare, gotOnFoot, gotDiagnostics, temporalShared);
+                glare, gotOnFoot, gotDiagnostics, temporalShared, temporalOwner);
         }
         okay &= check(exact,
             "actual legacy registry preserves exact callback inventory across all 64 owner combinations");
@@ -3009,6 +3012,101 @@ bool testDiagnosticsOwnerDeniedObjectProbe(
     return okay;
 }
 
+bool testTemporalAaOwnerDeniedUiDepthProbe(
+    ID3D11Device* device, ID3D11DeviceContext* context) {
+    if (!device || !context)
+        return check(false, "Temporal-AA UI-depth owner fixture has a real WARP device/context");
+
+    auto& config = edvr::Config::get();
+    const std::string savedTemporalMode = config.getString("fix.temporal_aa", "off");
+    const auto savedDsv = edvr::bindingGet(edvr::BindSlot::Dsv0);
+    const auto savedSrv = edvr::bindingGet(edvr::BindSlot::PsSrv0);
+    const auto savedResourceAttempts = g_resourceAttempts;
+    const auto savedGetResource = g_originalGetResource;
+    ID3D11ShaderResourceView* priorActualSrv = nullptr;
+    ID3D11DepthStencilView* priorActualDsv = nullptr;
+    context->PSGetShaderResources(0, 1, &priorActualSrv);
+    ComPtr<ID3D11ShaderResourceView> priorSrv;
+    priorSrv.Attach(priorActualSrv);
+    context->OMGetRenderTargets(0, nullptr, &priorActualDsv);
+    ComPtr<ID3D11DepthStencilView> priorDsv;
+    priorDsv.Attach(priorActualDsv);
+
+    bool okay = check(!edvr::uiDepthWantsDraws() && !edvr::detail::g_uiDepthOn,
+                      "UI-depth WARP fixture starts from a clean module state");
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = desc.Height = 64;
+    desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R32_TYPELESS;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL;
+    ComPtr<ID3D11Texture2D> texture;
+    HRESULT made = device->CreateTexture2D(&desc, nullptr, &texture);
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    if (SUCCEEDED(made)) made = device->CreateShaderResourceView(texture.Get(), &srvDesc, &srv);
+    D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+    dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+    dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    ComPtr<ID3D11DepthStencilView> dsv;
+    if (SUCCEEDED(made)) made = device->CreateDepthStencilView(texture.Get(), &dsvDesc, &dsv);
+    okay &= check(SUCCEEDED(made) && srv && dsv,
+                  "WARP creates the real SRV and depth target presented to uiDepthOnEyeDraw");
+
+    if (okay) {
+        config.set("fix.temporal_aa", "dlss");
+        edvr::uiDepthConfigure(config);
+        okay &= check(edvr::uiDepthWantsDraws() && edvr::detail::g_uiDepthOn,
+                      "fixture leaves real UI-depth module state active to model a stale cached owner");
+        ID3D11ShaderResourceView* rawSrv = srv.Get();
+        context->PSSetShaderResources(0, 1, &rawSrv);
+        context->OMSetRenderTargets(0, nullptr, dsv.Get());
+        edvr::bindingSet(edvr::BindSlot::PsSrv0, srv.Get());
+        edvr::bindingSet(edvr::BindSlot::Dsv0, dsv.Get());
+
+        edvr::VTableHook resourceHook;
+        const bool hookReady = hookResource(resourceHook, srv.Get());
+        okay &= check(hookReady,
+                      "UI-depth WARP GetResource counter installs on the real candidate SRV");
+        constexpr auto site = static_cast<std::uint16_t>(
+            edvr::draw_ladder::SiteId::kEyeUiDepthProbe);
+        edvr::VScreenPredicateTestResult result{};
+        if (hookReady) g_resourceAttempts = 0;
+        const bool deniedVisited = edvr::vScreenPredicateTestVisit(
+            site, context, context, 0, false, true, &result,
+            true, true, 'N', 3, 1, 0, 0, 0,
+            true, true, true, false, false);
+        okay &= check(deniedVisited && result.token.valid() &&
+                          result.siteResult.outcome == edvr::draw_ladder::SiteOutcome::Observed &&
+                          !result.uiDepthThisDrawAfter && edvr::uiDepthWantsDraws() &&
+                          hookReady && g_resourceAttempts == 0,
+                      "TAA-denied real eye-depth visitor preserves stale active UI-depth state but performs no candidate SRV query");
+
+        if (hookReady) g_resourceAttempts = 0;
+        const bool allowedVisited = edvr::vScreenPredicateTestVisit(
+            site, context, context, 0, false, true, &result,
+            true, true, 'N', 3, 1, 0, 0, 0,
+            true, true, true, true, false);
+        okay &= check(allowedVisited && result.token.valid() &&
+                          result.siteResult.outcome == edvr::draw_ladder::SiteOutcome::Observed &&
+                          hookReady && g_resourceAttempts > 0,
+                      "TAA-admitted real eye-depth visitor reaches uiDepthOnEyeDraw and proves its WARP resource-query counter");
+        if (hookReady) resourceHook.uninstall();
+    }
+
+    edvr::uiDepthShutdown();
+    context->PSSetShaderResources(0, 1, priorSrv.GetAddressOf());
+    context->OMSetRenderTargets(0, nullptr, priorDsv.Get());
+    edvr::bindingSet(edvr::BindSlot::PsSrv0, savedSrv);
+    edvr::bindingSet(edvr::BindSlot::Dsv0, savedDsv);
+    config.set("fix.temporal_aa", savedTemporalMode.c_str());
+    g_resourceAttempts = savedResourceAttempts;
+    g_originalGetResource = savedGetResource;
+    return okay;
+}
+
 bool testIntroOwnerDeniedVisitor(ID3D11Device* device,
                                  ID3D11DeviceContext* context) {
     if (!device || !context) return check(false, "Intro owner visitor has a real WARP device/context");
@@ -3137,6 +3235,101 @@ bool testIntroOwnerDeniedVisitor(ID3D11Device* device,
     edvr::introPanelConfigure(config);
     config.set("fix.panel_curvature", savedCurvature.c_str());
     edvr::panelCurveConfigure(config);
+    g_resourceAttempts = savedResourceAttempts;
+    g_originalGetResource = savedGetResource;
+    return okay;
+}
+
+bool testIntroOwnerDeniedScrim(ID3D11Device* device,
+                               ID3D11DeviceContext* context) {
+    if (!device || !context)
+        return check(false, "Intro scrim visitor has a real WARP device/context");
+
+    const bool savedScrimOn = edvr::detail::g_scrimOn;
+    const void* savedShadow[2] = {
+        edvr::bindingGet(edvr::BindSlot::PsSrv0),
+        edvr::bindingGet(edvr::BindSlot::PsSrv1),
+    };
+    const std::uint32_t savedResourceAttempts = g_resourceAttempts;
+    const auto savedGetResource = g_originalGetResource;
+    ID3D11ShaderResourceView* priorActualRaw[2]{};
+    context->PSGetShaderResources(0, 2, priorActualRaw);
+    ComPtr<ID3D11ShaderResourceView> priorActual[2];
+    priorActual[0].Attach(priorActualRaw[0]);
+    priorActual[1].Attach(priorActualRaw[1]);
+
+    bool okay = true;
+    ComPtr<ID3D11Texture2D> washTexture;
+    ComPtr<ID3D11ShaderResourceView> washSrv;
+    ComPtr<ID3D11Texture2D> uiTexture;
+    ComPtr<ID3D11ShaderResourceView> uiSrv;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = 16;
+    desc.Height = 16;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_BC1_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    HRESULT hr = device->CreateTexture2D(&desc, nullptr, &washTexture);
+    if (SUCCEEDED(hr)) hr = device->CreateShaderResourceView(washTexture.Get(), nullptr, &washSrv);
+    desc.Width = 2048;
+    desc.Height = 1024;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (SUCCEEDED(hr)) hr = device->CreateTexture2D(&desc, nullptr, &uiTexture);
+    if (SUCCEEDED(hr)) hr = device->CreateShaderResourceView(uiTexture.Get(), nullptr, &uiSrv);
+    okay &= check(SUCCEEDED(hr) && washSrv && uiSrv,
+                  "Intro scrim fixture creates the real WARP 16x16 BC1 wash and large UI SRVs");
+
+    if (SUCCEEDED(hr) && washSrv && uiSrv) {
+        edvr::VTableHook washResourceHook;
+        const bool hookReady = hookResource(washResourceHook, washSrv.Get());
+        edvr::ResourceInfo control{};
+        g_resourceAttempts = 0;
+        const bool resolverControl = hookReady &&
+            edvr::bindingResolve(washSrv.Get(), &control);
+        okay &= check(resolverControl && control.isTexture2D &&
+                          control.a == 16 && control.b == 16 &&
+                          g_resourceAttempts == 1,
+                      "real WARP wash SRV resolver control proves the connected candidate-query counter");
+
+        ID3D11ShaderResourceView* bindings[] = {washSrv.Get(), uiSrv.Get()};
+        context->PSSetShaderResources(0, 2, bindings);
+        edvr::bindingSet(edvr::BindSlot::PsSrv0, washSrv.Get());
+        edvr::bindingSet(edvr::BindSlot::PsSrv1, uiSrv.Get());
+        edvr::detail::g_scrimOn = true;  // stale enabled module state at the owner boundary
+
+        g_resourceAttempts = 0;
+        edvr::VScreenPredicateTestResult denied{};
+        const bool deniedVisited = edvr::vScreenPredicateTestVisit(
+            static_cast<std::uint16_t>(edvr::draw_ladder::SiteId::kScrimClaim),
+            context, context, 0, false, true, &denied,
+            true, true, 'X', 5760, 1, 0, 0, 0, false);
+        okay &= check(deniedVisited && denied.token.valid() &&
+                          denied.siteResult.outcome == edvr::draw_ladder::SiteOutcome::Declined &&
+                          edvr::detail::g_scrimOn &&
+                          hookReady && g_resourceAttempts == 0,
+                      "Intro-denied scrim visitor preserves core trace and declines stale active module state before WARP metadata queries");
+
+        g_resourceAttempts = 0;
+        edvr::VScreenPredicateTestResult allowed{};
+        const bool allowedVisited = edvr::vScreenPredicateTestVisit(
+            static_cast<std::uint16_t>(edvr::draw_ladder::SiteId::kScrimClaim),
+            context, context, 0, false, true, &allowed,
+            true, true, 'X', 5760, 1, 0, 0, 0, true);
+        okay &= check(allowedVisited && allowed.token.valid() &&
+                          allowed.siteResult.outcome == edvr::draw_ladder::SiteOutcome::Claimed &&
+                          hookReady && g_resourceAttempts == 1,
+                      "Intro-admitted scrim visitor reaches the production WARP metadata selector and claims the matching wash");
+        if (hookReady) washResourceHook.uninstall();
+    }
+
+    context->PSSetShaderResources(0, 1, priorActual[0].GetAddressOf());
+    context->PSSetShaderResources(1, 1, priorActual[1].GetAddressOf());
+    edvr::bindingSet(edvr::BindSlot::PsSrv0, const_cast<void*>(savedShadow[0]));
+    edvr::bindingSet(edvr::BindSlot::PsSrv1, const_cast<void*>(savedShadow[1]));
+    edvr::detail::g_scrimOn = savedScrimOn;
     g_resourceAttempts = savedResourceAttempts;
     g_originalGetResource = savedGetResource;
     return okay;
@@ -5030,11 +5223,13 @@ int main(int argc, char** argv) {
         okay &= testSunglareNomination(device, immediate);
         okay &= testCockpitOwnerDeniedGlareAndCore(device, immediate);
         okay &= testIntroOwnerDeniedVisitor(device, immediate);
+        okay &= testIntroOwnerDeniedScrim(device, immediate);
         okay &= testOnFootOwnerDeniedPanelCurve(device, immediate);
         okay &= testOnFootOwnerDeniedFootprint(device, immediate);
         okay &= testDiagnosticsOwnerLegacyGateRegistration();
         okay &= testDiagnosticsOwnerDeviceHookHost();
         okay &= testDiagnosticsOwnerDeniedObjectProbe(device, immediate);
+        okay &= testTemporalAaOwnerDeniedUiDepthProbe(device, immediate);
         for (std::uint32_t i = 0; i < 4; ++i)
             edvr::bindingSet(static_cast<edvr::BindSlot>(
                                  static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i), nullptr);

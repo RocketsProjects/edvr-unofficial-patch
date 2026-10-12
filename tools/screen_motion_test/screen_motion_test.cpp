@@ -60,7 +60,8 @@ ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,const void* bytes
 
 ID3D11ShaderResourceView* testWeaponMotion=nullptr;
 unsigned testWeaponConfigureCalls=0,testWeaponSourceCalls=0,testWeaponFrameCalls=0,testWeaponShutdownCalls=0;
-void weaponMotionConfigure(bool){++testWeaponConfigureCalls;}
+bool testWeaponConfigureEnabled=false;
+void weaponMotionConfigure(bool enabled){++testWeaponConfigureCalls;testWeaponConfigureEnabled=enabled;}
 void weaponMotionSource(ID3D11Texture2D*){++testWeaponSourceCalls;}
 ID3D11ShaderResourceView* weaponMotionView(){return testWeaponMotion;}
 void weaponMotionFrameBoundary(ID3D11DeviceContext*){++testWeaponFrameCalls;}
@@ -68,7 +69,14 @@ void weaponMotionShutdown(){++testWeaponShutdownCalls;}
 uint64_t testVs=0,testPs=0;ID3D11RenderTargetView* testRtv=nullptr;
 Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
 Config& Config::get(){static Config cfg;return cfg;}
-std::string Config::getString(const char*,const char*)const{return "dlss";}
+unsigned testTemporalModeReads=0;
+std::string testTemporalMode="dlss";
+std::string Config::getString(const char* key,const char* def)const{
+    ++testTemporalModeReads;
+    check(!strcmp(key,"fix.temporal_aa")&&def&&!strcmp(def,"off"),
+          "screen motion reads only the live Temporal-AA mode key");
+    return testTemporalMode;
+}
 unsigned testWeaponStabilityReads=0;
 bool Config::getBool(const char* key,bool def)const{
     ++testWeaponStabilityReads;
@@ -154,7 +162,10 @@ int main(int argc,char** argv){
     auto psCode=compile("float4 main():SV_Target{return 1;}","ps_5_0");ComPtr<ID3D11PixelShader> ps;hr(dev->CreatePixelShader(psCode->GetBufferPointer(),psCode->GetBufferSize(),nullptr,&ps));
     ctx->VSSetShader(vs.Get(),nullptr,0);ctx->PSSetShader(ps.Get(),nullptr,0);ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     D3D11_VIEWPORT vp{0,0,float(W),float(H),0,1};ctx->RSSetViewports(1,&vp);UINT stride=8,offset=0;ctx->IASetVertexBuffers(1,1,vb.GetAddressOf(),&stride,&offset);
+    detail::g_screenMotionOwnerAllowed=true;
     detail::g_screenMotionEnabled=true;
+    g.temporalAAOwnerAllowed=true;
+    g.onFootPanelOwnerAllowed=true;
     auto sourceDraw=[&](){
         ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(0,1,&none);
         ctx->OMSetRenderTargets(1,rt.GetAddressOf(),ds.Get());ctx->ClearDepthStencilView(ds.Get(),D3D11_CLEAR_DEPTH,.0025f,0);
@@ -416,7 +427,8 @@ int main(int argc,char** argv){
     // fallback off while it does.
     {
         ctx->ClearState();
-        g=State{};testSourceNotes=0;testSourceScene=nullptr;testDsv=nullptr;
+        g=State{};g.temporalAAOwnerAllowed=true;g.onFootPanelOwnerAllowed=true;
+        testSourceNotes=0;testSourceScene=nullptr;testDsv=nullptr;
         D3D11_TEXTURE2D_DESC ad{};ad.Width=W*2;ad.Height=H/2;ad.MipLevels=ad.ArraySize=ad.SampleDesc.Count=1;
         ad.Format=DXGI_FORMAT_R32_TYPELESS;ad.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
         ComPtr<ID3D11Texture2D> atlas;hr(dev->CreateTexture2D(&ad,nullptr,&atlas));
@@ -489,7 +501,10 @@ int main(int argc,char** argv){
     // checks exist to hold: screenMotionLive() is what the draw path believes,
     // and it has to keep agreeing with the flags after every reset.
     {
+        detail::g_screenMotionOwnerAllowed=true;
         detail::g_screenMotionEnabled=true;detail::g_screenMotionFailed=false;
+        g.temporalAAOwnerAllowed=true;
+        g.onFootPanelOwnerAllowed=true;
         check(screenMotionLive(),"live with the feature armed and no failure");
         detail::g_screenMotionFailed=true;
         check(!screenMotionLive(),"a setup failure stands the draw path down");
@@ -497,8 +512,9 @@ int main(int argc,char** argv){
         // KEEPS the arming -- it exists to let a transient failure retry.
         g.seen=true;g.lastScreen=0;g.frame=121;
         screenMotionFrameBoundary(nullptr);
-        check(detail::g_screenMotionEnabled&&!detail::g_screenMotionFailed&&screenMotionLive(),
-              "the idle State reset keeps the arming and clears the failure");
+        check(detail::g_screenMotionEnabled&&!detail::g_screenMotionFailed&&screenMotionLive()&&
+                  g.temporalAAOwnerAllowed&&g.onFootPanelOwnerAllowed,
+              "the idle State reset keeps both admitted owners and the arming, and clears the failure");
         // Shutdown clears both, so a torn-down module can never read live.
         screenMotionShutdown();
         check(!detail::g_screenMotionEnabled&&!detail::g_screenMotionFailed&&!screenMotionLive(),
@@ -511,28 +527,56 @@ int main(int argc,char** argv){
         const unsigned savedWeaponFrameCalls=testWeaponFrameCalls;
         const unsigned savedWeaponShutdownCalls=testWeaponShutdownCalls;
         const unsigned savedWeaponStabilityReads=testWeaponStabilityReads;
+        const unsigned savedTemporalModeReads=testTemporalModeReads;
+        const bool savedWeaponConfigureEnabled=testWeaponConfigureEnabled;
+        const std::string savedTemporalMode=testTemporalMode;
         testWeaponConfigureCalls=testWeaponSourceCalls=testWeaponFrameCalls=testWeaponShutdownCalls=0;
-        testWeaponStabilityReads=0;
-        screenMotionConfigure(Config::get(),false);
-        const uint64_t frameBefore=g.frame;
+        testWeaponStabilityReads=testTemporalModeReads=0;
+        testTemporalMode="dlss";
+        screenMotionConfigure(Config::get(),false,false);
+        const uint64_t deniedFrameStart=g.frame;
         screenMotionFrameBoundary(ctx.Get());
-        check(screenMotionLive() && g.frame==frameBefore+1 &&
-                  testWeaponStabilityReads==0 && testWeaponConfigureCalls==0 &&
+        check(!screenMotionLive() && g.frame==deniedFrameStart &&
+                  testTemporalModeReads==0 && testWeaponStabilityReads==0 &&
+                  testWeaponConfigureCalls==0 &&
                   testWeaponSourceCalls==0 && testWeaponFrameCalls==0 &&
                   testWeaponShutdownCalls==0,
-              "cached On-foot absence keeps the real screen-motion frame tick alive while skipping the cold weapon key and every weapon callback");
+              "both cached owners absent skip both cold config keys and all optional module callbacks");
 
-        screenMotionConfigure(Config::get(),true);
+        screenMotionConfigure(Config::get(),true,false);
+        const uint64_t temporalOnlyFrameStart=g.frame;
         screenMotionFrameBoundary(ctx.Get());
-        check(g.frame==frameBefore+2 && testWeaponStabilityReads==1 &&
-                  testWeaponConfigureCalls==1 && testWeaponFrameCalls==1,
-              "owner-allowed Legacy control reads the live weapon key and dispatches the real integration callbacks");
+        check(screenMotionLive() && g.frame==temporalOnlyFrameStart+1 &&
+                  testTemporalModeReads==1 && testWeaponStabilityReads==0 &&
+                  testWeaponConfigureCalls==0 && testWeaponFrameCalls==0,
+              "Temporal-AA admission alone reads its mode and keeps core ScreenMotion live without touching On-foot config or callbacks");
+
+        screenMotionConfigure(Config::get(),false,true);
+        const uint64_t onFootOnlyFrameStart=g.frame;
+        screenMotionFrameBoundary(ctx.Get());
+        check(!screenMotionLive() && g.frame==onFootOnlyFrameStart &&
+                  testTemporalModeReads==1 && testWeaponStabilityReads==1 &&
+                  testWeaponConfigureCalls==1 && !testWeaponConfigureEnabled &&
+                  testWeaponFrameCalls==1,
+              "On-foot admission remains independent: it reads weapon stability and dispatches its real frame path while TAA config stays absent");
+
+        screenMotionConfigure(Config::get(),true,true);
+        const uint64_t bothFrameStart=g.frame;
+        screenMotionFrameBoundary(ctx.Get());
+        check(screenMotionLive() && g.frame==bothFrameStart+1 &&
+                  testTemporalModeReads==2 && testWeaponStabilityReads==2 &&
+                  testWeaponConfigureCalls==2 && testWeaponConfigureEnabled &&
+                  testWeaponFrameCalls==2,
+              "both admitted owners preserve the real core and weapon dispatch with live config reads");
         screenMotionShutdown();
         testWeaponConfigureCalls=savedWeaponConfigureCalls;
         testWeaponSourceCalls=savedWeaponSourceCalls;
         testWeaponFrameCalls=savedWeaponFrameCalls;
         testWeaponShutdownCalls=savedWeaponShutdownCalls;
         testWeaponStabilityReads=savedWeaponStabilityReads;
+        testTemporalModeReads=savedTemporalModeReads;
+        testWeaponConfigureEnabled=savedWeaponConfigureEnabled;
+        testTemporalMode=savedTemporalMode;
     }
     {auto d=screenMotionGpuDiagnostics();check(!d.collecting&&!d.draining&&!d.sourceFrames&&!d.uiClearCalls&&!d.uiDrawCalls&&!d.eyeClearCalls&&!d.projectionCalls,"screen GPU diagnostics reset on shutdown");}
     testScreenConsumers(dev.Get(),ctx.Get());

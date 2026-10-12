@@ -6,6 +6,22 @@
 
 namespace edvr::plugins::performance {
 
+// Private host context for the first-party configure callback. The host passes
+// the immutable Temporal-AA admission snapshot; this is not part of the Ops or
+// settings ABI and does not change their version/layout.
+struct TextureSamplerHostContextV1 {
+    uint32_t structSize;
+    uint32_t version;
+    uint32_t temporalAAOwnerAllowed;
+};
+
+constexpr uint32_t kTextureSamplerHostContextVersion1 = 1;
+
+static_assert(std::is_standard_layout<TextureSamplerHostContextV1>::value &&
+              std::is_trivially_copyable<TextureSamplerHostContextV1>::value &&
+              sizeof(TextureSamplerHostContextV1) == 12,
+              "sampler host context v1 must remain a fixed POD");
+
 // Private fixed-width boundary between the device-hook host and the
 // Performance sampler policy. The host owns the D3D descriptor and real call.
 struct TextureSamplerDescV1 {

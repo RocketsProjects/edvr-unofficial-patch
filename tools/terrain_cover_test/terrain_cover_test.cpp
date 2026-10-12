@@ -751,6 +751,8 @@ int main(int argc, char** argv) {
     {
         const std::string device = slurp(root + "\\src\\d3d11\\device_hook.cpp");
         const std::string temporal = slurp(root + "\\src\\d3d11\\native_temporal.cpp");
+        const std::string fss = slurp(root + "\\src\\d3d11\\native_fss.cpp");
+        const std::string fssFixture = slurp(root + "\\tools\\native_fss_test\\native_fss_test.cpp");
         const std::string hook = slurp(root + "\\src\\d3d11\\terrain_cull_cover_hook.cpp");
         const std::string core = slurp(root + "\\src\\d3d11\\terrain_cull_cover_core.h");
         const std::string build = slurp(root + "\\build.bat");
@@ -766,7 +768,7 @@ int main(int argc, char** argv) {
             "if (g_state->comfortOwnerAllowed)\n"
             "                terrainCullCoverPoll(stampMs());";
         const std::string terrainFrusta =
-            "if(s->comfortOwnerAllowed) edvr::terrainCullCoverNoteFrusta(s->frusta);";
+            "if(s->ownerAllowed)edvr::terrainCullCoverNoteFrusta(f->frusta);";
         check(occurrencesLive(device, "terrainCullCoverInstall(") == 1 &&
                   occurrencesLive(device, terrainInstall) == 1 &&
                   precedes(device, comfortAdmission, terrainInstall) &&
@@ -777,12 +779,21 @@ int main(int argc, char** argv) {
                   has(device, terrainPoll) &&
                   precedes(device, "vScreenRefreshConfig();", terrainPoll),
               "C7.b ...and polls under cached Comfort admission after the config reload");
-        check(occurrencesLive(temporal, terrainFrusta) == 1 &&
-                  occurrences(temporal, "edvr::terrainCullCoverNoteFrusta(") == 1 &&
-                  occurrences(temporal, "s.comfortOwnerAllowed=edvr::comfortOwnerAllowed();") == 1 &&
-                  precedes(temporal, "std::memcpy(s->frusta,f->frusta,sizeof(s->frusta));", terrainFrusta) &&
-                  precedes(temporal, terrainFrusta, "g_vertical.store("),
-              "C7.c native_temporal.cpp's begin() notifies the cover after copying frusta only for its cached Comfort owner");
+        check(occurrences(fss, terrainFrusta) == 1 &&
+                  occurrences(fss, "edvr::terrainCullCoverNoteFrusta(") == 1 &&
+                  occurrences(temporal, "edvr::terrainCullCoverNoteFrusta(") == 0 &&
+                  occurrences(temporal, "edvr::comfortOwnerAllowed()") == 0 &&
+                  occurrences(fss, "bool active=false,ownerAllowed=false,frameOpen=false") == 1 &&
+                  occurrences(fss, "edvr::comfortOwnerAllowed()") == 1 &&
+                  occurrences(fss, "s.active=true;s.ownerAllowed=ownerAllowed;") == 1 &&
+                  precedes(fss, "s->frame=*f;", terrainFrusta) &&
+                  precedes(fss, terrainFrusta, "s->sync=edvr::eyeSyncFromConfig") &&
+                  occurrences(fssFixture, "nativeFssPublishesComfortFrustaOnce();") == 1 &&
+                  occurrences(fssFixture, "mode=\"off\";comfortOwnerAllowedForTest=true;comfortFrustaNotes=0;") == 1 &&
+                  occurrences(fssFixture, "mode=\"on\";auto second=frame(901);") == 1 &&
+                  has(fssFixture, "Comfort FSS publishes the exact valid game-facing frusta once even when healing is off") &&
+                  precedes(temporal, "std::memcpy(s->frusta,f->frusta,sizeof(s->frusta));", "g_vertical.store("),
+              "C7.c valid native FSS begin is the sole Comfort-cached frusta publisher before heal config; its off/on fixture proves one publication while Temporal-AA keeps its core copy without duplicating it");
         check(occurrences(hook, "return forward(a, b, c, d, r.vfov, r.aspect);") == 1 && occurrences(hook, "BuilderFn = uintptr_t (__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, float, float);") == 1,
               "C7.d the detour forwards the four register arguments untouched and only the two floats it computed");
         check(!has(hook, "Config::") && !has(hook, "getBool(") && !has(hook, "getString(") && !has(core, "terrain_cull_cover =") && !has(ini, "terrain_cull_cover"),

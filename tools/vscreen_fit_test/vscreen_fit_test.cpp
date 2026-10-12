@@ -1076,17 +1076,37 @@ void caseR12() {
     check(has(res, "f.flatProfile = runtimeFlatProfile();") && has(res, "vscreenfit::decide(in)"),
           "R12e: the resolver asks the pure rule, with the flat profile as a fact");
     {   // A curved screen is not a condition of the route (it re-issues the game's own strip), so the resolver reads no curve fact.
-        const std::string facts = functionBody(res, "vscreenfit::RouteFacts routeFactsFromConfig(Config& cfg) {");
+        const std::string facts = functionBody(res, "vscreenfit::RouteFacts routeFactsFromConfig(Config& cfg, bool temporalAAOwnerAllowed) {");
         check(!facts.empty() && !has(facts, "panel_curvature") && !has(facts, "panelCurve") && !has(facts, ".curved") &&
                   !has(res, "#include \"panel_curve.h\""),
               "R12e: the resolver reads no curve fact: routeFactsFromConfig does not read the curvature and vscreen_res.cpp does not include panel_curve.h");
+        const std::string ownerGuard = "if (temporalAAOwnerAllowed) {";
+        const std::string qualityRead = "cfg.getString(\"fix.ui_quality\", \"100\")";
+        const std::string temporalRead = "cfg.getString(\"fix.temporal_aa\", \"off\")";
+        check(!facts.empty() && has(facts, ownerGuard.c_str()) && before(facts, ownerGuard, qualityRead) &&
+                  before(facts, ownerGuard, temporalRead) &&
+                  has(facts, "f.layerWhy = \"the Temporal-AA owner is not admitted\";") &&
+                  count(facts, qualityRead) == 1 && count(facts, temporalRead) == 1,
+              "R12t: absent Temporal-AA ownership bypasses both layer-key reads and gives the route the explicit non-live owner reason");
     }
     {
-        const std::string resolve = functionBody(res, "void resolveVScreenTargetResolution(");
+        const std::string resolve = functionBody(res, "void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* outHeight,");
         check(has(resolve, "if (announce) {") && has(resolve, "formatRuleLine(") && before(resolve, "vscreenfit::decide(in)", "formatRuleLine("),
               "R12e: the `vScreen resolution:` line is the rule's own line and only the announcing call prints it");
         check(has(resolve, "lastKnownEyeWidth(") && before(resolve, "lastKnownEyeWidth(", "vscreenfit::decide(in)") && has(resolve, "lastKnownPanelFootprint("),
               "R12e: the rule starts from the eye width on record, with the stored footprint beside it");
+        check(has(resolve, "bool temporalAAOwnerAllowed, bool announce") &&
+                  has(resolve, "in.route = routeFactsFromConfig(cfg, temporalAAOwnerAllowed);"),
+              "R12t: the resolver requires the cached Temporal-AA owner bit and forwards it to route facts");
+    }
+    {
+        const std::string device = readFile("src\\d3d11\\device_hook.cpp");
+        const std::string menu = readFile("src\\d3d11\\menu.cpp");
+        const std::string intro = readFile("src\\plugins\\intro\\intro_upscale.cpp");
+        check(has(device, "resolveVScreenTargetResolution(cfg, &w, &h, s.temporalAAOwnerAllowed);") &&
+                  has(menu, "resolveVScreenTargetResolution(Config::get(), &vw, &vh, temporalAAOwnerAllowed(),") &&
+                  has(intro, "resolveVScreenTargetResolution(cfg, &vw, &vh, temporalAAOwnerAllowed(), /*announce=*/false);"),
+              "R12t: startup, menu and Intro resolution all pass the cached Temporal-AA owner decision");
     }
 
     // The instrument's hook in the draw path, and what arms it.

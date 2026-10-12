@@ -9,6 +9,7 @@
 #include "../../src/openxr/native_render_binding.h"
 #include "launch_centre_cases.h"
 #include "treatment_cases.h"
+#include "temporal_startup_cases.h"
 #include "frame_end_overlap_cases.h"
 #include "frame_cycle_cases.h"
 #include "frequency_cases.h"
@@ -678,6 +679,7 @@ int selfTest() {
   edvr::openxr::test::runLaunchCentreCases(check);
   edvr::openxr::test::runFeatureHostCases(check);
   edvr::openxr::test::runTreatmentCases(check);
+  edvr::openxr::test::runTemporalStartupCases(check);
   edvr::openxr::test::runDeferredTreatmentCases(check);
   edvr::openxr::test::runFrameEndOverlapCases(check);
   edvr::openxr::test::runSubmissionStatsCases(check);

@@ -3,6 +3,7 @@
 #include "ui_layer.h"
 #include "ui_layer_math.h"  // uiLayerUvFromRegion
 #include "temporal_pass.h"
+#include "device_hook.h" // cached Temporal-AA admission
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/supersample_math.h"
@@ -132,6 +133,9 @@ HRESULT WINAPI close(void* p) { std::lock_guard<std::mutex> lock(mutex);State*s=
 extern "C" HRESULT WINAPI edvrAcquireNativeSharpen(const EdvrNativeSharpenRequest* r,EdvrNativeSharpenTable* t) {
   if(!t||t->size!=sizeof(*t)||t->version!=EDVR_NATIVE_SHARPEN_VERSION_1)return E_INVALIDARG;*t={sizeof(*t),EDVR_NATIVE_SHARPEN_VERSION_1};
   if(!r||r->size!=sizeof(*r)||r->version!=EDVR_NATIVE_SHARPEN_VERSION_1||!r->gameDevice||!r->generation)return E_INVALIDARG;
+  // Sharpen is an optional Temporal-AA-owned provider. Leave the exact
+  // versioned empty table and avoid device identity queries or pool work.
+  if(!edvr::temporalAAOwnerAllowed())return S_FALSE;
   IUnknown* identity=nullptr;if(FAILED(r->gameDevice->QueryInterface(IID_IUnknown,(void**)&identity)))return E_INVALIDARG;identity->Release();
   std::lock_guard<std::mutex> lock(mutex);if(current||used==16)return E_PENDING;State&s=pool[used++];s={};s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.active=true;current=&s;available.store(true);t->context=&s;t->treatEye=treat;t->invalidate=invalidate;t->close=close;edvr::Log::get().note("native sharpen: acquired generation %llu.",(unsigned long long)r->generation);return S_OK;
 }

@@ -68,9 +68,10 @@ void flatRuntimeNoteCameraApplied();
 // Whether a legacy projection plan exists for the current frame (the
 // ownership policy's legacyEligible input).
 bool flatRuntimeLegacyPlanExists();
-void flatRuntimePresent(IDXGISwapChain*, uint64_t frame, HRESULT, UINT flags);
-void flatRuntimeBeforePresent();
-void flatRuntimeResize();
+void flatRuntimePresent(IDXGISwapChain*, uint64_t frame, HRESULT, UINT flags,
+                        bool temporalAAOwnerAllowed);
+void flatRuntimeBeforePresent(bool temporalAAOwnerAllowed);
+void flatRuntimeResize(bool temporalAAOwnerAllowed);
 void flatRuntimeConstantBuffers(UINT start, UINT count, ID3D11Buffer* const*);
 void flatRuntimeUavs(UINT start, UINT count, ID3D11UnorderedAccessView* const*);
 struct FlatRuntimeDispatchScope {

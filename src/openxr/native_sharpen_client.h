@@ -17,6 +17,13 @@ class NativeSharpenClient final {
     EdvrNativeSharpenRequest request{sizeof(request), EDVR_NATIVE_SHARPEN_VERSION_1, device, generation};
     EdvrNativeSharpenTable candidate{sizeof(candidate), EDVR_NATIVE_SHARPEN_VERSION_1};
     const auto result = reinterpret_cast<decltype(&edvrAcquireNativeSharpen)>(entry)(&request, &candidate);
+    if (result == S_FALSE) {
+      if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_SHARPEN_VERSION_1 ||
+          candidate.context || candidate.treatEye || candidate.invalidate || candidate.close)
+        return E_NOINTERFACE;
+      table_ = {};
+      return S_FALSE;
+    }
     if (result != S_OK) return FAILED(result) ? result : E_NOINTERFACE;
     if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_SHARPEN_VERSION_1 ||
         !candidate.context || !owned(provider, candidate.treatEye) ||

@@ -17,10 +17,10 @@
   validation; their per-owner receipts remain in the dated journal.
   Diagnostics startup/callback/capture gates pass full offline validation:
   `build/full-diagnostics-absence-offline-20261011-r9.log` (receipt `5cdd1948`).
-- **Module progress:** seven owners pass offline. Temporal AA remains.
-  Selections unavailable; runtime absence/order open.
-  Final source audit found an Intro loading-dim ownership gap; its repair
-  follows with the Temporal-AA migration.
+  Temporal-AA startup/provider/callback gates pass full offline validation:
+  `build/full-temporal-absence-offline-20261011-r10.log` (receipt `8d003869`).
+- **Module progress:** all eight owners pass offline. Selections remain
+  unavailable; runtime absence/order and CPU/GPU acceptance remain open.
 - **Offline evidence:** FSS site 1 has a frozen selector oracle, v16 facts,
   seven-base-fact capacity and terminal X/6 fixtures. Capture uses consumed
   values; unarmed paths build no payload. Caught faults after matching reads
@@ -5334,3 +5334,146 @@ exports and the self-contained installer resources:
 Availability stays closed. Runtime absence/order and final matched CPU/GPU
 acceptance remain open. Steam installation remains held; no DLL promotion, live
 settings edit, flight or feature-to-main merge occurred.
+
+### 2026-10-11 — Temporal AA startup, providers and callback absence
+
+Temporal AA reuses the admission bit cached after device-hook commit. Its five
+keys keep their existing ownership and names. Startup, reload, motion/depth/UI
+observers, jitter, resolve, sharpening and shutdown use that cached bit; shared
+Core forwarding and Diagnostics-or-Temporal-AA discovery remain available.
+
+Native Temporal and Sharpen return an exact versioned empty table with
+`S_FALSE` when denied, before configuration, device identity or provider pool
+work. Their clients accept only that exact optional-provider result and reject
+malformed tables, unexpected callbacks and other statuses. Actual loaded
+provider/client and host capture fixtures cover denial and admitted controls;
+they do not claim a selected-profile XR startup.
+
+The empty-table cases corrupt each size, version, context and callback field
+independently for Temporal, Sharpen and FSS. A startup fixture calls the same
+production acquisition method used by the host: Core menu remains mandatory,
+either or both TAA providers may be absent, and malformed absence, errors,
+pending and unexpected positive results fail. It checks the graphics-thread
+rendezvous and acquisition counts. Source mutations require startup to call
+that method once at the generation boundary before the remaining providers, and
+require the fixture to stay invoked. This covers the acquisition decision, not
+the complete OpenXR initialization sequence.
+
+Comfort's terrain cover now receives its game-facing, unjittered frusta solely
+from the admitted native FSS frame boundary. This runs with healing off as well
+as on, and stays available when Temporal AA is absent. The FSS fixtures check
+the exact frusta; the Temporal fixture checks no duplicate publication.
+ScreenMotion configures Temporal AA and On-foot separately, preserving native
+On-foot weapon work while leaving Temporal work cold. Its existing GPU weapon
+path still requires Temporal rendering.
+
+Flat Present and BeforePresent contain shared work. Their cached-owner gates
+exclude Temporal configuration, jitter, velocity and treatment while keeping
+Core capture, projection accounting, map bookkeeping and forwarding. UI texture
+corrections and atlas notifications are also gated. The actual WARP UI-depth
+fixture exercises stale active state under denial and an admitted visitor; the
+registry fixture checks all sixty-four owner combinations. The shared
+resolution resolver receives the cached Temporal-AA admission bit. Denial reads
+neither Temporal/UI-quality key and reports a nonlive layer to the fit
+decision; explicit widths and shared dimensions remain available. Performance's
+default texture bias uses both cached Temporal-AA admission and the configured
+enabled mode; admitted `off` retains the zero default. Explicit Performance
+bias remains unchanged. Optional menu status and Flat warnings respect
+admission; Core menu rows can still display and edit stored settings.
+
+Final source audit also found the loading-dim scrim still registered as Core
+despite its Intro-owned key. Its registration, configuration, draw visitor,
+substitution and shutdown now use cached Intro admission. All thirty legacy
+draw rows have explicit optional-owner boundaries; Core forwarding stays live.
+
+The dedicated CelestialStatus tick is now gated outside BoundaryTick, alongside
+EngineVelocity. When Temporal AA is denied, neither feature work nor its
+budget/timing mark runs. The source checker passes 187 negative mutations,
+including startup seam bypass, duplicate invocation and cached-accessor bypass.
+The first full build exposed a shadowed Flat owner predicate and an early
+VScreen state declaration dependency. Flat now uses its passed cached bit;
+VScreen uses the existing cached accessor, declared in its definition's
+anonymous namespace. The Flat fixture rejects an unconditional wrapper drain.
+The full-build evidence below covers this repaired source tree.
+
+Full R2 compiled the DLLs but stopped at the ScreenMotion eye-map positive
+control. The fixture armed the old external globals without setting the new
+cached State owners, so the real frame boundary returned before building eye
+history. Its manual setup and two State resets now seed both admitted owners;
+the eye-map assertion and four-way owner matrix remain intact. The focused
+native-motion retry passes motion, fusion and night-vision rigs in
+`build/focused-temporal-absence-offline-20261011-r1.log`. Production gates were
+unchanged by this fixture repair.
+
+Full R3 exposed three more fixture assumptions. The OpenXR capture fixture now
+counts the final Core copy and explicitly closes the previously admitted FSS
+provider before testing its absence. Flat source checks now target the
+owner-gated warning, wrapper and frame-end paths. The isolated UI-world rig
+defines the new cached ScreenMotion owner flag. The focused OpenXR, Flat and
+UI-world retry passes in
+`build/focused-temporal-integration-offline-20261011-r1.log`; these repairs
+leave production behavior unchanged. R4 found that the added FSS-absence
+fixture duplicated a source mutation anchor. The checker now targets the client
+and host cases separately and requires the host's close-and-absence sequence;
+independent negative mutations cover both assignments.
+
+Full R5 reached the VScreen forwarding rig, whose all-admitted test-only State
+still omitted the cached Temporal-AA owner bit. Seeding that bit restores the
+existing literal lazy checkpoint and callback-order expectations. The focused
+real WARP retry passes in
+`build/focused-temporal-forwarding-offline-20261011-r1.log`; no production path
+changed for this repair.
+
+Full R6 reached UI-quality source checks that still pinned pre-admission calls.
+The UI-quality, VR-world-route and on-foot-map fixtures now require cached
+Temporal-AA gates while preserving curved reissue, crisp-before-world, Intro
+strip refusal and argument, injector, and frame-naming order. Their negative
+controls include owner-gate bypasses. The first focused retry exposed four
+remaining stale operands; all three rigs pass after repair in
+`build/focused-temporal-wiring-offline-20261011-r2.log`, including the real
+WARP UI-quality checks. These five fixture-file changes leave production
+behavior unchanged.
+
+Full R7 compiled the DLLs and reached 69 jobs before a VScreen-fit test helper
+received a `std::string` where it requires `const char*`. Passing the existing
+guard string's `c_str()` fixes the test call without changing its checks. The
+focused retry passes 299 checks and 150 source mutations in
+`build/focused-temporal-fit-offline-20261011-r1.log`.
+
+Full R8 reached the skin-join source pin, which still expected the former
+ownerless one-line dispatch. The fixture now pins the Temporal-AA owner,
+skin-wanted and chain-verdict guard, its single notification and its order
+before the game's dispatch. Independent controls remove owner admission or the
+chain verdict. Its companion mutator preserves the original chain test and adds
+an owner-bypass test. The focused retry passes 159 checks and 85 mutation
+anchors in `build/focused-temporal-skin-offline-20261011-r2.log`. All 31
+mutation-anchor self-tests in the full build also pass before R9.
+
+Full R9 reached 114 jobs before a UI-composite source pin expected the old
+unguarded depth-probe condition. Its repaired pin requires cached Temporal-AA
+admission while preserving per-draw reset, scope consumption, one census count,
+family/after-UI retry and substitution order; a bypass control removes only
+owner admission. The failed and unexecuted R9 subset then passes all 55 rigs,
+including seven quiet timing rigs, in
+`build/focused-temporal-r9-remainder-offline-20261011-r1.log`.
+
+During R8, the successful installer rig deleted our ignored installer stage:
+the runner owns and cleans top-level `installer-*` directories. This was a
+staging-name collision, not a production installer failure. The exact catalog
+merge reference was recovered and verified against its original hash; installer
+reconstruction uses a `plugin-installer-*` directory outside that rig prefix.
+Selection integration remains separate from this checkpoint.
+
+Ruled out: an early ungated UI-quality operand patch. The DLL-load routine
+installs shared Core SSAA setter/getter hooks only. UI-quality operand writes
+are reached later through the sole target-setting caller, after Temporal AA
+admission. The native sizing atomics have Temporal/UI-quality consumers only.
+
+Full R10 passes all 169 jobs, both production DLLs, the config contract,
+exports and the self-contained installer resources:
+`build/full-temporal-absence-offline-20261011-r10.log`, receipt `8d003869`.
+
+All eight owners have offline checkpoints. Selections remain unavailable;
+runtime absence/order and the final matched CPU/GPU comparison remain open.
+Steam installation remains held. No DLL promotion, live settings edit, flight
+or feature-to-main merge occurred.

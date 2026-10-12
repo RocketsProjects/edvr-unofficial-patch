@@ -67,7 +67,7 @@ struct VrWorldInternalScope {
 // Once a frame at the Present boundary, AFTER the UI layer's own boundary (it reads the gate that boundary computed):
 // accounts the frame that ended, steps the ownership machine, reads the key, prints the 5 s line, publishes the state the
 // next frame starts in and arms the detector for it.
-void vrWorldRouteFrameBoundary();
+void vrWorldRouteFrameBoundary(bool temporalAAOwnerAllowed = true);
 
 // ---- what the rest of the pipeline asks -----------------------------------------------------------------------------
 // The key is auto (as read at the last boundary). Render thread.

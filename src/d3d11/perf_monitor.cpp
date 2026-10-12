@@ -951,10 +951,12 @@ bool updateBenchmarkMetadata(State& s, const NativeTimingSnapshot& timing,
             benchmarkCopy(metadata.runtime, sizeof(metadata.runtime), labels.runtimeName);
             benchmarkCopy(metadata.headset, sizeof(metadata.headset), labels.systemName);
         }
-        const std::string aa = Config::get().getString("fix.temporal_aa", "off");
-        const std::string dlss = Config::get().getString("fix.temporal_aa_model", "k");
-        benchmarkCopy(metadata.aaMode, sizeof(metadata.aaMode), aa.c_str());
-        benchmarkCopy(metadata.dlssMode, sizeof(metadata.dlssMode), dlss.c_str());
+        if (temporalAAOwnerAllowed()) {
+            const std::string aa = Config::get().getString("fix.temporal_aa", "off");
+            const std::string dlss = Config::get().getString("fix.temporal_aa_model", "k");
+            benchmarkCopy(metadata.aaMode, sizeof(metadata.aaMode), aa.c_str());
+            benchmarkCopy(metadata.dlssMode, sizeof(metadata.dlssMode), dlss.c_str());
+        }
         benchmarkCopy(metadata.build, sizeof(metadata.build), EDVR_VERSION_STRING);
         s.nativeBenchmarkMetadataMs = nowMs;
     }

@@ -26,6 +26,7 @@ namespace edvr {
 namespace detail {
 bool g_screenMotionEnabled = false;
 bool g_screenMotionFailed = false;
+bool g_screenMotionOwnerAllowed = false;
 }  // namespace detail
  namespace {
 template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
@@ -43,7 +44,9 @@ struct State {
     bool noted=false;
     bool seen=false;
     bool weapon=true,weaponNoted=false;
+    bool temporalAAOwnerAllowed=false;
     bool onFootPanelOwnerAllowed=false;
+    bool weaponConfigured=false;
     unsigned lastScreen=0;
     unsigned frame=0,sourceFrame=~0u,sourceWrite=0,sourcePrevious=~0u;
     Ptr<ID3D11Buffer> camera[2];
@@ -220,22 +223,37 @@ bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev,Screen& e,unsigned w,uns
     return true;
 }
 }
-void screenMotionConfigure(Config& cfg, bool onFootPanelOwnerAllowed) {
-    bool on=temporalModeEnabled(cfg.getString("fix.temporal_aa","off"));
-    if(on!=detail::g_screenMotionEnabled){g_gpu.close();g=State{};detail::g_screenMotionEnabled=on;detail::g_screenMotionFailed=false;}
+void screenMotionConfigure(Config& cfg, bool temporalAAOwnerAllowed,
+                           bool onFootPanelOwnerAllowed) {
+    detail::g_screenMotionOwnerAllowed = temporalAAOwnerAllowed;
+    const bool on = temporalAAOwnerAllowed &&
+        temporalModeEnabled(cfg.getString("fix.temporal_aa","off"));
+    if(on!=detail::g_screenMotionEnabled){
+        g_gpu.close();
+        const bool temporalOwner=g.temporalAAOwnerAllowed;
+        const bool onFootOwner=g.onFootPanelOwnerAllowed;
+        const bool weaponConfigured=g.weaponConfigured;
+        g=State{};
+        g.temporalAAOwnerAllowed=temporalOwner;
+        g.onFootPanelOwnerAllowed=onFootOwner;
+        g.weaponConfigured=weaponConfigured;
+        detail::g_screenMotionEnabled=on;detail::g_screenMotionFailed=false;
+    }
+    g.temporalAAOwnerAllowed = temporalAAOwnerAllowed;
     g.onFootPanelOwnerAllowed = onFootPanelOwnerAllowed;
     if(on&&!g_gpu.policyNoted){g_gpu.policyNoted=true;Log::get().note("on-foot motion GPU diagnostics: enabled for screen UI clears/reissues, per-eye screen projection, and weapon identify/capture/raster; exact sparse query intervals only, one admission per category per frame, 1800 source-frame windows and a 120-frame no-wait drain.");}
     if (onFootPanelOwnerAllowed) {
         const bool weapon=cfg.getBool("fix.weapon_stability",true);
         if(weapon!=g.weapon)g_gpu.close();
         g.weapon=weapon;
+        g.weaponConfigured=true;
         weaponMotionConfigure(detail::g_screenMotionEnabled && g.weapon);
     } else {
         g.weapon = false;
     }
 }
 bool screenMotionRecognize() {
-    bool matched=detail::g_screenMotionEnabled && !detail::g_screenMotionFailed && bindingShaderHash(BindSlot::Vs)==0x5C36AF051B98B9F1ull &&
+    bool matched=detail::g_screenMotionOwnerAllowed && detail::g_screenMotionEnabled && !detail::g_screenMotionFailed && bindingShaderHash(BindSlot::Vs)==0x5C36AF051B98B9F1ull &&
         bindingShaderHash(BindSlot::Ps)==0xCFE84157BC76E921ull;
     if(matched){g.seen=true;g.lastScreen=g.frame;}return matched;
 }
@@ -542,6 +560,7 @@ static void flushPanelCounts(ID3D11DeviceContext* ctx) {
 void screenMotionFrameBoundary(ID3D11DeviceContext* ctx){
     if (g.onFootPanelOwnerAllowed)
         weaponMotionFrameBoundary(ctx);
+    if (!g.temporalAAOwnerAllowed) return;
     g_gpu.tick(ctx,g.frame);
     flushPanelCounts(ctx);
     // The naming without terrain: this frame's busiest screen-sized pool depth
@@ -575,7 +594,7 @@ void screenMotionFrameBoundary(ID3D11DeviceContext* ctx){
         }
     }
     ++g.frame;
-    if(g.seen && g.frame-g.lastScreen>120){g_gpu.close();bool weapon=g.weapon;bool owner=g.onFootPanelOwnerAllowed;g=State{};g.weapon=weapon;g.onFootPanelOwnerAllowed=owner;detail::g_screenMotionFailed=false;}
+    if(g.seen && g.frame-g.lastScreen>120){g_gpu.close();bool weapon=g.weapon;bool temporalOwner=g.temporalAAOwnerAllowed;bool onFootOwner=g.onFootPanelOwnerAllowed;bool weaponConfigured=g.weaponConfigured;g=State{};g.weapon=weapon;g.temporalAAOwnerAllowed=temporalOwner;g.onFootPanelOwnerAllowed=onFootOwner;g.weaponConfigured=weaponConfigured;detail::g_screenMotionFailed=false;}
 }
 ScreenMotionGpuDiagnostics screenMotionGpuDiagnostics(){
     ScreenMotionGpuDiagnostics s{};s.scope=g_gpu.scope;s.sourceFrames=g_gpu.sourceFrames;
@@ -587,5 +606,5 @@ ScreenMotionGpuDiagnostics screenMotionGpuDiagnostics(){
     s.uiClearInvalid=g_gpu.uiClear.timer.totals.invalid;s.uiDrawInvalid=g_gpu.uiDraw.timer.totals.invalid;s.eyeClearInvalid=g_gpu.eyeClear.timer.totals.invalid;s.projectionInvalid=g_gpu.projection.timer.totals.invalid;
     s.collecting=g_gpu.phase==GpuDiagnostics::Phase::Collecting;s.draining=g_gpu.phase==GpuDiagnostics::Phase::Draining;return s;
 }
-void screenMotionShutdown(){const bool owner=g.onFootPanelOwnerAllowed;g_gpu.reset(nullptr);g=State{};detail::g_screenMotionEnabled=false;detail::g_screenMotionFailed=false;if(owner)weaponMotionShutdown();}
+void screenMotionShutdown(){const bool weaponConfigured=g.weaponConfigured;g_gpu.reset(nullptr);g=State{};detail::g_screenMotionOwnerAllowed=false;detail::g_screenMotionEnabled=false;detail::g_screenMotionFailed=false;if(weaponConfigured)weaponMotionShutdown();}
 }

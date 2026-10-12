@@ -69,6 +69,8 @@ uint32_t vscreenModeAppliedWidth();
 // resolution:` line); the panel patch is the one call site that should (its
 // caller is the only one with nothing else to say about the value), so the
 // others pass false rather than printing the same line twice on every reload.
+// `temporalAAOwnerAllowed` is the caller's cached admission fact. When false,
+// the resolver treats the UI layer as unavailable without reading its config.
 //
 // "auto" is TWO rules (../common/vscreen_fit.h): fitted to 70% of the on-foot
 // screen's head-on width in the eye when the VR world route will run, today's 125%
@@ -76,7 +78,7 @@ uint32_t vscreenModeAppliedWidth();
 // numbers it was made from for an "auto" that resolved (its width is 0 for an
 // explicit width, which is used exactly, and for an auto with nothing on record).
 void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* outHeight,
-                                    bool announce = true,
+                                    bool temporalAAOwnerAllowed, bool announce = true,
                                     vscreenfit::Decision* outDecision = nullptr);
 
 }  // namespace edvr

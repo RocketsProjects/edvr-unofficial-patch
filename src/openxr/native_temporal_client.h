@@ -22,6 +22,14 @@ class NativeTemporalClient final {
     EdvrNativeTemporalRequest request{sizeof(request), EDVR_NATIVE_TEMPORAL_VERSION_1, device, generation};
     EdvrNativeTemporalTable candidate{sizeof(candidate), EDVR_NATIVE_TEMPORAL_VERSION_1};
     const auto result = reinterpret_cast<decltype(&edvrAcquireNativeTemporal)>(entry)(&request, &candidate);
+    if (result == S_FALSE) {
+      if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_TEMPORAL_VERSION_1 ||
+          candidate.context || candidate.beginFrame || candidate.noteProjection || candidate.treatEye ||
+          candidate.invalidate || candidate.close || candidate.skipEye)
+        return E_NOINTERFACE;
+      table_ = {}; generation_ = 0;
+      return S_FALSE;
+    }
     if (result != S_OK) return FAILED(result) ? result : E_NOINTERFACE;
     if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_TEMPORAL_VERSION_1 ||
         !candidate.context || !owned(provider, candidate.beginFrame) || !owned(provider, candidate.noteProjection) ||

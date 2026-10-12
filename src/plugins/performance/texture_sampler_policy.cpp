@@ -27,9 +27,20 @@ void resolveTextureSamplerSettingsV1(TextureSamplerSettingsV1* settings,
                                      void* hostContext,
                                      ReadEliteHmdMultiplierV1 readMultiplier) {
     if (!settings) return;
+    bool temporalOwnerAllowed = false;
+    const auto* const context =
+        static_cast<const TextureSamplerHostContextV1*>(hostContext);
+    if (context && context->structSize == sizeof(*context) &&
+        context->version == kTextureSamplerHostContextVersion1 &&
+        context->temporalAAOwnerAllowed <= 1u) {
+        temporalOwnerAllowed = context->temporalAAOwnerAllowed != 0;
+    }
     const int anisotropy = Config::get().getIntInRange(
         "advanced.texture_anisotropy", 0, 0, 16);
-    const bool temporal = temporalModeEnabled(
+    // TAA's key is private to its admitted owner. Preserve the historical
+    // mode-dependent default only when that owner is present; Performance
+    // still owns an explicitly configured texture_lod_bias value.
+    const bool temporal = temporalOwnerAllowed && temporalModeEnabled(
         Config::get().getString("fix.temporal_aa", "off"));
     const std::string biasKey = Config::get().getString(
         "advanced.texture_lod_bias", temporal ? "auto" : "0");

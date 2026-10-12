@@ -371,17 +371,22 @@ namespace {
 //     on record has run on it. Elite's native Oculus back end loads LibOVRRT first and
 //     is refused here.
 // tools\vscreen_fit_test pins every literal below against its owner's source.
-vscreenfit::RouteFacts routeFactsFromConfig(Config& cfg) {
+vscreenfit::RouteFacts routeFactsFromConfig(Config& cfg, bool temporalAAOwnerAllowed) {
     vscreenfit::RouteFacts f;
     f.flatProfile = runtimeFlatProfile();
     f.keyAuto = true;
 
-    const std::string quality = cfg.getString("fix.ui_quality", "100");
-    bool recognized = true;
-    const float target = uiQualityParse(quality.c_str(), &recognized, nullptr);
-    const bool temporal = temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
     const bool jitterAsShipped = true;
-    f.layerWhy = uiLayerNotLiveReasonFor(target, temporal, jitterAsShipped, /*stoodDown=*/false);
+    if (temporalAAOwnerAllowed) {
+        const std::string quality = cfg.getString("fix.ui_quality", "100");
+        bool recognized = true;
+        const float target = uiQualityParse(quality.c_str(), &recognized, nullptr);
+        const bool temporal = temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
+        f.layerWhy = uiLayerNotLiveReasonFor(target, temporal, jitterAsShipped, /*stoodDown=*/false);
+    } else {
+        // The layer is unavailable when its owner is absent, regardless of stale config values.
+        f.layerWhy = "the Temporal-AA owner is not admitted";
+    }
 
     switch (vrRuntime()) {
         case VrRuntime::NativeOpenXR:   f.runtime = vscreenfit::RuntimeKind::EdvrOpenXr; break;
@@ -396,7 +401,8 @@ vscreenfit::RouteFacts routeFactsFromConfig(Config& cfg) {
 }  // namespace
 
 void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* outHeight,
-                                    bool announce, vscreenfit::Decision* outDecision) {
+                                    bool temporalAAOwnerAllowed, bool announce,
+                                    vscreenfit::Decision* outDecision) {
     if (outWidth) *outWidth = 0;
     if (outHeight) *outHeight = 0;
     if (outDecision) *outDecision = vscreenfit::Decision{};
@@ -424,7 +430,7 @@ void resolveVScreenTargetResolution(Config& cfg, uint32_t* outWidth, uint32_t* o
             in.fractionAtUnit = stored.fractionAtUnit;
             in.footprintSamples = stored.samples;
         }
-        in.route = routeFactsFromConfig(cfg);
+        in.route = routeFactsFromConfig(cfg, temporalAAOwnerAllowed);
         const vscreenfit::Decision d = vscreenfit::decide(in);
         if (outDecision) *outDecision = d;
         w = d.width;

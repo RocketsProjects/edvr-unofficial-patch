@@ -833,6 +833,21 @@ bool unwrapDiagnosticsOwnerTick(std::string& compactBody,
     return true;
 }
 
+// Temporal-AA owns two cached-condition wrappers around already budgeted
+// ticks. Strip only the exact guard and callback pair before the residual
+// presentFrameBoundary check; owner conditions and callback bodies stay exact.
+bool unwrapTemporalAAOwnerTick(std::string& compactBody,
+                               const std::string& tickExpression) {
+    const std::string exact =
+        "if(g_state->temporalAAOwnerAllowed)" + tickExpression;
+    const size_t at = compactBody.find(exact);
+    if (at == std::string::npos ||
+        compactBody.find(exact, at + exact.size()) != std::string::npos)
+        return false;
+    compactBody.replace(at, exact.size(), tickExpression);
+    return true;
+}
+
 int boundarySourceChecks(const std::string& root) {
     int bad = 0;
     auto verify = [&](bool ok, const char* what) {
@@ -929,6 +944,17 @@ int boundarySourceChecks(const std::string& root) {
     verify(diagnosticsSchedulerOwned && diagnosticsVtableOwned &&
                diagnosticsHotkeysOwned && diagnosticsProbeCensusOwned,
            "cached Diagnostics admission encloses exactly the scheduler, vtable-watch, hotkey, and probe-census ticks");
+    const std::string temporalEngineVelocityTick =
+        "tkEngineVelocityClock.run([]{"
+        "engineVelocityNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));});";
+    const std::string temporalCelestialStatusTick =
+        "tkCelestialStatus.run(tickCelestialStatus);";
+    const bool temporalEngineVelocityOwned =
+        unwrapTemporalAAOwnerTick(body, temporalEngineVelocityTick);
+    const bool temporalCelestialStatusOwned =
+        unwrapTemporalAAOwnerTick(body, temporalCelestialStatusTick);
+    verify(temporalEngineVelocityOwned && temporalCelestialStatusOwned,
+           "cached Temporal-AA admission encloses exactly the EngineVelocity clock and Celestial Status ticks");
     {
         std::string injected = withoutSpaces(tickBody);
         const size_t tickAt = injected.find("tkExplorerCam.run(");
@@ -988,6 +1014,68 @@ int boundarySourceChecks(const std::string& root) {
                    !unwrapDiagnosticsOwnerTick(diagnosticsBroad, diagnosticsHotkeysTick) &&
                    !unwrapDiagnosticsOwnerTick(diagnosticsWrongTick, diagnosticsHotkeysTick),
                "Diagnostics wrapper rejects unbudgeted work, broader admission, and a different tick");
+
+        const std::string temporalOwnerPrefix =
+            "if(g_state->temporalAAOwnerAllowed)";
+        const std::string temporalBroadPrefix =
+            "if(g_state->temporalAAOwnerAllowed||g_state->onFootPanelOwnerAllowed)";
+        std::string temporalEngineInjected = withoutSpaces(tickBody);
+        const size_t temporalEngineAt = temporalEngineInjected.find(
+            temporalEngineVelocityTick);
+        if (temporalEngineAt != std::string::npos)
+            temporalEngineInjected.insert(temporalEngineAt, "unbudgetedProbe();");
+        std::string temporalEngineWrongTick = withoutSpaces(tickBody);
+        const size_t temporalEngineWrongAt = temporalEngineWrongTick.find(
+            temporalOwnerPrefix + temporalEngineVelocityTick);
+        if (temporalEngineWrongAt != std::string::npos)
+            temporalEngineWrongTick.replace(temporalEngineWrongAt,
+                (temporalOwnerPrefix + temporalEngineVelocityTick).size(),
+                temporalOwnerPrefix + "tkHotkeys.run(tickHotkeys);");
+        std::string temporalEngineBroad = withoutSpaces(tickBody);
+        const size_t temporalEngineBroadAt = temporalEngineBroad.find(
+            temporalOwnerPrefix + temporalEngineVelocityTick);
+        if (temporalEngineBroadAt != std::string::npos)
+            temporalEngineBroad.replace(temporalEngineBroadAt,
+                temporalOwnerPrefix.size(), temporalBroadPrefix);
+
+        std::string temporalCelestialInjected = withoutSpaces(tickBody);
+        const size_t temporalCelestialAt = temporalCelestialInjected.find(
+            temporalCelestialStatusTick);
+        if (temporalCelestialAt != std::string::npos)
+            temporalCelestialInjected.insert(temporalCelestialAt,
+                                             "unbudgetedProbe();");
+        std::string temporalCelestialWrongBody = withoutSpaces(tickBody);
+        const size_t temporalCelestialWrongAt = temporalCelestialWrongBody.find(
+            temporalOwnerPrefix + temporalCelestialStatusTick);
+        if (temporalCelestialWrongAt != std::string::npos)
+            temporalCelestialWrongBody.replace(temporalCelestialWrongAt,
+                (temporalOwnerPrefix + temporalCelestialStatusTick).size(),
+                temporalOwnerPrefix + "tkCelestialStatus.run(tickHotkeys);");
+        std::string temporalCelestialBroad = withoutSpaces(tickBody);
+        const size_t temporalCelestialBroadAt = temporalCelestialBroad.find(
+            temporalOwnerPrefix + temporalCelestialStatusTick);
+        if (temporalCelestialBroadAt != std::string::npos)
+            temporalCelestialBroad.replace(temporalCelestialBroadAt,
+                temporalOwnerPrefix.size(), temporalBroadPrefix);
+        verify(temporalEngineAt != std::string::npos &&
+                   temporalEngineWrongAt != std::string::npos &&
+                   temporalEngineBroadAt != std::string::npos &&
+                   !unwrapTemporalAAOwnerTick(temporalEngineInjected,
+                                              temporalEngineVelocityTick) &&
+                   !unwrapTemporalAAOwnerTick(temporalEngineWrongTick,
+                                              temporalEngineVelocityTick) &&
+                   !unwrapTemporalAAOwnerTick(temporalEngineBroad,
+                                              temporalEngineVelocityTick) &&
+                   temporalCelestialAt != std::string::npos &&
+                   temporalCelestialWrongAt != std::string::npos &&
+                   temporalCelestialBroadAt != std::string::npos &&
+                   !unwrapTemporalAAOwnerTick(temporalCelestialInjected,
+                                              temporalCelestialStatusTick) &&
+                   !unwrapTemporalAAOwnerTick(temporalCelestialWrongBody,
+                                              temporalCelestialStatusTick) &&
+                   !unwrapTemporalAAOwnerTick(temporalCelestialBroad,
+                                              temporalCelestialStatusTick),
+               "Temporal-AA wrappers reject injected work, changed tick bodies, and broader TAA-or-On-foot admission");
     }
     // Every tick call out, then what is left.
     size_t pos = 0;

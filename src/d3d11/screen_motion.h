@@ -6,7 +6,8 @@
 struct ID3D11ShaderResourceView;
 namespace edvr {
 class Config;
-void screenMotionConfigure(Config&, bool onFootPanelOwnerAllowed = true);
+void screenMotionConfigure(Config&, bool temporalAAOwnerAllowed,
+                           bool onFootPanelOwnerAllowed);
 
 // Is this fix live? The first term of screenMotionSource, screenMotionUiDraw
 // and screenMotionRecognize, published so the draw path can decline without a
@@ -21,9 +22,11 @@ void screenMotionConfigure(Config&, bool onFootPanelOwnerAllowed = true);
 namespace detail {
 extern bool g_screenMotionEnabled;
 extern bool g_screenMotionFailed;
+extern bool g_screenMotionOwnerAllowed;
 }  // namespace detail
 inline bool screenMotionLive() {
-    return detail::g_screenMotionEnabled && !detail::g_screenMotionFailed;
+    return detail::g_screenMotionOwnerAllowed && detail::g_screenMotionEnabled &&
+           !detail::g_screenMotionFailed;
 }
 
 void screenMotionSource(ID3D11DeviceContext*,unsigned width,unsigned height);

@@ -38,6 +38,8 @@ uint64_t finalSequence=0;uint32_t finalEye=9,finalRegion[4]{};
 bool finalComposite=false,finalFlipU=false,finalFlipV=false;
 ID3D11Texture2D* layeredOut=nullptr; ID3D11Texture2D* lastFrame=nullptr; uint32_t lastRegion[4]{}; float lastUv[4]{};
 namespace edvr {
+bool temporalAAOwnerAllowedForSharpenFixture=true;
+bool temporalAAOwnerAllowed() noexcept {return temporalAAOwnerAllowedForSharpenFixture;}
 void breadcrumb(const char*) {} // production guard.cpp's crash-channel dependency
 void temporalPassCaptureFinalEye(uint64_t seq,uint32_t eye,ID3D11Texture2D* texture,const uint32_t region[4],bool composite,bool flipU,bool flipV){
   ++finalCalls;finalSequence=seq;finalEye=eye;finalTexture=texture;std::memcpy(finalRegion,region,sizeof(finalRegion));finalComposite=composite;finalFlipU=flipU;finalFlipV=flipV;
@@ -250,10 +252,26 @@ void run() {
   result.Reset(); check(client.invalidate()==S_OK&&client.close()==S_OK,"client lifecycle");
   check(client.treat(2,0,source.Get(),nullptr,result,box)==S_FALSE&&!result&&box.uMax==0,"closed client passthrough");
 }
+void nativeSharpenOwnerDenied(){
+  Device device;const bool savedOwner=edvr::temporalAAOwnerAllowedForSharpenFixture;
+  edvr::temporalAAOwnerAllowedForSharpenFixture=false;
+  bool empty=true;
+  for(unsigned i=0;i<20;++i){
+    // Non-null but intentionally unusable: denied acquire must not query the device.
+    EdvrNativeSharpenRequest request{sizeof(request),EDVR_NATIVE_SHARPEN_VERSION_1,reinterpret_cast<ID3D11Device*>(uintptr_t(1)),700+i};
+    EdvrNativeSharpenTable table{sizeof(table),EDVR_NATIVE_SHARPEN_VERSION_1};
+    const HRESULT result=edvrAcquireNativeSharpen(&request,&table);
+    empty=empty&&result==S_FALSE&&table.size==sizeof(table)&&table.version==EDVR_NATIVE_SHARPEN_VERSION_1&&
+      !table.context&&!table.treatEye&&!table.invalidate&&!table.close;
+  }
+  check(empty,"Temporal-AA-denied sharpen provider returns exact S_FALSE and a versioned empty table across repeated requests");
+  check(!edvr::nativeSharpenActive(),"Temporal-AA denial reserves no active sharpen provider session");
+  edvr::temporalAAOwnerAllowedForSharpenFixture=savedOwner;
+}
 int wmain(int argc,wchar_t** argv) {
   SetErrorMode(3);
   if(argc==2&&!wcscmp(argv[1],L"--dry-run")){std::puts("native_sharpen_test: dry-run (no device or files)");return 0;}
   if(argc!=2||wcscmp(argv[1],L"--self-test"))return 2;
-  try{run();}catch(const std::exception& e){std::printf("FAIL: setup aborted: %s\n",e.what());return 1;}
+  try{nativeSharpenOwnerDenied();run();}catch(const std::exception& e){std::printf("FAIL: setup aborted: %s\n",e.what());return 1;}
   std::printf("native_sharpen_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

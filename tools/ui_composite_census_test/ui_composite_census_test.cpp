@@ -754,7 +754,7 @@ void pins() {
     const auto vsPlaces = [&countOnlyReads, &eyeSequenceOrder](const std::string& handler, const std::string& body) {
         return countOnlyReads(body) &&
                eyeSequenceOrder() &&
-               inOrder(handler, {"if constexpr (id == SiteId::kEyeUiDepthProbe)", "if (uiDepthWantsDraws())", "t_uiDepthThisDraw = uiDepthOnEyeDraw(self,", "t_compositeThisDraw = uiDepthDrawSampledSurface();"}) &&
+               inOrder(handler, {"if constexpr (id == SiteId::kEyeUiDepthProbe)", "if (s->temporalAAOwnerAllowed && uiDepthWantsDraws())", "t_uiDepthThisDraw = uiDepthOnEyeDraw(self,", "t_compositeThisDraw = uiDepthDrawSampledSurface();"}) &&
                countOf(handler, "t_compositeThisDraw=uiDepthDrawSampledSurface();") == 1 &&
                has(body, "composite(t_compositeThisDraw)") && has(body, "t_compositeThisDraw = false;") &&
                inOrder(body, {"uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily)", "uiLayer = uiLayerNoteOther(", "if (compositeCounted) {",
@@ -764,11 +764,13 @@ void pins() {
                countOf(body, "uiLayerNoteCompositeTaken();") == 1 && countOf(body, "uiLayerNoteCompositeLeft(") == 1;
     };
     check(!fwd.empty() && !eyeUiHandler.empty() && has(foreignHandler, "t_compositeThisDraw = false;") && vsPlaces(eyeUiHandler, fwd),
-          "P3: vscreen.cpp clears the composite flag with the other per-draw flags, sets it right after uiDepthOnEyeDraw, consumes it in the scope, and counts the composite "
+          "P3: vscreen.cpp clears the composite flag with the other per-draw flags, sets it behind cached Temporal AA owner admission right after uiDepthOnEyeDraw, consumes it in the scope, and counts the composite "
           "once, after the family's take and the after-UI retry and before the substitutions");
     {
         const std::string taken = "uiLayerNoteCompositeTaken();";
         std::string early = fwd, noLeft = fwd, extraTaken = fwd, notCleared = foreignHandler, notSet = eyeUiHandler, notConsumed = fwd, writes = fwd, returns = fwd;
+        const std::string ownerBypass = edited(eyeUiHandler,
+            "s->temporalAAOwnerAllowed && uiDepthWantsDraws()", "uiDepthWantsDraws()");
         writes = edited(writes, "if (compositeCounted) {", "if (compositeCounted) { uiLayer = false;");
         returns = edited(returns, "uiLayerNoteCompositeTaken();", "uiLayerNoteCompositeTaken(); return;");
         // the count moved in front of the after-UI retry
@@ -786,10 +788,10 @@ void pins() {
         const std::string otherHandler = siteHandler(movedVisitor, "kEyeUiDepthProbe");
         const std::string holoHandler = siteHandler(movedVisitor, "kEyeHoloDepthProbe");
         notConsumed = edited(notConsumed, "composite(t_compositeThisDraw)", "composite(false)");
-        check(!vsPlaces(eyeUiHandler, early) && !vsPlaces(eyeUiHandler, noLeft) && !vsPlaces(eyeUiHandler, extraTaken) && !has(notCleared, "t_compositeThisDraw = false;") &&
+        check(!vsPlaces(ownerBypass, fwd) && !vsPlaces(eyeUiHandler, early) && !vsPlaces(eyeUiHandler, noLeft) && !vsPlaces(eyeUiHandler, extraTaken) && !has(notCleared, "t_compositeThisDraw = false;") &&
                   !vsPlaces(notSet, fwd) && !vsPlaces(movedSet, fwd) && has(holoHandler, "t_compositeThisDraw=uiDepthDrawSampledSurface();") &&
                   !vsPlaces(otherHandler, fwd) && !vsPlaces(eyeUiHandler, notConsumed) && !vsPlaces(eyeUiHandler, writes) && !vsPlaces(eyeUiHandler, returns),
-              "P3 control: counted before the after-UI retry, with no left-composite call, with a second taken call, with the flag never cleared, never set, "
+              "P3 control: with Temporal AA owner admission bypassed, counted before the after-UI retry, with no left-composite call, with a second taken call, with the flag never cleared, never set, "
               "not consumed by the scope, with the count assigning the take or returning, the pin fails");
     }
 

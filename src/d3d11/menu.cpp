@@ -407,6 +407,7 @@ bool isDlssPresetRow(const MenuRowDef& d) {
 }
 
 bool dlssPresetDisabled() {
+    if (!temporalAAOwnerAllowed()) return true;
     if (runtimeFlatProfile()) return !flatDlssSelected();
     return temporalEngineFor(Config::get().getString("fix.temporal_aa", "off")) !=
            TemporalEngine::Nvidia;
@@ -422,6 +423,7 @@ bool isSharpenRow(const MenuRowDef& d) {
 }
 
 bool sharpenRowDisabled() {
+    if (!temporalAAOwnerAllowed()) return true;
     return flatSharpenRowDim(runtimeFlatProfile(),
                              temporalModeEnabled(Config::get().requestedTemporalMode()));
 }
@@ -1042,7 +1044,8 @@ void flatWarningTick(uint64_t now) {
     const char* reason = "";
     bool standing = false;
     // The runtime's atomic first: a treated session pays a load and nothing else.
-    const bool refusing = flatRuntimeStructuralRefusal(&reason, &standing) &&
+    const bool refusing = temporalAAOwnerAllowed() &&
+                          flatRuntimeStructuralRefusal(&reason, &standing) &&
                           temporalModeEnabled(Config::get().requestedTemporalMode());
     if (refusing || s.open || s.flatSettingsForce) {
         const bool force = s.flatSettingsForce || (refusing && !s.flatWarnActive);
@@ -1625,7 +1628,9 @@ void buildStatus(MenuContent& c) {
         snprintf(buf, sizeof(buf), "not published yet");
     }
     statusLine(c, "Eye texture", buf);
-    {
+    if (!temporalAAOwnerAllowed()) {
+        statusLine(c, "Temporal AA", "owner not admitted");
+    } else {
         const std::string mode = Config::get().getString("fix.temporal_aa", "off");
         uint32_t n = 0, resets = 0;
         double avg = 0.0, mx = 0.0, rej = 0.0, clip = 0.0;
@@ -1658,7 +1663,7 @@ void buildStatus(MenuContent& c) {
         }
         statusLine(c, "Temporal AA", buf);
     }
-    {
+    if (temporalAAOwnerAllowed()) {
         // Stage 0 price report: the last CLOSED window's per-region median, stereo-pair-summed.
         // Absent until 600 pairs have run once, or a treatment/size/format/
         // setting change closed a shorter window early.
@@ -1674,7 +1679,9 @@ void buildStatus(MenuContent& c) {
             statusLine(c, "Temporal AA price", buf);
         }
     }
-    {
+    if (!temporalAAOwnerAllowed()) {
+        statusLine(c, "Sharpening", "owner not admitted");
+    } else {
         uint32_t n = 0;
         double avg = 0.0, mx = 0.0;
         const std::string v = Config::get().getString("fix.render_sharpness", "0.0");
@@ -2046,7 +2053,7 @@ void buildContent(MenuContent& c) {
                              (sharpenRow && sharpenRowDisabled());
             l.dim = dim;
             strncpy(l.left, d.label, sizeof(l.left) - 1);
-            if (dlssRow) {
+            if (dlssRow && temporalAAOwnerAllowed()) {
                 const std::string mode = runtimeFlatProfile() ? Config::get().requestedTemporalMode()
                                                               : Config::get().getString("fix.temporal_aa", "off");
                 snprintf(l.left, sizeof(l.left), "%s preset", _stricmp(mode.c_str(), "dlaa") == 0 ? "DLAA" : nvidiaLabel());
@@ -2131,7 +2138,8 @@ void buildContent(MenuContent& c) {
                 uint32_t vw = 0, vh = 0;
                 vscreenfit::Decision autoRule;
                 if (onFootPanelOwnerAllowed())
-                    resolveVScreenTargetResolution(Config::get(), &vw, &vh, /*announce=*/false, &autoRule);
+                    resolveVScreenTargetResolution(Config::get(), &vw, &vh, temporalAAOwnerAllowed(),
+                                                   /*announce=*/false, &autoRule);
                 if (vw && vh && autoRule.width) {
                     // "auto": which of its two rules chose it (vscreen_fit.h).
                     vscreenfit::formatHint(c.hint, sizeof(c.hint), autoRule);
@@ -2265,7 +2273,7 @@ void buildContent(MenuContent& c) {
         // The graphics-wrapper note (flat only, while a temporal mode is selected, and only when the hook-mode probe found
         // a wrapper such as ReShade handling every graphics call): the words wrapped to the note face's width, after a
         // blank line, and said once in the log the first time they are drawn.
-        if (runtimeFlatProfile()) {
+        if (runtimeFlatProfile() && temporalAAOwnerAllowed()) {
             const char* wrapper = contextWrapperFile();
             FlatWarnRuler ruler{c.capPx * 8 / 7};
             FlatSettingsWarning note;
@@ -2583,12 +2591,16 @@ void stepRow(int defIndex, int dir, int mult) {
     const MenuRowDef& d = kMenuRows[defIndex];
     const std::string& cur = g_rows[defIndex].value;
     if (isDlssPresetRow(d) && dlssPresetDisabled()) {
-        g_s.lastWrite = "DLSS preset is inactive: select DLSS or DLAA above first.";
+        g_s.lastWrite = temporalAAOwnerAllowed()
+                            ? "DLSS preset is inactive: select DLSS or DLAA above first."
+                            : "Temporal-AA owner is not admitted.";
         g_s.contentDirty = true;
         return;
     }
     if (isSharpenRow(d) && sharpenRowDisabled()) {
-        g_s.lastWrite = "Sharpening is inactive: turn anti-aliasing on above first.";
+        g_s.lastWrite = temporalAAOwnerAllowed()
+                            ? "Sharpening is inactive: turn anti-aliasing on above first."
+                            : "Temporal-AA owner is not admitted.";
         g_s.contentDirty = true;
         return;
     }

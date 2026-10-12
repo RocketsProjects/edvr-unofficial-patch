@@ -10,7 +10,7 @@
 #include "vscreen.h"           // vScreenClearRenderTargetViewRaw: the black frame's one clear
 #include "vr_camera_census.h"   // nativeTemporalEyeGeometry's declaration, so its definition below is checked against it
 #include "terrain_cull_cover_hook.h"   // the terrain cull cover (docs/terrain-culling.md): begin() tells it the frusta the game is handed
-#include "device_hook.h"               // cached Comfort admission, sampled at provider acquire
+#include "device_hook.h"               // cached Temporal-AA admission, sampled at provider acquire
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/temporal_math.h"
@@ -65,7 +65,6 @@ struct State {
   DWORD thread = 0;
   uint64_t generation = 0;
   bool active = false, begun = false, standDown = false;
-  bool comfortOwnerAllowed = false;
   uint64_t sequence = 0, reference = 0;
   float head[12]{}, eyes[2][12]{}, frusta[2][4]{};
   float shift[2][2]{};
@@ -367,10 +366,9 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   s->recW=f->recommendedWidth;s->recH=f->recommendedHeight;
   g_recommended.store((uint64_t(s->recW)<<32)|s->recH,std::memory_order_release);
   std::memcpy(s->head,f->head,sizeof(s->head));std::memcpy(s->eyes,f->eyeToHead,sizeof(s->eyes));std::memcpy(s->frusta,f->frusta,sizeof(s->frusta));
-  // The game's terrain cull builds a centred frustum from the vFOV and aspect it is told; the cover widens it to the largest tangents of what the game is handed (the
-  // unjittered frusta of this frame, after any FOV trim). This Comfort-owned notification is admitted once when the provider is acquired; the function itself
-  // also no-ops when the cover could not install (or the flat profile made it inert). The temporal provider's core frustum copies and outputs stay unconditional.
-  if(s->comfortOwnerAllowed) edvr::terrainCullCoverNoteFrusta(s->frusta);
+  // The Comfort-owned terrain cover receives the game's unjittered frusta
+  // solely from native_fss::begin. These copies and outputs belong to the
+  // acquired Temporal-AA provider.
   {const float up=std::fabs(s->frusta[0][2]),down=std::fabs(s->frusta[0][3]);uint32_t a=0,b=0;
    std::memcpy(&a,&up,4);std::memcpy(&b,&down,4);g_vertical.store((uint64_t(a)<<32)|b,std::memory_order_release);}
   {const bool asked=f->askedWidth&&f->askedHeight&&f->askedWidth<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION&&f->askedHeight<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
@@ -661,6 +659,9 @@ bool nativeTemporalTrueVerticalTangents(float* up, float* down) {
 extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(const EdvrNativeTemporalRequest* r,EdvrNativeTemporalTable* t){
   if(!t||t->size!=sizeof(*t)||t->version!=EDVR_NATIVE_TEMPORAL_VERSION_1)return E_INVALIDARG;*t={sizeof(*t),EDVR_NATIVE_TEMPORAL_VERSION_1};
   if(!r||r->size!=sizeof(*r)||r->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||!r->gameDevice||!r->generation)return E_INVALIDARG;
-  std::lock_guard<std::mutex> lock(mutex);if(current||used==16)return E_PENDING;State&s=pool[used++];s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.comfortOwnerAllowed=edvr::comfortOwnerAllowed();s.pendingSettings=readConfig();s.currentSettings=s.pendingSettings;s.active=true;current=&s;
+  // Denial is an exact optional-provider result: the versioned table above is
+  // empty, with no pool reservation, config read, or game-device work.
+  if(!edvr::temporalAAOwnerAllowed())return S_FALSE;
+  std::lock_guard<std::mutex> lock(mutex);if(current||used==16)return E_PENDING;State&s=pool[used++];s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.pendingSettings=readConfig();s.currentSettings=s.pendingSettings;s.active=true;current=&s;
   t->context=&s;t->beginFrame=begin;t->noteProjection=noteProjection;t->treatEye=treat;t->invalidate=invalidate;t->close=close;t->skipEye=skipEye;return S_OK;
 }

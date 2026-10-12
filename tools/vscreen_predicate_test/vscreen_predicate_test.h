@@ -22,6 +22,7 @@ struct VScreenPredicateTestResult final {
     std::uint64_t censusSkippedAfter = 0;
     void* sceneCbNominatedAfter = nullptr;
     bool curveThisDrawAfter = false;
+    bool uiDepthThisDrawAfter = false;
 };
 
 struct VScreenForwardingTestInput final {
@@ -254,7 +255,8 @@ bool vScreenLegacyGateRegistrationTest(
     std::uint32_t* sharedGlareCallbacks,
     std::uint32_t* onFootCallbacks,
     std::uint32_t* diagnosticsCallbacks,
-    std::uint32_t* temporalSharedCallbacks) noexcept;
+    std::uint32_t* temporalSharedCallbacks,
+    std::uint32_t* temporalAAOwnerCallbacks) noexcept;
 
 bool vScreenEyeCensusPredicateTestVisit(
     ID3D11DeviceContext* context, char kind, std::uint32_t count,

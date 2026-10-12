@@ -76,11 +76,12 @@ namespace edvr{void breadcrumb(const char*){}}
 namespace edvr{void uiLayerNoteTemporal(uint64_t seq,uint32_t eye,const void* out){++uiLayerNotes;uiLayerNoteSeq=seq;uiLayerNoteEye=eye;uiLayerNoteOut=out;}
 void uiLayerNoteSubmitted(uint64_t,uint32_t eye,const void* submitted){++uiLayerSubmits;if(eye<2)uiLayerSubmitted[eye]=submitted;}
 void vrWorldRouteNoteSceneReset(){++worldRouteSceneResets;}}
-// The terrain cull cover (src/d3d11/terrain_cull_cover_hook.cpp, docs/terrain-culling.md), which begin() tells the frusta the game is handed: recorded here, asserted below.
+// The Comfort terrain-cover publisher, now owned by native FSS rather than
+// this Temporal-AA provider. Keep a counter here to reject duplicate notes.
 unsigned coverNotes=0;float coverLast[2][4]{};
-bool comfortOwnerAllowedForTemporalFixture=true;
+bool temporalAAOwnerAllowedForTemporalFixture=true;
 namespace edvr{
-bool comfortOwnerAllowed() noexcept {return comfortOwnerAllowedForTemporalFixture;}
+bool temporalAAOwnerAllowed() noexcept {return temporalAAOwnerAllowedForTemporalFixture;}
 void terrainCullCoverNoteFrusta(const float f[2][4]){++coverNotes;std::memcpy(coverLast,f,sizeof(coverLast));}}
 // The served floor's NGX query (dlaa.cpp), shaped the way the flights'
 // modes lines read (edvr_gfx_20260923_153446.log line 435): quality,
@@ -132,11 +133,6 @@ EdvrNativeTemporalFrame frame(uint64_t generation,uint64_t sequence){
 EdvrNativeTemporalTable acquire(Device& d,uint64_t generation,const char* mode="on"){
   edvr::Config::get().set("fix.temporal_aa",mode);EdvrNativeTemporalRequest r{sizeof(r),1,d.device.Get(),generation};EdvrNativeTemporalTable t{sizeof(t),1};
   require(edvrAcquireNativeTemporal(&r,&t)==S_OK,"acquire");return t;
-}
-EdvrNativeTemporalTable acquireComfortOwnerDeniedTemporal(Device& d,uint64_t generation){
-  const bool prior=comfortOwnerAllowedForTemporalFixture;comfortOwnerAllowedForTemporalFixture=false;
-  try{auto t=acquire(d,generation);comfortOwnerAllowedForTemporalFixture=prior;return t;}
-  catch(...){comfortOwnerAllowedForTemporalFixture=prior;throw;}
 }
 EdvrNativeTemporalProjection begin(EdvrNativeTemporalTable& t,const EdvrNativeTemporalFrame& f,bool project=true){
   EdvrNativeTemporalProjection p{sizeof(p),1};HRESULT result=E_FAIL,a=S_OK,b=S_OK;
@@ -278,13 +274,13 @@ void run(){
   // is, false again once it closes.
   ID3D11Device* warmDev=reinterpret_cast<ID3D11Device*>(1);unsigned long warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target before any channel is acquired");
-  Device d;auto source=d.texture();auto t=acquireComfortOwnerDeniedTemporal(d,11);
+  Device d;auto source=d.texture();auto t=acquire(d,11);
   auto f=frame(11,1);auto p=begin(t,f);
-  check(coverNotes==0,"owner-denied temporal provider does not publish frusta to Comfort terrain cover");
+  check(coverNotes==0,"Temporal-AA frame begin leaves Comfort frusta publication to the FSS provider without duplication");
   uint32_t deniedRecommendedW=0,deniedRecommendedH=0;
   check(p.size==sizeof(p)&&p.version==1&&edvr::nativeTemporalRecommended(&deniedRecommendedW,&deniedRecommendedH)&&
         deniedRecommendedW==480&&deniedRecommendedH==360,
-        "owner-denied provider still begins the real core temporal frame and publishes its 480x360 recommendation");
+        "the Temporal-AA provider preserves its core frame and 480x360 recommendation");
   warmDev=nullptr;warmThread=0;
   check(edvr::nativeTemporalWarmTarget(&warmDev,&warmThread)&&warmDev==d.device.Get()&&warmThread==GetCurrentThreadId(),
       "warm target names the acquiring thread and device");
@@ -354,8 +350,8 @@ void run(){
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target once the channel closes");
   {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn)&&!edvr::nativeTemporalAsked(&rw,&rh)&&!edvr::nativeTemporalTrueVerticalTangents(&u,&dn),"no recommendation, frustum, ask or true frustum once the channel closes");}
   auto fresh=acquire(d,12);f=frame(12,1);begin(fresh,f);
-  check(coverNotes==1&&std::memcmp(coverLast,f.frusta,sizeof(coverLast))==0,
-        "owner-admitted temporal provider still publishes begun frusta to Comfort terrain cover");
+  check(coverNotes==0,
+        "Temporal-AA begin never duplicates Comfort terrain publication, including when both owners are admitted");
   check(treat(t,1,0,source.Get())==E_INVALIDARG,"stale table cannot address new generation");
   // Previous eye yaw 90 degrees, current yaw zero, head translates +X:
   // the translation is +Z in the previous eye and head rotation is zero.
@@ -641,7 +637,31 @@ void run(){
     }
   }
 }
+void nativeTemporalOwnerDenied(){
+  Device d;const bool savedOwner=temporalAAOwnerAllowedForTemporalFixture;
+  temporalAAOwnerAllowedForTemporalFixture=false;
+  bool empty=true;
+  for(unsigned i=0;i<20;++i){
+    // Non-null but intentionally unusable: denial must return before device health/query work.
+    EdvrNativeTemporalRequest request{sizeof(request),EDVR_NATIVE_TEMPORAL_VERSION_1,reinterpret_cast<ID3D11Device*>(uintptr_t(1)),700+i};
+    EdvrNativeTemporalTable table{sizeof(table),EDVR_NATIVE_TEMPORAL_VERSION_1};
+    const HRESULT result=edvrAcquireNativeTemporal(&request,&table);
+    empty=empty&&result==S_FALSE&&table.size==sizeof(table)&&table.version==EDVR_NATIVE_TEMPORAL_VERSION_1&&
+      !table.context&&!table.beginFrame&&!table.noteProjection&&!table.treatEye&&!table.invalidate&&!table.close&&!table.skipEye;
+  }
+  check(empty,"Temporal-AA-denied provider returns exact S_FALSE and a versioned empty table across repeated requests");
+  ID3D11Device* warm=nullptr;unsigned long thread=0;
+  check(!edvr::nativeTemporalWarmTarget(&warm,&thread),"Temporal-AA denial reserves no native temporal device or pool session");
+  temporalAAOwnerAllowedForTemporalFixture=true;
+  EdvrNativeTemporalRequest allowedRequest{sizeof(allowedRequest),EDVR_NATIVE_TEMPORAL_VERSION_1,d.device.Get(),799};
+  EdvrNativeTemporalTable allowed{sizeof(allowed),EDVR_NATIVE_TEMPORAL_VERSION_1};
+  const HRESULT admitted=edvrAcquireNativeTemporal(&allowedRequest,&allowed);
+  check(admitted==S_OK&&allowed.context&&allowed.beginFrame&&allowed.noteProjection&&allowed.treatEye&&allowed.close,
+        "the admitted Temporal-AA control acquires after repeated denied attempts without pool exhaustion");
+  if(admitted==S_OK)check(allowed.close(allowed.context)==S_OK,"admitted Temporal-AA control closes its provider session");
+  temporalAAOwnerAllowedForTemporalFixture=savedOwner;
+}
 int wmain(int argc,wchar_t** argv){SetErrorMode(3);if(argc==2&&!wcscmp(argv[1],L"--dry-run")){std::puts("native_temporal_test: dry-run (no device or files)");return 0;}
-  if(argc!=2||wcscmp(argv[1],L"--self-test"))return 2;try{run();}catch(const std::exception& e){std::printf("FAIL: %s\n",e.what());if(!failures)++failures;}
+  if(argc!=2||wcscmp(argv[1],L"--self-test"))return 2;try{nativeTemporalOwnerDenied();run();}catch(const std::exception& e){std::printf("FAIL: %s\n",e.what());if(!failures)++failures;}
   std::printf("native_temporal_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

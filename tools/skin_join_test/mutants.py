@@ -199,8 +199,12 @@ MUTANTS = [
       "skinChainBound hands the cache no generation: it keeps one verdict per address for good"),
     M("verdict-glue-own-map", "J14", "exposure", [("static skinjoin::ChainVerdicts verdicts;", "static std::unordered_map<void*, bool> verdicts;")],
       "skinChainBound keeps its own address-keyed map again"),
-    M("verdict-hook-ungated", "J14", "exposure", [("if (engineVelocitySkinWanted() && skinChainBound()) engineVelocityNoteChainDispatch(self, x);", "if (engineVelocitySkinWanted()) engineVelocityNoteChainDispatch(self, x);")],
+    M("verdict-hook-ungated", "J14", "exposure", [("if (temporalAAOwnerAllowed() && engineVelocitySkinWanted() && skinChainBound())\n        engineVelocityNoteChainDispatch(self, x);",
+                                                    "if (temporalAAOwnerAllowed() && engineVelocitySkinWanted())\n        engineVelocityNoteChainDispatch(self, x);")],
       "every owner dispatch is fed to the join, whatever shader it runs"),
+    M("verdict-hook-owner-bypass", "J14", "exposure", [("if (temporalAAOwnerAllowed() && engineVelocitySkinWanted() && skinChainBound())\n        engineVelocityNoteChainDispatch(self, x);",
+                                                        "if (engineVelocitySkinWanted() && skinChainBound())\n        engineVelocityNoteChainDispatch(self, x);")],
+      "a dispatch can reach the chain join without Temporal AA owner admission"),
 ]
 
 if __name__ == "__main__":

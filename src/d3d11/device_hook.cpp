@@ -733,10 +733,12 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         captureFlatShader('v', hash, bytecode, len);
         rememberFlatProbeShader('v', hash, bytecode, len);
         registerShaderHash(*out, hash);
-        engineVelocityRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        if (g_state->temporalAAOwnerAllowed)
+            engineVelocityRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if (onFootPanelOwnerAllowed())
             weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
-        orbitalWidthRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);   // fix.ui_quality: the orbit lines (orbital_width.h)
+        if (g_state->temporalAAOwnerAllowed)
+            orbitalWidthRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);   // fix.ui_quality: the orbit lines (orbital_width.h)
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyePanelSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len),static_cast<ID3D11VertexShader*>(*out));
@@ -775,10 +777,12 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         captureFlatShader('p', hash, bytecode, len);
         rememberFlatProbeShader('p', hash, bytecode, len);
         registerShaderHash(*out, hash);
-        engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        if (g_state->temporalAAOwnerAllowed)
+            engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if (runtimeFlatProfile()) FlatOverlayLayer::rememberPixelShader(static_cast<ID3D11PixelShader*>(*out),
             bytecode,static_cast<size_t>(len),linkage!=nullptr);
-        uiLayerRememberHoloPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        if (g_state->temporalAAOwnerAllowed)
+            uiLayerRememberHoloPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || hash==EyeDrawSnapshot::kUnknownAPs || hash==EyeDrawSnapshot::kUnknownBPs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyePanelSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len),static_cast<ID3D11PixelShader*>(*out));
@@ -871,7 +875,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
     // shrunk to fit with its aspect kept, and says so (ui_surfaces.cpp). Everything at or under the limit is
     // forwarded as the game made it: the one compare below is all it costs.
     D3D11_TEXTURE2D_DESC netDesc;
-    if (!fromEdvr && desc && self == g_state->device &&
+    if (!fromEdvr && g_state->temporalAAOwnerAllowed && desc && self == g_state->device &&
         (desc->Width > kUiPanelNetLimit || desc->Height > kUiPanelNetLimit)) {
         bool shrunk = false;
         guardedBudget(g_createBudget, [&] { shrunk = uiSurfacesPanelNet(*desc, init != nullptr, &netDesc); });
@@ -888,7 +892,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
             // large A8 texture (the glyph atlas), and a render or depth
             // surface of an interface panel's shape (its creating chain, once
             // per size) -- each with the chain it was made from (ui_surfaces.h).
-            if (!fromEdvr && out && *out) {
+            if (!fromEdvr && g_state->temporalAAOwnerAllowed && out && *out) {
                 if (uiSurfacesWantsAtlas(*desc)) {
                     guardedBudget(g_createBudget, [&] { uiSurfacesNoteAtlas(*out, *desc, init != nullptr); });
                 } else if (uiSurfacesWantsChain(*desc, init != nullptr)) {
@@ -1071,11 +1075,13 @@ HRESULT STDMETHODCALLTYPE hookedDevCreate(ID3D11Device* self, const void* first,
             noteDeviceCreateFailure(Slot, hr, first, second, FirstIsResource);
         } else if constexpr (Slot == kDevCreateBuffer) {
             const auto* desc=static_cast<const D3D11_BUFFER_DESC*>(first);
-            if(out && *out)engineVelocityBufferCreated(static_cast<ID3D11Buffer*>(*out),desc);
+            if(g_state->temporalAAOwnerAllowed && out && *out)
+                engineVelocityBufferCreated(static_cast<ID3D11Buffer*>(*out),desc);
             // A destroyed buffer's address can be reused by a fresh one; a watched planet-patch buffer would otherwise
             // inherit that buffer's stale shadow. Guarded like the Map/Unmap tees (celestial_motion.h): with nothing
             // watched, no new buffer's address can match.
-            if(out && *out && celestialMotionAnyWatched())celestialMotionConstantsUnknownWrite(static_cast<ID3D11Buffer*>(*out));
+            if(g_state->temporalAAOwnerAllowed && out && *out && celestialMotionAnyWatched())
+                celestialMotionConstantsUnknownWrite(static_cast<ID3D11Buffer*>(*out));
             if(out && *out && desc && desc->BindFlags==D3D11_BIND_CONSTANT_BUFFER && flatRuntimeActive()) {
                 const auto* initial=static_cast<const D3D11_SUBRESOURCE_DATA*>(second);
                 flatRuntimeCreateBuffer(static_cast<ID3D11Buffer*>(*out),initial?initial->pSysMem:nullptr);
@@ -1177,7 +1183,7 @@ void flatResizeNote(const char* api, UINT count, UINT width, UINT height, DXGI_F
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
     const bool ours = self == g_state->swapChain;
     long refs = -1;
-    if (ours) { menuFlatResize(); flatRuntimeResize(); refs = flatResizeBackBufferRefs(self); }
+    if (ours) { menuFlatResize(); flatRuntimeResize(g_state->temporalAAOwnerAllowed); refs = flatResizeBackBufferRefs(self); }
     const HRESULT hr = g_state->realResizeBuffers(self, count, width, height, format, flags);
     if (ours) flatResizeNote("ResizeBuffers", count, width, height, format, flags, hr, refs);
     return hr;
@@ -1186,7 +1192,7 @@ HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT cou
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* masks, IUnknown* const* queues) {
     const bool ours = static_cast<IDXGISwapChain*>(self) == g_state->swapChain;
     long refs = -1;
-    if (ours) { menuFlatResize(); flatRuntimeResize(); refs = flatResizeBackBufferRefs(self); }
+    if (ours) { menuFlatResize(); flatRuntimeResize(g_state->temporalAAOwnerAllowed); refs = flatResizeBackBufferRefs(self); }
     const HRESULT hr = g_state->realResizeBuffers1(self, count, width, height, format, flags, masks, queues);
     if (ours) flatResizeNote("ResizeBuffers1", count, width, height, format, flags, hr, refs);
     return hr;
@@ -1270,7 +1276,8 @@ void tickHotkeys() {
     // reaction-time capture, the second is the one you read.
     if (g_state->dumpKey.pressed()) {
         dumpCameraRing("the history key");
-        temporalPassDumpHistory("the history key");
+        if (g_state->temporalAAOwnerAllowed)
+            temporalPassDumpHistory("the history key");
         g_state->dumpDueMs = nowMs() + kDumpDelayMs;
     }
     // THE PRESS THAT WENT NOWHERE, said out loud.
@@ -1304,7 +1311,8 @@ void tickHotkeys() {
         g_state->dumpDueMs = 0;
         dumpCameraRing("a key you pressed two seconds ago",
                        (uint32_t)(kDumpDelayMs / 1000));
-        temporalPassDumpHistory("a key you pressed two seconds ago");
+        if (g_state->temporalAAOwnerAllowed)
+            temporalPassDumpHistory("a key you pressed two seconds ago");
     }
     // The draw census key (issue 69074). Same silent-failure shape as the
     // history key, same cure: a diagnostic keypress that another window
@@ -1312,7 +1320,8 @@ void tickHotkeys() {
     // place anyone would look for the reason.
     if (g_state->censusKey.pressed()) {
         if (runtimeFlatProfile()) {
-            flatTemporalArm((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+            if (g_state->temporalAAOwnerAllowed)
+                flatTemporalArm((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
             // The flat profile's draw census, both tiers: every draw, offscreen included, for two frames (draw_census.h).
             drawCensusFlatRequest();
         } else {
@@ -1325,7 +1334,8 @@ void tickHotkeys() {
         }
     }
     // The eye dump key: the next treated frame's two eyes to disk.
-    if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
+    if (g_state->temporalAAOwnerAllowed && g_state->eyesKey.pressed())
+        temporalPassArmEyeDump();
     if (g_state->missedCensusNotes < kMissedDumpNotes &&
         g_state->censusKey.takeMissedWhileUnfocused()) {
         ++g_state->missedCensusNotes;
@@ -1366,7 +1376,8 @@ void tickEliteBinds() {
 // supercruise (celestial_motion.h). It rode the head-offset gate's journal tick until that tick went with the old Explorer Cam
 // route (2026-10-07); the call and its once-a-frame cadence are unchanged.
 void tickCelestialStatus() {
-    celestialMotionNoteStatus(journalSupercruiseKnown(), journalSupercruise());
+    if (g_state->temporalAAOwnerAllowed)
+        celestialMotionNoteStatus(journalSupercruiseKnown(), journalSupercruise());
 }
 
 // The FSS mode latch (tkFssModeLatch).
@@ -1541,9 +1552,10 @@ void presentFrameBoundary() {
     });
     // Engine-record velocity's clock (the emit table's frame stamps and
     // the per-eye snapshots), the same exactly-once-per-owned-present tick.
-    tkEngineVelocityClock.run([] {
-        engineVelocityNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
-    });
+    if (g_state->temporalAAOwnerAllowed)
+        tkEngineVelocityClock.run([] {
+            engineVelocityNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
+        });
     // The scheduler stack probe's report tick, same call site and the
     // same one-atomic-load-when-off cost.
     if (diagnosticsOwnerAllowed()) tkSchedulerProbe.run([] {
@@ -1582,7 +1594,8 @@ void presentFrameBoundary() {
     // boundaries EDVR used to infer -- gameplay starting (LoadGame) and
     // on-foot sessions beginning (Disembark).
     tkJournalWatch.run([] { journalWatchTick(); });
-    tkCelestialStatus.run(tickCelestialStatus);
+    if (g_state->temporalAAOwnerAllowed)
+        tkCelestialStatus.run(tickCelestialStatus);
     // Explorer Cam (Phase 1), after the journal's tick it reads (on foot, GuiFocus, gameplay).
     runExplorerCamOwned(g_state->explorerCamOwnerAllowed, [] {
         tkExplorerCam.run([] {
@@ -1775,8 +1788,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // blocked in WaitGetPoses: the frame period less the two is the render
     // thread's own busy time.
     if (runtimeFlatProfile())
-        flatTemporalBeforePresent(self, g_state->frameCounter, flags);
-    if (runtimeFlatProfile()) flatRuntimeBeforePresent();
+        if (g_state->temporalAAOwnerAllowed)
+            flatTemporalBeforePresent(self, g_state->frameCounter, flags);
+    if (runtimeFlatProfile())
+        flatRuntimeBeforePresent(g_state->temporalAAOwnerAllowed);
     if (runtimeFlatProfile()) menuFlatBeforePresent(self, flags);
     if (runtimeFlatProfile()) flatRuntimeWeaponFootprintBeforePresent(self, flags);
     // The flat HDR route's crash-safe breadcrumbs (flat_hdr_crumbs.h): for the first frames that reach the resolver, the
@@ -1804,8 +1819,11 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     g_frameTicks.markAt("present_pre", presentT0);
     g_frameTicks.external(presentT1);
     if (runtimeFlatProfile())
-        flatTemporalAfterPresent(g_state->frameCounter, hr, flags);
-    if (runtimeFlatProfile()) flatRuntimePresent(self, g_state->frameCounter, hr, flags);
+        if (g_state->temporalAAOwnerAllowed)
+            flatTemporalAfterPresent(g_state->frameCounter, hr, flags);
+    if (runtimeFlatProfile())
+        flatRuntimePresent(self, g_state->frameCounter, hr, flags,
+                           g_state->temporalAAOwnerAllowed);
     if (qpcFrequency() > 0) {
         perfMonitorNotePresentWait(static_cast<double>(presentT1 - presentT0) * 1000.0 /
                                    static_cast<double>(qpcFrequency()));
@@ -2032,7 +2050,8 @@ bool initializeComfortStartup(State& state) {
 void menuActionDumpCamera(void*) {
     if (!diagnosticsOwnerAllowed()) return;
     dumpCameraRing("the settings menu");
-    temporalPassDumpHistory("the settings menu");
+    if (g_state && g_state->temporalAAOwnerAllowed)
+        temporalPassDumpHistory("the settings menu");
 }
 void menuActionCensus(void*) {
     if (!diagnosticsOwnerAllowed()) return;
@@ -2042,7 +2061,8 @@ void menuActionCensus(void*) {
 }
 void menuActionDumpEyes(void*) {
     if (!diagnosticsOwnerAllowed()) return;
-    temporalPassArmEyeDump();
+    if (g_state && g_state->temporalAAOwnerAllowed)
+        temporalPassArmEyeDump();
 }
 void menuActionMarker(void*) {
     if (!diagnosticsOwnerAllowed()) return;
@@ -2745,25 +2765,6 @@ void hookDevice(ID3D11Device* device) {
     EDVR_HOOK_DEV_CREATE(kDevCreateDsv, true);
 #undef EDVR_HOOK_DEV_CREATE
     vrSsaaGateStartup();  // log only: the 3D mode file, the .fxcfg's Supersampling and HMD Quality, once per process
-    {
-        const bool samplerOwnerAllowed =
-            plugin_admission_transport::ownerAllowedForStartup(
-                plugins::kPluginPerformance);
-        const bool warnAutoSourceUnavailable = samplerStartupConfigureForOwner(
-            samplerOwnerAllowed,
-            &plugins::performance::textureSamplerPolicyOpsV1, nullptr,
-            &samplerReadEliteHmdMultiplier, &s.samplerPolicy,
-            &s.samplerSettings);
-        if (warnAutoSourceUnavailable) {
-            // Preserve the historical startup warning. The module has
-            // already resolved the failed auto value to zero.
-            Log::get().note(
-                "texture filtering: advanced.texture_lod_bias = auto, but Elite's graphics "
-                "preset gave no HMDRenderTargetMultiplier (Options\\Graphics\\*.fxcfg under "
-                "%%LOCALAPPDATA%%\\Frontier Developments\\Elite Dangerous). No bias is applied. "
-                "Set a number instead, or check the game has written its settings once.");
-        }
-    }
     s.deviceHook.replace(kDevCreateSamplerState, &hookedCreateSamplerState,
                          reinterpret_cast<void**>(&s.realCreateSamplerState));
     // The two capability queries, hooked to REPORT and nothing else -- see
@@ -2798,6 +2799,30 @@ void hookDevice(ID3D11Device* device) {
     s.temporalAAOwnerAllowed =
         plugin_admission_transport::ownerAllowedForStartup(
             plugins::kPluginTemporalAa);
+    {
+        const bool samplerOwnerAllowed =
+            plugin_admission_transport::ownerAllowedForStartup(
+                plugins::kPluginPerformance);
+        plugins::performance::TextureSamplerHostContextV1 samplerHostContext{
+            sizeof(plugins::performance::TextureSamplerHostContextV1),
+            plugins::performance::kTextureSamplerHostContextVersion1,
+            s.temporalAAOwnerAllowed ? 1u : 0u};
+        const bool warnAutoSourceUnavailable = samplerStartupConfigureForOwner(
+            samplerOwnerAllowed,
+            &plugins::performance::textureSamplerPolicyOpsV1,
+            &samplerHostContext,
+            &samplerReadEliteHmdMultiplier, &s.samplerPolicy,
+            &s.samplerSettings);
+        if (warnAutoSourceUnavailable) {
+            // Preserve the historical startup warning. The module has
+            // already resolved the failed auto value to zero.
+            Log::get().note(
+                "texture filtering: advanced.texture_lod_bias = auto, but Elite's graphics "
+                "preset gave no HMDRenderTargetMultiplier (Options\\Graphics\\*.fxcfg under "
+                "%%LOCALAPPDATA%%\\Frontier Developments\\Elite Dangerous). No bias is applied. "
+                "Set a number instead, or check the game has written its settings once.");
+        }
+    }
     runComfortOwned(s.comfortOwnerAllowed, [&] {
         fssResConfigure(sentinelCfg);
     });
@@ -3002,7 +3027,8 @@ void hookDevice(ID3D11Device* device) {
                 installGlitchFrameFix();
             });
             installVScreenFixes(device, ctxMode);
-            flatTemporalStart(device);
+            if (g_state->temporalAAOwnerAllowed)
+                flatTemporalStart(device);
             // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): a CodeHook on Frontier's input-assembler flush, once, in BOTH profiles -- the stale
             // cache is the game's, not VR's. A build that is not 332841 is one log line and nothing patched.
             vertexResyncInstall();
@@ -3051,7 +3077,7 @@ void hookDevice(ID3D11Device* device) {
         bool applied = false;
         runOnFootPanelOwned(s.onFootPanelOwnerAllowed, [&] {
             Config& cfg = Config::get();
-            resolveVScreenTargetResolution(cfg, &w, &h);
+            resolveVScreenTargetResolution(cfg, &w, &h, s.temporalAAOwnerAllowed);
             applied = (w && h) && applyVScreenModeResolution(w, h);
         });
         // Elite's own on-foot panel size, and what the panel still renders at if
@@ -3301,7 +3327,8 @@ DeviceCreates deviceCreatesTake() {
 }
 
 void shutdownDeviceHooks() {
-    flatTemporalStop();
+    if (g_state && g_state->temporalAAOwnerAllowed)
+        flatTemporalStop();
     // FreeLibrary teardown can run under the loader lock on another thread.
     // Invalidate timing first, then let each owner release its queries without
     // issuing context commands. Normal process exit skips this entire path.
@@ -3340,7 +3367,8 @@ void shutdownDeviceHooks() {
     // Reverse of install order: vScreen's vtable copy was taken on top of the
     // exposure fix's, so it comes off first.
     if (onFootPanelOwnerAllowed()) revertVScreenModeResolution();
-    uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
+    if (g_state && g_state->temporalAAOwnerAllowed)
+        uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
     vrSsaaHoldShutdown();    // the Supersampling hold's loader slot, back to the game's
     vertexResyncShutdown();  // the vertex-buffer resync's session line (the hook itself stays; the game's process exit says the line through Log::setExitLine)
     if (comfortOwnerAllowed()) {

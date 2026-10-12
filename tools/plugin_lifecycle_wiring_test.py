@@ -7,6 +7,7 @@ Mutants are applied in memory only.
 """
 import argparse
 from pathlib import Path
+import re
 import sys
 
 
@@ -40,6 +41,10 @@ SLICE_PATHS = {
     "relay_host": ROOT / "src/d3d11/kinematic_eval_hook.cpp",
     "vscreen": ROOT / "src/d3d11/vscreen.cpp",
     "device": ROOT / "src/d3d11/device_hook.cpp",
+    "ui_layer": ROOT / "src/d3d11/ui_layer.cpp",
+    "exposure_fix": ROOT / "src/d3d11/exposure_fix.cpp",
+    "texture_sampler_policy": ROOT / "src/plugins/performance/texture_sampler_policy.cpp",
+    "texture_sampler_policy_header": ROOT / "src/plugins/performance/texture_sampler_policy.h",
     "registry": ROOT / "src/d3d11/plugin_registry.cpp",
     "registry_header": ROOT / "src/d3d11/plugin_registry.h",
     "explorer_owner_gate": ROOT / "src/d3d11/explorer_cam_owner_gate.h",
@@ -62,9 +67,14 @@ SLICE_PATHS = {
     "sunglare": ROOT / "src/d3d11/sunglare_fix.cpp",
     "onfoot_owner_gate": ROOT / "src/d3d11/on_foot_panel_owner_gate.h",
     "screen_motion": ROOT / "src/d3d11/screen_motion.cpp",
+    "flat_runtime": ROOT / "src/d3d11/flat_runtime.cpp",
+    "native_sharpen": ROOT / "src/d3d11/native_sharpen.cpp",
     "vr_world_route": ROOT / "src/d3d11/vr_world_route.cpp",
     "temporal_pass": ROOT / "src/d3d11/temporal_pass.cpp",
     "menu": ROOT / "src/d3d11/menu.cpp",
+    "intro_upscale": ROOT / "src/plugins/intro/intro_upscale.cpp",
+    "vscreen_res": ROOT / "src/d3d11/vscreen_res.cpp",
+    "vscreen_res_header": ROOT / "src/d3d11/vscreen_res.h",
     "vscreen_fit_fixture": ROOT / "tools/vscreen_fit_test/vscreen_fit_test.cpp",
     "screen_motion_fixture": ROOT / "tools/screen_motion_test/screen_motion_test.cpp",
 }
@@ -951,6 +961,9 @@ def check_module_slices(sources: dict[str, str]) -> None:
             "result.ownerAllowed = ownerAllowed(decision);",
             "result.strictSelection = result.ownerAllowed &&",
             "Mode::AdmittedSelection")
+    if "decision.size" in intro_decision_helper or \
+            "decision.version" in intro_decision_helper:
+        raise AssertionError("Intro helper must delegate wire validation to the authoritative pure owner rule")
     strict_mode_start = intro_decision_helper.find("if (decision.mode ==")
     strict_mode_end = intro_decision_helper.find("result.strictModeSelection = true;", strict_mode_start)
     strict_mode_gate = intro_decision_helper[strict_mode_start:strict_mode_end]
@@ -1430,6 +1443,18 @@ def check_module_slices(sources: dict[str, str]) -> None:
     if "if(r==S_FALSE)" not in client_acquire or "validOwnerAbsentTable(candidate)" not in client_acquire or \
             "if(r!=S_OK)" not in client_acquire:
         raise AssertionError("FSS client must accept only a valid S_FALSE absence response and preserve other errors")
+    host_open = body(native_runtime_host, "bool open(const RuntimeOptions& options)")
+    startup_treatment_call = (
+        "if(!acquireStartupTreatmentProviders(options.graphicsProvider,externalDevice,runtimeGeneration))return false;")
+    if host_open.count(startup_treatment_call) != 1:
+        raise AssertionError("native startup must use the tested production treatment acquisition seam exactly once")
+    ordered(host_open, "runtimeGeneration=gate.beginGeneration();",
+            "compositorGeneration=poses.begin();",
+            "if(runtimeGeneration&&compositorGeneration&&options.graphicsProvider&&externalDevice) {",
+            startup_treatment_call,
+            "acquired=features.acquire(options.graphicsProvider",
+            "acquired=fss.acquire(options.graphicsProvider",
+            "acquired=timing.acquire(options.graphicsProvider")
     host_fss = native_runtime_host
     fss_acquire = host_fss.find("acquired=fss.acquire(options.graphicsProvider")
     host_fss_scope = host_fss[fss_acquire:fss_acquire + 900] if fss_acquire >= 0 else ""
@@ -1439,15 +1464,18 @@ def check_module_slices(sources: dict[str, str]) -> None:
         raise AssertionError("native host must continue on explicit Comfort absence but reject actual acquire errors")
     if "if(fss.acquired())" not in host_fss:
         raise AssertionError("native FSS frame callbacks must be skipped when the optional provider is absent")
+    if '#include "temporal_startup_cases.h"' not in native_treatment_runner or \
+            "edvr::openxr::test::runTemporalStartupCases(check);" not in native_treatment_runner:
+        raise AssertionError("production startup treatment acquisition fixture is missing or not invoked")
     if "edvr::openxr::test::runTreatmentCases(check);" not in native_treatment_runner:
         raise AssertionError("real native host treatment fixture is not invoked")
     treatment_cases = body(native_treatment_fixture,
                            "template<class Check> void runTreatmentCases(Check check)")
-    for token in ("state.fssAcquireMode=State::FssAcquireMode::ownerAbsent;",
-                  "const HRESULT absent=h.fss.acquire(provider,device.Get(),1);",
+    for token in ("state.fssAcquireMode=State::FssAcquireMode::ownerAbsent;\n    const HRESULT absent=h.fss.acquire(provider,device.Get(),1);",
                   "absent==S_FALSE&&!h.fss.acquired()",
                   "State::FssAcquireMode::malformedAbsent", "State::FssAcquireMode::failure",
                   "State::FssAcquireMode::otherPositive", "State::FssAcquireMode::admitted",
+                  "check(h.fss.close()==S_OK&&!h.fss.acquired(),\n    \"host releases the admitted FSS table before its isolated absence capture\");\n  state.fssAcquireMode=State::FssAcquireMode::ownerAbsent;\n  check(h.fss.acquire(provider,device.Get(),2)==S_FALSE&&!h.fss.acquired(),",
                   "result==vr::VRCompositorError_None&&state.calls==\"TSPM\"&&h.graphicsCalls.calls-before==3",
                   "the real host treatment chain feeds each later stage the prior output with FSS unacquired"):
         if token not in treatment_cases:
@@ -1474,42 +1502,41 @@ def check_module_slices(sources: dict[str, str]) -> None:
     if "state->comfortOwnerAllowed" not in frame_core or "transitionEnabled = state->comfortOwnerAllowed &&" not in native_frame:
         raise AssertionError("native frame transition output and latch must honor cached owner state")
 
-    # Native temporal projection and treatment remain core operations under
-    # Comfort absence. Only the terrain-cover observer receives cached owner
-    # admission, sampled once when the provider is acquired.
+    # Native Temporal-AA is optional, while Comfort owns the shared terrain
+    # frusta publisher through native FSS. Absence at either provider must be
+    # exact and must not reserve its pool or perform device/config work.
     temporal_state = body(native_temporal, "struct State {")
     temporal_acquire = body(native_temporal,
                             "extern \"C\" HRESULT WINAPI edvrAcquireNativeTemporal(")
     temporal_begin = body(native_temporal, "HRESULT WINAPI begin(")
-    if "bool comfortOwnerAllowed = false;" not in temporal_state:
-        raise AssertionError("native temporal owner cache must default denied")
-    if temporal_acquire.count("edvr::comfortOwnerAllowed()") != 1 or \
-            "s.comfortOwnerAllowed=edvr::comfortOwnerAllowed();" not in temporal_acquire:
-        raise AssertionError("native temporal provider must snapshot Comfort admission exactly once at Acquire")
-    ordered(temporal_acquire, "s.comfortOwnerAllowed=edvr::comfortOwnerAllowed();",
-            "s.pendingSettings=readConfig();")
-    if "edvr::comfortOwnerAllowed()" in temporal_begin or \
-            "if(s->comfortOwnerAllowed) edvr::terrainCullCoverNoteFrusta(s->frusta);" not in temporal_begin:
-        raise AssertionError("temporal Begin may gate only terrain notification using its cached owner")
-    ordered(temporal_begin, "std::memcpy(s->head,f->head,sizeof(s->head));",
-            "if(s->comfortOwnerAllowed) edvr::terrainCullCoverNoteFrusta(s->frusta);",
-            "std::memset(out,0,sizeof(*out));")
-    denied_temporal_acquire = body(
-        native_temporal_fixture,
-        "EdvrNativeTemporalTable acquireComfortOwnerDeniedTemporal(")
+    if "edvr::comfortOwnerAllowed()" in temporal_acquire or \
+            "terrainCullCoverNoteFrusta" in temporal_begin:
+        raise AssertionError("Temporal-AA provider must not own or duplicate the shared Comfort frusta publisher")
+    ordered(temporal_acquire, "*t={sizeof(*t),EDVR_NATIVE_TEMPORAL_VERSION_1};",
+            "if(!edvr::temporalAAOwnerAllowed())return S_FALSE;",
+            "std::lock_guard<std::mutex> lock(mutex)", "s.pendingSettings=readConfig();")
+    if "temporalAAOwnerAllowed()" in temporal_begin:
+        raise AssertionError("native Temporal-AA Begin must use its acquired provider without re-querying admission")
     temporal_fixture_run = body(native_temporal_fixture, "void run()")
-    for token in ("const bool prior=comfortOwnerAllowedForTemporalFixture;",
-                  "comfortOwnerAllowedForTemporalFixture=false;",
-                  "auto t=acquire(d,generation);",
-                  "comfortOwnerAllowedForTemporalFixture=prior;",
-                  "catch(...){comfortOwnerAllowedForTemporalFixture=prior;throw;}"):
-        if token not in denied_temporal_acquire:
-            raise AssertionError(f"temporal denial fixture must acquire the real provider with owner absent: {token}")
-    if "acquireComfortOwnerDeniedTemporal(d,11)" not in temporal_fixture_run or \
-            "check(coverNotes==0" not in temporal_fixture_run or \
-            "owner-denied provider still begins the real core temporal frame" not in temporal_fixture_run or \
-            "owner-admitted temporal provider still publishes begun frusta" not in temporal_fixture_run:
-        raise AssertionError("real temporal provider denial and admitted control are missing")
+    if "nativeTemporalOwnerDenied();" not in native_temporal_fixture or \
+            "Temporal-AA-denied provider returns exact S_FALSE and a versioned empty table" not in native_temporal_fixture:
+        raise AssertionError("real native Temporal-AA denied/admitted provider fixture is missing or not invoked")
+    fss_state = body(native_fss, "struct State {")
+    fss_acquire = body(native_fss, "extern \"C\" HRESULT WINAPI edvrAcquireNativeFss(")
+    fss_begin = body(native_fss, "HRESULT WINAPI begin(void* p,const EdvrNativeFssFrame* f)")
+    if "ownerAllowed=false" not in fss_state or \
+            fss_acquire.count("edvr::comfortOwnerAllowed()") != 1:
+        raise AssertionError("native FSS must cache Comfort ownership once for its shared frusta service")
+    ordered(fss_acquire, "*t={sizeof(*t),EDVR_NATIVE_FSS_VERSION_2};",
+            "const bool ownerAllowed=edvr::comfortOwnerAllowed();",
+            "if(!ownerAllowed)return S_FALSE;",
+            "GetDeviceRemovedReason()", "std::lock_guard<std::mutex>lock(mu)")
+    ordered(fss_begin, "if(s->ownerAllowed)edvr::terrainCullCoverNoteFrusta(f->frusta);",
+            "s->sync=edvr::eyeSyncFromConfig(edvr::Config::get());")
+    if "nativeFssPublishesComfortFrustaOnce();" not in native_fss_fixture or \
+            "Comfort FSS publishes the exact valid game-facing frusta once even when healing is off" not in native_fss_fixture or \
+            "nativeFssComfortOwnerDenied();" not in native_fss_fixture:
+        raise AssertionError("native FSS must retain its denied-owner and shared frusta positive-control fixtures")
     terrain_install = body(terrain_cover, "void terrainCullCoverInstall(bool ownerAllowed, bool flatProfile)")
     if "if (!ownerAllowed) return;" not in terrain_install:
         raise AssertionError("denied Comfort ownership must skip terrain hook installation")
@@ -1545,13 +1572,16 @@ def check_module_slices(sources: dict[str, str]) -> None:
             "(mask & 1u) != 0", "(mask & 2u) != 0", "(mask & 4u) != 0",
             "(mask & 8u) != 0", "(mask & 16u) != 0", "(mask & 32u) != 0",
             "cockpit, comfort, intro, onFoot, diagnostics, temporalAA,",
-            "2u + (cockpit ? 6u : 0u)",
-            "(comfort ? 4u : 0u)", "(intro ? 5u : 0u)",
+            "(cockpit ? 6u : 0u)",
+            "(comfort ? 4u : 0u)", "(intro ? 6u : 0u)",
             "(onFoot ? 3u : 0u)", "((cockpit || comfort) ? 1u : 0u)",
             "(diagnostics ? 7u : 0u)",
+            "(temporalAA ? 1u : 0u)",
             "((diagnostics || temporalAA) ? 2u : 0u)",
+            "gotIntro == (intro ? 6u : 0u)",
             "gotDiagnostics == (diagnostics ? 7u : 0u)",
             "temporalShared == ((diagnostics || temporalAA) ? 2u : 0u)",
+            "temporalOwner == (temporalAA ? 1u : 0u)",
             "actual legacy registry preserves exact callback inventory across all 64 owner combinations"):
         if token not in gate_fixture:
             raise AssertionError(f"64-combination owner registry fixture lost {token}")
@@ -1565,6 +1595,23 @@ def check_module_slices(sources: dict[str, str]) -> None:
                   "okay &= testIntroOwnerDeniedVisitor(device, immediate);"):
         if token not in intro_visitor_fixture and token not in vscreen_predicate_fixture:
             raise AssertionError(f"real Intro denied/admitted visitor fixture lost {token}")
+    scrim_fixture = body(vscreen_predicate_fixture,
+                         "bool testIntroOwnerDeniedScrim(")
+    for token in ("SiteId::kScrimClaim", "g_scrimOn = true",
+                  "SiteOutcome::Declined", "g_resourceAttempts == 0",
+                  "SiteOutcome::Claimed", "g_resourceAttempts == 1",
+                  "testIntroOwnerDeniedScrim(device, immediate);"):
+        if token not in scrim_fixture and token not in vscreen_predicate_fixture:
+            raise AssertionError(f"real Intro scrim denied/admitted WARP fixture lost {token}")
+    if 'EDVR_GATE_INTRO(scrim, scrimWantsDraws())' not in vscreen or \
+            '{"legacy.scrim", &drawGate_scrim, true, LegacyGateOwner::Intro}' not in vscreen or \
+            'if (!s->introOwnerAllowed) return SiteResult::declined();' not in vscreen or \
+            'runIntroOwned(g_state && g_state->introOwnerAllowed,\n                      [&] { scrimBegin(self); });' not in vscreen or \
+            'runIntroOwned(g_state && g_state->introOwnerAllowed,\n                      [&] { scrimEnd(self); });' not in vscreen or \
+            'runIntroOwned(s->introOwnerAllowed, [&] { scrimConfigure(cfg); });' not in vscreen or \
+            'runIntroOwned(g_state->introOwnerAllowed, [&] { scrimConfigure(cfg); });' not in vscreen or \
+            'runIntroOwned(g_state->introOwnerAllowed, [&] { scrimShutdown(); });' not in vscreen:
+        raise AssertionError("Intro scrim legacy gate, visitor, lifecycle, and teardown must use the cached Intro owner")
     admission_fixture = body(plugin_dispatch_fixture, "void testIntroStartupAdmissionSnapshot()")
     for token in ("introStartupAdmission(unavailable, false)",
                   "introStartupAdmission(vrCandidate, true)",
@@ -1575,6 +1622,20 @@ def check_module_slices(sources: dict[str, str]) -> None:
                   "testIntroStartupAdmissionSnapshot();"):
         if token not in admission_fixture and token not in plugin_dispatch_fixture:
             raise AssertionError(f"Intro startup query/Legacy/strict selection fixture lost {token}")
+    strict_policy_fixture = body(
+        plugin_dispatch_fixture,
+        "void testDiagnosticsTemporalStartupAdmissionPolicy()")
+    for token in ("makeDecision(diagnosticsBit)", "makeDecision(temporalAaBit)",
+                  "makeDecision(introBit)", "makeDecision(0)",
+                  "controlled strict Diagnostics-only selection keeps the shared startup path awake",
+                  "controlled strict Temporal-AA-only selection keeps the shared startup path awake",
+                  "strict Intro-only selection retains Intro startup without waking the Diagnostics/Temporal-AA exception",
+                  "real generated empty catalog remains Legacy-compatible and supplies no strict-positive runtime evidence",
+                  "failed and malformed snapshots fail closed even when cached Diagnostics and Temporal-AA owner flags are present"):
+        if token not in strict_policy_fixture:
+            raise AssertionError(f"controlled strict-policy fixture lost {token}")
+    if "testDiagnosticsTemporalStartupAdmissionPolicy();" not in plugin_dispatch_fixture:
+        raise AssertionError("controlled D/TAA strict-policy fixture must stay invoked")
     registry_visit = body(registry, "uint32_t pluginRegistryVisitLegacyDrawGatesForTest(")
     if "for (uint32_t i = 0; i < g_legacyCount; ++i)" not in registry_visit or \
             "gate.predicate(gate.state ? gate.state : legacyState)" not in registry_visit:
@@ -1586,13 +1647,288 @@ def check_module_slices(sources: dict[str, str]) -> None:
             "deniedComfortOutput.transitionEnabled == 0" not in native_frame_fixture:
         raise AssertionError("real native-frame denied-owner transition fixture is missing or not invoked")
     temporal_run = body(native_temporal_fixture, "void run()")
-    ordered(temporal_run, "auto t=acquireComfortOwnerDeniedTemporal(d,11)", "auto p=begin(t,f)",
+    if "coverNotes==0" not in temporal_run or \
+            "Temporal-AA frame begin leaves Comfort frusta publication to the FSS provider" not in temporal_run:
+        raise AssertionError("native Temporal-AA fixture must prove its frame does not duplicate Comfort frusta publication")
+    ordered(temporal_run, "auto t=acquire(d,11)", "auto f=frame(11,1);auto p=begin(t,f)",
+            "check(coverNotes==0,\"Temporal-AA frame begin leaves Comfort frusta publication to the FSS provider without duplication\")",
             "check(p.tangentShift[0][0]==0&&p.tangentShift[1][1]==0",
             "check(treat(t,1,1,source.Get())==S_OK")
     if "comfortOwnerAllowed" in temporal_run or "runComfortOwned" in temporal_run:
         raise AssertionError("independent native temporal core must not be swallowed by Comfort ownership")
 
     check_onfoot_boundary(sources)
+    check_temporal_aa_boundary(sources)
+
+
+def check_temporal_aa_boundary(sources: dict[str, str]) -> None:
+    """Keep Temporal-AA config and callbacks behind the published owner cache."""
+    device = sources["device"]
+    vscreen = sources["vscreen"]
+    native_temporal = sources["native_temporal"]
+    native_sharpen = sources["native_sharpen"]
+    screen_motion = sources["screen_motion"]
+    flat_runtime = sources["flat_runtime"]
+    exposure_fix = sources["exposure_fix"]
+    world_route = sources["vr_world_route"]
+    ui_layer = sources["ui_layer"]
+    vscreen_res = sources["vscreen_res"]
+    vscreen_res_header = sources["vscreen_res_header"]
+    menu = sources["menu"]
+    intro_upscale = sources["intro_upscale"]
+    sampler_policy = sources["texture_sampler_policy"]
+    sampler_policy_header = sources["texture_sampler_policy_header"]
+
+    if "bool temporalAAOwnerAllowed = false;" not in body(device, "struct State {"):
+        raise AssertionError("device Temporal-AA owner cache must default to denied")
+    startup = body(device, "void hookDevice(")
+    if startup.count("plugin_admission_transport::ownerAllowedForStartup(\n            plugins::kPluginTemporalAa)") != 1:
+        raise AssertionError("device hook must sample Temporal-AA admission exactly once")
+    ordered(startup, "if (!s.deviceHook.commit())", "s.device = device;",
+            "s.temporalAAOwnerAllowed =", "plugins::kPluginTemporalAa)",
+            "runComfortOwned(s.comfortOwnerAllowed")
+    if "return g_state && g_state->temporalAAOwnerAllowed;" not in body(
+            device, "bool temporalAAOwnerAllowed() noexcept"):
+        raise AssertionError("Temporal-AA getter must expose only the cached device decision")
+
+    present_boundary = body(device, "void presentFrameBoundary()")
+    celestial_status_tick = (
+        "if (g_state->temporalAAOwnerAllowed)\n"
+        "        tkCelestialStatus.run(tickCelestialStatus);"
+    )
+    if present_boundary.count(celestial_status_tick) != 1:
+        raise AssertionError(
+            "Celestial Status must skip its budgeted frame tick without the cached Temporal-AA owner")
+
+    resolver = body(vscreen_res, "void resolveVScreenTargetResolution(")
+    route_facts = body(vscreen_res, "vscreenfit::RouteFacts routeFactsFromConfig(")
+    denied_facts = body(route_facts, "} else {")
+    if "bool temporalAAOwnerAllowed" not in vscreen_res_header or \
+            "bool temporalAAOwnerAllowed" not in vscreen_res or \
+            "in.route = routeFactsFromConfig(cfg, temporalAAOwnerAllowed);" not in resolver:
+        raise AssertionError("vScreen fit resolver must receive and forward the cached Temporal-AA owner")
+    ordered(route_facts, "if (temporalAAOwnerAllowed) {",
+            'cfg.getString("fix.ui_quality", "100")',
+            'cfg.getString("fix.temporal_aa", "off")',
+            "f.layerWhy = uiLayerNotLiveReasonFor(", "} else {")
+    if 'f.layerWhy = "the Temporal-AA owner is not admitted";' not in denied_facts or \
+            "fix.ui_quality" in denied_facts or "fix.temporal_aa" in denied_facts:
+        raise AssertionError("denied fit route must be truthful while leaving cold Temporal-AA keys unread")
+    if "resolveVScreenTargetResolution(cfg, &w, &h, s.temporalAAOwnerAllowed);" not in startup or \
+            "resolveVScreenTargetResolution(Config::get(), &vw, &vh, temporalAAOwnerAllowed()," not in menu or \
+            "resolveVScreenTargetResolution(cfg, &vw, &vh, temporalAAOwnerAllowed()," not in intro_upscale:
+        raise AssertionError("vScreen fit callers must supply the published Temporal-AA decision")
+    preset_disabled = body(menu, "bool dlssPresetDisabled()")
+    status = body(menu, "void buildStatus(")
+    if "if (!temporalAAOwnerAllowed()) return true;" not in preset_disabled or \
+            "Config::get().getString(\"fix.temporal_aa\", \"off\")" not in preset_disabled:
+        raise AssertionError("DLSS preset dimming must stop before reading Temporal-AA config when owner is absent")
+    if 'if (!temporalAAOwnerAllowed()) {\n        statusLine(c, "Temporal AA", "owner not admitted");\n    } else {' not in status or \
+            "const std::string mode = Config::get().getString(\"fix.temporal_aa\", \"off\");" not in status:
+        raise AssertionError("menu Temporal-AA telemetry must show owner denial without reading its mode")
+    if "if (dlssRow && temporalAAOwnerAllowed()) {" not in menu or \
+            "runtimeFlatProfile() ? Config::get().requestedTemporalMode()" not in menu:
+        raise AssertionError("DLSS preset row label must read the mode only under Temporal-AA ownership")
+    warning = body(menu, "void flatWarningTick(")
+    ordered(warning, "const bool refusing = temporalAAOwnerAllowed() &&",
+            "flatRuntimeStructuralRefusal(&reason, &standing)",
+            "temporalModeEnabled(Config::get().requestedTemporalMode())",
+            "if (refusing || s.open || s.flatSettingsForce)",
+            "if (s.flatSettings.poll(now, force))")
+    if "if (runtimeFlatProfile() && temporalAAOwnerAllowed()) {\n            const char* wrapper = contextWrapperFile();" not in menu:
+        raise AssertionError("flat wrapper note must not probe wrappers or read requested mode without TAA ownership")
+    ordered(startup, "s.temporalAAOwnerAllowed =",
+            "const bool samplerOwnerAllowed =",
+            "TextureSamplerHostContextV1 samplerHostContext{",
+            "s.temporalAAOwnerAllowed ? 1u : 0u",
+            "samplerStartupConfigureForOwner(",
+            "runComfortOwned(s.comfortOwnerAllowed")
+    if startup.count("plugins::kPluginTemporalAa)") != 1 or \
+            "struct TextureSamplerHostContextV1" not in sampler_policy_header or \
+            "sizeof(TextureSamplerHostContextV1) == 12" not in sampler_policy_header:
+        raise AssertionError("sampler policy must receive the single cached Temporal-AA snapshot through its typed host context")
+    sampler_config = body(sampler_policy, "void resolveTextureSamplerSettingsV1(")
+    ordered(sampler_config, "bool temporalOwnerAllowed = false;",
+            "static_cast<const TextureSamplerHostContextV1*>(hostContext)",
+            "context->structSize == sizeof(*context)",
+            "context->version == kTextureSamplerHostContextVersion1",
+            "context->temporalAAOwnerAllowed <= 1u",
+            "temporalOwnerAllowed = context->temporalAAOwnerAllowed != 0;",
+            '"advanced.texture_anisotropy"',
+            "const bool temporal = temporalOwnerAllowed && temporalModeEnabled(",
+            'getString("fix.temporal_aa", "off")', '"advanced.texture_lod_bias"')
+    if '"advanced.texture_lod_bias", temporal ? "auto" : "0"' not in sampler_config:
+        raise AssertionError("sampler policy must preserve the configured-mode default while treating malformed or absent TAA context as off")
+
+    if "bool temporalAAOwnerAllowed = false;" not in body(vscreen, "struct State {"):
+        raise AssertionError("vScreen Temporal-AA owner cache must default to denied")
+    install = body(vscreen, "void installVScreenFixes(")
+    cached_copy = "const bool temporalAAOwnerAllowed = edvr::temporalAAOwnerAllowed();"
+    if install.count(cached_copy) != 1 or "ownerAllowedForStartup(plugins::kPluginTemporalAa)" in install:
+        raise AssertionError("vScreen must copy the device-published Temporal-AA decision once")
+    ordered(install, cached_copy, "Config& cfg = Config::get();",
+            "g_state->temporalAAOwnerAllowed = temporalAAOwnerAllowed;")
+    dormant_start = install.find("if (!wantVoid && scale == 1.0f &&")
+    dormant_end = install.find("// Preserve the existing retry path", dormant_start)
+    if dormant_start < 0 or dormant_end < 0:
+        raise AssertionError("vScreen dormant transport-only decision scope is missing")
+    dormant_condition = install[dormant_start:dormant_end]
+    owner_snapshots = (
+        "const bool diagnosticsAllowed = diagnosticsOwnerAllowed();",
+        cached_copy,
+        "const bool strictSelectedVScreenOwner = strictAdmissionNeedsVScreenHooks(\n"
+        "        introAdmission, diagnosticsAllowed, temporalAAOwnerAllowed);",
+    )
+    if any(install.count(token) != 1 or install.find(token) > dormant_start
+           for token in owner_snapshots):
+        raise AssertionError("D and Temporal-AA owner decisions must be cached once before dormant startup selection")
+    if "!introAdmission.strictSelection &&" not in dormant_condition or \
+            "!strictSelectedVScreenOwner &&" not in dormant_condition:
+        raise AssertionError("transport-only startup must preserve Intro semantics and qualify D/TAA by accepted strict selection")
+    strict_helper = body(sources["intro_owner_gate"],
+                         "inline bool strictAdmissionNeedsVScreenHooks(")
+    ordered(strict_helper, "admission.strictModeSelection &&",
+            "(diagnosticsOwnerAllowed || temporalAAOwnerAllowed)")
+    refresh = body(vscreen, "void vScreenRefreshConfig()")
+    if "temporalAAOwnerAllowed()" in refresh or "s->temporalAAOwnerAllowed" not in refresh:
+        raise AssertionError("vScreen reload must reuse cached Temporal-AA admission without a second query")
+    if "if (s->temporalAAOwnerAllowed) {\n        sharpenPassConfigure(cfg);\n        temporalPassConfigure(cfg);\n    }" not in refresh or \
+            "if (g_state->temporalAAOwnerAllowed) {\n        sharpenPassConfigure(cfg);\n        temporalPassConfigure(cfg);\n    }" not in install:
+        raise AssertionError("Temporal-AA configure/read paths must remain behind cached ownership")
+    ui_layer_config = body(ui_layer, "void uiLayerConfigure(")
+    if ui_layer_config.count("uiPanelScaleSetTarget(target);") != 1 or \
+            vscreen.count("uiLayerConfigure(cfg);") != 2 or \
+            "if (s->temporalAAOwnerAllowed) {\n        uiDepthConfigure(cfg);\n        uiLayerConfigure(cfg);\n    }" not in refresh or \
+            "if (g_state->temporalAAOwnerAllowed) {\n        uiDepthConfigure(cfg);\n        uiLayerConfigure(cfg);\n    }" not in install:
+        raise AssertionError("TAA-only UI panel scaling must stay on its owner-gated uiLayerConfigure path")
+
+    temporal_acquire = body(native_temporal,
+                            'extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(')
+    if "*t={sizeof(*t),EDVR_NATIVE_TEMPORAL_VERSION_1};" not in temporal_acquire:
+        raise AssertionError("native Temporal-AA absence must return an exact empty versioned table")
+    ordered(temporal_acquire, "*t={sizeof(*t),EDVR_NATIVE_TEMPORAL_VERSION_1};",
+            "if(!edvr::temporalAAOwnerAllowed())return S_FALSE;",
+            "std::lock_guard<std::mutex> lock(mutex)", "s.pendingSettings=readConfig();")
+    sharpen_acquire = body(native_sharpen,
+                           'extern "C" HRESULT WINAPI edvrAcquireNativeSharpen(')
+    if "*t={sizeof(*t),EDVR_NATIVE_SHARPEN_VERSION_1};" not in sharpen_acquire:
+        raise AssertionError("native sharpen absence must return an exact empty versioned table")
+    ordered(sharpen_acquire, "*t={sizeof(*t),EDVR_NATIVE_SHARPEN_VERSION_1};",
+            "if(!edvr::temporalAAOwnerAllowed())return S_FALSE;",
+            "QueryInterface", "std::lock_guard<std::mutex> lock(mutex)")
+
+    motion_config = body(screen_motion, "void screenMotionConfigure(")
+    ordered(motion_config,
+            "const bool on = temporalAAOwnerAllowed &&",
+            'temporalModeEnabled(cfg.getString("fix.temporal_aa","off"))')
+    if "const bool on = temporalAAOwnerAllowed &&" not in motion_config:
+        raise AssertionError("ScreenMotion must not read temporal mode when its owner is absent")
+
+    flat_present = body(flat_runtime, "void flatRuntimePresent(")
+    ordered(flat_present,
+            "const auto mode = temporalAAOwnerAllowed\n        ? Config::get().requestedTemporalMode()",
+            "const bool enabled = temporalAAOwnerAllowed && temporalModeEnabled(mode);",
+            "const auto model = temporalAAOwnerAllowed\n        ? Config::get().getString(\"fix.temporal_aa_model\", \"k\")",
+            "if (!enabled) {")
+    no_taa_branch = body(flat_present, "if (!enabled) {")
+    if "if(!manual&&!s.drawPackets.active())return;" not in no_taa_branch or \
+            not no_taa_branch.rstrip().endswith("return;") or \
+            "advanced.temporal_aa_jitter_phases" in no_taa_branch or \
+            "advanced.temporal_aa_jitter_phases" not in flat_present or \
+            "s.drawPackets.present(s.drawPacketContext.Get(),frame+1);" not in no_taa_branch or \
+            "armDrawPackets(s,frame);" not in no_taa_branch:
+        raise AssertionError("flat AA-off/owner-absent flow must preserve capture work and return before Temporal-AA jitter config")
+    if "engineVelocityConfigure(enabled && !enginePausedThen);" not in flat_present or \
+            "if (temporalAAOwnerAllowed)" not in flat_present:
+        raise AssertionError("flat engine-motion setup must remain disabled with Temporal-AA ownership")
+    flat_substitution = body(flat_runtime, "void flatRuntimeSubstitution(")
+    ordered(flat_substitution, "if (!temporalAAOwnerAllowed()) return;",
+            "if (!engineVelocityFlatPending()) return;", "switch (flatSubstAction(event))")
+    if "if (temporalAAOwnerAllowed()) engineVelocityFlatLazy(!diagnostics);" not in flat_runtime:
+        raise AssertionError("flat draw must keep diagnostic/Core work while only dispatching EngineVelocity when TAA is admitted")
+    flat_before_present = body(flat_runtime, "void flatRuntimeBeforePresent(")
+    ordered(flat_before_present, "mapBounce().present(",
+            "if (temporalAAOwnerAllowed && owner())", "engineVelocityFlatFrameEndWithCost();",
+            "if (owner()) gpuFrameClose(state());")
+    flat_weapon_footprint = body(flat_runtime,
+                                 "void flatRuntimeWeaponFootprintBeforePresent(")
+    if "s.weaponFootprint.beforePresent(" not in flat_weapon_footprint or \
+            "temporalAAOwnerAllowed" in flat_weapon_footprint:
+        raise AssertionError("flat On-foot weapon-footprint capture remains independent of Temporal-AA ownership")
+    route_mode = body(world_route, "FlatMonoResolveMode resolveModeFromConfig(")
+    ordered(route_mode, "if (!g_temporalAAOwnerAllowed)",
+            'Config::get().getString("fix.temporal_aa", "off")')
+
+    # EngineVelocity is one Temporal-AA leg spread across device, context and
+    # flat hooks. Preserve those host paths while requiring each optional tee
+    # to consult the immutable cached owner before entering the module.
+    velocity_draw_sites = re.findall(
+        r"(?m)^\s*engineVelocityBeforeDraw(?:SampledBoundary|WithApi(?:<[^>\n]+>)?)\(",
+        vscreen)
+    velocity_draw_guards = re.findall(
+        r"if\s*\(g_state->temporalAAOwnerAllowed\)\s*(?:\{\s*)?engineVelocityBeforeDraw|"
+        r"if\s*\(self == g_state->ownerCtx && g_state->temporalAAOwnerAllowed\)\s*"
+        r"(?:\{\s*)?engineVelocityBeforeDraw",
+        vscreen)
+    if len(velocity_draw_sites) != 7 or len(velocity_draw_guards) != len(velocity_draw_sites):
+        raise AssertionError("every vScreen engine-velocity draw callback must stay behind cached Temporal-AA ownership")
+    motion_resource_written = body(vscreen, "static void motionResourceWritten(")
+    owner_active = body(vscreen, "bool temporalAAOwnerActive() noexcept {")
+    if "return g_state && g_state->temporalAAOwnerAllowed;" not in owner_active:
+        raise AssertionError("vScreen Temporal-AA accessor must expose only its cached owner decision")
+    if ("if (temporalAAOwnerActive())\n        engineVelocityResourceWritten(resource);" not in motion_resource_written or
+            motion_resource_written.count("engineVelocityResourceWritten(resource);") != 1):
+        raise AssertionError("shared resource writes must consult the cached Temporal-AA accessor before EngineVelocity invalidation")
+    for gate in (
+            "if (mapData0 && type != D3D11_MAP_READ && g_state->temporalAAOwnerAllowed)\n"
+            "        engineVelocityResourceMapped(res, mapped->pData, static_cast<int>(type));",
+            "if (g_state->temporalAAOwnerAllowed)\n            tkEngineVelocity.run(",
+            "if (g_state->temporalAAOwnerAllowed && celestialMotionAnyWatched())\n"
+            "        celestialMotionConstantsUnmapped(res);",
+            "if (g_state->temporalAAOwnerAllowed && celestialMotionAnyWatched())\n"
+            "            celestialMotionConstantsWritten(dst, data, box);",
+            "if (g_state->temporalAAOwnerAllowed)\n            tkCelestialMotion.run(",
+            "if (g_state && g_state->temporalAAOwnerAllowed)\n        celestialMotionShutdown();"):
+        if gate not in vscreen:
+            raise AssertionError(f"Temporal-AA cached owner must gate this shared vScreen callback: {gate}")
+    if "if (g_state->temporalAAOwnerAllowed)\n            engineVelocityRememberVs(" not in device or \
+            "if (g_state->temporalAAOwnerAllowed)\n            engineVelocityRememberPs(" not in device or \
+            "if(g_state->temporalAAOwnerAllowed && out && *out)\n                engineVelocityBufferCreated(" not in device or \
+            "if (g_state->temporalAAOwnerAllowed)\n        tkEngineVelocityClock.run(" not in device:
+        raise AssertionError("device shader/buffer capture and the EngineVelocity present clock must be owner-gated")
+    texture_create = body(device, "HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(")
+    ordered(texture_create,
+            "if (!fromEdvr && g_state->temporalAAOwnerAllowed && desc && self == g_state->device &&",
+            "uiSurfacesPanelNet(*desc, init != nullptr, &netDesc)",
+            "const HRESULT hr = createTexture2DForwarded(self, desc, init, out);",
+            "if (!fromEdvr && g_state->temporalAAOwnerAllowed && out && *out) {",
+            "uiSurfacesWantsAtlas(*desc)", "uiSurfacesWantsChain(*desc, init != nullptr)")
+    if "uiAtlasNoteWrite(res, 1);" not in vscreen or \
+            ("if (g_state->temporalAAOwnerAllowed && type != D3D11_MAP_READ)\n"
+             "        uiAtlasNoteWrite(res, 1);") not in vscreen or \
+            vscreen.count("if (g_state->temporalAAOwnerAllowed) uiAtlasNoteWrite(dst, 2);") != 2 or \
+            "if (g_state->temporalAAOwnerAllowed) uiAtlasNoteWrite(dst, 0);" not in vscreen:
+        raise AssertionError("UI atlas Map/copy/update observers must be gated without suppressing the shared forwarding hooks")
+    if ("if (temporalAAOwnerAllowed() && engineVelocitySkinWanted() && skinChainBound())\n"
+            "        engineVelocityNoteChainDispatch(self, x);") not in exposure_fix:
+        raise AssertionError("Comfort's chain dispatch may observe EngineVelocity skin only under cached TAA ownership")
+    for token in (
+            "if (g_state->temporalAAOwnerAllowed && celestialMotionAnyWatched())",
+            "if (g_state->temporalAAOwnerAllowed && mapData0 && type != D3D11_MAP_READ && celestialMotionAnyWatched()) {",
+            "celestialMotionConstantsMapped(res, mapped->pData);",
+            "celestialMotionConstantsUnknownWrite(dst);",
+            "if (g_state->temporalAAOwnerAllowed && owner && celestialMotionLive()",
+            "celestialMotionNoteDraw(self);",
+            "if (g_state->temporalAAOwnerAllowed)\n            tkCelestialMotion.run(",
+            "if (g_state && g_state->temporalAAOwnerAllowed)\n        celestialMotionShutdown();"):
+        if token not in vscreen:
+            raise AssertionError(f"planet-patch data tee lost its cached Temporal-AA owner boundary: {token}")
+
+    for token in ("if(g_state->temporalAAOwnerAllowed && out && *out && celestialMotionAnyWatched())",
+                  "celestialMotionConstantsUnknownWrite(static_cast<ID3D11Buffer*>(*out));",
+                  "if (g_state->temporalAAOwnerAllowed)\n        celestialMotionNoteStatus("):
+        if token not in device:
+            raise AssertionError(f"device-side planet-patch observer lost its Temporal-AA owner boundary: {token}")
 
 
 def check_onfoot_boundary(sources: dict[str, str]) -> None:
@@ -1619,7 +1955,7 @@ def check_onfoot_boundary(sources: dict[str, str]) -> None:
     gate_end = device.index("        });", gate_start)
     resolution_gate = device[gate_start:gate_end]
     ordered(resolution_gate, "Config& cfg = Config::get();",
-            "resolveVScreenTargetResolution(cfg, &w, &h);",
+            "resolveVScreenTargetResolution(cfg, &w, &h, s.temporalAAOwnerAllowed);",
             "applied = (w && h) && applyVScreenModeResolution(w, h);")
     if "vScreenSetPanelSize(applied ? w : kStockW, applied ? h : kStockH);" not in device:
         raise AssertionError("stock panel dimensions must remain published when optional On-foot ownership is absent")
@@ -1669,9 +2005,10 @@ def check_onfoot_boundary(sources: dict[str, str]) -> None:
 
     if "if (onFootPanelOwnerAllowed) {\n        const bool weapon=cfg.getBool(\"fix.weapon_stability\",true);" not in screen_motion:
         raise AssertionError("weapon config must be lazy when On-foot ownership is absent")
-    if "if (g.onFootPanelOwnerAllowed)\n        weaponMotionFrameBoundary(ctx);\n    g_gpu.tick(ctx,g.frame);\n    flushPanelCounts(ctx);" not in screen_motion:
-        raise AssertionError("ScreenMotion must gate only weapon frame work and preserve core temporal-AA progress")
-    if "if(owner)weaponMotionShutdown();" not in screen_motion:
+    if "if (g.onFootPanelOwnerAllowed)\n        weaponMotionFrameBoundary(ctx);\n    if (!g.temporalAAOwnerAllowed) return;\n    g_gpu.tick(ctx,g.frame);\n    flushPanelCounts(ctx);" not in screen_motion:
+        raise AssertionError("ScreenMotion must gate weapon work independently and keep core temporal-AA work owner-gated")
+    if "g_gpu.reset(nullptr);g=State{};" not in screen_motion or \
+            "if(weaponConfigured)weaponMotionShutdown();" not in screen_motion:
         raise AssertionError("ScreenMotion shutdown must preserve core cleanup and gate weapon teardown")
 
     if "state.onFootPanelOwnerAllowed = edvr::onFootPanelOwnerAllowed();" not in native_frame:
@@ -1686,7 +2023,7 @@ def check_onfoot_boundary(sources: dict[str, str]) -> None:
     if "auto* weapon=onFootPanelOwnerAllowed() ? weaponMotionView() : nullptr;" not in temporal_pass or \
             "ID3D11ShaderResourceView* map = onFootPanelOwnerAllowed()" not in world_route:
         raise AssertionError("temporal-AA and VR world routes must include weapon data only for admitted On-foot")
-    if "if (onFootPanelOwnerAllowed())\n                    resolveVScreenTargetResolution" not in menu:
+    if "if (onFootPanelOwnerAllowed())\n                    resolveVScreenTargetResolution(Config::get(), &vw, &vh, temporalAAOwnerAllowed()," not in menu:
         raise AssertionError("menu resolution hints must not read On-foot config when absent")
 
     fixture = sources["vscreen_predicate_fixture"]
@@ -1710,8 +2047,8 @@ def check_onfoot_boundary(sources: dict[str, str]) -> None:
             "deniedOnFootOutput.deferredPacing == 0" not in native_fixture:
         raise AssertionError("real native-frame On-foot denial fixture is missing")
     motion_fixture = sources["screen_motion_fixture"]
-    for token in ("cached On-foot absence keeps the real screen-motion frame tick alive",
-                  "owner-allowed Legacy control reads the live weapon key"):
+    for token in ("On-foot admission remains independent: it reads weapon stability and dispatches its real frame path while TAA config stays absent",
+                  "both admitted owners preserve the real core and weapon dispatch with live config reads"):
         if token not in motion_fixture:
             raise AssertionError(f"ScreenMotion On-foot absence control is missing: {token}")
 
@@ -1743,6 +2080,25 @@ def self_test_slices(sources: dict[str, str]) -> None:
         'getString("experimental.fov_trim_vertical", "")',
         'getString("experimental.fov_trim_wrong", "")')
     expect_slice("Performance owns the literal FOV Config keys", changed)
+
+    changed = dict(sources)
+    changed["native_host"] = once(changed["native_host"],
+        "if(!acquireStartupTreatmentProviders(options.graphicsProvider,externalDevice,runtimeGeneration))return false;",
+        "/* startup acquisition seam bypassed */")
+    expect_slice("native startup cannot bypass the behaviorally tested treatment acquisition seam", changed)
+
+    changed = dict(sources)
+    changed["native_host"] = once(changed["native_host"],
+        "if(!acquireStartupTreatmentProviders(options.graphicsProvider,externalDevice,runtimeGeneration))return false;",
+        "if(!acquireStartupTreatmentProviders(options.graphicsProvider,externalDevice,runtimeGeneration))return false;\n"
+        "if(!acquireStartupTreatmentProviders(options.graphicsProvider,externalDevice,runtimeGeneration))return false;")
+    expect_slice("native startup cannot acquire the treatment providers twice", changed)
+
+    changed = dict(sources)
+    changed["native_treatment_runner"] = once(changed["native_treatment_runner"],
+        "edvr::openxr::test::runTemporalStartupCases(check);",
+        "/* production startup fixture omitted */")
+    expect_slice("the native startup treatment acquisition fixture remains invoked", changed)
 
     changed = dict(sources)
     changed["native_frame"] = once(changed["native_frame"],
@@ -2253,9 +2609,15 @@ def self_test_slices(sources: dict[str, str]) -> None:
 
     changed = dict(sources)
     changed["native_treatment_fixture"] = once(changed["native_treatment_fixture"],
-        "state.fssAcquireMode=State::FssAcquireMode::ownerAbsent;",
-        "state.fssAcquireMode=State::FssAcquireMode::admitted;")
-    expect_slice("real client and host exercise the actual optional FSS absence result", changed)
+        "state.fssAcquireMode=State::FssAcquireMode::ownerAbsent;\n    const HRESULT absent=h.fss.acquire(provider,device.Get(),1);",
+        "state.fssAcquireMode=State::FssAcquireMode::admitted;\n    const HRESULT absent=h.fss.acquire(provider,device.Get(),1);")
+    expect_slice("real client exercises the actual optional FSS absence result", changed)
+
+    changed = dict(sources)
+    changed["native_treatment_fixture"] = once(changed["native_treatment_fixture"],
+        "state.fssAcquireMode=State::FssAcquireMode::ownerAbsent;\n  check(h.fss.acquire(provider,device.Get(),2)==S_FALSE&&!h.fss.acquired(),",
+        "state.fssAcquireMode=State::FssAcquireMode::admitted;\n  check(h.fss.acquire(provider,device.Get(),2)==S_FALSE&&!h.fss.acquired(),")
+    expect_slice("real host FSS absence capture uses owner-denied provider state", changed)
 
     changed = dict(sources)
     changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],
@@ -2381,6 +2743,12 @@ def self_test_slices(sources: dict[str, str]) -> None:
     expect_slice("Intro startup strict/Legacy decision fixture stays invoked", changed)
 
     changed = dict(sources)
+    changed["plugin_dispatch_fixture"] = once(changed["plugin_dispatch_fixture"],
+        "testDiagnosticsTemporalStartupAdmissionPolicy();",
+        "/* controlled strict D/TAA policy fixture omitted */")
+    expect_slice("controlled strict D/TAA policy fixture stays invoked without claiming runtime positives", changed)
+
+    changed = dict(sources)
     changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],
         "fssPanelSite, immediate, immediate, 0, true, true,\n"
         "                              &deniedScanner, true, false, 'X', 6, 1, 5, 6)",
@@ -2395,31 +2763,155 @@ def self_test_slices(sources: dict[str, str]) -> None:
 
     changed = dict(sources)
     changed["native_temporal_fixture"] = once(changed["native_temporal_fixture"],
-        "void run(){\n", "void run(){\n  if (!comfortOwnerAllowed) return;\n")
-    expect_slice("native temporal core begin/projection remains independent of Comfort admission", changed)
+        "nativeTemporalOwnerDenied();", "/* native Temporal-AA absence fixture omitted */")
+    expect_slice("real native Temporal-AA absence fixture remains invoked", changed)
 
     changed = dict(sources)
     changed["native_temporal"] = once(changed["native_temporal"],
-        "s.comfortOwnerAllowed=edvr::comfortOwnerAllowed();",
-        "s.comfortOwnerAllowed=true;")
-    expect_slice("native temporal snapshots published Comfort admission at Acquire", changed)
+        "if(!edvr::temporalAAOwnerAllowed())return S_FALSE;",
+        "if(false)return S_FALSE;")
+    expect_slice("denied Temporal-AA native acquire skips pool/config/device work", changed)
 
     changed = dict(sources)
-    changed["native_temporal"] = once(changed["native_temporal"],
-        "if(s->comfortOwnerAllowed) edvr::terrainCullCoverNoteFrusta(s->frusta);",
-        "edvr::terrainCullCoverNoteFrusta(s->frusta);")
-    expect_slice("temporal core remains live while its terrain observer is owner-gated", changed)
+    changed["flat_runtime"] = once(changed["flat_runtime"],
+        "const auto mode = temporalAAOwnerAllowed\n        ? Config::get().requestedTemporalMode()",
+        "const auto mode = Config::get().requestedTemporalMode()")
+    expect_slice("flat runtime never reads Temporal-AA mode without its cached owner", changed)
 
     changed = dict(sources)
-    changed["native_temporal"] = once(changed["native_temporal"],
-        "if(s->comfortOwnerAllowed) edvr::terrainCullCoverNoteFrusta(s->frusta);",
-        "if(edvr::comfortOwnerAllowed()) edvr::terrainCullCoverNoteFrusta(s->frusta);")
-    expect_slice("native temporal Begin does not re-query ownership per frame", changed)
+    changed["flat_runtime"] = once(changed["flat_runtime"],
+        "if(!manual&&!s.drawPackets.active())return;",
+        "const int asked=Config::get().getInt(\"advanced.temporal_aa_jitter_phases\",8);\n"
+        "        if(!manual&&!s.drawPackets.active())return;")
+    expect_slice("AA-off flat capture returns before reading Temporal-AA jitter config", changed)
 
     changed = dict(sources)
-    changed["native_temporal_fixture"] = once(changed["native_temporal_fixture"],
-        "acquireComfortOwnerDeniedTemporal(d,11)", "acquire(d,11)")
-    expect_slice("real native temporal denied-owner provider fixture is invoked", changed)
+    changed["flat_runtime"] = once(changed["flat_runtime"],
+        "s.drawPackets.present(s.drawPacketContext.Get(),frame+1);",
+        "/* Core draw-packet present omitted */")
+    expect_slice("flat Core draw-packet capture remains active when Temporal-AA is absent", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "if (g_state->temporalAAOwnerAllowed)\n            tkEngineVelocity.run(",
+        "if (true)\n            tkEngineVelocity.run(")
+    expect_slice("vScreen does not dispatch EngineVelocity clock without Temporal-AA admission", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "if (temporalAAOwnerActive())\n        engineVelocityResourceWritten(resource);",
+        "engineVelocityResourceWritten(resource);")
+    expect_slice("shared resource writes do not invalidate EngineVelocity without the cached owner", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "return g_state && g_state->temporalAAOwnerAllowed;",
+        "return true;")
+    expect_slice("vScreen Temporal-AA accessor cannot bypass its cached owner decision", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "if (g_state->temporalAAOwnerAllowed)\n"
+        "        tkCelestialStatus.run(tickCelestialStatus);",
+        "tkCelestialStatus.run(tickCelestialStatus);")
+    expect_slice("Celestial Status tick is skipped without Temporal-AA admission", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "if (g_state->temporalAAOwnerAllowed)\n            engineVelocityRememberVs(",
+        "if (true)\n            engineVelocityRememberVs(")
+    expect_slice("device shader capture remains cached-owner gated", changed)
+
+    changed = dict(sources)
+    changed["flat_runtime"] = once(changed["flat_runtime"],
+        "if (!temporalAAOwnerAllowed()) return;",
+        "/* TAA owner boundary removed */")
+    expect_slice("flat shared draw hooks do not dispatch TAA substitution without admission", changed)
+
+    changed = dict(sources)
+    changed["exposure_fix"] = once(changed["exposure_fix"],
+        "if (temporalAAOwnerAllowed() && engineVelocitySkinWanted() && skinChainBound())",
+        "if (engineVelocitySkinWanted() && skinChainBound())")
+    expect_slice("Comfort chain observer cannot sample the TAA skin path without its owner", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "if (g_state->temporalAAOwnerAllowed && mapData0 && type != D3D11_MAP_READ && celestialMotionAnyWatched()) {",
+        "if (mapData0 && type != D3D11_MAP_READ && celestialMotionAnyWatched()) {")
+    expect_slice("planet-patch Map tee stays owner-gated", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "if (!fromEdvr && g_state->temporalAAOwnerAllowed && out && *out) {\n"
+        "                if (uiSurfacesWantsAtlas(*desc)) {",
+        "if (!fromEdvr && out && *out) {\n"
+        "                if (uiSurfacesWantsAtlas(*desc)) {")
+    expect_slice("UI surface atlas/chain recognition remains owner-gated after game texture creation", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "if (g_state->temporalAAOwnerAllowed && type != D3D11_MAP_READ)\n"
+        "        uiAtlasNoteWrite(res, 1);",
+        "if (type != D3D11_MAP_READ)\n        uiAtlasNoteWrite(res, 1);")
+    expect_slice("UI atlas write Map observer remains owner-gated", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "if (g_state->temporalAAOwnerAllowed) {\n"
+        "        uiDepthConfigure(cfg);\n"
+        "        uiLayerConfigure(cfg);",
+        "if (true) {\n"
+        "        uiDepthConfigure(cfg);\n"
+        "        uiLayerConfigure(cfg);")
+    expect_slice("TAA-only UI panel scaling is not configured without cached ownership", changed)
+
+    changed = dict(sources)
+    changed["native_fss"] = once(changed["native_fss"],
+        "const bool ownerAllowed=edvr::comfortOwnerAllowed();",
+        "const bool ownerAllowed=true;")
+    expect_slice("native FSS snapshots published Comfort admission at Acquire", changed)
+
+    changed = dict(sources)
+    changed["native_fss"] = once(changed["native_fss"],
+        "if(s->ownerAllowed)edvr::terrainCullCoverNoteFrusta(f->frusta);",
+        "edvr::terrainCullCoverNoteFrusta(f->frusta);")
+    expect_slice("shared Comfort frusta publication remains owner-gated", changed)
+
+    changed = dict(sources)
+    changed["native_fss_fixture"] = once(changed["native_fss_fixture"],
+        "nativeFssPublishesComfortFrustaOnce();", "/* Comfort frusta positive control omitted */")
+    expect_slice("native FSS retains its once-per-frame frusta control", changed)
+
+    changed = dict(sources)
+    changed["intro_owner_gate"] = once(changed["intro_owner_gate"],
+        "admission.strictModeSelection &&",
+        "admission.strictModeSelection ||")
+    expect_slice("admitted Diagnostics cannot be stranded in transport-only startup", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "const bool diagnosticsAllowed = diagnosticsOwnerAllowed();",
+        "const bool diagnosticsAllowed = false;")
+    expect_slice("D owner snapshot is taken before dormant startup selection", changed)
+
+    changed = dict(sources)
+    changed["intro_owner_gate"] = once(changed["intro_owner_gate"],
+        "if (decision.mode == static_cast<std::uint32_t>(\n"
+        "            plugin_selection::admission_v1::Mode::AdmittedSelection)) {",
+        "if (decision.mode != static_cast<std::uint32_t>(\n"
+        "            plugin_selection::admission_v1::Mode::AdmittedSelection)) {")
+    expect_slice("D/TAA dormancy bypass requires a valid admitted strict selection", changed)
+
+    changed = dict(sources)
+    changed["intro_owner_gate"] = once(changed["intro_owner_gate"],
+        "(diagnosticsOwnerAllowed || temporalAAOwnerAllowed)",
+        "(diagnosticsOwnerAllowed && temporalAAOwnerAllowed)")
+    expect_slice("either strict-selected D or TAA owner keeps its startup path", changed)
+
+    changed = dict(sources)
+    changed["vscreen"] = once(changed["vscreen"],
+        "!strictSelectedVScreenOwner &&", "strictSelectedVScreenOwner &&")
+    expect_slice("only strict-selected D/TAA ownership bypasses transport-only startup", changed)
 
     changed = dict(sources)
     changed["proxy"] = once(changed["proxy"],
@@ -2493,9 +2985,9 @@ def self_test_slices(sources: dict[str, str]) -> None:
 
     changed = dict(sources)
     changed["screen_motion"] = once(changed["screen_motion"],
-        "if (g.onFootPanelOwnerAllowed)\n        weaponMotionFrameBoundary(ctx);\n    g_gpu.tick(ctx,g.frame);",
-        "weaponMotionFrameBoundary(ctx);\n    g_gpu.tick(ctx,g.frame);")
-    expect_slice("weapon frame work stays owner-gated while core temporal-AA continues", changed)
+        "if (g.onFootPanelOwnerAllowed)\n        weaponMotionFrameBoundary(ctx);\n    if (!g.temporalAAOwnerAllowed) return;",
+        "weaponMotionFrameBoundary(ctx);\n    if (!g.temporalAAOwnerAllowed) return;")
+    expect_slice("weapon frame work stays owner-gated independently of Temporal-AA", changed)
 
     changed = dict(sources)
     changed["native_frame"] = once(changed["native_frame"],
@@ -2517,9 +3009,76 @@ def self_test_slices(sources: dict[str, str]) -> None:
 
     changed = dict(sources)
     changed["menu"] = once(changed["menu"],
-        "if (onFootPanelOwnerAllowed())\n                    resolveVScreenTargetResolution",
-        "if (true)\n                    resolveVScreenTargetResolution")
+        "if (onFootPanelOwnerAllowed())\n                    resolveVScreenTargetResolution(Config::get(), &vw, &vh, temporalAAOwnerAllowed(),",
+        "if (true)\n                    resolveVScreenTargetResolution(Config::get(), &vw, &vh, temporalAAOwnerAllowed(),")
     expect_slice("menu hint avoids On-foot settings reads when the owner is absent", changed)
+
+    changed = dict(sources)
+    changed["vscreen_res"] = once(changed["vscreen_res"],
+        "if (temporalAAOwnerAllowed) {",
+        "if (true) {")
+    expect_slice("vScreen fit resolver does not read cold Temporal-AA keys when owner is denied", changed)
+
+    changed = dict(sources)
+    changed["intro_upscale"] = once(changed["intro_upscale"],
+        "resolveVScreenTargetResolution(cfg, &vw, &vh, temporalAAOwnerAllowed(),",
+        "resolveVScreenTargetResolution(cfg, &vw, &vh,")
+    expect_slice("Intro fit call passes the published Temporal-AA owner decision", changed)
+
+    changed = dict(sources)
+    changed["menu"] = once(changed["menu"],
+        "if (!temporalAAOwnerAllowed()) return true;\n    if (runtimeFlatProfile()) return !flatDlssSelected();",
+        "/* preset row reads mode without owner */\n    if (runtimeFlatProfile()) return !flatDlssSelected();")
+    expect_slice("menu preset-row dimming does not read Temporal-AA mode without owner", changed)
+
+    changed = dict(sources)
+    changed["menu"] = once(changed["menu"],
+        'if (!temporalAAOwnerAllowed()) {\n        statusLine(c, "Temporal AA", "owner not admitted");\n    } else {',
+        'if (false) {\n        statusLine(c, "Temporal AA", "owner not admitted");\n    } else {')
+    expect_slice("menu status preserves owner-denied cold mode branch", changed)
+
+    changed = dict(sources)
+    changed["menu"] = once(changed["menu"],
+        "if (dlssRow && temporalAAOwnerAllowed()) {",
+        "if (dlssRow) {")
+    expect_slice("menu preset row label does not read Temporal-AA mode when owner is absent", changed)
+
+    changed = dict(sources)
+    changed["menu"] = once(changed["menu"],
+        "const bool refusing = temporalAAOwnerAllowed() &&",
+        "const bool refusing = true &&")
+    expect_slice("flat warning does not inspect refusal or requested mode without TAA owner", changed)
+
+    changed = dict(sources)
+    changed["menu"] = once(changed["menu"],
+        "if (refusing || s.open || s.flatSettingsForce) {",
+        "if (refusing) {")
+    expect_slice("flat settings polling remains available to open/forced Core menu without TAA", changed)
+
+    changed = dict(sources)
+    changed["menu"] = once(changed["menu"],
+        "if (runtimeFlatProfile() && temporalAAOwnerAllowed()) {\n            const char* wrapper = contextWrapperFile();",
+        "if (runtimeFlatProfile()) {\n            const char* wrapper = contextWrapperFile();")
+    expect_slice("flat wrapper note probe and requested mode remain TAA-owned", changed)
+
+    changed = dict(sources)
+    changed["device"] = once(changed["device"],
+        "s.temporalAAOwnerAllowed ? 1u : 0u",
+        "temporalAAOwnerAllowed() ? 1u : 0u")
+    expect_slice("Performance sampler receives the cached post-commit TAA snapshot", changed)
+
+    changed = dict(sources)
+    changed["texture_sampler_policy"] = once(changed["texture_sampler_policy"],
+        "context->temporalAAOwnerAllowed <= 1u",
+        "true")
+    expect_slice("sampler policy validates the cached Temporal-AA owner context before using it", changed)
+
+    changed = dict(sources)
+    changed["texture_sampler_policy"] = once(changed["texture_sampler_policy"],
+        'const bool temporal = temporalOwnerAllowed && temporalModeEnabled(\n'
+        '        Config::get().getString("fix.temporal_aa", "off"));',
+        'const bool temporal = temporalOwnerAllowed;')
+    expect_slice("admitted TAA ownership does not enable the auto LOD default when the configured mode is off", changed)
 
     changed = dict(sources)
     changed["vscreen_predicate_fixture"] = once(changed["vscreen_predicate_fixture"],

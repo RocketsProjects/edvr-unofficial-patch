@@ -254,6 +254,8 @@ MUTANTS = [
     M("pin-quality-default-drifts", "R12c", [('cfg.getString("fix.ui_quality", "100")', 'cfg.getString("fix.ui_quality", "125")')], "the resolver's fix.ui_quality default is not the layer's", "src/d3d11/vscreen_res.cpp"),
     M("pin-route-default-drifts", "R12b", [("f.keyAuto = true;", "f.keyAuto = false;")], "the resolver no longer states the on-foot world route as on", "src/d3d11/vscreen_res.cpp"),
     M("pin-layer-reason-dropped", "R12c", [("uiLayerNotLiveReasonFor(target, temporal, jitterAsShipped, /*stoodDown=*/false)", "nullptr")], "the resolver does not ask why the layer is not live", "src/d3d11/vscreen_res.cpp"),
+    M("pin-temporal-keys-read-without-owner", "R12t", [("if (temporalAAOwnerAllowed) {", "if (true) {")],
+      "the resolver reads Temporal-AA layer keys even when that owner is absent", "src/d3d11/vscreen_res.cpp"),
     M("pin-ini-forgets-the-rule", "R12o", [("#   fitted   when the VR on-foot world route will run (it needs", "#   fitted   when the VR on-foot route will run (it needs")], "the ini's text no longer names the world route", "edvr.ini"),
     M("pin-ini-forgets-the-restart", "R12o", [("# while it runs (never any file on disk). Needs a game restart; typing the", "# while it runs (never any file on disk). Takes effect later; typing the")], "the ini's text no longer says a restart is needed", "edvr.ini"),
     M("pin-ini-curve-stops-it", "R12o", [("fix.panel_curvature, does not stop it)", "fix.panel_curvature at 0)")], "the ini's text says a curved screen holds the route off again", "edvr.ini"),

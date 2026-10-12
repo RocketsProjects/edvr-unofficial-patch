@@ -584,7 +584,9 @@ inline int flatCopyWeaponWiringTests() {
     expect(!helperValid(without(helper, "if(!f.foregroundRequired)return;")), "mutation control: a helper that asks TAA or a one-camera frame fails the wiring");
 
     // -- the census line --
-    const std::string present = compact(body(runtime, "void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags) {"));
+    const std::string present = compact(body(runtime, "void flatRuntimePresent("));
+    expect(present.find("booltemporalAAOwnerAllowed)") != std::string::npos,
+           "the Present census receives the cached Temporal-AA owner decision");
     const auto lineValid = [&](const std::string& text) {
         return ordered(text, {"flatCopyFormatWindow(copyText,", "s.copyWindow.reset();", "flatCopyWeaponFormatWindow(weaponText,",
                               "s.copyWeaponWindow);", "Log::get().note(\"%s\", weaponText);", "s.copyWeaponWindow.reset();"});

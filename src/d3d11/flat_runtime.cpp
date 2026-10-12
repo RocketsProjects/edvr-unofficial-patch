@@ -2542,7 +2542,7 @@ bool flatRuntimeSceneSizes(uint32_t* renderWidth, uint32_t* renderHeight, uint32
                               outputHeight);
 }
 
-void flatRuntimeResize() {
+void flatRuntimeResize(bool temporalAAOwnerAllowed) {
     // The game retries a refused ResizeBuffers every frame: thousands of calls in seconds with no Present between
     // them (2026-10-09 Epic logs). The reports below say it once per 5 s with the count of the calls they skipped.
     static ULONGLONG lastResizeReportMs = 0;
@@ -2561,7 +2561,8 @@ void flatRuntimeResize() {
     nativeScale.store(false, std::memory_order_release);
     // The swap chain or the device went: engine motion's bound state (the game's render targets among it, held by
     // reference) is forgotten without touching a context that may be gone.
-    flatRuntimeSubstitution(nullptr, FlatSubstEvent::kResize);
+    if (temporalAAOwnerAllowed)
+        flatRuntimeSubstitution(nullptr, FlatSubstEvent::kResize);
     auto& s = state(); FlatComputeInternalScope guard; s.drawCapture.cancel("resize-or-stop");
     overlaySuffixActive.store(false,std::memory_order_release);
     s.overlay.reset();
@@ -2579,16 +2580,19 @@ void flatRuntimeResize() {
     foregroundDomainActive.store(false,std::memory_order_release);
     untrustedCoverageActive.store(false,std::memory_order_release);
     s.overlayFailureNoted=false;
-    s.weaponFootprint.cancel("resize-or-stop");flatMonoResolveReset();
+    s.weaponFootprint.cancel("resize-or-stop");
+    if (temporalAAOwnerAllowed) flatMonoResolveReset();
     // fix.ui_quality's flat layer: its layers, depth targets, composite output and the views over the pictures it
     // composited (none of them the back buffer, all of them released), and the door, so a fresh one arms the layer.
-    flatUiLayerRelease();
+    if (temporalAAOwnerAllowed) flatUiLayerRelease();
     s.drawPackets.cancel();
     // A reset (or the mode turned off) ends a stand-down: the new contract may well be
     // one the selector recognises, and every paused piece restarts with it.
-    endStandDown(s, s.prefix.frame, "the swap chain or device was reset, or the mode was turned off");
+    if (temporalAAOwnerAllowed)
+        endStandDown(s, s.prefix.frame, "the swap chain or device was reset, or the mode was turned off");
     gpuReset(s);
-    flatCameraInjectReset(); // history and the decision do not survive a resize; injected cameras stay known for the flush
+    if (temporalAAOwnerAllowed)
+        flatCameraInjectReset(); // history and the decision do not survive a resize; injected cameras stay known for the flush
     finishPhaseCensusFrame(s);
     if(reportResize && (s.phaseCensusFrames || s.phaseFailuresUsed || s.phaseOverflowCalls))
         reportPhaseCensus(s,"resize-or-stop");
@@ -2614,7 +2618,7 @@ void flatRuntimeResize() {
     g_sceneSizes.store(0, std::memory_order_release);
     s.prefix = FlatRuntimePrefix{}; s.context.Reset(); s.device.Reset(); s.thread = 0; s.viewportCount = 0;
 }
-void flatRuntimeBeforePresent() {
+void flatRuntimeBeforePresent(bool temporalAAOwnerAllowed) {
     g_flatRuntimeLive.store(false, std::memory_order_release);
     // Open mappings survive a stand-down or resize. Watch them at every frame
     // boundary, even when the projection runtime no longer exists.
@@ -2624,9 +2628,10 @@ void flatRuntimeBeforePresent() {
     HdrCrumbSpan routeBeforePresent(hdrCrumbPresentSide(), "before-present");
     // The frame is ending: the game's state goes back where engine motion's is still bound, before the real Present
     // and every EDVR pass that follows it (the lazy form, engine_velocity.h).
-    if (owner()) flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);
+    if (temporalAAOwnerAllowed && owner())
+        flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);
     // And what engine motion's bracket kept for the frame goes with it.
-    if (owner()) engineVelocityFlatFrameEndWithCost();
+    if (temporalAAOwnerAllowed && owner()) engineVelocityFlatFrameEndWithCost();
     // The census's whole-frame GPU span ends here, just before the real Present.
     if (owner()) gpuFrameClose(state());
 }
@@ -3262,7 +3267,8 @@ void flatRuntimeWeaponFootprintBeforePresent(IDXGISwapChain* swap,UINT flags) {
     FlatComputeInternalScope guard;
     s.weaponFootprint.beforePresent(s.context.Get(),s.prefix.frame,s.prefix.sequence);
 }
-void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags) {
+void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags,
+                        bool temporalAAOwnerAllowed) {
     if (!runtimeFlatProfile() || !swap || (flags & DXGI_PRESENT_TEST)) return;
     auto& s = state(); if (s.thread && !owner()) return;
     s.untrusted.pollMask(s.context.Get());
@@ -3300,7 +3306,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // closes here and reopens only once the next frame's phase is chosen, so a
     // Present that returns early below (mode off, no device, no swap buffer)
     // can never leave the previous frame's phase injecting.
-    flatCameraInjectDisarm();
+    if (temporalAAOwnerAllowed) flatCameraInjectDisarm();
     // The camera producer probe's per-Present cadence (config-gated inside).
     flatCameraProducerProbeFrame(frame);
     // Account for the completed frame before mode/resize changes or the next
@@ -3313,11 +3319,13 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if (s.observing) ++s.covFramesObserving;
     if (s.covFrameLocallyRefused) ++s.covFramesLocallyRefused;
     s.covFrameLocallyRefused = false;
-    const auto mode = Config::get().requestedTemporalMode();
-    const bool enabled = temporalModeEnabled(mode);
-    const auto model = Config::get().getString("fix.temporal_aa_model", "k");
+    const auto mode = temporalAAOwnerAllowed
+        ? Config::get().requestedTemporalMode() : std::string("off");
+    const bool enabled = temporalAAOwnerAllowed && temporalModeEnabled(mode);
+    const auto model = temporalAAOwnerAllowed
+        ? Config::get().getString("fix.temporal_aa_model", "k") : std::string("k");
     const auto preset = temporalPresetFor(model);
-    if (s.preset != preset.full) {
+    if (temporalAAOwnerAllowed && s.preset != preset.full) {
         s.preset = preset.full;
         dlaaSetPreset(preset.full);
         if (temporalEngineFor(mode) == TemporalEngine::Nvidia) {
@@ -3327,7 +3335,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         Log::get().note("flat runtime: DLSS model=%s preset=%u; applied at frame boundary%s",
             model.c_str(),preset.full,preset.known?"":" (unknown model; using K)");
     }
-    if (mode != s.mode) {
+    if (temporalAAOwnerAllowed && mode != s.mode) {
         s.haveResolvePlan=false;s.resolvePreflight={};s.resolvePreflightRetryMs=0;
         s.mode = mode; reset();
         // A new mode is a new question for the stand-down: everything restarts.
@@ -3348,10 +3356,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // Engine motion follows the stand-down (s.enginePaused); the mode of the frame that
     // starts now is decided below, and a change of it is handed over there.
     const bool enginePausedThen = s.enginePaused;
-    engineVelocityConfigure(enabled && !enginePausedThen);
+    if (temporalAAOwnerAllowed)
+        engineVelocityConfigure(enabled && !enginePausedThen);
     // No temporal mode selected: the census stops (its gates close, a scope costs a load and a compare).
     if (!enabled) {
-        s.census.idle();if(s.device || s.output || s.cameras.count())flatRuntimeResize();
+        s.census.idle();if(s.device || s.output || s.cameras.count())flatRuntimeResize(temporalAAOwnerAllowed);
         const auto request=projectionAuditRequested.take();
         const bool manual=flatCaptureBulk(request);
         if(request==FlatCaptureTier::General)Log::get().note("flat capture general: configured=%s AA=off; bounded desktop discovery only, bulk exporters not armed",mode.c_str());
@@ -3380,7 +3389,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     }
     FlatComputeInternalScope guard;
     Ptr<ID3D11Device> actualDevice; swap->GetDevice(IID_PPV_ARGS(&actualDevice));
-    if (s.device && actualDevice.Get() != s.device.Get()) { flatRuntimeResize(); s.thread = GetCurrentThreadId(); }
+    if (s.device && actualDevice.Get() != s.device.Get()) { flatRuntimeResize(temporalAAOwnerAllowed); s.thread = GetCurrentThreadId(); }
     if (!s.device) { swap->GetDevice(IID_PPV_ARGS(&s.device)); if (s.device) s.device->GetImmediateContext(&s.context); }
     if (!s.device || !s.context) return;
     // fix.ui_quality's flat layer: a device the layer has not seen (the actual-device-change branch above, or a device
@@ -3422,7 +3431,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.census.onFrame(censusNow, censusFreq, endedPaused);
         // Always drained, so the priming frame (or a census that was stopped) leaves no backlog to
         // be read as the first window's.
-        const EngineVelocityWrapperCounts wrapper = engineVelocityTakeWrapperCounts();
+        EngineVelocityWrapperCounts wrapper{};
+        if (temporalAAOwnerAllowed) wrapper = engineVelocityTakeWrapperCounts();
         if (censusWasRunning) s.census.noteWrapper(wrapper.stateCalls, wrapper.substitutedDraws);
         // The questions the runtime answered from what it already knew (flat_query_cut.h): drained with the wrapper's counts,
         // and the frame that starts now says whether it is one of the checked ones (one in 64).
@@ -3795,8 +3805,10 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         // named here draws in a known pool family with no keyed pixel shader, so its
         // pixels have no engine slot (engine_velocity_unkeyed.h).
         {
-            char unkeyed[560]; engineVelocityFormatUnkeyed(unkeyed,sizeof(unkeyed));
-            Log::get().note("%s",unkeyed);
+            if (temporalAAOwnerAllowed) {
+                char unkeyed[560]; engineVelocityFormatUnkeyed(unkeyed,sizeof(unkeyed));
+                Log::get().note("%s",unkeyed);
+            }
         }
         Log::get().note("flat jitter: enabled=%u wanted=%u phases=%u phase=(%.5g,%.5g) previous=(%.5g,%.5g) warm=%u frames=%llu draws=%llu dispatches=%llu refusals=%llu state=%s history-valid=%u",
             enabled?1u:0u,1u,s.phase.phaseCount,
@@ -4001,6 +4013,10 @@ static EngineVelocityFlushCause flushCauseOf(FlatSubstEvent event) {
     }
 }
 void flatRuntimeSubstitution(ID3D11DeviceContext* ctx, FlatSubstEvent event) {
+    // Flat draw hooks also carry Core capture/census work. Keep those callers
+    // alive, but do not let their shared boundary dispatch the TAA-owned
+    // EngineVelocity substitution when Temporal-AA is absent.
+    if (!temporalAAOwnerAllowed()) return;
     if (overlaySuffixActive.load(std::memory_order_acquire) && owner() && overlayOpen(state()) &&
         (event == FlatSubstEvent::kExecuteCommandList || event == FlatSubstEvent::kClearState))
         overlayFail(state(), "overlay-unknown-write-or-command-list");
@@ -4657,7 +4673,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // one armed the game's state goes back at once and every producer draw restores after itself, as it always did.
     {
         const bool diagnostics = flatTemporalCapturing() || s.drawCapture.active() || s.drawPackets.armed();
-        engineVelocityFlatLazy(!diagnostics);
+        if (temporalAAOwnerAllowed()) engineVelocityFlatLazy(!diagnostics);
         if (diagnostics) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);
     }
     const FlatProjectionBindingPlan* projectionPlan=nullptr;

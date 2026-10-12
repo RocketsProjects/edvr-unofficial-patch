@@ -132,15 +132,19 @@ void setLoaderPanelRead(LoaderPanelRead<T>& read, T value) noexcept {
 
 namespace {
 
+bool temporalAAOwnerActive() noexcept;
+
 // nullptr invalidates every cached input (command-list execution); otherwise
 // only writes to a source instance, bone or camera buffer invalidate them.
 // Reached from every Unmap, Copy and Update on the owner context.
 static void motionResourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)){
     if (onFootPanelOwnerAllowed()) weaponMotionResourceWritten(resource);
-    uiDepthMotionResourceWritten(resource,first,end);
+    if (temporalAAOwnerActive())
+        uiDepthMotionResourceWritten(resource,first,end);
     // Engine-record velocity: a write to an open eye-frame's pool or scene
     // constants drops that eye-frame's engine data (engine_velocity.h).
-    engineVelocityResourceWritten(resource);
+    if (temporalAAOwnerActive())
+        engineVelocityResourceWritten(resource);
 }
 
 // How often the totals line is written, and how long the starvation notice
@@ -1008,6 +1012,40 @@ bool runVScreenFootprintOwned(State* state, Callback&& callback) {
 }
 
 State* g_state = nullptr;
+
+bool temporalAAOwnerActive() noexcept {
+    return g_state && g_state->temporalAAOwnerAllowed;
+}
+bool uiDepthOwnerWantsDraws() noexcept {
+    return temporalAAOwnerActive() && uiDepthWantsDraws();
+}
+bool uiDepthOwnerHologramWantsDraws() noexcept {
+    return temporalAAOwnerActive() && uiDepthHologramWantsDraws();
+}
+bool uiLayerOwnerLive() noexcept {
+    return temporalAAOwnerActive() && uiLayerLive();
+}
+bool uiLayerOwnerWatching() noexcept {
+    return temporalAAOwnerActive() && uiLayerWatching();
+}
+bool uiLayerOwnerIssueBlocked() noexcept {
+    return temporalAAOwnerActive() && uiLayerIssueBlocked();
+}
+bool uiLayerOwnerCrispOn() noexcept {
+    return temporalAAOwnerActive() && uiLayerCrispOn();
+}
+bool uiLayerOwnerCrispPending() noexcept {
+    return temporalAAOwnerActive() && uiLayerCrispPending();
+}
+bool temporalAAOwnerWantsFssChrome() noexcept {
+    return temporalAAOwnerActive() && temporalPassWantsFssChrome();
+}
+bool flatTemporalOwnerCapturing() noexcept {
+    return temporalAAOwnerActive() && flatTemporalCapturing();
+}
+bool screenMotionOwnerLive() noexcept {
+    return temporalAAOwnerActive() && screenMotionLive();
+}
 
 bool diagnosticsOwnerPresent() {
     return g_state && g_state->diagnosticsOwnerAllowed;
@@ -1993,6 +2031,7 @@ uint32_t g_testSharedGlareLegacyGateCallbacks = 0;
 uint32_t g_testOnFootLegacyGateCallbacks = 0;
 uint32_t g_testDiagnosticsLegacyGateCallbacks = 0;
 uint32_t g_testTemporalSharedLegacyGateCallbacks = 0;
+uint32_t g_testTemporalAaLegacyGateCallbacks = 0;
 #define EDVR_TEST_COUNT_COCKPIT_GATE() (++g_testCockpitLegacyGateCallbacks)
 #define EDVR_TEST_COUNT_COMFORT_GATE() (++g_testComfortLegacyGateCallbacks)
 #define EDVR_TEST_COUNT_INTRO_GATE() (++g_testIntroLegacyGateCallbacks)
@@ -2000,6 +2039,7 @@ uint32_t g_testTemporalSharedLegacyGateCallbacks = 0;
 #define EDVR_TEST_COUNT_ON_FOOT_GATE() (++g_testOnFootLegacyGateCallbacks)
 #define EDVR_TEST_COUNT_DIAGNOSTICS_GATE() (++g_testDiagnosticsLegacyGateCallbacks)
 #define EDVR_TEST_COUNT_TEMPORAL_SHARED_GATE() (++g_testTemporalSharedLegacyGateCallbacks)
+#define EDVR_TEST_COUNT_TEMPORAL_AA_GATE() (++g_testTemporalAaLegacyGateCallbacks)
 #else
 #define EDVR_TEST_COUNT_COCKPIT_GATE() ((void)0)
 #define EDVR_TEST_COUNT_COMFORT_GATE() ((void)0)
@@ -2008,6 +2048,7 @@ uint32_t g_testTemporalSharedLegacyGateCallbacks = 0;
 #define EDVR_TEST_COUNT_ON_FOOT_GATE() ((void)0)
 #define EDVR_TEST_COUNT_DIAGNOSTICS_GATE() ((void)0)
 #define EDVR_TEST_COUNT_TEMPORAL_SHARED_GATE() ((void)0)
+#define EDVR_TEST_COUNT_TEMPORAL_AA_GATE() ((void)0)
 #endif
 #define EDVR_GATE_STATE(name, expression)                                      \
     uint32_t drawGate_##name(void* opaque) {                                   \
@@ -2057,6 +2098,13 @@ uint32_t g_testTemporalSharedLegacyGateCallbacks = 0;
         EDVR_TEST_COUNT_DIAGNOSTICS_GATE();                                  \
         return (expression) ? 1u : 0u;                                      \
     }
+#define EDVR_GATE_TEMPORAL_AA(name, expression)                              \
+    uint32_t drawGate_##name(void* opaque) {                                 \
+        State* s = static_cast<State*>(opaque);                              \
+        if (!s || !s->temporalAAOwnerAllowed) return 0;                      \
+        EDVR_TEST_COUNT_TEMPORAL_AA_GATE();                                  \
+        return (expression) ? 1u : 0u;                                      \
+    }
 
 EDVR_GATE_ON_FOOT(panel_distance, s->distanceEnabled)
 EDVR_GATE_COMFORT(transition_flash_eye_count, s->countForFlashFix)
@@ -2071,7 +2119,7 @@ EDVR_GATE_COMFORT(fss_reveal, fssRevealWantsDraws())
 EDVR_GATE_OWNED(remlok, remlokWantsDraws())
 EDVR_GATE_INTRO(hologram_depth, holoWantsDraws())
 EDVR_GATE_OWNED(target_indicator, targetSharpWantsDraws())
-EDVR_GATE_GLOBAL(ui_depth, uiDepthWantsDraws())
+EDVR_GATE_TEMPORAL_AA(ui_depth, uiDepthWantsDraws())
 EDVR_GATE_DIAGNOSTICS(draw_census, drawCensusArmed())
 uint32_t drawGate_object_probe(void* opaque) {
     State* s = static_cast<State*>(opaque);
@@ -2090,7 +2138,7 @@ uint32_t drawGate_sun_glare(void* opaque) {
 }
 EDVR_GATE_OWNED(particles, particleWantsDraws())
 EDVR_GATE_INTRO(backdrop, backdropWantsDraws())
-EDVR_GATE_GLOBAL(scrim, scrimWantsDraws())
+EDVR_GATE_INTRO(scrim, scrimWantsDraws())
 EDVR_GATE_DIAGNOSTICS(quad_probe, quadProbeWants())
 EDVR_GATE_INTRO(loader_panel, loaderPanelWants())
 EDVR_GATE_INTRO(intro_panel, introPanelWants())
@@ -2113,6 +2161,7 @@ EDVR_GATE_INTRO(intro_curve, introCurveWants())
 #undef EDVR_GATE_INTRO
 #undef EDVR_GATE_ON_FOOT
 #undef EDVR_GATE_DIAGNOSTICS
+#undef EDVR_GATE_TEMPORAL_AA
 #undef EDVR_TEST_COUNT_COCKPIT_GATE
 #undef EDVR_TEST_COUNT_COMFORT_GATE
 #undef EDVR_TEST_COUNT_INTRO_GATE
@@ -2120,6 +2169,7 @@ EDVR_GATE_INTRO(intro_curve, introCurveWants())
 #undef EDVR_TEST_COUNT_ON_FOOT_GATE
 #undef EDVR_TEST_COUNT_DIAGNOSTICS_GATE
 #undef EDVR_TEST_COUNT_TEMPORAL_SHARED_GATE
+#undef EDVR_TEST_COUNT_TEMPORAL_AA_GATE
 
 struct LegacyDrawGateRegistration {
     const char* name;
@@ -2146,14 +2196,14 @@ constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] = {
     {"legacy.remlok", &drawGate_remlok, true, LegacyGateOwner::CockpitVisuals},
     {"legacy.hologram-depth", &drawGate_hologram_depth, true, LegacyGateOwner::Intro},
     {"legacy.target-indicator", &drawGate_target_indicator, true, LegacyGateOwner::CockpitVisuals},
-    {"legacy.ui-depth", &drawGate_ui_depth, false},
+    {"legacy.ui-depth", &drawGate_ui_depth, true, LegacyGateOwner::TemporalAa},
     {"legacy.sun-glare", &drawGate_sun_glare, true, LegacyGateOwner::CockpitOrComfort},
     {"legacy.draw-census", &drawGate_draw_census, true, LegacyGateOwner::Diagnostics},
     {"legacy.object-probe", &drawGate_object_probe, true, LegacyGateOwner::DiagnosticsOrTemporalAa},
     {"legacy.panel-curve", &drawGate_panel_curve, true, LegacyGateOwner::OnFootPanel},
     {"legacy.particles", &drawGate_particles, true, LegacyGateOwner::CockpitVisuals},
     {"legacy.backdrop", &drawGate_backdrop, true, LegacyGateOwner::Intro},
-    {"legacy.scrim", &drawGate_scrim, false},
+    {"legacy.scrim", &drawGate_scrim, true, LegacyGateOwner::Intro},
     {"legacy.quad-probe", &drawGate_quad_probe, true, LegacyGateOwner::Diagnostics},
     {"legacy.loader-panel", &drawGate_loader_panel, true, LegacyGateOwner::Intro},
     {"legacy.intro-panel", &drawGate_intro_panel, true, LegacyGateOwner::Intro},
@@ -2567,7 +2617,7 @@ struct VScreenDrawLadderVisitor {
                 if (captureFact) fact->fssChrome.outerCensus = tri(censusGate);
                 outerGate = censusGate;
                 if (!outerGate) {
-                    const bool temporalGate = temporalPassWantsFssChrome();
+                    const bool temporalGate = temporalAAOwnerWantsFssChrome();
                     if (captureFact) fact->fssChrome.outerTemporal = tri(temporalGate);
                     outerGate = temporalGate;
                 }
@@ -2664,7 +2714,7 @@ struct VScreenDrawLadderVisitor {
                             s->fssChromeFrame = chromeFrameNo;
                             bumpFssChromeStamp();
                         }
-                        if (uiDepthWantsDraws()) uiDepthLearnScannerChrome(self, h, srv, res);
+                        if (uiDepthOwnerWantsDraws()) uiDepthLearnScannerChrome(self, h, srv, res);
                     }
                     res->Release();
                     srv->Release();
@@ -2794,7 +2844,7 @@ struct VScreenDrawLadderVisitor {
                     drawCensusDrawDirect(self, kind, count, instances, true, nullptr, 0, args);
                 return exited(id, DrawVerdict::kNone);
             }
-            if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);
+            if (flatTemporalOwnerCapturing()) flatTemporalDraw(self, count, instances);
             s->curveThisDraw = false;
             if (s->introOwnerAllowed) s->introCurveThisDraw = false;
             t_uiDepthThisDraw = false;
@@ -2919,7 +2969,7 @@ struct VScreenDrawLadderVisitor {
             return SiteResult::observed(static_cast<uint16_t>(s->rtv0Eye
                 ? draw_ladder::RouteId::kVrEye : draw_ladder::RouteId::kOffscreen));
         } else if constexpr (id == SiteId::kOffscreenSubmittedDraw) {
-            if (screenMotionLive()) screenMotionSource(self, s->panelW ? s->panelW : 1920,
+            if (screenMotionOwnerLive()) screenMotionSource(self, s->panelW ? s->panelW : 1920,
                                                        s->panelH ? s->panelH : 1080);
             if (s->rtv0Cand >= 0) {
                 State::SceneCandidate& c = s->cands[s->rtv0Cand];
@@ -2938,7 +2988,7 @@ struct VScreenDrawLadderVisitor {
             }
             if (diagDrawCensusWantsOffscreen() && diagDrawCensusArmed())
                 drawCensusOffDraw(self, kind, count, instances, args);
-            if (uiDepthWantsDraws()) uiDepthNoteOffscreenDraw(self);
+            if (uiDepthOwnerWantsDraws()) uiDepthNoteOffscreenDraw(self);
             if (s->introOwnerAllowed && kind == 'N' && count == 4 && introPanelWants() &&
                 bindingGet(BindSlot::PsSrv1) && bindingGet(BindSlot::PsSrv2)) {
                 ResourceInfo info;
@@ -3189,18 +3239,19 @@ struct VScreenDrawLadderVisitor {
         } else if constexpr (id == SiteId::kEyeDepthAndCount) {
             ++s->eyeDrawsThisFrame;
             void* const eyeDsv = bindingGet(BindSlot::Dsv0);
-            if (depthProbeEyeDrawNeedsNote(eyeDsv))
+            if ((s->diagnosticsOwnerAllowed || s->temporalAAOwnerAllowed) &&
+                depthProbeEyeDrawNeedsNote(eyeDsv))
                 depthProbeNoteEyeDraw(self, eyeDsv, s->eyeDrawsThisFrame);
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kEyeUiDepthProbe) {
-            if (uiDepthWantsDraws()) {
+            if (s->temporalAAOwnerAllowed && uiDepthWantsDraws()) {
                 t_uiDepthThisDraw = uiDepthOnEyeDraw(self,
                     {kind, count, instances, args.start, args.base, args.startInstance});
                 t_compositeThisDraw = uiDepthDrawSampledSurface();
             }
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kEyeHoloDepthProbe) {
-            if (uiDepthHologramWantsDraws())
+            if (s->temporalAAOwnerAllowed && uiDepthHologramWantsDraws())
                 t_holoDepthThisDraw = uiDepthHologramOnEyeDraw(self);
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kIntroPanelClaim) {
@@ -3274,7 +3325,7 @@ struct VScreenDrawLadderVisitor {
                 drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame, args);
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kUiCrispProbe) {
-            if (s->rtv0Eye && uiLayerCrispOn() && self == g_state->ownerCtx)
+            if (s->rtv0Eye && uiLayerOwnerCrispOn() && self == g_state->ownerCtx)
                 uiLayerCrispNoteEyeDraw(self, kind, count, instances, args.startInstance);
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kObjectProbe) {
@@ -3605,6 +3656,7 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kScrimClaim) {
+            if (!s->introOwnerAllowed) return SiteResult::declined();
             if constexpr (TracePolicy::enabled) {
                 holo_scrim_observation::ScrimObservation observed{};
                 const bool matches = scrimOnEyeDrawObserved(kind, count, instances, &observed);
@@ -4310,7 +4362,7 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
             flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource),FlatOverlayMutationOp::ClearRtv);
     }
     if (g_vrWorldWatchWrites) vrWorldRouteNoteRtvClear(rtv);
-    if (flatTemporalCapturing()) flatTemporalClearColor(rtv);
+    if (flatTemporalOwnerCapturing()) flatTemporalClearColor(rtv);
     // The census's record of this clear, before the probes and before
     // the void fix touches the colour: the line carries what the GAME
     // asked for.
@@ -4354,7 +4406,7 @@ void STDMETHODCALLTYPE hookedClearUavUint(ID3D11DeviceContext* self,
         flatRuntimeOverlayViewMutation(uav, FlatOverlayMutationOp::ClearUav,
             FlatMutationDetails::clear(FlatOverlayMutationOp::ClearUav,"ClearUnorderedAccessViewUint",c));
     }
-    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearUav(uav);
+    if (!foreignContext(self) && flatTemporalOwnerCapturing()) flatTemporalClearUav(uav);
     g_state->realClearUavUint(self, uav, c);
 }
 void STDMETHODCALLTYPE hookedClearUavFloat(ID3D11DeviceContext* self,
@@ -4368,7 +4420,7 @@ void STDMETHODCALLTYPE hookedClearUavFloat(ID3D11DeviceContext* self,
         flatRuntimeOverlayViewMutation(uav, FlatOverlayMutationOp::ClearUav,
             FlatMutationDetails::clear(FlatOverlayMutationOp::ClearUav,"ClearUnorderedAccessViewFloat",c));
     }
-    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearUav(uav);
+    if (!foreignContext(self) && flatTemporalOwnerCapturing()) flatTemporalClearUav(uav);
     g_state->realClearUavFloat(self, uav, c);
 }
 void STDMETHODCALLTYPE hookedGenerateMips(ID3D11DeviceContext* self,
@@ -4409,7 +4461,7 @@ void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT 
     // bumps the generation either way.
     bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
     bindingSet(BindSlot::Dsv0, dsv);
-    if (flatTemporalCapturing()) flatTemporalBind((n && rtvs) ? rtvs[0] : nullptr, dsv);
+    if (flatTemporalOwnerCapturing()) flatTemporalBind((n && rtvs) ? rtvs[0] : nullptr, dsv);
     g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
 }
 
@@ -4445,7 +4497,7 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
         }
         bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
         bindingSet(BindSlot::Dsv0, dsv);
-        if (flatTemporalCapturing()) flatTemporalBind((n && rtvs) ? rtvs[0] : nullptr, dsv);
+        if (flatTemporalOwnerCapturing()) flatTemporalBind((n && rtvs) ? rtvs[0] : nullptr, dsv);
     } else if (flatRuntimeActive()) {
         // The targets stay as they are and the UAVs go beside them: engine motion's MRT6, if it is still bound over the
         // game's targets, is among the targets those UAV slots must follow. The game's own set first.
@@ -4493,7 +4545,7 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UIN
     // covering it records it, even when it unbinds.
     if (start <= 1u && 1u - start < n) bindingSet(BindSlot::VsCb1, bufs ? bufs[1u - start] : nullptr);
     if (flatRuntimeActive()) flatRuntimeConstantBuffers(start, n, bufs);
-    if (flatTemporalCapturing()) flatTemporalConstantBuffers(false, start, n, bufs);
+    if (flatTemporalOwnerCapturing()) flatTemporalConstantBuffers(false, start, n, bufs);
     g_state->realVSSetConstantBuffers(self, start, n, bufs);
 }
 
@@ -4502,7 +4554,7 @@ void STDMETHODCALLTYPE hookedPSSetConstantBuffers(ID3D11DeviceContext* self, UIN
     if (g_flatComputeInternal) { g_state->realPSSetConstantBuffers(self, start, n, bufs); return; }
     // Installed only for flat discovery. Forward exactly once, including
     // foreign contexts and every call outside the bounded capture window.
-    if (!foreignContext(self) && flatTemporalCapturing())
+    if (!foreignContext(self) && flatTemporalOwnerCapturing())
         flatTemporalConstantBuffers(true, start, n, bufs);
     g_state->realPSSetConstantBuffers(self, start, n, bufs);
 }
@@ -4582,7 +4634,8 @@ void STDMETHODCALLTYPE hookedPSSetShader(ID3D11DeviceContext* self, ID3D11PixelS
     if (!foreignContext(self)) {
         const uint64_t h = shaderHashMemo(g_state->psMemo, ps);
         bindingSetShader(BindSlot::Ps, ps, h);
-        if (h) engineVelocityNoteSelfMarkingPs(h);   // the seam arc's bind census (engine_velocity.cpp)
+        if (h && g_state->temporalAAOwnerAllowed)
+            engineVelocityNoteSelfMarkingPs(h);   // the seam arc's bind census (engine_velocity.cpp)
         ++g_state->psSets;
         if (ps && !h) ++g_state->psSetsNoHash;
     }
@@ -4612,7 +4665,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
     }
     forgetBindings(s);
     if (flatRuntimeActive()) flatRuntimeClearBindings();
-    if (flatTemporalCapturing()) {
+    if (flatTemporalOwnerCapturing()) {
         flatTemporalBind(nullptr, nullptr);
         flatTemporalViewport(0, nullptr);
         flatTemporalClearBindings();
@@ -4629,7 +4682,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     State* s = g_state;
     if (foreignContext(self)) {
         if (flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
-        engineVelocityResourceUnknown(nullptr);
+        if (g_state->temporalAAOwnerAllowed) engineVelocityResourceUnknown(nullptr);
         s->realExecuteCommandList(self, list, restoreContextState);
         return;
     }
@@ -4644,12 +4697,13 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     // A recorded command list runs on the state the context holds: the game's, not engine motion's.
     if (flatRuntimeActive()) flatRuntimeSubstitution(self, FlatSubstEvent::kExecuteCommandList);
     if (flatRuntimeActive() && !privateExecution) flatRuntimeUnknown();
-    if (flatTemporalCapturing() && !privateExecution)
+    if (flatTemporalOwnerCapturing() && !privateExecution)
         flatTemporalExecuteList(false);
     if (!privateExecution) {
         graphicsBridgeNoteUnknownExecution();
         motionResourceWritten(nullptr);
-        if (celestialMotionAnyWatched()) celestialMotionConstantsUnknownWrite(nullptr);
+        if (g_state->temporalAAOwnerAllowed && celestialMotionAnyWatched())
+            celestialMotionConstantsUnknownWrite(nullptr);
         if (s->comfortOwnerAllowed) glitchFrameInvalidatePool(nullptr);
     }
     s->realExecuteCommandList(self, list, restoreContextState);
@@ -4698,9 +4752,11 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (gpuFrameCommandMightAct()) gpuFrameCommand(self);
     State* s = g_state;
     ++s->thunkHits[kHitMap];
-    if (type != D3D11_MAP_READ) uiAtlasNoteWrite(res, 1);  // one load until an atlas is watched
+    if (g_state->temporalAAOwnerAllowed && type != D3D11_MAP_READ)
+        uiAtlasNoteWrite(res, 1);  // one load until an atlas is watched
     if (foreignContext(self)) {
-        if(type!=D3D11_MAP_READ)engineVelocityResourceUnknown(res);
+        if(type!=D3D11_MAP_READ && g_state->temporalAAOwnerAllowed)
+            engineVelocityResourceUnknown(res);
         const HRESULT hr=s->realMap(self, res, sub, type, flags, mapped);
         flatRuntimeMapBounceNoteMap(self,res,sub,type,false,SUCCEEDED(hr));
         if (type!=D3D11_MAP_READ && SUCCEEDED(hr) && flatRuntimeActive())
@@ -4748,7 +4804,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         }
         flatRuntimeMap(res, type, mapped->pData);
     }
-    if (mapData0 && flatTemporalCapturing())
+    if (mapData0 && flatTemporalOwnerCapturing())
         flatTemporalMap(res, sub, type, mapped->pData);
     // The census CB watch's half of the tee: while a census runs, it needs
     // the mapped pointer of any buffer it is watching. One bool call when no
@@ -4763,7 +4819,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // Planet-patch constants' CPU shadow: remember the mapped pointer so the Unmap tee can copy the game's write
     // without a GPU copy at the draw. celestialMotionAnyWatched() is the callee's own first test, inline: with no
     // buffer watched (the module off, or no planet patch drawn yet) no resource can match.
-    if (mapData0 && type != D3D11_MAP_READ && celestialMotionAnyWatched()) {
+    if (g_state->temporalAAOwnerAllowed && mapData0 && type != D3D11_MAP_READ && celestialMotionAnyWatched()) {
         celestialMotionConstantsMapped(res, mapped->pData);
     }
     // Only the one buffer we care about, so this is a pointer compare on a very
@@ -4845,7 +4901,8 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // tell a re-map that keeps registers 270..275 (and a NO_OVERWRITE
     // append) from a write that changes what the snapshot holds. Four
     // pointer compares while live, one relaxed load while not.
-    if (mapData0 && type != D3D11_MAP_READ) engineVelocityResourceMapped(res, mapped->pData, static_cast<int>(type));
+    if (mapData0 && type != D3D11_MAP_READ && g_state->temporalAAOwnerAllowed)
+        engineVelocityResourceMapped(res, mapped->pData, static_cast<int>(type));
     // The billboard loan's target, independent of the chain above on
     // purpose: the buffer the glare train reads may BE the composite's or
     // the camera's, and must not steal either shadow's slot. Pointer compare
@@ -4887,7 +4944,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     State* s = g_state;
     ++s->thunkHits[kHitUnmap];
     if (foreignContext(self)) {
-        engineVelocityResourceUnknown(res);
+        if (g_state->temporalAAOwnerAllowed) engineVelocityResourceUnknown(res);
         if (flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
         bounceLease.finish();
         s->realUnmap(self, res, sub);
@@ -4896,7 +4953,8 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     motionResourceWritten(res);
     // The planet-patch shadow reads the write BEFORE the real Unmap, like every tee here: after it the memory is
     // no longer ours to look at.
-    if (celestialMotionAnyWatched()) celestialMotionConstantsUnmapped(res);
+    if (g_state->temporalAAOwnerAllowed && celestialMotionAnyWatched())
+        celestialMotionConstantsUnmapped(res);
     // glitchFrameInvalidatePool's own and only test is "installed at all"
     // (glitch_frame.h) -- unlike glitchFrameWantsPool, it does not also ask
     // State::observing, so glitchFrameObserving() would be the wrong,
@@ -4917,7 +4975,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         flatRuntimeOverlayResourceMutation(res, FlatOverlayMutationOp::Unmap,detail);
         flatRuntimeUnmap(res);
     }
-    if (flatTemporalCapturing()) flatTemporalUnmap(res);
+    if (flatTemporalOwnerCapturing()) flatTemporalUnmap(res);
     if (s->comfortOwnerAllowed && fssRevealWantsDraws())
         fssRevealNoteUnmap(res);
     // Read before forwarding: after the real Unmap the memory is no longer ours
@@ -4951,7 +5009,8 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         guardedBudget(g_temporalCameraBudget, [&] {
             // The same rows, kept pending for the temporal pass's camera
             // motion source until the frame's first eye draw claims them.
-            temporalPassNoteSceneWrite(s->camResource, s->camData, s->camBytes);
+            if (g_state->temporalAAOwnerAllowed)
+                temporalPassNoteSceneWrite(s->camResource, s->camData, s->camBytes);
         });
         s->camResource = nullptr;
         s->camData = nullptr;
@@ -5136,7 +5195,9 @@ __declspec(noinline) void forwardVerdictBegin(ID3D11DeviceContext* self, DrawVer
     case DrawVerdict::kNightVision:
         runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
                                [&] { pluginRegistryBegin(kPluginClaimNightVision,self); }); break;
-    case DrawVerdict::kScrim:        scrimBegin(self); break;
+    case DrawVerdict::kScrim:
+        runIntroOwned(g_state && g_state->introOwnerAllowed,
+                      [&] { scrimBegin(self); }); break;
     case DrawVerdict::kGlareSteady:
         runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
                                [&] { sunglareBegin(self); }); break;
@@ -5158,7 +5219,9 @@ __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdi
     case DrawVerdict::kGlareSteady:
         runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
                                [&] { sunglareEnd(self); }); break;
-    case DrawVerdict::kScrim:        scrimEnd(self); break;
+    case DrawVerdict::kScrim:
+        runIntroOwned(g_state && g_state->introOwnerAllowed,
+                      [&] { scrimEnd(self); }); break;
     case DrawVerdict::kTargetSharp:
         runCockpitVisualsOwned(g_state && g_state->cockpitVisualsOwnerAllowed,
                                [&] { targetSharpEnd(self); }); break;
@@ -5315,7 +5378,7 @@ __declspec(noinline) void worldScreenReissue(TracePolicy& trace,
                                              ID3D11DeviceContext* self, char kind,
                                              UINT count, UINT instances,
                                              const DrawArgs& args) {
-    if (uiLayerIssueBlocked()) {
+    if (uiLayerOwnerIssueBlocked()) {
         ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(
             trace, draw_ladder::ActionPhase::Begin, draw_ladder::ActionOutcome::Declined,
             kind, count, instances, args);
@@ -5352,7 +5415,7 @@ __declspec(noinline) void worldScreenReissueCurved(TracePolicy& trace,
                                                   char kind, UINT count,
                                                   UINT instances,
                                                   const DrawArgs& args) {
-    if (uiLayerIssueBlocked()) {
+    if (uiLayerOwnerIssueBlocked()) {
         ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(
             trace, draw_ladder::ActionPhase::Begin,
             draw_ladder::ActionOutcome::Declined, kind, count, instances, args,
@@ -5405,7 +5468,7 @@ __declspec(noinline) void curvedScreenSwallowed(TracePolicy& trace,
                              args.base, args.startInstance);
     });
     if (!routeOwns) return;
-    if (screenMotionLive()) screenMotionRecognize();
+    if (screenMotionOwnerLive()) screenMotionRecognize();
     worldScreenReissueCurved(trace, self, 'X', count, instances, args);
 }
 
@@ -5489,7 +5552,7 @@ template <class TracePolicy>
 void uiLayerSecondIssues(TracePolicy& trace, ID3D11DeviceContext* self,
                          char kind, UINT count, UINT instances,
                          const DrawArgs& args) {
-    if (uiLayerIssueBlocked()) return;
+    if (uiLayerOwnerIssueBlocked()) return;
     GpuCensusScope census(self, GpuCensusSection::FrameUiLayerReissues);
     const bool multiply = uiLayerMultiplyBegin(self);
     ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSecondUiDraw>(
@@ -5581,8 +5644,8 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // re-comparing it at each of a dozen sites per draw.
     const bool owner = self == g_state->ownerCtx;
     if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedEntry,
-            [] { return detail::g_uiLayerIssueBlocked; },
-            [] { return uiLayerIssueBlocked(); })) {
+            [] { return uiLayerOwnerIssueBlocked(); },
+            [] { return uiLayerOwnerIssueBlocked(); })) {
         if constexpr (TracePolicy::enabled) {
             draw_ladder_trace::ForwardFacts facts{};
             facts.presentMask = draw_ladder_trace::kForwardOwner |
@@ -5666,7 +5729,7 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
         }
     } seedOutcome{owner && forwardInputs.read(forwardInputs.fact.seedDiagnostics,
             [] { return detail::g_uiSeedDiagnostics; },
-            [] { return uiLayerSeedDiagnostics(); })};
+            [] { return temporalAAOwnerActive() && uiLayerSeedDiagnostics(); })};
     // The VR world route's pending re-issue of THIS draw (ui_layer.h): held for this call and no longer, so a draw
     // that goes no further (swallowed, or never issued) cannot leave it for the next one.
     struct WorldReissueScope {
@@ -5683,8 +5746,8 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // other issue through `draw` below passes None and is timed by its own section.
     auto observedDraw = [&](AlteredDraw altered) {
         if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,
-                [] { return detail::g_uiLayerIssueBlocked; },
-                [] { return uiLayerIssueBlocked(); })) {
+                [] { return uiLayerOwnerIssueBlocked(); },
+                [] { return uiLayerOwnerIssueBlocked(); })) {
             ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,
                 kind, count, instances, args);
@@ -5715,8 +5778,8 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // private geometry shader (supercruise_bars.h). Set with the family below, read at the layer's bracket.
     bool barsFamily = false;
     if (owner && forwardInputs.read(forwardInputs.fact.uiLayerLiveEyeGate,
-            [] { return detail::g_uiLayerLive; },
-            [] { return uiLayerLive(); }) && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
+            [] { return uiLayerOwnerLive(); },
+            [] { return uiLayerOwnerLive(); }) && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
         const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count);
         familyEvaluated = true;
         compositeCounted = uiDepthScope.composite;
@@ -5739,12 +5802,12 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
             // the panel would never come back to the eye route. It is made here instead, before the draw's own issue, so the
             // curved screen's substitution (which returns before that tail) is covered too. With the key off uiLayerMapsOn()
             // is false and this is one load of it, and only for a taken 2D screen composite.
-            if (uiLayer && uiFamily == UiLayerFamily::kScreen && uiLayerMapsOn() && screenMotionLive() && screenMotionRecognize())
+            if (uiLayer && uiFamily == UiLayerFamily::kScreen && uiLayerMapsOn() && screenMotionOwnerLive() && screenMotionRecognize())
                 uiLayerMapsNoteRecognised();
         }
     } else if (owner && forwardInputs.read(forwardInputs.fact.uiLayerLiveFallbackGate,
-            [] { return detail::g_uiLayerLive; },
-            [] { return uiLayerLive(); }) && v != DrawVerdict::kQuadSkip) {
+            [] { return uiLayerOwnerLive(); },
+            [] { return uiLayerOwnerLive(); }) && v != DrawVerdict::kQuadSkip) {
         // The two composites into a target vScreen does not call an eye's:
         // counted for the family census (one hash load a draw while live).
         const uint64_t vs = bindingShaderHash(BindSlot::Vs);
@@ -5767,8 +5830,8 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     bool retryCrispPending = false;
     bool retryCrispEvaluated = false;
     if (!uiLayer && owner && forwardInputs.read(forwardInputs.fact.uiLayerWatchingGate,
-            [] { return detail::g_uiLayerWatching; },
-            [] { return uiLayerWatching(); })) {
+            [] { return uiLayerOwnerWatching(); },
+            [] { return uiLayerOwnerWatching(); })) {
         retryCrispEvaluated = true;
         retryCrispPending = uiLayerCrispPending();
         if (!retryCrispPending) {
@@ -5961,7 +6024,9 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     }
     // Planet patch motion (celestial_motion.h): a colour-pass patch draw's constants are read from the CPU shadow here, before the game's
     // own issue -- no GPU copy, no reissue. celestialMotionLive() first, one load; then the VS hash the draw path already holds.
-    if (owner && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
+    if (g_state->temporalAAOwnerAllowed && owner && celestialMotionLive() &&
+        bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs)
+        celestialMotionNoteDraw(self);
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
     // The orbit lines (orbital_width.h; fix.ui_quality): the game's own draw of their vertex shader into an eye target is
     // issued with the half-width scaled by the panel patch's factor -- a patched copy of that shader and a private b13
@@ -5992,12 +6057,13 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // A Verdict-class draw also carries the fix that wraps it (alteredFixOf): the census names each.
     const AlteredDrawClass alteredClass = [&] {
         if constexpr (TracePolicy::enabled) {
-            const int family = engine_velocity_detail::cache.family;
+            const int family = g_state->temporalAAOwnerAllowed
+                ? engine_velocity_detail::cache.family : -1;
             forwardInputs.set(forwardInputs.fact.engineVelocityCacheFamily, family);
             return classifyAlteredDraw(owner, v == DrawVerdict::kNone, family >= 0, layered);
         } else {
             return classifyAlteredDraw(owner, v == DrawVerdict::kNone,
-                                       engineVelocityDrawSubstituted(), layered);
+                                       g_state->temporalAAOwnerAllowed && engineVelocityDrawSubstituted(), layered);
         }
     }();
     // THE SURFACE STRIP (docs\intro-video.md, 2026-10-01). With fix.panel_curvature above 0 the intro movie's composite (EDVR places its quad;
@@ -6030,7 +6096,7 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
             stripToward = introCurveToward();
             stripReverseU = introCurveReverseU();
         }
-        if (stripToward != 0 && !uiLayerIssueBlocked()) {
+        if (stripToward != 0 && !uiLayerOwnerIssueBlocked()) {
             ladderTraceAction<TracePolicy, draw_ladder::ActionId::kCurveStripDraw>(
                 trace, draw_ladder::ActionPhase::Begin, draw_ladder::ActionOutcome::Attempted,
                 kind, count, instances, args, 0, draw_ladder::kActionIssueCountUnknown);
@@ -6070,8 +6136,8 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // own issue, so the picture is stock whether or not the re-issue runs;
     // one bool load for the ordinary draw.
     if (originalIssued && forwardInputs.read(forwardInputs.fact.crispPendingAfterOriginal,
-            [] { return detail::g_uiLayerCrispPending; },
-            [] { return uiLayerCrispPending(); })) {
+            [] { return uiLayerOwnerCrispPending(); },
+            [] { return uiLayerOwnerCrispPending(); })) {
         crispHudTonemapReissue(trace, self, kind, count, instances, args);
     }
     // The VR world route: the 2D screen composite the layer did not take, issued above exactly as the game
@@ -6086,8 +6152,8 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // longer sees.
     if (effectCaptureScope.ctx) objectProbePanelDrawEnd(self);
     if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedAfterOriginal,
-            [] { return detail::g_uiLayerIssueBlocked; },
-            [] { return uiLayerIssueBlocked(); })) {
+            [] { return uiLayerOwnerIssueBlocked(); },
+            [] { return uiLayerOwnerIssueBlocked(); })) {
         // Begin failed with untrusted shader state: close existing brackets,
         // but issue neither the stock fallback nor any depth/motion replay.
         if (v == DrawVerdict::kBackdrop) {
@@ -6178,7 +6244,8 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
             return uiDepthPlanetPending();
         }
     };
-    if(owner && readPlanetPending() && uiDepthPlanetBegin(self)) {
+    if(owner && temporalAAOwnerActive() && readPlanetPending() &&
+       uiDepthPlanetBegin(self)) {
         GpuCensusScope census(self, GpuCensusSection::FramePlanet);
         pureDrawReissue(self,kind,count,instances,args);
         uiDepthPlanetEnd(self);
@@ -6250,17 +6317,17 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
-    uiAtlasNoteWrite(dst, 2);
+    if (g_state->temporalAAOwnerAllowed) uiAtlasNoteWrite(dst, 2);
     if (g_vrWorldWatchWrites && !foreignContext(self)) vrWorldRouteNoteWrite(dst);   // a write into H after the resolve is the latch's
-    if(foreignContext(self))engineVelocityResourceUnknown(dst);
-    if (!foreignContext(self)) {motionResourceWritten(dst);if(celestialMotionAnyWatched())celestialMotionConstantsUnknownWrite(dst);if(g_state->comfortOwnerAllowed)glitchFrameInvalidatePool(dst);if(g_state->comfortOwnerAllowed&&fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
+    if(foreignContext(self) && g_state->temporalAAOwnerAllowed)engineVelocityResourceUnknown(dst);
+    if (!foreignContext(self)) {motionResourceWritten(dst);if(g_state->temporalAAOwnerAllowed&&celestialMotionAnyWatched())celestialMotionConstantsUnknownWrite(dst);if(g_state->comfortOwnerAllowed)glitchFrameInvalidatePool(dst);if(g_state->comfortOwnerAllowed&&fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerOwnerWatching())uiLayerNoteCopy(dst,src);}
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyResource,
             FlatMutationDetails::transfer(FlatOverlayMutationOp::CopyResource,"CopyResource",src));
         flatRuntimeWrittenExtent(dst,historyWholeWrite(HistoryWriteEntry::CopyResource));
     }
-    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'R');
+    if (!foreignContext(self) && flatTemporalOwnerCapturing()) flatTemporalTransfer(dst, src, 'R');
     if (diagDrawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
                        foreignContext(self));
@@ -6285,7 +6352,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
     }
     // The depth probe learns which value the game clears an eye-draw
     // target to, which says which way its depth runs.
-    if (!foreignContext(self)) {depthProbeNoteClear(dsv, depth);if(uiLayerWatching())uiLayerNoteDepthClear(dsv, flags, depth, stencil);}
+    if (!foreignContext(self)) {if(g_state->diagnosticsOwnerAllowed||g_state->temporalAAOwnerAllowed)depthProbeNoteClear(dsv, depth);if(uiLayerOwnerWatching())uiLayerNoteDepthClear(dsv, flags, depth, stencil);}
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
         flatRuntimeOverlayViewMutation(dsv, FlatOverlayMutationOp::ClearDsv,
@@ -6293,7 +6360,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
         flatRuntimeWeaponFootprintClear(dsv, flags, stencil);
     }
     if (!foreignContext(self) && (flags & D3D11_CLEAR_DEPTH) && flatRuntimeActive()) { ResourceInfo info{}; if (bindingResolve(dsv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource)); }
-    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearDepth(dsv, flags, depth);
+    if (!foreignContext(self) && flatTemporalOwnerCapturing()) flatTemporalClearDepth(dsv, flags, depth);
     g_state->realClearDsv(self, dsv, flags, depth, stencil);
 }
 
@@ -6335,7 +6402,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
     if (runtimeFlatProfile()) {
         withFlatBypassTrace(self, 'Z', 0, 0, DrawArgs{}, [&](auto& trace) {
-            if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
+            if (self == g_state->ownerCtx && flatTemporalOwnerCapturing()) flatTemporalDraw(self, 0, 0);
             FlatRuntimeDrawScope flatDraw(self, 0, 'Z');
             if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw(args, off);
             g_state->realDrawIndexedInstancedIndirect(self, args, off);
@@ -6353,7 +6420,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
             [&] { g_state->realDrawIndexedInstancedIndirect(self, args, off); });
         return;
     }
-    const bool blocked = self == g_state->ownerCtx && uiLayerIssueBlocked();
+    const bool blocked = self == g_state->ownerCtx && uiLayerOwnerIssueBlocked();
     withCommandBypassTrace<draw_ladder::RouteId::kDrawIndexedInstancedIndirectBypass,
                            draw_ladder::SequenceId::kDrawIndexedInstancedIndirectBypass,
                            draw_ladder::SiteId::kDrawIndexedInstancedIndirectRuntimeBypass,
@@ -6366,7 +6433,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
             if (diagDrawCensusArmed()) drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
             if (!foreignContext(self)) {
                 depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
-                engineVelocityBeforeDrawSampledBoundary(self, g_state->rtv0Eye);
+                if (g_state->temporalAAOwnerAllowed)
+                    engineVelocityBeforeDrawSampledBoundary(self, g_state->rtv0Eye);
                 pixelProbeBefore(g_state, self);
                 if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
             }
@@ -6384,7 +6452,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
     if (runtimeFlatProfile()) {
         withFlatBypassTrace(self, 'Y', 0, 0, DrawArgs{}, [&](auto& trace) {
-            if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
+            if (self == g_state->ownerCtx && flatTemporalOwnerCapturing()) flatTemporalDraw(self, 0, 0);
             FlatRuntimeDrawScope flatDraw(self, 0, 'Y');
             if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw(args, off);
             g_state->realDrawInstancedIndirect(self, args, off);
@@ -6402,7 +6470,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
             [&] { g_state->realDrawInstancedIndirect(self, args, off); });
         return;
     }
-    const bool blocked = self == g_state->ownerCtx && uiLayerIssueBlocked();
+    const bool blocked = self == g_state->ownerCtx && uiLayerOwnerIssueBlocked();
     withCommandBypassTrace<draw_ladder::RouteId::kDrawInstancedIndirectBypass,
                            draw_ladder::SequenceId::kDrawInstancedIndirectBypass,
                            draw_ladder::SiteId::kDrawInstancedIndirectRuntimeBypass,
@@ -6415,7 +6483,8 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
             if (diagDrawCensusArmed()) drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
             if (!foreignContext(self)) {
                 depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
-                engineVelocityBeforeDrawSampledBoundary(self, g_state->rtv0Eye);
+                if (g_state->temporalAAOwnerAllowed)
+                    engineVelocityBeforeDrawSampledBoundary(self, g_state->rtv0Eye);
                 pixelProbeBefore(g_state, self);
                 if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
             }
@@ -6441,7 +6510,7 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyStructureCount,detail);
     }
     if(!foreignContext(self)){motionResourceWritten(dst,off,uint64_t(off)+4);if(g_state->comfortOwnerAllowed)glitchFrameInvalidatePool(dst);}
-    else engineVelocityResourceUnknown(dst);
+    else if (g_state->temporalAAOwnerAllowed) engineVelocityResourceUnknown(dst);
     if (diagDrawCensusArmed()) {
         drawCensusStructCount(dst, off, src, foreignContext(self));
     }
@@ -6456,20 +6525,21 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
                      "CopySubresourceRegion");
-    uiAtlasNoteWrite(dst, 2);
+    if (g_state->temporalAAOwnerAllowed) uiAtlasNoteWrite(dst, 2);
     if (g_vrWorldWatchWrites && !foreignContext(self)) vrWorldRouteNoteWrite(dst);
-    if(foreignContext(self))engineVelocityResourceUnknown(dst);
+    if(foreignContext(self) && g_state->temporalAAOwnerAllowed)engineVelocityResourceUnknown(dst);
     if (!foreignContext(self)) {
         // Buffer boxes are byte ranges. Keep the destination offset: a
         // small upload into the shared IB must not invalidate other meshes.
         if(box && box->right>=box->left)
             motionResourceWritten(dst,dstX,uint64_t(dstX)+box->right-box->left);
         else motionResourceWritten(dst);
-        if (celestialMotionAnyWatched()) celestialMotionConstantsUnknownWrite(dst);
+        if (g_state->temporalAAOwnerAllowed && celestialMotionAnyWatched())
+            celestialMotionConstantsUnknownWrite(dst);
         if (g_state->comfortOwnerAllowed) glitchFrameInvalidatePool(dst);
         if (g_state->comfortOwnerAllowed && fssResActive())
             fssResNoteCopyMaybeMismatched(dst, src);
-        if (uiLayerWatching()) uiLayerNoteCopy(dst, src);
+        if (uiLayerOwnerWatching()) uiLayerNoteCopy(dst, src);
     }
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
@@ -6478,7 +6548,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
                 src,srcSub,dstSub,box,dstX,dstY,dstZ));
         flatRuntimeWrittenExtent(dst,flatRuntimeCopyExtent(dstSub,dstX,src,box));
     }
-    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'C');
+    if (!foreignContext(self) && flatTemporalOwnerCapturing()) flatTemporalTransfer(dst, src, 'C');
     if (diagDrawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
                        box ? box->left : 0, box ? box->top : 0,
@@ -6502,13 +6572,14 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
                      "UpdateSubresource");
-    uiAtlasNoteWrite(dst, 0);
+    if (g_state->temporalAAOwnerAllowed) uiAtlasNoteWrite(dst, 0);
     if (g_vrWorldWatchWrites && !foreignContext(self)) vrWorldRouteNoteWrite(dst);
-    if(foreignContext(self))engineVelocityResourceUnknown(dst);
+    if(foreignContext(self) && g_state->temporalAAOwnerAllowed)engineVelocityResourceUnknown(dst);
     if (!foreignContext(self)) {
         if(box && box->right>=box->left)motionResourceWritten(dst,box->left,box->right);
         else motionResourceWritten(dst);
-        if (celestialMotionAnyWatched()) celestialMotionConstantsWritten(dst, data, box);
+        if (g_state->temporalAAOwnerAllowed && celestialMotionAnyWatched())
+            celestialMotionConstantsWritten(dst, data, box);
         if (g_state->comfortOwnerAllowed) glitchFrameInvalidatePool(dst);
     }
     if (diagDrawCensusArmed()) {
@@ -6537,7 +6608,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::UpdateSubresource,detail);
         flatRuntimeUpdate(dst, data, box);
     }
-    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalUpdate(dst, data, box);
+    if (!foreignContext(self) && flatTemporalOwnerCapturing()) flatTemporalUpdate(dst, data, box);
     g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch,
                                    depthPitch);
 }
@@ -6566,7 +6637,7 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::Resolve,detail);
         flatRuntimeWritten(dst);
     }
-    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'V');
+    if (!foreignContext(self) && flatTemporalOwnerCapturing()) flatTemporalTransfer(dst, src, 'V');
     if (diagDrawCensusArmed()) {
         drawCensusResolve(dst, dstSub, src, srcSub, static_cast<uint32_t>(fmt));
     }
@@ -6608,7 +6679,7 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
     if (g_flatComputeInternal) { g_state->realRSSetViewports(self, n, vps); return; }
     State* s = g_state;
     if (!foreignContext(self) && flatRuntimeActive()) flatRuntimeViewport(n, vps);
-    if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalViewport(n, vps);
+    if (!foreignContext(self) && flatTemporalOwnerCapturing()) flatTemporalViewport(n, vps);
     if (foreignContext(self) || !s->comfortOwnerAllowed || n != 1 || !vps ||
         !fssResActive()) {
         s->realRSSetViewports(self, n, vps);
@@ -6721,7 +6792,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         withFlatBypassTrace(self, 'D', count, 1, args, [&](auto& trace) {
             // Capture original game bindings before the temporal scope substitutes
             // the engine-motion PS/MRT or the output-copy SRV.
-            if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
+            if (self == g_state->ownerCtx && flatTemporalOwnerCapturing()) flatTemporalDraw(self, count, 1);
             flatCensusDraw(self, 'D', count, 1, args);
             FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
             if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
@@ -6759,7 +6830,8 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             Api>(trace, self, 'D', count, 1, args);
         const DrawVerdict v = decision.verdict;
       if (v == DrawVerdict::kNone && self == g_state->ownerCtx)
-          engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
+          if (g_state->temporalAAOwnerAllowed)
+              engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
         if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
         forwardWithVerdict(trace, self, v, 'D', count, 1, args, [&](AlteredDraw altered) {
@@ -6784,7 +6856,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     if (runtimeFlatProfile()) {
         withFlatBypassTrace(self, 'A', 0, 0, DrawArgs{}, [&](auto& trace) {
-            if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
+            if (self == g_state->ownerCtx && flatTemporalOwnerCapturing()) flatTemporalDraw(self, 0, 0);
             FlatRuntimeDrawScope flatDraw(self, 0, 'A');
             if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
             g_state->realDrawAuto(self);
@@ -6802,7 +6874,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
             [&] { g_state->realDrawAuto(self); });
         return;
     }
-    const bool blocked = self == g_state->ownerCtx && uiLayerIssueBlocked();
+    const bool blocked = self == g_state->ownerCtx && uiLayerOwnerIssueBlocked();
     withCommandBypassTrace<draw_ladder::RouteId::kAutoBypass,
                            draw_ladder::SequenceId::kAutoBypass,
                            draw_ladder::SiteId::kAutoRuntimeBypass,
@@ -6810,7 +6882,8 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
         self, 'A', 0, 0, DrawArgs{}, nullptr, 0, false, false,
         draw_ladder::kActionGpuDrawArgsUnavailable, blocked, [&](auto& trace) {
             gpuFrameCommand(self);
-            if (self == g_state->ownerCtx) engineVelocityBeforeDrawSampledBoundary(self, g_state->rtv0Eye);
+            if (self == g_state->ownerCtx && g_state->temporalAAOwnerAllowed)
+                engineVelocityBeforeDrawSampledBoundary(self, g_state->rtv0Eye);
             if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
             g_state->realDrawAuto(self);
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kAutoDraw>(
@@ -6825,7 +6898,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         ++g_state->thunkHits[kHitDrawIndexed];
         DrawArgs args{}; args.start = startIndex; args.base = baseVertex;
         withFlatBypassTrace(self, 'I', count, 1, args, [&](auto& trace) {
-            if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
+            if (self == g_state->ownerCtx && flatTemporalOwnerCapturing()) flatTemporalDraw(self, count, 1);
             flatCensusDraw(self, 'I', count, 1, args);
             FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
             if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
@@ -6864,7 +6937,8 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
             Api>(trace, self, 'I', count, 1, args);
         const DrawVerdict v = decision.verdict;
         if (v == DrawVerdict::kNone && self == g_state->ownerCtx)
-            engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
+            if (g_state->temporalAAOwnerAllowed)
+                engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
         if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
         forwardWithVerdict(trace, self, v, 'I', count, 1, args, [&](AlteredDraw altered) {
@@ -6892,7 +6966,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     if (runtimeFlatProfile()) {
         DrawArgs args{}; args.base = static_cast<int32_t>(startVertex); args.startInstance = startInstance;
         withFlatBypassTrace(self, 'N', perInstance, instances, args, [&](auto& trace) {
-            if (self == g_state->ownerCtx && flatTemporalCapturing())
+            if (self == g_state->ownerCtx && flatTemporalOwnerCapturing())
                 flatTemporalDraw(self, perInstance, instances);
             flatCensusDraw(self, 'N', perInstance, instances, args);
             FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
@@ -6933,8 +7007,10 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
             Api>(trace, self, 'N', perInstance, instances, args);
         const DrawVerdict v = decision.verdict;
         if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {
-            engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
-            engineVelocityNoteSkinDraw(self, startInstance, instances);
+            if (g_state->temporalAAOwnerAllowed) {
+                engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
+                engineVelocityNoteSkinDraw(self, startInstance, instances);
+            }
         }
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
         if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
@@ -6971,7 +7047,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (runtimeFlatProfile()) {
         DrawArgs args{}; args.start = startIndex; args.base = baseVertex; args.startInstance = startInstance;
         withFlatBypassTrace(self, 'X', perInstance, instances, args, [&](auto& trace) {
-            if (self == g_state->ownerCtx && flatTemporalCapturing())
+            if (self == g_state->ownerCtx && flatTemporalOwnerCapturing())
                 flatTemporalDraw(self, perInstance, instances);
             flatCensusDraw(self, 'X', perInstance, instances, args);
             FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
@@ -7032,8 +7108,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
       // only when the game has rebound something since the last look. After the
       // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
         if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {
-            engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
-            engineVelocityNoteSkinDraw(self, startInstance, instances);
+            if (g_state->temporalAAOwnerAllowed) {
+                engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
+                engineVelocityNoteSkinDraw(self, startInstance, instances);
+            }
         }
       if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
       if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
@@ -7078,14 +7156,15 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             const bool glitchWantsScene = g_state->comfortOwnerAllowed &&
                 recognisedScene && glitchFrameWantsSceneDraw(sceneVs);
             int temporalEye = -1;
-            if (recognisedScene && (temporalPassWantsRigidDraw(0) ||
+            const bool temporalOwner = g_state->temporalAAOwnerAllowed;
+            if (temporalOwner && recognisedScene && (temporalPassWantsRigidDraw(0) ||
                                     temporalPassWantsRigidDraw(1))) {
                 int targetIndex = -1;
                 depthProbeCurrentSceneEyeOf(
                     static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0)),
                     &temporalEye, &targetIndex);
             }
-            const bool temporalWantsScene = recognisedScene &&
+            const bool temporalWantsScene = temporalOwner && recognisedScene &&
                 temporalPassWantsRigidDraw(temporalEye);
             // At most one temporal VS-b1 query per identified eye/frame. The
             // old flash diagnostic shares it when both want this draw. A null
@@ -7117,13 +7196,13 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             // are unused while the route owns it (0.24 ms), so they are skipped -- but the RECOGNITION still runs.
             // It is what keeps naming the world's source camera and depth for the next frames (the engine slot
             // source and the weapon map depend on it), and it only ever ran inside screenMotionDraw.
-            if (screenMotionLive() && uiLayerWorldReissuePending()) screenMotionRecognize();
+            if (screenMotionOwnerLive() && uiLayerWorldReissuePending()) screenMotionRecognize();
             // screenMotionLive() is the first term of both (screen_motion.h);
             // with fix.temporal_aa off these were two calls per draw that only
             // ever returned. Neither runs for a draw the UI layer took
             // (ui_layer.h): its pixels are not in the pass's input, and the
             // bound target and viewport are the layer's.
-            if (screenMotionLive() && !uiLayerRedirecting() && !uiLayerWorldReissuePending()) {
+            if (screenMotionOwnerLive() && !uiLayerRedirecting() && !uiLayerWorldReissuePending()) {
                 // The census (issue #38) times screen_motion.cpp's own GPU
                 // work now, not this call site: most calls into either
                 // function return above, at screenMotionLive()'s own flags
@@ -7201,6 +7280,10 @@ using VScreenEyeCensusTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeCensusSkip, draw_ladder::SiteKind::Claim>;
 using VScreenObjectProbeTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kObjectProbe, draw_ladder::SiteKind::Observe>;
+using VScreenUiDepthProbeTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kEyeUiDepthProbe, draw_ladder::SiteKind::Observe>;
+using VScreenScrimTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kScrimClaim, draw_ladder::SiteKind::Claim>;
 using VScreenLoaderPanelTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kOffscreenLoaderPanel, draw_ladder::SiteKind::Claim>;
 using VScreenTargetSharpTestSite = draw_ladder::InterestGated<
@@ -7649,6 +7732,12 @@ draw_ladder::SiteResult vScreenPredicateTestInvoke(
     if (siteId == static_cast<std::uint16_t>(VScreenObjectProbeTestSite::id)) {
         return vScreenPredicateTestInvokeSite<VScreenObjectProbeTestSite>(visitor, trace);
     }
+    if (siteId == static_cast<std::uint16_t>(VScreenUiDepthProbeTestSite::id)) {
+        return vScreenPredicateTestInvokeSite<VScreenUiDepthProbeTestSite>(visitor, trace);
+    }
+    if (siteId == static_cast<std::uint16_t>(VScreenScrimTestSite::id)) {
+        return vScreenPredicateTestInvokeSite<VScreenScrimTestSite>(visitor, trace);
+    }
     return vScreenPredicateTestInvokeSite<VScreenDistanceTestSite>(visitor, trace);
 }
 
@@ -7686,7 +7775,9 @@ bool vScreenPredicateTestVisit(
                     siteId != static_cast<std::uint16_t>(VScreenIntroCurveTestSite::id) &&
                     siteId != static_cast<std::uint16_t>(VScreenHoloTestSite::id) &&
                     siteId != static_cast<std::uint16_t>(VScreenBackdropTestSite::id) &&
-                    siteId != static_cast<std::uint16_t>(VScreenObjectProbeTestSite::id)))
+                    siteId != static_cast<std::uint16_t>(VScreenObjectProbeTestSite::id) &&
+                    siteId != static_cast<std::uint16_t>(VScreenUiDepthProbeTestSite::id) &&
+                    siteId != static_cast<std::uint16_t>(draw_ladder::SiteId::kScrimClaim)))
         return false;
 
     static State fixture{};
@@ -7709,6 +7800,7 @@ bool vScreenPredicateTestVisit(
     State* const priorState = g_state;
     const bool priorUiDepth = t_uiDepthThisDraw;
     const bool priorComposite = t_compositeThisDraw;
+    t_uiDepthThisDraw = false;
     g_state = &fixture;
 
     draw_ladder_trace::DrawFacts facts{};
@@ -7717,6 +7809,8 @@ bool vScreenPredicateTestVisit(
     facts.instances = instances;
     result->token = draw_ladder_trace::beginDraw(facts);
     if (!result->token.valid()) {
+        t_uiDepthThisDraw = priorUiDepth;
+        t_compositeThisDraw = priorComposite;
         g_state = priorState;
         return false;
     }
@@ -7735,6 +7829,7 @@ bool vScreenPredicateTestVisit(
     }
     result->glareClampAfter = fixture.glareClamp;
     result->curveThisDrawAfter = fixture.curveThisDraw;
+    result->uiDepthThisDrawAfter = t_uiDepthThisDraw;
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;
@@ -7770,10 +7865,11 @@ bool vScreenLegacyGateRegistrationTest(
     std::uint32_t* sharedGlareCallbacks,
     std::uint32_t* onFootCallbacks,
     std::uint32_t* diagnosticsCallbacks,
-    std::uint32_t* temporalSharedCallbacks) noexcept {
+    std::uint32_t* temporalSharedCallbacks,
+    std::uint32_t* temporalAAOwnerCallbacks) noexcept {
     if (!registeredCount || !cockpitCallbacks || !comfortCallbacks || !introCallbacks ||
         !sharedGlareCallbacks || !onFootCallbacks || !diagnosticsCallbacks ||
-        !temporalSharedCallbacks) return false;
+        !temporalSharedCallbacks || !temporalAAOwnerCallbacks) return false;
 
     // Isolate only the legacy-gate table; lifecycle/plugin registrations and
     // their state remain untouched and are restored after the temporary visit.
@@ -7792,6 +7888,7 @@ bool vScreenLegacyGateRegistrationTest(
     g_testOnFootLegacyGateCallbacks = 0;
     g_testDiagnosticsLegacyGateCallbacks = 0;
     g_testTemporalSharedLegacyGateCallbacks = 0;
+    g_testTemporalAaLegacyGateCallbacks = 0;
     const bool registered = registerLegacyDrawGates(&fixture, registeredCount);
     (void)pluginRegistryVisitLegacyDrawGatesForTest(&fixture);
     *cockpitCallbacks = g_testCockpitLegacyGateCallbacks;
@@ -7801,6 +7898,7 @@ bool vScreenLegacyGateRegistrationTest(
     *onFootCallbacks = g_testOnFootLegacyGateCallbacks;
     *diagnosticsCallbacks = g_testDiagnosticsLegacyGateCallbacks;
     *temporalSharedCallbacks = g_testTemporalSharedLegacyGateCallbacks;
+    *temporalAAOwnerCallbacks = g_testTemporalAaLegacyGateCallbacks;
     pluginRegistryEndLegacyDrawGateTest();
     return registered;
 }
@@ -7818,6 +7916,7 @@ bool vScreenForwardingPredicateTestVisit(
     fixture.comfortOwnerAllowed = true;
     fixture.introOwnerAllowed = true;
     fixture.onFootPanelOwnerAllowed = true;
+    fixture.temporalAAOwnerAllowed = true;
     fixture.ownerCtx = context;
     fixture.rtv0Eye = nullptr;
     fixture.curveThisDraw = input.curveThisDraw;
@@ -8280,6 +8379,7 @@ bool vScreenPanelDistanceApiTransactionTest(
     fixture.introOwnerAllowed = true;
     fixture.onFootPanelOwnerAllowed = true;
     fixture.diagnosticsOwnerAllowed = true;
+    fixture.temporalAAOwnerAllowed = true;
     const uint32_t priorEyeW = fixture.eyeW;
     const uint32_t priorEyeH = fixture.eyeH;
     const uint32_t priorEyeDraws = fixture.eyeDrawsThisFrame;
@@ -9250,9 +9350,11 @@ void vScreenRefreshConfig() {
     runCockpitVisualsOwned(s->cockpitVisualsOwnerAllowed, [&] {
         wakePulseConfigure(cfg);
     });
-    uiDepthConfigure(cfg);
-    uiLayerConfigure(cfg);
-    scrimConfigure(cfg);
+    if (s->temporalAAOwnerAllowed) {
+        uiDepthConfigure(cfg);
+        uiLayerConfigure(cfg);
+    }
+    runIntroOwned(s->introOwnerAllowed, [&] { scrimConfigure(cfg); });
     runDiagnosticsOwned(s->diagnosticsOwnerAllowed, [&] { quadProbeConfigure(cfg); });
     selectIntroVideoLifecycle();
     configureIntroLifecycleStage(kIntroLifecycleLoader, cfg,
@@ -9262,10 +9364,13 @@ void vScreenRefreshConfig() {
     configureIntroLifecycleStage(kIntroLifecyclePanel, cfg,
                                  introPanelConfigure);
     configureIntroVideoLifecycle(cfg);
-    sharpenPassConfigure(cfg);
-    temporalPassConfigure(cfg);
+    if (s->temporalAAOwnerAllowed) {
+        sharpenPassConfigure(cfg);
+        temporalPassConfigure(cfg);
+    }
     configureSchedulerLifecycle(cfg);
-    screenMotionConfigure(cfg, s->onFootPanelOwnerAllowed);
+    screenMotionConfigure(cfg, s->temporalAAOwnerAllowed,
+                          s->onFootPanelOwnerAllowed);
     pluginRegistryConfigure(&cfg);
     if (s->diagnosticsOwnerAllowed || s->temporalAAOwnerAllowed)
         depthProbeConfigure(cfg, s->diagnosticsOwnerAllowed,
@@ -9526,20 +9631,26 @@ void vScreenFrameBoundary() {
         runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
             tkWakePulse.run([&] { wakePulseReport(); });
         });
-        tkUiDepth.run([&] { uiDepthFrameBoundary(g_state->ownerCtx); });
+        if (g_state->temporalAAOwnerAllowed)
+            tkUiDepth.run([&] { uiDepthFrameBoundary(g_state->ownerCtx); });
         // fix.ui_quality: the layer's warm compile, the surfaces' five-second
         // cross-check and learning, the key's 30-second totals, and the end
         // of this frame's watch for draws after the UI.
-        tkUiLayer.run([&] { uiLayerFrameBoundary(g_state->ownerCtx); });
+        if (g_state->temporalAAOwnerAllowed)
+            tkUiLayer.run([&] { uiLayerFrameBoundary(g_state->ownerCtx); });
         // The orbit lines' factor, read from the panel patch the layer's boundary has just settled (orbital_width.h): one atomic
         // every draw of the next frame sees, both eyes, the game's and the coverage twin.
-        tkOrbitalWidth.run([&] { orbitalWidthFrameBoundary(g_state->ownerCtx); });
+        if (g_state->temporalAAOwnerAllowed)
+            tkOrbitalWidth.run([&] { orbitalWidthFrameBoundary(g_state->ownerCtx); });
         // The supercruise bars' private pass (supercruise_bars.h): settles a binding the last issue could not restore.
-        tkSupercruiseBars.run([&] { supercruiseBarsFrameBoundary(g_state->ownerCtx); });
+        if (g_state->temporalAAOwnerAllowed)
+            tkSupercruiseBars.run([&] { supercruiseBarsFrameBoundary(g_state->ownerCtx); });
         // The VR world route (docs section 82) reads the world-screen gate the layer's boundary just computed, accounts the
         // frame that ended, steps its ownership machine and arms its detector; the camera census runs after it. With
         // the census off each returns at its first test when the route has nothing to do.
-        tkVrWorldRoute.run([&] { vrWorldRouteFrameBoundary(); });
+        tkVrWorldRoute.run([&] {
+            vrWorldRouteFrameBoundary(g_state->temporalAAOwnerAllowed);
+        });
         // fix.vscreen_res_width = auto's footprint instrument (vscreen_footprint.h): maps a sample whose copy has had time to
         // run, and every 30 s prints its line and stores the on-foot head-on floor (p10) for the next launch's width. The gate it is
         // handed is the one the route reads: the layer's world-screen gate while the layer is live, else the journal's word.
@@ -9551,18 +9662,25 @@ void vScreenFrameBoundary() {
                 vscreenFootprintFrameBoundary(g_state->ownerCtx, onFoot);
             });
         });
-        tkScreenMotion.run([&] { screenMotionFrameBoundary(g_state->ownerCtx); });
-        tkEngineVelocity.run([&] { engineVelocityFrameBoundary(g_state->ownerCtx); });
+        if (g_state->temporalAAOwnerAllowed ||
+            g_state->onFootPanelOwnerAllowed)
+            tkScreenMotion.run([&] { screenMotionFrameBoundary(g_state->ownerCtx); });
+        if (g_state->temporalAAOwnerAllowed)
+            tkEngineVelocity.run([&] { engineVelocityFrameBoundary(g_state->ownerCtx); });
         // Planet patch motion's stamp and 5 s census line (celestial_motion.h): the stamp pairs each eye's frames, and the pass's
         // consumer for a frame has run by the time this does, as every consumer of the frame's draws has.
-        tkCelestialMotion.run([&] { celestialMotionFrameBoundary(); });
+        if (g_state->temporalAAOwnerAllowed)
+            tkCelestialMotion.run([&] { celestialMotionFrameBoundary(); });
         // The sharpening's warm compile and missing-hook note, once a frame,
         // unconditionally -- not nested under any other feature's gate.
-        tkSharpenTick.run([&] { sharpenPassTick(g_state->ownerCtx); });
+        if (g_state->temporalAAOwnerAllowed)
+            tkSharpenTick.run([&] { sharpenPassTick(g_state->ownerCtx); });
         // The temporal pass: its warm compile, and this frame's camera
         // rows becoming last frame's.
-        tkTemporalTick.run([&] { temporalPassTick(g_state->ownerCtx); });
-        tkTemporalBoundary.run([&] { temporalPassFrameBoundary(); });
+        if (g_state->temporalAAOwnerAllowed) {
+            tkTemporalTick.run([&] { temporalPassTick(g_state->ownerCtx); });
+            tkTemporalBoundary.run([&] { temporalPassFrameBoundary(); });
+        }
         // Issue #38's per-feature GPU cost census (gpu_census.h): polls every
         // section's timer, rotates which one is actively timed next frame,
         // and every 30 s logs one summary line. Always on, no ini key.
@@ -10635,9 +10753,11 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
         wakePulseConfigure(cfg);
     });
-    uiDepthConfigure(cfg);
-    uiLayerConfigure(cfg);
-    scrimConfigure(cfg);
+    if (g_state->temporalAAOwnerAllowed) {
+        uiDepthConfigure(cfg);
+        uiLayerConfigure(cfg);
+    }
+    runIntroOwned(g_state->introOwnerAllowed, [&] { scrimConfigure(cfg); });
     runDiagnosticsOwned(g_state->diagnosticsOwnerAllowed, [&] { quadProbeConfigure(cfg); });
     selectIntroVideoLifecycle();
     configureIntroLifecycleStage(kIntroLifecycleLoader, cfg,
@@ -10647,10 +10767,13 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     configureIntroLifecycleStage(kIntroLifecyclePanel, cfg,
                                  introPanelConfigure);
     configureIntroVideoLifecycle(cfg);
-    sharpenPassConfigure(cfg);
-    temporalPassConfigure(cfg);
+    if (g_state->temporalAAOwnerAllowed) {
+        sharpenPassConfigure(cfg);
+        temporalPassConfigure(cfg);
+    }
     configureSchedulerLifecycle(cfg);
-    screenMotionConfigure(cfg, g_state->onFootPanelOwnerAllowed);
+    screenMotionConfigure(cfg, g_state->temporalAAOwnerAllowed,
+                          g_state->onFootPanelOwnerAllowed);
     pluginRegistryConfigure(&cfg);
     if (g_state->diagnosticsOwnerAllowed || g_state->temporalAAOwnerAllowed)
         depthProbeConfigure(cfg, g_state->diagnosticsOwnerAllowed,
@@ -11043,14 +11166,19 @@ void shutdownVScreenFixes() {
     }
     shutdownRemlokLifecycle();
     runIntroOwned(g_state->introOwnerAllowed, [&] { holoShutdown(); });
-    uiDepthShutdown();
-    uiLayerShutdown();
-    orbitalWidthShutdown();
-    supercruiseBarsShutdown();
-    screenMotionShutdown();
+    if (g_state && g_state->temporalAAOwnerAllowed) {
+        uiDepthShutdown();
+        uiLayerShutdown();
+        orbitalWidthShutdown();
+        supercruiseBarsShutdown();
+    }
+    if (g_state && (g_state->temporalAAOwnerAllowed ||
+                    g_state->onFootPanelOwnerAllowed))
+        screenMotionShutdown();
     pluginRegistryShutdown();
-    celestialMotionShutdown();
-    scrimShutdown();
+    if (g_state && g_state->temporalAAOwnerAllowed)
+        celestialMotionShutdown();
+    runIntroOwned(g_state->introOwnerAllowed, [&] { scrimShutdown(); });
     runDiagnosticsOwned(g_state->diagnosticsOwnerAllowed, [&] { quadProbeShutdown(); });
     runCockpitVisualsOwned(g_state->cockpitVisualsOwnerAllowed, [&] {
         wakePulseShutdown();
@@ -11072,7 +11200,8 @@ void shutdownVScreenFixes() {
     shutdownIntroLifecycleStage(kIntroLifecyclePanel, introPanelShutdown);
     shutdownIntroLifecycleStage(kIntroLifecycleCurve, introCurveShutdown);
     shutdownIntroVideoLifecycle();
-    temporalPassShutdown();
+    if (g_state && g_state->temporalAAOwnerAllowed)
+        temporalPassShutdown();
     // The scheduler stack probe (advanced.scheduler_probe) is configured by
     // vScreen startup and reload, independently of the temporal pass.
     // reset() clears active_ -- the Present and job-entry feeds check it --
@@ -11083,7 +11212,8 @@ void shutdownVScreenFixes() {
     });
     if (g_state->diagnosticsOwnerAllowed || g_state->temporalAAOwnerAllowed)
         depthProbeShutdown(g_state->diagnosticsOwnerAllowed);
-    sharpenPassShutdown();
+    if (g_state && g_state->temporalAAOwnerAllowed)
+        sharpenPassShutdown();
     g_state->hook.uninstall();
     perfMonitorPluginCostShutdown();
     const draw_ladder_trace::ShutdownResult replay = draw_ladder_trace::shutdown();

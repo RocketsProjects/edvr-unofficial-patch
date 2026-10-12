@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <type_traits>
 
 namespace {
 using namespace edvr::plugins::performance;
@@ -29,9 +30,24 @@ struct MultiplierFixture {
     unsigned calls = 0;
 };
 
+struct ConfigureHostFixture {
+    TextureSamplerHostContextV1 admission{
+        sizeof(TextureSamplerHostContextV1),
+        kTextureSamplerHostContextVersion1,
+        1u};
+    MultiplierFixture* multiplier = nullptr;
+    bool callbackReceivedAdmissionPointer = false;
+};
+
+static_assert(std::is_standard_layout<ConfigureHostFixture>::value,
+              "the typed host context must remain the first fixture member");
+
 bool readMultiplier(void* opaque, float* multiplier, float* ssaa, char* file,
                     uint32_t fileCapacity) {
-    auto& fixture = *static_cast<MultiplierFixture*>(opaque);
+    auto& host = *static_cast<ConfigureHostFixture*>(opaque);
+    host.callbackReceivedAdmissionPointer = opaque == &host.admission;
+    if (!host.multiplier) return false;
+    auto& fixture = *host.multiplier;
     ++fixture.calls;
     if (!fixture.available) return false;
     if (multiplier) *multiplier = fixture.multiplier;
@@ -42,7 +58,8 @@ bool readMultiplier(void* opaque, float* multiplier, float* ssaa, char* file,
 
 TextureSamplerSettingsV1 configure(const char* anisotropy, const char* bias,
                                    const char* temporal,
-                                   MultiplierFixture* multiplier = nullptr) {
+                                   MultiplierFixture* multiplier = nullptr,
+                                   bool ownerAllowed = true) {
     edvr::Config::get().set("advanced.texture_anisotropy", anisotropy);
     if (bias) edvr::Config::get().set("advanced.texture_lod_bias", bias);
     edvr::Config::get().set("fix.temporal_aa", temporal);
@@ -52,10 +69,29 @@ TextureSamplerSettingsV1 configure(const char* anisotropy, const char* bias,
               ops->version == kTextureSamplerPolicyOpsVersion1 && ops->configure &&
               ops->rewrite,
           "v1 policy ops table is complete");
-    ops->configure(ops->context, multiplier, &readMultiplier, &settings);
+    ConfigureHostFixture host{};
+    host.admission.temporalAAOwnerAllowed = ownerAllowed ? 1u : 0u;
+    host.multiplier = multiplier;
+    ops->configure(ops->context, &host.admission, &readMultiplier, &settings);
+    if (multiplier && multiplier->calls > 0)
+        check(host.callbackReceivedAdmissionPointer,
+              "multiplier callback receives the typed host context unchanged");
     check(settings.structSize == sizeof(settings) &&
               settings.version == kTextureSamplerSettingsVersion1,
           "configure produces the v1 POD settings record");
+    return settings;
+}
+
+TextureSamplerSettingsV1 configureWithoutValidHostContext(void* hostContext) {
+    edvr::Config::get().set("advanced.texture_anisotropy", "0");
+    edvr::Config::get().set("fix.temporal_aa", "dlss");
+    TextureSamplerSettingsV1 settings{};
+    const auto* ops = textureSamplerPolicyOpsV1();
+    check(ops && ops->configure, "policy configure operation is available");
+    ops->configure(ops->context, hostContext, nullptr, &settings);
+    check(settings.structSize == sizeof(settings) &&
+              settings.version == kTextureSamplerSettingsVersion1,
+          "invalid host context still produces initialized settings");
     return settings;
 }
 
@@ -97,6 +133,54 @@ void testUnsetDefaultsAndAuto() {
               !settings.biasAutoRequested && !settings.rewriteEnabled,
           "unset VR sampler settings retain zero defaults");
 
+    // An admitted owner retains mode semantics: mode off defaults to zero,
+    // while mode on defaults to auto and reaches the same opaque callback
+    // context that carries the typed admission snapshot.
+    MultiplierFixture admittedOnMultiplier{true, 0.5f, 1.25f};
+    settings = configure("0", nullptr, "off", &admittedOnMultiplier, true);
+    check(settings.bias == 0.0f && !settings.biasAutoRequested &&
+              admittedOnMultiplier.calls == 0,
+          "admitted TAA mode off keeps the zero default without a multiplier read");
+    settings = configure("0", nullptr, "dlss", &admittedOnMultiplier, true);
+    check(settings.biasAutoRequested && settings.autoSourceAvailable &&
+              std::fabs(settings.bias - -1.0f) < 0.00001f &&
+              admittedOnMultiplier.calls == 1,
+          "admitted TAA mode on keeps the auto default and multiplier behavior");
+
+    // Denial must not consult the TAA mode even when it is enabled and the
+    // explicit LOD key is absent. The zero default and untouched callback
+    // counter make an accidental mode read/auto branch observable.
+    MultiplierFixture deniedMultiplier{true, 0.5f, 1.25f};
+    settings = configure("0", nullptr, "dlss", &deniedMultiplier, false);
+    check(settings.bias == 0.0f && !settings.biasAutoRequested &&
+              !settings.rewriteEnabled && deniedMultiplier.calls == 0,
+          "denied owner skips the TAA mode default and auto callback");
+
+    TextureSamplerHostContextV1 malformed{
+        sizeof(TextureSamplerHostContextV1),
+        kTextureSamplerHostContextVersion1,
+        2u};
+    settings = configureWithoutValidHostContext(nullptr);
+    check(settings.bias == 0.0f && !settings.biasAutoRequested &&
+              !settings.rewriteEnabled,
+          "null host context keeps the cold TAA default at zero");
+    settings = configureWithoutValidHostContext(&malformed);
+    check(settings.bias == 0.0f && !settings.biasAutoRequested &&
+              !settings.rewriteEnabled,
+          "out-of-range owner bit keeps the cold TAA default at zero");
+    malformed.temporalAAOwnerAllowed = 1u;
+    malformed.structSize -= 4u;
+    settings = configureWithoutValidHostContext(&malformed);
+    check(settings.bias == 0.0f && !settings.biasAutoRequested &&
+              !settings.rewriteEnabled,
+          "wrong host-context size keeps the cold TAA default at zero");
+    malformed.structSize = sizeof(TextureSamplerHostContextV1);
+    malformed.version += 1u;
+    settings = configureWithoutValidHostContext(&malformed);
+    check(settings.bias == 0.0f && !settings.biasAutoRequested &&
+              !settings.rewriteEnabled,
+          "wrong host-context version keeps the cold TAA default at zero");
+
     edvr::Config::get().set("fix.temporal_aa", "dlss");
     MultiplierFixture multiplier{true, 0.5f, 1.25f};
     settings = configure("17", nullptr, "dlss", &multiplier);
@@ -108,10 +192,21 @@ void testUnsetDefaultsAndAuto() {
           "auto bias uses log2 of Elite's multiplier");
     check(multiplier.calls == 1 && std::strstr(settings.biasWhy, "fixture.2.4.fxcfg"),
           "auto alone requests the host multiplier and retains its diagnostic source");
+    // The callback receives the host context pointer (whose first member is
+    // the typed admission POD) unchanged through the policy boundary.
+    check(settings.biasAutoRequested,
+          "admitted auto control reaches the multiplier callback path");
     MultiplierFixture tinyMultiplier{true, 0.01f, 1.0f};
     settings = configure("0", "auto", "off", &tinyMultiplier);
     check(settings.biasAuto && settings.bias == -4.0f,
           "auto-derived bias is clamped at negative four");
+
+    MultiplierFixture deniedExplicitMultiplier{true, 0.5f, 1.25f};
+    settings = configure("0", "1.25", "dlss", &deniedExplicitMultiplier, false);
+    check(std::fabs(settings.bias - 1.25f) < 0.00001f &&
+              !settings.biasAutoRequested && settings.rewriteEnabled &&
+              deniedExplicitMultiplier.calls == 0,
+          "denied TAA owner preserves Performance's explicit bias without auto lookup");
 }
 
 void testConfigurationAndAuto() {

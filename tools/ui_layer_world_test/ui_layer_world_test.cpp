@@ -131,8 +131,9 @@ BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)];
 }  // namespace detail
 void breadcrumb(const char*) {}  // production guard.cpp's crash-channel dependency
 
-// screen_motion.h's two flags (screenMotionLive is inline over them): the rig sets them the way fix.temporal_aa would.
+// screen_motion.h's cached owner and feature flags: this fixture admits Temporal AA.
 namespace detail {
+bool g_screenMotionOwnerAllowed = true;
 bool g_screenMotionEnabled = true;
 bool g_screenMotionFailed = false;
 }  // namespace detail

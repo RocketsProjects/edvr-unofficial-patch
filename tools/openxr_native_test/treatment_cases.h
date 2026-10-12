@@ -14,6 +14,16 @@ struct State {
   char fail=0;
   enum class FssAcquireMode { admitted, ownerAbsent, malformedAbsent, failure, otherPositive };
   FssAcquireMode fssAcquireMode=FssAcquireMode::admitted;
+  enum class FssMalformedField { size, version, context, beginFrame, treatEye, healPair, invalidate, close };
+  FssMalformedField fssMalformedField=FssMalformedField::context;
+  enum class TemporalAcquireMode { admitted, ownerAbsent, malformedAbsent, failure, pending, otherPositive };
+  TemporalAcquireMode temporalAcquireMode=TemporalAcquireMode::admitted;
+  enum class TemporalMalformedField { size, version, context, beginFrame, noteProjection, treatEye, invalidate, close, skipEye };
+  TemporalMalformedField temporalMalformedField=TemporalMalformedField::context;
+  enum class SharpenAcquireMode { admitted, ownerAbsent, malformedAbsent, failure, pending, otherPositive };
+  SharpenAcquireMode sharpenAcquireMode=SharpenAcquireMode::admitted;
+  enum class SharpenMalformedField { size, version, context, treatEye, invalidate, close };
+  SharpenMalformedField sharpenMalformedField=SharpenMalformedField::context;
   unsigned invalidations=0;
   std::string calls;
   std::vector<ID3D11Texture2D*> inputs;
@@ -80,7 +90,18 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFss(const EdvrNativeFssRequest*,EdvrN
     case State::FssAcquireMode::ownerAbsent:
       *table={sizeof(*table),EDVR_NATIVE_FSS_VERSION_2};return S_FALSE;
     case State::FssAcquireMode::malformedAbsent:
-      *table={sizeof(*table),EDVR_NATIVE_FSS_VERSION_2,&state};return S_FALSE;
+      *table={sizeof(*table),EDVR_NATIVE_FSS_VERSION_2};
+      switch(state.fssMalformedField) {
+        case State::FssMalformedField::size:++table->size;break;
+        case State::FssMalformedField::version:++table->version;break;
+        case State::FssMalformedField::context:table->context=&state;break;
+        case State::FssMalformedField::beginFrame:table->beginFrame=beginFss;break;
+        case State::FssMalformedField::treatEye:table->treatEye=fss;break;
+        case State::FssMalformedField::healPair:table->healPair=healPair;break;
+        case State::FssMalformedField::invalidate:table->invalidate=invalidate;break;
+        case State::FssMalformedField::close:table->close=close;break;
+      }
+      return S_FALSE;
     case State::FssAcquireMode::failure:
       *table={sizeof(*table),EDVR_NATIVE_FSS_VERSION_2};return E_FAIL;
     case State::FssAcquireMode::otherPositive:
@@ -90,11 +111,60 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFss(const EdvrNativeFssRequest*,EdvrN
 }
 extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(const EdvrNativeTemporalRequest*,EdvrNativeTemporalTable* table) {
   using namespace edvr::openxr::test::treatment_fixture;
-  *table={sizeof(*table),EDVR_NATIVE_TEMPORAL_VERSION_1,&state,beginTemporal,projection,temporal,invalidate,close,skip};return S_OK;
+  *table={sizeof(*table),EDVR_NATIVE_TEMPORAL_VERSION_1,&state,beginTemporal,projection,temporal,invalidate,close,skip};
+  switch(state.temporalAcquireMode) {
+    case State::TemporalAcquireMode::admitted:return S_OK;
+    case State::TemporalAcquireMode::ownerAbsent:
+      *table={sizeof(*table),EDVR_NATIVE_TEMPORAL_VERSION_1};return S_FALSE;
+    case State::TemporalAcquireMode::malformedAbsent:
+      *table={sizeof(*table),EDVR_NATIVE_TEMPORAL_VERSION_1};
+      switch(state.temporalMalformedField) {
+        case State::TemporalMalformedField::size:++table->size;break;
+        case State::TemporalMalformedField::version:++table->version;break;
+        case State::TemporalMalformedField::context:table->context=&state;break;
+        case State::TemporalMalformedField::beginFrame:table->beginFrame=beginTemporal;break;
+        case State::TemporalMalformedField::noteProjection:table->noteProjection=projection;break;
+        case State::TemporalMalformedField::treatEye:table->treatEye=temporal;break;
+        case State::TemporalMalformedField::invalidate:table->invalidate=invalidate;break;
+        case State::TemporalMalformedField::close:table->close=close;break;
+        case State::TemporalMalformedField::skipEye:table->skipEye=skip;break;
+      }
+      return S_FALSE;
+    case State::TemporalAcquireMode::failure:
+      *table={sizeof(*table),EDVR_NATIVE_TEMPORAL_VERSION_1};return E_FAIL;
+    case State::TemporalAcquireMode::pending:
+      *table={sizeof(*table),EDVR_NATIVE_TEMPORAL_VERSION_1};return E_PENDING;
+    case State::TemporalAcquireMode::otherPositive:
+      *table={sizeof(*table),EDVR_NATIVE_TEMPORAL_VERSION_1};return static_cast<HRESULT>(2);
+  }
+  return E_UNEXPECTED;
 }
 extern "C" HRESULT WINAPI edvrAcquireNativeSharpen(const EdvrNativeSharpenRequest*,EdvrNativeSharpenTable* table) {
   using namespace edvr::openxr::test::treatment_fixture;
-  *table={sizeof(*table),EDVR_NATIVE_SHARPEN_VERSION_1,&state,sharpen,invalidate,close};return S_OK;
+  *table={sizeof(*table),EDVR_NATIVE_SHARPEN_VERSION_1,&state,sharpen,invalidate,close};
+  switch(state.sharpenAcquireMode) {
+    case State::SharpenAcquireMode::admitted:return S_OK;
+    case State::SharpenAcquireMode::ownerAbsent:
+      *table={sizeof(*table),EDVR_NATIVE_SHARPEN_VERSION_1};return S_FALSE;
+    case State::SharpenAcquireMode::malformedAbsent:
+      *table={sizeof(*table),EDVR_NATIVE_SHARPEN_VERSION_1};
+      switch(state.sharpenMalformedField) {
+        case State::SharpenMalformedField::size:++table->size;break;
+        case State::SharpenMalformedField::version:++table->version;break;
+        case State::SharpenMalformedField::context:table->context=&state;break;
+        case State::SharpenMalformedField::treatEye:table->treatEye=sharpen;break;
+        case State::SharpenMalformedField::invalidate:table->invalidate=invalidate;break;
+        case State::SharpenMalformedField::close:table->close=close;break;
+      }
+      return S_FALSE;
+    case State::SharpenAcquireMode::failure:
+      *table={sizeof(*table),EDVR_NATIVE_SHARPEN_VERSION_1};return E_FAIL;
+    case State::SharpenAcquireMode::pending:
+      *table={sizeof(*table),EDVR_NATIVE_SHARPEN_VERSION_1};return E_PENDING;
+    case State::SharpenAcquireMode::otherPositive:
+      *table={sizeof(*table),EDVR_NATIVE_SHARPEN_VERSION_1};return static_cast<HRESULT>(2);
+  }
+  return E_UNEXPECTED;
 }
 extern "C" HRESULT WINAPI edvrAcquireNativeMenu(const EdvrNativeMenuRequest*,EdvrNativeMenuTable* table) {
   using namespace edvr::openxr::test::treatment_fixture;
@@ -129,27 +199,109 @@ template<class Check> void runTreatmentCases(Check check) {
   check(f.initialized&&SUCCEEDED(h.captured.initialize(device.Get())),"host treatment capture initialized");
   const auto provider=GetModuleHandleW(nullptr);
   {
+    NativeTemporalClient temporalProbe;
+    state.temporalAcquireMode=State::TemporalAcquireMode::ownerAbsent;
+    check(temporalProbe.acquire(provider,device.Get(),801)==S_FALSE&&!temporalProbe.acquired(),
+      "the real temporal client accepts only exact owner-absence S_FALSE and remains unacquired");
+    state.temporalAcquireMode=State::TemporalAcquireMode::malformedAbsent;
+    const State::TemporalMalformedField temporalMalformedFields[]={
+      State::TemporalMalformedField::size,State::TemporalMalformedField::version,
+      State::TemporalMalformedField::context,State::TemporalMalformedField::beginFrame,
+      State::TemporalMalformedField::noteProjection,State::TemporalMalformedField::treatEye,
+      State::TemporalMalformedField::invalidate,State::TemporalMalformedField::close,
+      State::TemporalMalformedField::skipEye};
+    bool temporalMalformedRejected=true;
+    for(unsigned i=0;i<sizeof(temporalMalformedFields)/sizeof(temporalMalformedFields[0]);++i) {
+      state.temporalMalformedField=temporalMalformedFields[i];
+      const HRESULT malformed=temporalProbe.acquire(provider,device.Get(),802+i);
+      temporalMalformedRejected&=malformed==E_NOINTERFACE&&!temporalProbe.acquired();
+    }
+    check(temporalMalformedRejected,
+      "the real temporal client rejects each independently malformed S_FALSE table field and remains unacquired");
+    state.temporalAcquireMode=State::TemporalAcquireMode::failure;
+    check(temporalProbe.acquire(provider,device.Get(),811)==E_FAIL&&!temporalProbe.acquired(),
+      "the real temporal client preserves provider failures instead of treating them as optional absence");
+    state.temporalAcquireMode=State::TemporalAcquireMode::pending;
+    check(temporalProbe.acquire(provider,device.Get(),812)==E_PENDING&&!temporalProbe.acquired(),
+      "the real temporal client preserves E_PENDING as a fatal acquisition result");
+    state.temporalAcquireMode=State::TemporalAcquireMode::otherPositive;
+    check(temporalProbe.acquire(provider,device.Get(),813)==E_NOINTERFACE&&!temporalProbe.acquired(),
+      "the real temporal client rejects non-S_OK positive provider results");
+    state.temporalAcquireMode=State::TemporalAcquireMode::admitted;
+    check(temporalProbe.acquire(provider,device.Get(),814)==S_OK&&temporalProbe.acquired(),
+      "the same temporal provider still admits its ordinary S_OK table");
+    check(temporalProbe.close()==S_OK&&!temporalProbe.acquired(),"the admitted temporal probe releases its table");
+
+    NativeSharpenClient sharpenProbe;
+    state.sharpenAcquireMode=State::SharpenAcquireMode::ownerAbsent;
+    check(sharpenProbe.acquire(provider,device.Get(),811)==S_FALSE&&!sharpenProbe.acquired(),
+      "the real sharpen client accepts only exact owner-absence S_FALSE and remains unacquired");
+    state.sharpenAcquireMode=State::SharpenAcquireMode::malformedAbsent;
+    const State::SharpenMalformedField sharpenMalformedFields[]={
+      State::SharpenMalformedField::size,State::SharpenMalformedField::version,
+      State::SharpenMalformedField::context,State::SharpenMalformedField::treatEye,
+      State::SharpenMalformedField::invalidate,State::SharpenMalformedField::close};
+    bool sharpenMalformedRejected=true;
+    for(unsigned i=0;i<sizeof(sharpenMalformedFields)/sizeof(sharpenMalformedFields[0]);++i) {
+      state.sharpenMalformedField=sharpenMalformedFields[i];
+      const HRESULT malformed=sharpenProbe.acquire(provider,device.Get(),812+i);
+      sharpenMalformedRejected&=malformed==E_NOINTERFACE&&!sharpenProbe.acquired();
+    }
+    check(sharpenMalformedRejected,
+      "the real sharpen client rejects each independently malformed S_FALSE table field and remains unacquired");
+    state.sharpenAcquireMode=State::SharpenAcquireMode::failure;
+    check(sharpenProbe.acquire(provider,device.Get(),818)==E_FAIL&&!sharpenProbe.acquired(),
+      "the real sharpen client preserves provider failures instead of treating them as optional absence");
+    state.sharpenAcquireMode=State::SharpenAcquireMode::pending;
+    check(sharpenProbe.acquire(provider,device.Get(),819)==E_PENDING&&!sharpenProbe.acquired(),
+      "the real sharpen client preserves E_PENDING as a fatal acquisition result");
+    state.sharpenAcquireMode=State::SharpenAcquireMode::otherPositive;
+    check(sharpenProbe.acquire(provider,device.Get(),820)==E_NOINTERFACE&&!sharpenProbe.acquired(),
+      "the real sharpen client rejects non-S_OK positive provider results");
+    state.sharpenAcquireMode=State::SharpenAcquireMode::admitted;
+    check(sharpenProbe.acquire(provider,device.Get(),821)==S_OK&&sharpenProbe.acquired(),
+      "the same sharpen provider still admits its ordinary S_OK table");
+    check(sharpenProbe.close()==S_OK&&!sharpenProbe.acquired(),"the admitted sharpen probe releases its table");
+  }
+  {
     NativeFssClient probe;
     state.fssAcquireMode=State::FssAcquireMode::ownerAbsent;
     const HRESULT absent=h.fss.acquire(provider,device.Get(),1);
     check(absent==S_FALSE&&!h.fss.acquired(),
           "loaded optional FSS provider returns exact owner-absence S_FALSE and the real client remains unacquired");
     state.fssAcquireMode=State::FssAcquireMode::malformedAbsent;
-    check(probe.acquire(provider,device.Get(),901)==E_NOINTERFACE&&!probe.acquired(),
-          "the real client rejects nonempty S_FALSE provider tables");
+    const State::FssMalformedField fssMalformedFields[]={
+      State::FssMalformedField::size,State::FssMalformedField::version,
+      State::FssMalformedField::context,State::FssMalformedField::beginFrame,
+      State::FssMalformedField::treatEye,State::FssMalformedField::healPair,
+      State::FssMalformedField::invalidate,State::FssMalformedField::close};
+    bool fssMalformedRejected=true;
+    for(unsigned i=0;i<sizeof(fssMalformedFields)/sizeof(fssMalformedFields[0]);++i) {
+      state.fssMalformedField=fssMalformedFields[i];
+      const HRESULT malformed=probe.acquire(provider,device.Get(),901+i);
+      fssMalformedRejected&=malformed==E_NOINTERFACE&&!probe.acquired();
+    }
+    check(fssMalformedRejected,
+          "the real FSS client rejects each independently malformed S_FALSE table field and remains unacquired");
     state.fssAcquireMode=State::FssAcquireMode::failure;
-    check(probe.acquire(provider,device.Get(),902)==E_FAIL&&!probe.acquired(),
+    check(probe.acquire(provider,device.Get(),909)==E_FAIL&&!probe.acquired(),
           "the real client preserves provider failures instead of treating them as optional absence");
     state.fssAcquireMode=State::FssAcquireMode::otherPositive;
-    check(probe.acquire(provider,device.Get(),903)==E_NOINTERFACE&&!probe.acquired(),
+    check(probe.acquire(provider,device.Get(),910)==E_NOINTERFACE&&!probe.acquired(),
           "the real client rejects non-S_OK positive provider results");
     state.fssAcquireMode=State::FssAcquireMode::admitted;
-    check(probe.acquire(provider,device.Get(),904)==S_OK&&probe.acquired(),
+    check(probe.acquire(provider,device.Get(),911)==S_OK&&probe.acquired(),
           "the same loaded provider still admits the ordinary S_OK table");
     check(probe.close()==S_OK&&!probe.acquired(),"the admitted probe releases its isolated provider table");
   }
-  check(h.temporal.acquire(provider,device.Get(),1)==S_OK&&
-    h.sharpen.acquire(provider,device.Get(),1)==S_OK&&h.menu.acquire(provider,device.Get(),1)==S_OK,"host uses validated provider tables");
+  state.fssAcquireMode=State::FssAcquireMode::admitted;
+  check(h.fss.acquire(provider,device.Get(),1)==S_OK,"host retains the independently owned Comfort FSS provider");
+  state.temporalAcquireMode=State::TemporalAcquireMode::ownerAbsent;
+  state.sharpenAcquireMode=State::SharpenAcquireMode::ownerAbsent;
+  check(h.temporal.acquire(provider,device.Get(),1)==S_FALSE&&!h.temporal.acquired()&&
+    h.sharpen.acquire(provider,device.Get(),1)==S_FALSE&&!h.sharpen.acquired(),
+    "the real host clients publish optional TAA provider absence without acquiring either table");
+  check(h.menu.acquire(provider,device.Get(),1)==S_OK,"host keeps the independent Core menu provider available");
   check(f.route.bind()&&f.owner.start(),"host treatment rendezvous started");
   const vr::Texture_t texture{source.Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
   const vr::VRTextureBounds_t bounds{.75f,.875f,.125f,.25f};
@@ -161,6 +313,31 @@ template<class Check> void runTreatmentCases(Check check) {
     if(FAILED(context->Map(read.Get(),0,D3D11_MAP_READ,0,&mapped)))return uint32_t(0);
     const auto value=*static_cast<const uint32_t*>(mapped.pData);context->Unmap(read.Get(),0);return value;
   };
+  {
+    state.calls.clear();state.inputs.clear();state.passthrough=false;state.heal=false;state.fail=0;
+    const auto before=h.graphicsCalls.calls;
+    const auto posesBefore=h.menuPosePublications;
+    vr::EVRCompositorError result=vr::VRCompositorError_InvalidTexture;
+    check(f.route.invoke([&]{
+      h.activeFrameSequence=98;
+      result=h.capture(vr::Eye_Left,&texture,&bounds,vr::Submit_Default,true);
+    }),"host capture continues with temporal and sharpen providers explicitly absent");
+    check(result==vr::VRCompositorError_None&&state.calls=="FPM"&&h.graphicsCalls.calls-before==3,
+      "TAA absence skips temporal and sharpen while Comfort FSS and Core menu still run");
+    check(h.menuPosePublications==posesBefore+1,"Core pose publication remains live during TAA provider absence");
+    check(state.inputs.size()==2&&state.inputs[0]==source.Get()&&state.inputs[1]==source.Get(),
+      "the surviving Comfort and Core host stages both receive the original submitted texture");
+  }
+  state.temporalAcquireMode=State::TemporalAcquireMode::admitted;
+  state.sharpenAcquireMode=State::SharpenAcquireMode::admitted;
+  check(h.temporal.acquire(provider,device.Get(),2)==S_OK&&h.temporal.acquired()&&
+    h.sharpen.acquire(provider,device.Get(),2)==S_OK&&h.sharpen.acquired(),
+    "host reacquires both normal TAA providers after the isolated owner-absence capture");
+  check(h.fss.close()==S_OK&&!h.fss.acquired(),
+    "host releases the admitted FSS table before its isolated absence capture");
+  state.fssAcquireMode=State::FssAcquireMode::ownerAbsent;
+  check(h.fss.acquire(provider,device.Get(),2)==S_FALSE&&!h.fss.acquired(),
+    "host accepts exact optional FSS absence for the isolated capture");
   {
     state.calls.clear();state.inputs.clear();state.passthrough=false;state.heal=false;state.fail=0;
     const auto before=h.graphicsCalls.calls;

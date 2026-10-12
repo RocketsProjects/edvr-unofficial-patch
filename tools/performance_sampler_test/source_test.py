@@ -207,11 +207,19 @@ def inspect(host_text=None, policy_text=None, header_text=None,
     require("s.samplerPolicy->configure" not in host_raw and
             "advanced.texture_lod_bias = auto, but Elite's graphics" in host_raw,
             "configuration moved behind the helper and startup warning text remains literal")
-    require(ordered(host,
-                    r"ownerAllowedForStartup\s*\(\s*plugins::kPluginPerformance\s*\)",
-                    r"samplerStartupConfigureForOwner\s*\(",
-                    r"s\.deviceHook\.replace\(kDevCreateSamplerState,\s*&hookedCreateSamplerState"),
-            "the production transport predicate must gate startup before sampler hook installation")
+    try:
+        hook_device = function_body(host, "hookDevice")
+    except AssertionError as exc:
+        return [str(exc)]
+    require(ordered(hook_device,
+                    r"s\.deviceHook\.replace\(kDevCreateSamplerState,\s*&hookedCreateSamplerState",
+                    r"if\s*\(!s\.deviceHook\.commit\(\)\)",
+                    r"s\.temporalAAOwnerAllowed\s*=\s*plugin_admission_transport::ownerAllowedForStartup",
+                    r"const bool samplerOwnerAllowed\s*=\s*plugin_admission_transport::ownerAllowedForStartup",
+                    r"TextureSamplerHostContextV1\s+samplerHostContext",
+                    r"s\.temporalAAOwnerAllowed\s*\?\s*1u\s*:\s*0u",
+                    r"samplerStartupConfigureForOwner\s*\("),
+            "sampler setup follows hook commit and uses the cached post-commit TAA owner context")
     try:
         transport_gate = function_body(transport, "ownerAllowedForStartup")
     except AssertionError as exc:
@@ -270,9 +278,14 @@ def inspect(host_text=None, policy_text=None, header_text=None,
                     r"resolveTextureSamplerSettingsFromValuesV1"),
             "module owns the sampler config reads and resolution order")
     require('getIntInRange( "advanced.texture_anisotropy", 0, 0, 16)' in policy_compact and
-            'getString("fix.temporal_aa", "off")' in policy_compact and
-            'getString( "advanced.texture_lod_bias", temporal ? "auto" : "0")' in policy_compact,
-            "module owns exact keys, anisotropy bounds and temporal-dependent default")
+            re.search(r'const bool temporal\s*=\s*temporalOwnerAllowed\s*&&\s*'
+                      r'temporalModeEnabled\s*\(\s*Config::get\(\)\.getString\('
+                      r'\s*"fix\.temporal_aa"\s*,\s*"off"\s*\)\s*\)\s*;',
+                      policy_raw) is not None and
+            re.search(r'getString\(\s*"advanced\.texture_lod_bias"\s*,\s*'
+                      r'temporal\s*\?\s*"auto"\s*:\s*"0"\s*\)',
+                      policy_raw) is not None,
+            "module reads the TAA key only for its valid admitted owner and preserves mode-dependent bias defaults")
     require('if (_stricmp(biasKey, "auto") == 0)' in policy_compact and
             "readMultiplier(hostContext" in resolve and "log2f(multiplier)" in resolve,
             "only the auto branch asks the host for Elite's multiplier and computes log2")
@@ -300,6 +313,13 @@ def inspect(host_text=None, policy_text=None, header_text=None,
             "offsetof(TextureSamplerPolicyOpsV1, rewrite) == 24" in header and
             "uint32_t fileCapacity" in header,
             "POD extents, critical offsets and the host callback's fixed capacity stay pinned")
+    require("struct TextureSamplerHostContextV1" in header and
+            "uint32_t temporalAAOwnerAllowed;" in header and
+            "kTextureSamplerHostContextVersion1 = 1" in header and
+            "context->structSize == sizeof(*context)" in policy and
+            "context->version == kTextureSamplerHostContextVersion1" in policy and
+            "context->temporalAAOwnerAllowed <= 1u" in policy,
+            "the typed admission context is exact-version validated before optional TAA config reads")
     require('auto configuredOff = configure("0", "0", "off");' in rig_raw and
             "!configuredOff.rewriteEnabled" in rig_raw,
             "the production fixture pins the cached disabled flag for explicitly off settings")

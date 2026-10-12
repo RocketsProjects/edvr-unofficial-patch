@@ -297,7 +297,8 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
         objectProbeNoteDispatch(self, x, y, z, false);
     // F2 (the second skin, VR only): the palette chain's dispatch feeds the identity join before the game's dispatch runs. One atomic load
     // when the feature is off; the shader test is a lookup kept by shader object.
-    if (engineVelocitySkinWanted() && skinChainBound()) engineVelocityNoteChainDispatch(self, x);
+    if (temporalAAOwnerAllowed() && engineVelocitySkinWanted() && skinChainBound())
+        engineVelocityNoteChainDispatch(self, x);
 
     // The dispatch-skip probe, after the census record (a census taken
     // while probing must record what the game SUBMITTED -- the draw skips'

@@ -16,6 +16,7 @@ using Microsoft::WRL::ComPtr;
 static unsigned checks=0, failures=0, healCalls=0;
 static bool comfortOwnerAllowedForTest=true;
 static unsigned fssEyeSyncReads=0;
+static unsigned comfortFrustaNotes=0;static float comfortFrustaLast[2][4]{};
 static void* seenLeft=nullptr; static void* seenRight=nullptr; static float seenRect[4]{}; static float seenOuter=0,seenInner=0; static int seenMode=0;
 static LONG arrival=0, chrome=0; static float panel[16]{}; static bool panelReady=false;
 static void* published[2]{};
@@ -31,6 +32,7 @@ Log& Log::get(){static Log l;return l;}
 Log::~Log(){}
 void Log::note(const char*,...){ }
 bool comfortOwnerAllowed() noexcept {return comfortOwnerAllowedForTest;}
+void terrainCullCoverNoteFrusta(const float f[2][4]){++comfortFrustaNotes;std::memcpy(comfortFrustaLast,f,sizeof(comfortFrustaLast));}
 void publishSubmitTexture(int eye,void* texture){if(eye>=0&&eye<2)published[eye]=texture;}
 void fssHealRelease(){}
 LONG fssArrivalStampValue(){return arrival;}
@@ -80,6 +82,21 @@ void nativeFssComfortOwnerDenied(){
   if(allowed==S_OK) check(allowedTable.close(allowedTable.context)==S_OK,
                           "owner-present FSS control closes its real provider session");
   comfortOwnerAllowedForTest=savedOwner;
+}
+
+void nativeFssPublishesComfortFrustaOnce(){
+  Device d;const std::string savedMode=mode;const bool savedOwner=comfortOwnerAllowedForTest;
+  mode="off";comfortOwnerAllowedForTest=true;comfortFrustaNotes=0;
+  auto t=acquire(d);auto first=frame(900);
+  check(t.beginFrame(t.context,&first)==S_OK,"Comfort FSS begin succeeds with healing configured off");
+  check(comfortFrustaNotes==1&&std::memcmp(comfortFrustaLast,first.frusta,sizeof(comfortFrustaLast))==0,
+    "Comfort FSS publishes the exact valid game-facing frusta once even when healing is off");
+  mode="on";auto second=frame(901);
+  check(t.beginFrame(t.context,&second)==S_OK,"Comfort FSS begin succeeds with healing configured on");
+  check(comfortFrustaNotes==2&&std::memcmp(comfortFrustaLast,second.frusta,sizeof(comfortFrustaLast))==0,
+    "the shared Comfort publisher emits one fresh frustum pair per FSS frame without a Temporal-AA duplicate");
+  check(t.close(t.context)==S_OK,"Comfort frusta fixture closes its provider session");
+  mode=savedMode;comfortOwnerAllowedForTest=savedOwner;
 }
 
 void run(){
@@ -142,4 +159,4 @@ void run(){
   before=healCalls;check(healPair(t,21,&eye)==S_FALSE&&healCalls==before,"disabled repair never heals");
   check(t.close(t.context)==S_OK,"close");check(t.close(t.context)==S_FALSE,"close idempotent");
 }
-int wmain(int argc,wchar_t** argv){SetErrorMode(3);if(argc==2&&!wcscmp(argv[1],L"--dry-run")){std::puts("native_fss_test: dry-run");return 0;}if(argc!=2||wcscmp(argv[1],L"--self-test"))return 2;try{nativeFssComfortOwnerDenied();run();}catch(const std::exception& e){std::printf("FAIL: setup aborted: %s\n",e.what());return 1;}std::printf("native_fss_test: %u checks, %u failures\n",checks,failures);return failures?1:0;}
+int wmain(int argc,wchar_t** argv){SetErrorMode(3);if(argc==2&&!wcscmp(argv[1],L"--dry-run")){std::puts("native_fss_test: dry-run");return 0;}if(argc!=2||wcscmp(argv[1],L"--self-test"))return 2;try{nativeFssComfortOwnerDenied();nativeFssPublishesComfortFrustaOnce();run();}catch(const std::exception& e){std::printf("FAIL: setup aborted: %s\n",e.what());return 1;}std::printf("native_fss_test: %u checks, %u failures\n",checks,failures);return failures?1:0;}

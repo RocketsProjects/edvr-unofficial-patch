@@ -141,8 +141,6 @@ W_DIM_CALL = "panelCurveSurfaceDraw(\n                self, stripGain, stripTowa
 W_REVERSE_DECL = "    bool stripReverseU = false;\n"
 W_MOVIE_ARMED = "            if (introPanelStripArmed()) {\n"
 W_MOVIE_REVERSE = "                stripReverseU = introPanelStripReverseU();\n"
-W_REFUSAL = ("        if (owner && uiLayerIssueBlocked()) return false;\n"
-             "        if (stripIssued) return true;   // the strip was issued in its place: nothing more, and something was\n")
 W_INTRO_GATE = ("forwardInputs.read(\n"
                 "            forwardInputs.fact.introCurveThisDrawStripGate,\n"
                 "            [&] { return g_state->introCurveThisDraw; },\n"
@@ -382,8 +380,8 @@ MUTANTS = [
            "the splash dim's re-issue of the strip passes a constant u direction"),
     wiring("iw-site-reverse-starts-true", "strip-site", [(W_REVERSE_DECL, "    bool stripReverseU = true;\n")], "an unarmed draw's u direction starts as against x"),
     wiring("iw-unarmed-early-return-first", "unarmed-text",
-           [("if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,\n                [] { return detail::g_uiLayerIssueBlocked; },\n                [] { return uiLayerIssueBlocked(); })) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,\n                kind, count, instances, args);\n            return false;\n        }\n        if (stripIssued) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,\n                kind, count, instances, args);\n            return true;   // the strip was issued in its place: nothing more, and something was\n        }",
-             "if (stripIssued) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,\n                kind, count, instances, args);\n            return true;   // the strip was issued in its place: nothing more, and something was\n        }\n        if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,\n                [] { return detail::g_uiLayerIssueBlocked; },\n                [] { return uiLayerIssueBlocked(); })) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,\n                kind, count, instances, args);\n            return false;\n        }")],
+           [("if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,\n                [] { return uiLayerOwnerIssueBlocked(); },\n                [] { return uiLayerOwnerIssueBlocked(); })) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,\n                kind, count, instances, args);\n            return false;\n        }\n        if (stripIssued) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,\n                kind, count, instances, args);\n            return true;   // the strip was issued in its place: nothing more, and something was\n        }",
+             "if (stripIssued) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,\n                kind, count, instances, args);\n            return true;   // the strip was issued in its place: nothing more, and something was\n        }\n        if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,\n                [] { return uiLayerOwnerIssueBlocked(); },\n                [] { return uiLayerOwnerIssueBlocked(); })) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,\n                kind, count, instances, args);\n            return false;\n        }")],
            "the strip early-return now precedes the layer's refusal"),
     wiring("iw-unarmed-no-early-return", "unarmed-text", [("if (stripIssued) {", "if (false) {")],
            "the game's own draw is issued a second time over the strip"),
@@ -418,8 +416,14 @@ MUTANTS = [
            "the strip's main call passes a constant u direction"),
     wiring("iw-args-no-draw-function", "strip-args", [(W_STRIP_CALL, "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, nullptr);")],
            "the strip is drawn through no draw function"),
-    wiring("iw-args-past-the-refusal", "strip-args", [("if (stripToward != 0 && !uiLayerIssueBlocked()) {", "if (stripToward != 0) {")],
+    wiring("iw-args-past-the-refusal", "strip-args", [("if (stripToward != 0 && !uiLayerOwnerIssueBlocked()) {", "if (stripToward != 0) {")],
            "the strip is asked past observedDraw's own refusal"),
+    wiring("iw-args-owner-bypass", "strip-args", [("if (stripToward != 0 && !uiLayerOwnerIssueBlocked()) {", "if (stripToward != 0 && !uiLayerIssueBlocked()) {")],
+           "the strip asks the old refusal without cached Temporal AA owner admission"),
+    wiring("iw-unarmed-owner-bypass", "unarmed-text",
+           [("[] { return uiLayerOwnerIssueBlocked(); },\n                [] { return uiLayerOwnerIssueBlocked(); })) {",
+             "[] { return uiLayerIssueBlocked(); },\n                [] { return uiLayerIssueBlocked(); })) {")],
+           "the original draw asks the old refusal without cached Temporal AA owner admission"),
     wiring("iw-fallback-always-issued", "fallback",
            [(W_STRIP_CALL, "panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);\n            stripIssued = true;")],
            "the strip counts as issued whatever it returned: the game's quad is never drawn"),

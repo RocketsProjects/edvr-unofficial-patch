@@ -975,8 +975,30 @@ void caseChainVerdicts() {
         check(fn.find("static skinjoin::ChainVerdicts verdicts;") != std::string::npos && fn.find("verdicts.bound(cs, shaderRegistryGeneration(),") != std::string::npos &&
                   gen != std::string::npos && fn.find("unordered_map") == std::string::npos && fn.find("EnterCriticalSection") == std::string::npos,
               "J14.l skinChainBound keeps its verdicts in skinjoin::ChainVerdicts and passes the registry's generation (an inline load), not the lock");
-        check(ex.find("if (engineVelocitySkinWanted() && skinChainBound()) engineVelocityNoteChainDispatch(self, x);") != std::string::npos,
-              "J14.m the dispatch hook feeds the chain's dispatches to the join only when skinChainBound() says so");
+        const std::string hook = functionBody(ex, "void STDMETHODCALLTYPE hookedDispatch(");
+        const std::string gate = "if (temporalAAOwnerAllowed() && engineVelocitySkinWanted() && skinChainBound())\n"
+                                 "        engineVelocityNoteChainDispatch(self, x);";
+        const auto dispatchPinned = [&](const std::string& body) {
+            const size_t at = body.find(gate);
+            return at != std::string::npos && body.find(gate, at + gate.size()) == std::string::npos &&
+                   body.find("engineVelocityNoteChainDispatch(self, x);") == at + gate.find("engineVelocityNoteChainDispatch(self, x);") &&
+                   body.find("engineVelocityNoteChainDispatch(self, x);", at + gate.size()) == std::string::npos &&
+                   body.find("s->realDispatch(self, x, y, z);", at + gate.size()) != std::string::npos;
+        };
+        check(dispatchPinned(hook),
+              "J14.m the dispatch hook feeds the chain join once, after Temporal AA owner and skin-chain admission, before the game's dispatch");
+        std::string ownerBypass = hook;
+        const size_t ownerAt = ownerBypass.find("temporalAAOwnerAllowed() && engineVelocitySkinWanted() && skinChainBound()");
+        if (ownerAt != std::string::npos)
+            ownerBypass.replace(ownerAt, std::strlen("temporalAAOwnerAllowed() && "), "");
+        check(ownerAt != std::string::npos && !dispatchPinned(ownerBypass),
+              "J14.m control: removing Temporal AA owner admission breaks the dispatch pin");
+        std::string chainBypass = hook;
+        const size_t chainAt = chainBypass.find(" && skinChainBound())\n        engineVelocityNoteChainDispatch(self, x);");
+        if (chainAt != std::string::npos)
+            chainBypass.replace(chainAt, std::strlen(" && skinChainBound()"), "");
+        check(chainAt != std::string::npos && !dispatchPinned(chainBypass),
+              "J14.m control: removing the chain verdict breaks the dispatch pin");
     }
 }
 }  // namespace

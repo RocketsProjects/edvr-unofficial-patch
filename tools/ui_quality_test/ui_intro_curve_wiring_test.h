@@ -44,10 +44,10 @@ const char* const kNumbers =
     "if(v==DrawVerdict::kIntroPanel){if(introPanelStripArmed()){stripGain=introPanelStripGain();stripToward=1;stripReverseU=introPanelStripReverseU();}}"
     "else{stripGain=introCurveGain();stripToward=introCurveToward();stripReverseU=introCurveReverseU();}";
 const char* const kStripCall =
-    "if(stripToward!=0&&!uiLayerIssueBlocked()){";
+    "if(stripToward!=0&&!uiLayerOwnerIssueBlocked()){";
 const char* const kObserved =
     "constbooloriginalIssued=observedDraw(alteredClass==AlteredDrawClass::Verdict?AlteredDraw(alteredClass,alteredFixOf(v)):AlteredDraw(alteredClass));";
-const char* const kLambda = "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,[]{returndetail::g_uiLayerIssueBlocked;},[]{returnuiLayerIssueBlocked();})){";
+const char* const kLambda = "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,[]{returnuiLayerOwnerIssueBlocked();},[]{returnuiLayerOwnerIssueBlocked();})){";
 const char* const kDim =
     "constboolstripDim=stripIssued&&panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced);"
     "booldimIssued=stripDim;if(!stripDim){draw(AlteredDrawClass::None);dimIssued=true;}"
@@ -161,7 +161,7 @@ std::vector<WirePin> wiringPins(const std::string& text, const std::string& ladd
     pins.push_back({"unarmed-text",
                     has(fwd, kObserved) && has(fwd, kLambda) && has(fwd, kDim) && has(fwd, kDimBegin) &&
                         countOf(fwd, "splashDimBegin(self)") == 1 && countOf(fwd, "splashDimEnd(self)") == 1 &&
-                        inOrder(fwd, {"autoobservedDraw=[&](AlteredDrawaltered){", "if(owner&&forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,[]{returndetail::g_uiLayerIssueBlocked;},[]{returnuiLayerIssueBlocked();})){",
+                        inOrder(fwd, {"autoobservedDraw=[&](AlteredDrawaltered){", "if(owner&&forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,[]{returnuiLayerOwnerIssueBlocked();},[]{returnuiLayerOwnerIssueBlocked();})){",
                                        "returnfalse;}", "if(stripIssued){", "returntrue;", "constboolissued=draw(altered);"}),
                     "intro curve wiring [unarmed-text]: `const bool originalIssued = observedDraw(...)` is the text it was, the lambda only gains `if (stripIssued) return true;` "
                     "after its refusal, and the dim still draws the game's own `draw(AlteredDrawClass::None)` when the strip did not draw"});
@@ -254,8 +254,8 @@ const char* const kRawSkipTick = "        tkIntroSkip.run([&] {\n";
 const char* const kRawMovieComment = "    // The intro movie's panel (intro_panel.h). First thing in the eye\n";
 const char* const kRawCensusLine = "    // The census line for this draw, recorded while its bindings are certainly\n";
 const char* const kRawObservedEarly = R"x(        if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,
-                [] { return detail::g_uiLayerIssueBlocked; },
-                [] { return uiLayerIssueBlocked(); })) {
+                [] { return uiLayerOwnerIssueBlocked(); },
+                [] { return uiLayerOwnerIssueBlocked(); })) {
             ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,
                 kind, count, instances, args);
@@ -275,8 +275,8 @@ const char* const kRawObservedEarlyBad = R"x(        if (stripIssued) {
             return true;   // the strip was issued in its place: nothing more, and something was
         }
         if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,
-                [] { return detail::g_uiLayerIssueBlocked; },
-                [] { return uiLayerIssueBlocked(); })) {
+                [] { return uiLayerOwnerIssueBlocked(); },
+                [] { return uiLayerOwnerIssueBlocked(); })) {
             ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,
                 kind, count, instances, args);
@@ -286,12 +286,15 @@ const char* const kRawObservedEarlyBad = R"x(        if (stripIssued) {
 
 void testIntroCurveControls(const std::string& text, const std::string& ladderText) {
     const std::vector<Flip> flips = {
-        {"the flag is never cleared at the top", {{"if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);\n            s->curveThisDraw = false;\n            if (s->introOwnerAllowed) s->introCurveThisDraw = false;", "if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);\n            s->curveThisDraw = false;"}}, "flag-lifetime"},
+        {"the flag is never cleared at the top", {{"if (flatTemporalOwnerCapturing()) flatTemporalDraw(self, count, instances);\n            s->curveThisDraw = false;\n            if (s->introOwnerAllowed) s->introCurveThisDraw = false;", "if (flatTemporalOwnerCapturing()) flatTemporalDraw(self, count, instances);\n            s->curveThisDraw = false;"}}, "flag-lifetime"},
         {"the recogniser is asked for every draw", {{"if (s->introOwnerAllowed && kind == 'X' && count == 6 && introCurveWants())", "if (s->introOwnerAllowed && introCurveWants())"}}, "recognition"},
         {"an absent Intro owner still reaches the recogniser", {{"s->introOwnerAllowed && kind == 'X' && count == 6 && introCurveWants()", "kind == 'X' && count == 6 && introCurveWants()"}}, "recognition"},
         {"the flag is set whatever the recogniser said", {{"s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);", "s->introCurveThisDraw = true;"}}, "recognition"},
         {"the on-foot recogniser claims the intro composite again", {{"!(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash)", "true"}}, "guard"},
-        {"the strip is asked past the refusal", {{"if (stripToward != 0 && !uiLayerIssueBlocked()) {", "if (stripToward != 0) {"}}, "strip-args"},
+        {"the strip is asked past the refusal", {{"if (stripToward != 0 && !uiLayerOwnerIssueBlocked()) {", "if (stripToward != 0) {"}}, "strip-args"},
+        {"the strip bypasses the owner-gated refusal", {{"if (stripToward != 0 && !uiLayerOwnerIssueBlocked()) {", "if (stripToward != 0 && !uiLayerIssueBlocked()) {"}}, "strip-args"},
+        {"the original draw bypasses the owner-gated refusal", {{"[] { return uiLayerOwnerIssueBlocked(); },\n                [] { return uiLayerOwnerIssueBlocked(); })) {", "[] { return uiLayerIssueBlocked(); },\n                [] { return uiLayerIssueBlocked(); })) {"}}, "unarmed-text"},
+        {"the strip bypasses Intro owner admission", {{"if (g_state->introOwnerAllowed &&\n        (v == DrawVerdict::kIntroPanel", "if (true &&\n        (v == DrawVerdict::kIntroPanel"}}, "candidate"},
         {"the strip early return precedes the refusal", {{kRawObservedEarly, kRawObservedEarlyBad}}, "unarmed-text"},
         {"the failed strip still swallows the game's draw", {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);", "panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);\n            stripIssued = true;"}}, "fallback"},
         {"the splash uses the on-foot flag", {{"s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);", "s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);\n                s->curveThisDraw = s->introCurveThisDraw;"}}, "not-on-foot-flag"},

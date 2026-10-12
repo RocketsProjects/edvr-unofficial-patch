@@ -5,6 +5,7 @@
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "device_hook.h"
+#include "terrain_cull_cover_hook.h"
 #include <wrl/client.h>
 #include <algorithm>
 #include <cmath>
@@ -94,7 +95,12 @@ HRESULT WINAPI begin(void* p,const EdvrNativeFssFrame* f){
   if(f->referenceGeneration!=s->reference){clearCopies(*s);s->reference=f->referenceGeneration;resetStamps(*s);}
   for(unsigned e=0;e<2;++e)s->current[e].clear();
   s->healDelivered=false;
-  s->frame=*f;s->sequence=s->floor=f->sequence;s->frameOpen=true;s->consumed[0]=s->consumed[1]=false;s->sync=edvr::eyeSyncFromConfig(edvr::Config::get());s->projectionCompatible=parallel(*f);if(!s->projectionCompatible&&!s->projectionNoted){s->projectionNoted=true;edvr::Log::get().note("native fss: unsupported canted or unequal projection; healing is guarded off.");}s->healGate=false;s->submitLatched=false;return S_OK;
+  s->frame=*f;s->sequence=s->floor=f->sequence;s->frameOpen=true;s->consumed[0]=s->consumed[1]=false;
+  // Terrain's cover is a shared Comfort service. Publish the valid, unjittered
+  // game-facing frusta even when healing is off, and independently of whether
+  // Temporal-AA acquired its own provider. This is the sole publisher.
+  if(s->ownerAllowed)edvr::terrainCullCoverNoteFrusta(f->frusta);
+  s->sync=edvr::eyeSyncFromConfig(edvr::Config::get());s->projectionCompatible=parallel(*f);if(!s->projectionCompatible&&!s->projectionNoted){s->projectionNoted=true;edvr::Log::get().note("native fss: unsupported canted or unequal projection; healing is guarded off.");}s->healGate=false;s->submitLatched=false;return S_OK;
 }
 HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t e,ID3D11Texture2D* src,const float* b,ID3D11Texture2D** out){
   if(out)*out=nullptr;std::lock_guard<std::mutex> lock(mu);State*s=find(p);if(!s||!s->active||s!=live||!s->frameOpen||GetCurrentThreadId()!=s->thread||e>1||!out||!src||seq!=s->sequence||seq!=s->floor||s->consumed[e]||!sameDevice(s->device,src))return E_INVALIDARG;

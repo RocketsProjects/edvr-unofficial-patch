@@ -1200,12 +1200,12 @@ void sourcePins() {
     struct Thunk { const char* head; const char* first; };
     const Thunk thunks[] = {
         {"void STDMETHODCALLTYPE hookedDraw(", "gpuFrameCommand(self);"},
-        {"void STDMETHODCALLTYPE hookedDrawAuto(", "uiLayerIssueBlocked()"},
+        {"void STDMETHODCALLTYPE hookedDrawAuto(", "uiLayerOwnerIssueBlocked()"},
         {"void STDMETHODCALLTYPE hookedDrawIndexed(", "gpuFrameCommand(self);"},
         {"void STDMETHODCALLTYPE hookedDrawInstanced(", "gpuFrameCommand(self);"},
         {"void STDMETHODCALLTYPE hookedDrawIndexedInstanced(", "gpuFrameCommand(self);"},
-        {"void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(", "uiLayerIssueBlocked()"},
-        {"void STDMETHODCALLTYPE hookedDrawInstancedIndirect(", "uiLayerIssueBlocked()"},
+        {"void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(", "uiLayerOwnerIssueBlocked()"},
+        {"void STDMETHODCALLTYPE hookedDrawInstancedIndirect(", "uiLayerOwnerIssueBlocked()"},
     };
     bool early = true, detector = true, afterFlat = true;
     for (const Thunk& t : thunks) {
@@ -1267,12 +1267,21 @@ void sourcePins() {
     check(boundary.find("flatCameraVr") == std::string::npos && boundary.find("flatCameraInject") == std::string::npos,
           "key off: the boundary itself never touches the camera detour; only the two helpers it calls do, after the early return");
     {
-        const size_t callAt = boundary.find("driveInjector(");
-        const size_t guardAt = callAt == std::string::npos ? callAt : boundary.rfind("if (key == VrWorldKey::Auto) {", callAt);
-        check(callAt != std::string::npos && guardAt != std::string::npos && callAt - guardAt < 400 &&
-                  before(boundary, "const bool routeWorks = g_machine.state == VrWorldState::Warming || g_machine.state == VrWorldState::Owned;",
-                         "driveInjector(routeWorks"),
-              "jitter: the injector is driven only while the key is auto, and only for a route that is Warming or Owned");
+        const char* const driveCall = "driveInjector(g_temporalAAOwnerAllowed && routeWorks && g_vrWorldWants && gate && layerLive);";
+        const auto drivePinned = [&](const std::string& source) {
+            const size_t callAt = source.find(driveCall);
+            const size_t guardAt = callAt == std::string::npos ? callAt : source.rfind("if (key == VrWorldKey::Auto) {", callAt);
+            return callAt != std::string::npos && guardAt != std::string::npos && callAt - guardAt < 400 &&
+                   before(source, "const bool routeWorks = g_machine.state == VrWorldState::Warming || g_machine.state == VrWorldState::Owned;",
+                          driveCall) && count(source, driveCall) == 1 &&
+                   before(source, "g_temporalAAOwnerAllowed = temporalAAOwnerAllowed;", driveCall);
+        };
+        check(drivePinned(boundary) && count(vs, "vrWorldRouteFrameBoundary(g_state->temporalAAOwnerAllowed);") == 1,
+              "jitter: the injector is driven only while the key is auto, with cached Temporal AA admission and a Warming or Owned route");
+        const std::string bypass = replaceOnce(boundary, driveCall,
+            "driveInjector(routeWorks && g_vrWorldWants && gate && layerLive);");
+        check(!bypass.empty() && !drivePinned(bypass),
+              "jitter control: removing Temporal AA owner admission breaks the injector call pin");
     }
     check(count(rt, "driveInjector(") == 2 && count(rt, "windDownInjector(") == 2,
           "jitter: driveInjector is called once (the boundary) and windDownInjector once (the key-off branch), each defined once");
@@ -1317,7 +1326,8 @@ void sourcePins() {
     check(!treat.empty() && before(treat, "facts.depthNamed = facts.depthKnown && engineVelocitySourceIsNamed(depthTex);", "g_frameNamed = facts.depthNamed;") &&
               before(treat, "g_frameNamed = facts.depthNamed;", "vrWorldSelect(facts)") && count(rt, "g_frameNamed = facts.depthNamed;") == 1,
           "NAMING: the frame's naming is the selector's own depthNamed fact, recorded once at the trigger, before the selection");
-    check(before(boundary, "g_namedLast = g_frameNamed;", "driveInjector(routeWorks") && before(boundary, "driveInjector(routeWorks", "g_frameNamed = false;") &&
+    check(before(boundary, "g_namedLast = g_frameNamed;", "driveInjector(g_temporalAAOwnerAllowed && routeWorks") &&
+              before(boundary, "driveInjector(g_temporalAAOwnerAllowed && routeWorks", "g_frameNamed = false;") &&
               count(rt, "g_namedLast = g_frameNamed;") == 1,
           "NAMING: the boundary carries the ended frame's naming into the next frame's decision, then clears it for the frame that starts (no trigger, no naming)");
     check(rt.find("bool g_namedLast = false;") != std::string::npos && rt.find("bool g_frameNamed = false;") != std::string::npos &&

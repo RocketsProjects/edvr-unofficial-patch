@@ -391,18 +391,26 @@ inline int flatHdrCrumbWiringTests() {
     ordered(readKey, {"s.hdrKey = key; s.hdrKeyRead = true;", "if (hdrCrumbArmed(flatHdrKeyName(key)))",
                       "Log::get().note(\"flat hdr route: crash-safe trail on:", "Log::get().note(\"flat hdr route: %s (read at startup)"},
             "the trail's armed line, and the log's line that says where to look, are written when the key is read as auto, at startup or after a change");
-    ordered(body(runtime, "void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags) {"),
+    const std::string present = body(runtime, "void flatRuntimePresent(");
+    expect(present.find("bool temporalAAOwnerAllowed)") != std::string::npos,
+           "Present receives the cached Temporal-AA owner for its feature-specific accounting");
+    expect(present.find("if (temporalAAOwnerAllowed) flatCameraInjectDisarm();") != std::string::npos,
+           "Present keeps the TAA-owned camera-inject cleanup behind that cached decision");
+    ordered(present,
             {"const FlatMonoResolveStats rs = flatMonoResolveStats();", "gained.captured = rs.hdrCaptured - seen.captured;",
              "gained.copied = rs.hdrCopied - seen.copied;", "gained.prepped = rs.hdrPrepped - seen.prepped;", "gained.backend = rs.hdrBackend - seen.backend;",
              "gained.finished = rs.hdrFinished - seen.finished;", "gained.restored = rs.hdrRestored - seen.restored;",
              "flatHdrFormatWindow(hdrText, sizeof(hdrText), s.hdrKey,", "s.hdrWindow.reset();"},
             "the 5 s line prints the resolver's step counts as what they gained since the last window, then the window resets");
     // -- the frame's end: the guard wraps everything the Present does, the pre-Present span the work before the real call --
-    const std::string present = body(runtime, "void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags) {");
     ordered(present, {"if (s.thread && !owner()) return;", "HdrCrumbFrameEnd routeFrameEnd(hr);", "s.thread = GetCurrentThreadId();",
                       "hdrFrameEnd(s, frame);", "flatMonoResolvePreflight("},
             "flatRuntimePresent's frame end is open before anything it does, the preflight included");
-    const std::string before = body(runtime, "void flatRuntimeBeforePresent() {");
+    const std::string before = body(runtime, "void flatRuntimeBeforePresent(");
+    expect(before.find("bool temporalAAOwnerAllowed)") != std::string::npos,
+           "before-Present receives the cached Temporal-AA owner decision");
+    expect(before.find("if (temporalAAOwnerAllowed && owner())") != std::string::npos,
+           "before-Present gates the TAA-owned substitution and frame-end callbacks with the cached decision");
     ordered(before, {"HdrCrumbSpan routeBeforePresent(hdrCrumbPresentSide(), \"before-present\");",
                       "flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);", "engineVelocityFlatFrameEndWithCost();",
                      "gpuFrameClose(state());"},
@@ -414,7 +422,9 @@ inline int flatHdrCrumbWiringTests() {
     const std::string hooked = body(hook, "HRESULT STDMETHODCALLTYPE hookedPresent(");
     ordered(hooked, {"const bool routeCrumbs = hdrCrumbPresentSide();", "hdrCrumbWrite(\"present\", \"begin\");", "const int64_t presentT0 = qpcNow();",
                      "g_state->realPresent(self, syncInterval, flags);", "const int64_t presentT1 = qpcNow();",
-                     "hdrCrumbWrite(\"present\", \"end\", \"hr=0x%08X removed=0x%08X\"", "flatRuntimePresent(self, g_state->frameCounter, hr, flags);"},
+                     "hdrCrumbWrite(\"present\", \"end\", \"hr=0x%08X removed=0x%08X\"",
+                     "flatRuntimePresent(self, g_state->frameCounter, hr, flags,",
+                     "g_state->temporalAAOwnerAllowed);"},
             "the real Present is bracketed by its crumbs, outside the clock reads that time it, and before the runtime's frame end");
 
     // -- the resolver ------------------------------------------------------------------------------------------------------------

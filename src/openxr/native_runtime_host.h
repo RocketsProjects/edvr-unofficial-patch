@@ -2663,6 +2663,33 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     return clean;
   }
+  // Acquire the Core menu and the two optional TAA providers on the game's
+  // graphics thread. Kept as one production seam so the offline fixture can
+  // exercise the startup decision with the same clients and rendezvous.
+  bool acquireStartupTreatmentProviders(HMODULE provider,ID3D11Device* device,uint64_t generation) {
+    HRESULT acquired=E_FAIL;
+    if(!graphicsCalls.invoke([&]{acquired=menu.acquire(provider,device,generation);})||acquired!=S_OK) {
+      nativeTracePrintf("native_menu,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+    }
+    nativeTracePuts("native_menu,provider_acquired=1");
+    acquired=E_FAIL;
+    const bool temporalCall=graphicsCalls.invoke([&]{acquired=temporal.acquire(provider,device,generation);});
+    const bool temporalAbsent=temporalCall&&acquired==S_FALSE&&!temporal.acquired();
+    if(!temporalCall||(acquired!=S_OK&&!temporalAbsent)) {
+      nativeTracePrintf("native_temporal,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+    }
+    if(temporalAbsent)nativeTracePuts("native_temporal,provider_absent=owner_denied");
+    else nativeTracePuts("native_temporal,provider_acquired=1");
+    acquired=E_FAIL;
+    const bool sharpenCall=graphicsCalls.invoke([&]{acquired=sharpen.acquire(provider,device,generation);});
+    const bool sharpenAbsent=sharpenCall&&acquired==S_FALSE&&!sharpen.acquired();
+    if(!sharpenCall||(acquired!=S_OK&&!sharpenAbsent)) {
+      nativeTracePrintf("native_sharpen,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
+    }
+    if(sharpenAbsent)nativeTracePuts("native_sharpen,provider_absent=owner_denied");
+    else nativeTracePuts("native_sharpen,provider_acquired=1,order=after_temporal_before_menu");
+    return true;
+  }
   bool open(const RuntimeOptions& options) {
     if(!fovTrim.ready()) {
       nativeTracePuts("native_fov_trim,error=policy_state_create");
@@ -2888,20 +2915,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     compositorGeneration=poses.begin();
     if(runtimeGeneration&&compositorGeneration&&options.graphicsProvider&&externalDevice) {
       HRESULT acquired=E_FAIL;
-      if(!graphicsCalls.invoke([&]{acquired=menu.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
-        nativeTracePrintf("native_menu,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
-      }
-      nativeTracePuts("native_menu,provider_acquired=1");
-      acquired=E_FAIL;
-      if(!graphicsCalls.invoke([&]{acquired=temporal.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
-        nativeTracePrintf("native_temporal,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
-      }
-      nativeTracePuts("native_temporal,provider_acquired=1");
-      acquired=E_FAIL;
-      if(!graphicsCalls.invoke([&]{acquired=sharpen.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
-        nativeTracePrintf("native_sharpen,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
-      }
-      nativeTracePuts("native_sharpen,provider_acquired=1,order=after_temporal_before_menu");
+      if(!acquireStartupTreatmentProviders(options.graphicsProvider,externalDevice,runtimeGeneration))return false;
       acquired=E_FAIL;
       if(!graphicsCalls.invoke([&]{acquired=features.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
         nativeTracePrintf("native_features,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
