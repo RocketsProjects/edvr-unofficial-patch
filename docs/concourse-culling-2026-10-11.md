@@ -4,6 +4,7 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 
 ## Status
 
+- **Built v9 (`claude/hangar-test-8`, commit 7cb314d5, DLL v0.19.1-83-g7cb314d5; full build and dll-only promotion green, pushed, not installed, not flown):** the draw-list probe, `hotkey.drawlist_probe` (TEMPORARY, unbound by default, flat allow-list, commented in the edvr.ini template). Collects three consecutive frames of path A (builder) and path B (producer FUN_144312E00) appends, the pool copy, merge and clear calls, and the substituted pool draws per family, with carried candidates per frame; writes `edvr_logs\drawlist_<stamp>.csv`. The per-draw join is NOT live (the CPU has no draw-to-pool-key map). Tests H-PERSIST: see "Built v9". Flight: raised pad, same view, probe off, then sphere, then all; then the sealed hangar; one capture with a ship in view.
 - **Built v8.5 (`claude/hangar-test-8`, commit 0d55bf4d, DLL v0.19.1-79-g0d55bf4d; full build and dll-only promotion green, pushed, not installed, not flown):** diagnosis of the v8.4 flights (see "Built v8", v8.5). Clear audit: only `sealed_trial.cpp` writes rec+0x208 and rec+0x234, and the write lands before the record loop reads them; unchanged since 7fed41c8. New: `diag.sealed_trial_mode = all` (EVERY visited record loses its flags, no test; the discriminator); F2 keeps the mode (code never resets it); the F9 summary names the live builder path and the bracket's gate; the window and report carry the kind of the pointer at rec+0x290. Next flight: mode all with the census (F6) and a screen capture, then the F9 summary line.
 - **Built v8.4 (`claude/hangar-test-8`, commit 0be37478, DLL v0.19.1-77-g0be37478; full build and dll-only promotion green, pushed, not installed, not flown):** the record's centre is the builder's pose-derived centre (from `*(rec+0x290)`), with `rec+0x240` as a counted fallback. INFERRED until flown: `rec+0x240` reads exactly the origin for many distinct records, so the pose centre is the culling centre. Next flight: the trial in named mode, reading `zero_centre=`, `pose_fallback=` and `centre_dist_m` (see "Built v8", v8.4).
 - **Built v8 (`claude/hangar-test-8`, commit 7a466ee3, DLL v0.19.1-67-g7a466ee3; full build and dll-only promotion green, not installed, not flown):** three TEMPORARY instruments (see "Built v8"): the builder probe on 0x42B4420, the hatch-state probe on the docking object O, and a named record rule for the sealed trial. The builder's arguments are settled (six, the return unused); skip is REFUSED because its side effects are not proven absent.
@@ -663,3 +664,41 @@ Read-out:
 3. Trial sphere source: observer on 0x430EFE0 entry (no veto). Confidence high on the offsets. Caution: the radius is the unscaled node radius.
 
 No key added, no config change, no install.
+
+## Built v9 (2026-10-12, `claude/hangar-test-8`): the draw-list probe
+
+Commit `7cb314d5` (DLL `v0.19.1-83-g7cb314d5`). The draw-path doc (`5dd8bd57`) was merged first (`fa3532b5`, doc only). Full `build.bat` green: `drawlist_probe_test` 38 checks, `sealed_trial_test` 121, `builder_probe_test` 85, config contract 160 keys; then `build.bat --dll-only` green. Nothing installed, nothing flown. The v8.5 flight log (`edvr_gfx_20261012_080922.log`) is not on this machine; its numbers are the coordinator's reading.
+
+*Why.* In the v8.5 flight, `all` cleared about 916k records per 5 s with kept=0, yet less disappeared than with sphere or named. With the trial on, the builder ran about four times a frame while the walls still drew. Ships and drones come from producer B (FUN_144312E00), which runs inside the store before the trial's clear. The engine-motion logs show about ten producer-B calls a frame against 4,000 to 7,000 draw calls. **H-PERSIST (INFERRED):** each collection's draw list or pool persists across frames and is rebuilt only when something in the collection is admitted; clearing everything leaves the previous list drawing.
+
+*What the probe records* (one window: three consecutive frames from the next frame tick, written at the tick after the third):
+1. **Path A (builder)**, from the bracket observer, per call. The key is the instance pointer (rcx). The bracket's arguments do not carry the sub-item address (+0x40) the draw-path doc names, so that key is not used. Each call is taken as an append for the carried logic, since the builder's own append cannot be seen. One row per distinct key per frame.
+2. **Path B (producer)**, from the emit observer, after the forward. `before` and `after` are owner+0x2A4, so the appended count is exact. The key is the rig record's +0x250, the key FUN_143696FA0 uses to pick the owner's list.
+3. **Pool copy, merge and dictionary clear** calls per frame, with the raw collection pointer each observer receives (mapped base, destination, dictionary). The pointers are not joined across observers.
+4. **Substituted pool draws per family**, from the engine-motion draw counter (owner thread). Exact for substituted draws only. The main-view scene draw total is NOT counted: the draw census counts only while its own capture is armed, and the occlusion census uses queries.
+5. **Carried candidates**: a key appended in an earlier frame of the window and not in this one. A candidate is not a draw. The probe cannot say whether it was drawn.
+
+*The join: how draws map to records.* **Not live.** A scene draw is not mapped to its pool record on the CPU. Engine motion's draw side writes each pixel's t33 slot to MRT6 in the substituted pixel shader, and the temporal pass reads it on the GPU (`engine_velocity.h`, the DRAW half). The CPU never reads which pool record a draw used. The "pool records joined" counter (`engine_velocity.cpp`, the summary line) is the emit's history join: the previous pose per record. It is not a draw join. So every scene draw's origin is **unattributed**, and the summary says so. Producer keys map back this way: B by rec+0x250 to the rig record, whose name is rec+0x18, node, +0; A by the instance (rcx = the value at rec+0x290) with rec = r9 - 0x210 for the name.
+
+*What would appear if the probe never ran.* No `drawlist probe:` lines and no `drawlist_*.csv`. An armed line with no `collecting` line means the frame tick did not come (the probe runs from the builder probe's tick). A frame line that says `engine motion NOT live` means producer B, the copy, merge and clear taps, and the family draws are silent for that reason, not because nothing was drawn. A frame line that says `NOT the bracket path` means path A is zero for that reason.
+
+*Trial-mode independence.* The taps read no trial state. The mode is written on each line for the reader only. The probe runs the same in off, sphere, named and all.
+
+*Ruled out:*
+- ruled out: a CPU-side draw-to-pool-record join exists in engine motion, because the draw side is per pixel on the GPU (`engine_velocity.h`, the DRAW half). A per-draw origin is therefore not reportable from this build without a new GPU readback.
+- ruled out (by design, not measured): producer B's appends are affected by the trial's clear, because B runs inside the store before the clear (the draw-path doc, Ruled out). The probe's B counts are the control for that.
+
+*Flight plan (one session, same view):*
+1. Raised pad, same view, trial off: press `hotkey.drawlist_probe`, read the three frames.
+2. Same view, trial on in sphere (`diag.sealed_trial_mode = sphere`, `hotkey.sealed_trial` at the same radius): press the probe.
+3. Same view, trial on in `all` (`hotkey.sealed_trial_mode` until the mode says all): press the probe.
+4. The same three in the sealed hangar (docked, doors closed), same view.
+5. One capture with a ship in view. Its producer-B appends and its family row are the control.
+
+*Refutation criteria for H-PERSIST.*
+- **Confirmed:** in `all`, the substituted pool draws of the wall families stay large and about the same across the three frames, while their path A calls and path B appends drop to about zero, and the carried candidate count is large. The walls draw from a pool that nothing re-appends.
+- **Refuted:** in `all`, the wall families' draws fall in step with their appends: every drawn wall was appended fresh in its frame.
+- **Control:** ship families (producer B) should be unchanged under `all`, because B runs before the clear. That is not evidence for H-PERSIST; it is what the mechanism predicts.
+- **Limit:** only substituted families are counted. A wall drawn outside a substituted family is not in the family rows at all. If the walls are not in a substituted family, the test says nothing about them, and the flight shows that as zero wall draws, not as a refutation. The family names in the rows say which families were substituted.
+
+*Not done.* No flight, no install. Per-draw rows are not written (no join). The scene draw total is not counted. Path A appended counts are not exact (the builder's own append is not visible). A GPU readback of the pixel slots would give per-draw keys; that is a separate design.
