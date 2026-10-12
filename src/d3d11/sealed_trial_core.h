@@ -241,6 +241,9 @@ struct Window {
     // Built v13 (fix 1): the records kept by the own-ship exemption in the window, and the own ship's type prefix ("" when none).
     uint64_t ownKept = 0;
     const char* ownPrefix = "";
+    // Built v13.1: the window's extra fields, built by takeWindow: the top culled names (containing the camera; within the held box expanded
+    // 20 m), the bay's kept records, the camera's source and its live distance to the held pad, and the origin's motion (on foot and in all).
+    char extraText[1100] = {};
 };
 
 // The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named is the own-pad cell rule.
@@ -526,6 +529,67 @@ inline bool buildCapsule(const float p[3], const float q[3], float extend, float
     }
     if (length) *length = len;
     return finite3(a) && finite3(b);
+}
+
+// Built v13.1 (b): the own hangar's parts are kept in named mode. The bay volume is the shaft from the pad's centre o along its unit axis u:
+// lateral distance from the shaft within kBayLateralM, along it from -kBayBelowM (below the pad) to the target's distance plus kBayPastM.
+constexpr float kBayLateralM = 60.0f;
+constexpr float kBayBelowM = 20.0f;
+constexpr float kBayPastM = 20.0f;
+// Built v13.1 (a): the footprint margin for the culled-name tallies (the records just outside a face of the box).
+constexpr float kTallyMarginM = 20.0f;
+
+// The name classes the bay keeps: substrings of the game's record names (the own hangar's parts at any size).
+inline bool bayPartName(const char* name) noexcept {
+    static const char* const kParts[] = {"Hanger", "Hangar", "Lobby", "BlastShield", "Skirt", "LandingPad", "Lift", "Gate"};
+    if (!name || !name[0]) return false;
+    for (const char* part : kParts) {
+        if (std::strstr(name, part)) return true;
+    }
+    return false;
+}
+
+// The distance from p to the infinite line through o along the unit u; along (optional) receives the position of p's foot along u.
+inline float lateralToAxis(const float p[3], const float o[3], const float u[3], float* along = nullptr) noexcept {
+    const float d[3] = {p[0] - o[0], p[1] - o[1], p[2] - o[2]};
+    const float a = d[0] * u[0] + d[1] * u[1] + d[2] * u[2];
+    const float l[3] = {d[0] - a * u[0], d[1] - a * u[1], d[2] - a * u[2]};
+    if (along) *along = a;
+    return std::sqrt(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]);
+}
+
+// True when p lies in the bay volume of the shaft from o along u, the target at targetA metres from o.
+inline bool inBayVolume(const float p[3], const float o[3], const float u[3], float targetA) noexcept {
+    float a = 0.0f;
+    const float lat = lateralToAxis(p, o, u, &a);
+    return std::isfinite(lat) && std::isfinite(a) && lat <= kBayLateralM && a >= -kBayBelowM && a <= targetA + kBayPastM;
+}
+
+// The unit vector from a to b (false when they are closer than a metre, or not finite).
+inline bool unitBetween(const float a[3], const float b[3], float u[3]) noexcept {
+    const float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (!std::isfinite(len) || !(len >= 1.0f)) return false;
+    for (int k = 0; k < 3; ++k) u[k] = d[k] / len;
+    return true;
+}
+
+// The position of p along the cell box's own axes (u, v, w), when the cell is a box. False otherwise.
+inline bool boxCoordsOf(const OwnCell& c, const float p[3], float coords[3]) noexcept {
+    if (!c.box) return false;
+    const float d[3] = {p[0] - c.boxCentre[0], p[1] - c.boxCentre[1], p[2] - c.boxCentre[2]};
+    coords[0] = d[0] * c.boxU[0] + d[1] * c.boxU[1] + d[2] * c.boxU[2];
+    coords[1] = d[0] * c.boxV[0] + d[1] * c.boxV[1] + d[2] * c.boxV[2];
+    coords[2] = d[0] * c.boxW[0] + d[1] * c.boxW[1] + d[2] * c.boxW[2];
+    return true;
+}
+
+// True when p is within the box expanded by kTallyMarginM on each of its axes (a culled record there is just outside a face).
+inline bool nearBox(const OwnCell& c, const float p[3]) noexcept {
+    float x[3] = {};
+    if (!boxCoordsOf(c, p, x)) return false;
+    return std::fabs(x[0]) <= c.boxHalf[0] + kTallyMarginM && std::fabs(x[1]) <= c.boxHalf[1] + kTallyMarginM &&
+           std::fabs(x[2]) <= c.boxHalf[2] + kTallyMarginM;
 }
 
 // The nearest BlastShieldBase* instance within kCapsuleMaxM of p (else the nearest own Hanger*Small/Medium/Large). Writes its centre and name.
@@ -1076,7 +1140,7 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          "rigs_seen=%llu rigs_vetoed=%llu rigs_mixed=%llu rigs_unknown=%llu rigs_refresh=%llu early_ms=%.3f early_mode=%s "
                          "own_ship_kept=%llu own_prefix=%s assoc_sync=%llu assoc_job=%llu assoc_none=%llu frames=%llu early_ms_per_frame=%.4f "
                          "rig_records_matched=%llu rig_records_unevaluated=%llu rig_emulate_faults=%llu "
-                         "box=%s half_length_m=%.1f half_width_m=%.1f height_m=%.1f margin_m=%.1f view source = %s",
+                         "box=%s half_length_m=%.1f half_width_m=%.1f height_m=%.1f margin_m=%.1f %s view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
                          static_cast<unsigned long long>(w.kept), static_cast<unsigned long long>(w.keptUnknown),
                          static_cast<unsigned long long>(w.sunSkipped), static_cast<double>(w.evalNs) / 1.0e6,
@@ -1104,7 +1168,7 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          w.frames ? w.earlyMs / static_cast<double>(w.frames) : 0.0, static_cast<unsigned long long>(w.rigRecMatched), static_cast<unsigned long long>(w.rigRecUnevaluated),
                          static_cast<unsigned long long>(w.rigEmuFaults), w.boxOn ? "on" : "off", static_cast<double>(w.boxHalf[0]),
                          static_cast<double>(w.boxHalf[1]), static_cast<double>(w.boxHalf[2]), static_cast<double>(w.boxMargin),
-                         viewSource);
+                         w.extraText, viewSource);
 }
 
 // "sealed trial: on at frame F (radius R m; camera (x,y,z) or unknown; the sun pair is skipped; records outside the sphere

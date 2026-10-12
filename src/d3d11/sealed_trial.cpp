@@ -19,6 +19,7 @@
 #include "../common/log.h"
 #include "asset_census_core.h"
 #include "kept_report_core.h"
+#include "journal_watch.h"
 #include "kinematic_eval_hook.h"
 #include "sealed_trial_core.h"
 #include "store_hook.h"
@@ -114,6 +115,40 @@ float g_ownCandidateDist = -1.0f;   // the candidate's distance from the camera,
 uint64_t g_ownExempt = 0;           // records kept by the own-ship exemption this window
 char g_lastSize = 'S';
 
+// Built v13.1 (a): the window's culled-name tallies. Containing: culled records whose sphere holds the camera (the culled_containing count, by
+// name). Near box: culled records within the held box expanded by kTallyMarginM. coords: the box coordinates of the name's first record (its
+// centre about the cell, when the cell is not a box).
+struct NameTally {
+    char name[48];
+    uint32_t n;
+    float coords[3];
+};
+constexpr size_t kTallySlots = 48;
+constexpr size_t kBayNameSlots = 20;
+NameTally g_tallyContain[kTallySlots] = {};
+NameTally g_tallyNear[kTallySlots] = {};
+uint32_t g_tallyContainUsed = 0, g_tallyNearUsed = 0;
+uint64_t g_tallyContainOver = 0, g_tallyNearOver = 0;
+// Built v13.1 (b): the bay rule. Records it keeps that the box alone would cull: this window, and since the engage (with the first names).
+uint64_t g_bayKept = 0;
+uint64_t g_bayKeptEngage = 0;
+char g_bayNames[kBayNameSlots][48] = {};
+uint32_t g_bayNameCount = 0;
+uint32_t g_bayEngageFrame = 0;
+char g_bayNeighbour[200] = {};   // the nearest other pad to the shaft, measured at the engage
+// Built v13.1 (a): the automatic reports. Due 2 s after a named engage; 10 s after the player goes on foot while the trial is on.
+bool g_autoEngagePending = false;
+uint64_t g_autoEngageDueMs = 0;
+uint64_t g_onFootSinceMs = 0;
+bool g_onFootReported = false;
+// Built v13.1 (c): the camera's origin (the view 0 origin the on-foot rule centres on), its motion per window, and the on-foot part of it.
+bool g_camOriginValid = false;
+float g_camOrigin[3] = {};
+double g_camMovedM = 0.0;
+uint64_t g_camFrames = 0;
+uint64_t g_camOnFootFrames = 0;
+double g_camOnFootMovedM = 0.0;
+
 // The class cache (lock-free): a slot per node, a word per slot (sealed_trial_core.h packs it). Written by any thread that runs the store.
 std::atomic<uint64_t> g_classSlots[kClassSlots] = {};
 
@@ -182,6 +217,111 @@ double nanoseconds(const LARGE_INTEGER& a, const LARGE_INTEGER& b) noexcept {
     return static_cast<double>(b.QuadPart - a.QuadPart) * 1.0e9 / static_cast<double>(f.QuadPart);
 }
 
+// Built v13.1: counts one culled record under its name, in a tally of at most kTallySlots names (the rest are counted as over).
+void tallyNote(NameTally* t, uint32_t* used, uint64_t* over, const char* name, const float coords[3]) noexcept {
+    for (uint32_t i = 0; i < *used; ++i) {
+        if (std::strcmp(t[i].name, name) == 0) {
+            ++t[i].n;
+            return;
+        }
+    }
+    if (*used >= kTallySlots) {
+        ++*over;
+        return;
+    }
+    NameTally& s = t[(*used)++];
+    std::snprintf(s.name, sizeof(s.name), "%s", name);
+    s.n = 1;
+    for (int k = 0; k < 3; ++k) s.coords[k] = coords[k];
+}
+
+// The top three names by count as "name xN at (a, b, c)", then the distinct and overflow counts.
+std::string tallyText(const NameTally* t, uint32_t used, uint64_t over) {
+    std::string out = "[";
+    bool taken[kTallySlots] = {};
+    for (int k = 0; k < 3; ++k) {
+        int best = -1;
+        for (uint32_t i = 0; i < used; ++i) {
+            if (!taken[i] && (best < 0 || t[i].n > t[best].n)) best = static_cast<int>(i);
+        }
+        if (best < 0) break;
+        taken[best] = true;
+        char part[160];
+        std::snprintf(part, sizeof(part), "%s%s x%u at (%.1f, %.1f, %.1f)", k ? ", " : "", t[best].name, t[best].n,
+                      static_cast<double>(t[best].coords[0]), static_cast<double>(t[best].coords[1]), static_cast<double>(t[best].coords[2]));
+        out += part;
+    }
+    if (out == "[") out += "none";
+    char tail[80];
+    std::snprintf(tail, sizeof(tail), "] distinct=%u over=%llu", used, static_cast<unsigned long long>(over));
+    out += tail;
+    return out;
+}
+
+// Built v13.1 (a, b): the bay's kept records since the engage, with their first names, and the nearest other pad. Called by the automatic reports.
+void logBay(const char* trigger, uint32_t frame) {
+    std::string names;
+    for (uint32_t i = 0; i < g_bayNameCount; ++i) {
+        if (i) names += ", ";
+        names += g_bayNames[i];
+    }
+    Log::get().note("sealed bay (%s, frame %u): %llu records kept since the engage at frame %u that the box alone would cull; first %u names: %s. "
+                    "Nearest other pad to the shaft: %s.", trigger, frame, static_cast<unsigned long long>(g_bayKeptEngage), g_bayEngageFrame,
+                    g_bayNameCount, names.empty() ? "none" : names.c_str(), g_bayNeighbour);
+}
+
+// Built v13.1 (b, c): at a named engage, the bay's rule is stated and the nearest other pad's lateral distance to the shaft is measured from the
+// pads the store saw last frame (the own pad excluded). Also arms the automatic report due 2 s on.
+void beginBay(const sealed::OwnCell& c, uint32_t frame) {
+    g_bayKeptEngage = 0;
+    g_bayNameCount = 0;
+    g_bayEngageFrame = frame;
+    g_autoEngagePending = true;
+    g_autoEngageDueMs = GetTickCount64() + 2000;
+    float u[3] = {};
+    if (!c.capsule || !sealed::unitBetween(c.capA, c.capB, u)) {
+        std::snprintf(g_bayNeighbour, sizeof(g_bayNeighbour), "not measured (no shaft at the engage)");
+    } else {
+        float best = -1.0f;
+        uint32_t others = 0;
+        char bestName[64] = {};
+        for (size_t i = 0; i < g_padCount; ++i) {
+            const sealed::PadObs& p = g_pads[i];
+            if (p.addr == c.pad) continue;
+            ++others;
+            const float lat = sealed::lateralToAxis(p.centre, c.capA, u);
+            if (best < 0.0f || lat < best) {
+                best = lat;
+                std::snprintf(bestName, sizeof(bestName), "%s", p.name);
+            }
+        }
+        if (best < 0.0f)
+            std::snprintf(g_bayNeighbour, sizeof(g_bayNeighbour), "none seen (0 other pads in last frame's records)");
+        else
+            std::snprintf(g_bayNeighbour, sizeof(g_bayNeighbour), "%s at %.1f m lateral of the shaft (%u other pads seen)", bestName,
+                          static_cast<double>(best), others);
+    }
+    Log::get().note("sealed bay (engage frame %u): keeps records named Hanger, Hangar, Lobby, BlastShield, Skirt, LandingPad, Lift or Gate within %.0f m "
+                    "lateral of the shaft, from %.0f m below the pad to %.0f m past the target (target %.1f m from the pad). Nearest other pad: %s.",
+                    frame, static_cast<double>(sealed::kBayLateralM), static_cast<double>(sealed::kBayBelowM),
+                    static_cast<double>(sealed::kBayPastM), static_cast<double>(c.capLen), g_bayNeighbour);
+}
+
+// Built v13.1 (c): the camera's origin once per frame, its motion over the window, and the part of it on foot.
+void noteCameraFrame() noexcept {
+    if (!g_view.originOk) return;
+    const bool foot = journalOnFootKnown() && journalOnFoot();
+    if (g_camOriginValid) {
+        const double m = static_cast<double>(sealed::distance(g_view.origin, g_camOrigin));
+        g_camMovedM += m;
+        if (foot) g_camOnFootMovedM += m;
+    }
+    for (int k = 0; k < 3; ++k) g_camOrigin[k] = g_view.origin[k];
+    g_camOriginValid = true;
+    ++g_camFrames;
+    if (foot) ++g_camOnFootFrames;
+}
+
 void resetWindow() noexcept {
     g_culled.store(0);
     g_kept.store(0);
@@ -203,6 +343,11 @@ void resetWindow() noexcept {
     g_trialFramesWinStart = g_trialFrames;
     g_frozenFrames = g_frozenSkipped = 0;
     g_ownExempt = 0;
+    g_tallyContainUsed = g_tallyNearUsed = 0;
+    g_tallyContainOver = g_tallyNearOver = 0;
+    g_bayKept = 0;
+    g_camFrames = g_camOnFootFrames = 0;
+    g_camMovedM = g_camOnFootMovedM = 0.0;
     g_centreDist.clear();
     if (g_centreDist.capacity() < kCentreDistCap) g_centreDist.reserve(kCentreDistCap);   // at a window's end, not on the store's hot path
 }
@@ -272,6 +417,18 @@ sealed::Window takeWindow() noexcept {
     } else {
         std::snprintf(w.padReason, sizeof(w.padReason), "%s", named ? g_cellPrev.reason : "sphere mode (no cell)");
     }
+    // Built v13.1: the top culled names, the bay, and the camera. camera_to_pad_m is LIVE (this frame's camera to the held pad's centre); pad_dist
+    // above is the value frozen at the engage.
+    const float camToPad = (g_frameCamValid && g_cellPrev.has) ? sealed::distance(g_frameCam, g_cellPrev.centre) : -1.0f;
+    char camText[200];
+    std::snprintf(camText, sizeof(camText), "camera_source=%s camera_to_pad_m=%.2f camera_frames=%llu origin_moved_m=%.2f on_foot_frames=%llu "
+                  "on_foot_origin_moved_m=%.2f", view::sourceName(g_view.source), static_cast<double>(camToPad),
+                  static_cast<unsigned long long>(g_camFrames), g_camMovedM, static_cast<unsigned long long>(g_camOnFootFrames), g_camOnFootMovedM);
+    std::string extra = "top_culled_containing=" + tallyText(g_tallyContain, g_tallyContainUsed, g_tallyContainOver) +
+                        " top_culled_near_box=" + tallyText(g_tallyNear, g_tallyNearUsed, g_tallyNearOver) +
+                        " bay_kept=" + std::to_string(g_bayKept) + " " + camText +
+                        " early_ms_scope=frame_tick_refresh_only (decisions untimed in v13.1) ";
+    std::snprintf(w.extraText, sizeof(w.extraText), "%s", extra.c_str());
     return w;
 }
 
@@ -290,7 +447,7 @@ const char* viewLabel(const view::Resolved& v) noexcept {
 
 // Writes the window's line at the current radius and the view it ran against, then starts a new window. Called under the lock.
 void noteWindow() {
-    char line[1400];
+    char line[2600];
     sealed::formatWindow(line, sizeof(line), takeWindow(), g_radius.load(std::memory_order_relaxed), viewLabel(g_view),
                          g_mode.load(std::memory_order_relaxed));
     Log::get().note("%s", line);
@@ -814,7 +971,9 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
                 if (picked && sealed::buildCapsule(next.centre, q, sealed::kCapsuleExtendM, next.capA, next.capB, &next.capLen)) {
                     next.capsule = true;
                     std::snprintf(next.capTarget, sizeof(next.capTarget), "%s", qn);
-                    logAxisPick(next, e2, haveAxes, perp, along, frame);   // Built v13: both distances, once per change
+                    // Built v13: both distances. Built v13.1: logged at the engage only, the frame the cell is frozen from (the per-frame pick wanders
+                    // while the cell is not held, and the log would show that wander as if it were the cell).
+                    if (g_engagePending) logAxisPick(next, e2, haveAxes, perp, along, frame);
                     buildBoxFor(next, q);   // Built v11 (second addendum): the box when the pad's orientation and extent are readable
                 }
             }
@@ -850,6 +1009,7 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
                 g_heldValid = true;
                 g_engagePending = false;
                 logEngage(g_heldCell, frame);
+                beginBay(g_heldCell, frame);   // Built v13.1 (b, a): the bay rule and its neighbour measurement; the automatic report due 2 s on
             }
         } else if (g_engageTries >= kEngageTries) {
             g_engagePending = false;
@@ -1450,6 +1610,24 @@ void sealedTrialFrame(uint32_t frame) {
     }
     if (!g_on.load(std::memory_order_acquire)) return;
     const uint64_t now = GetTickCount64();
+    // Built v13.1 (a): the automatic kept and culled-near-axis reports. Due 2 s after a named engage; and 10 s after the player goes on foot
+    // while the trial is on (once per time on foot). Each writes the same report as hotkey.sealed_trial_report, and logs the bay.
+    if (g_autoEngagePending && now >= g_autoEngageDueMs) {
+        g_autoEngagePending = false;
+        logBay("named engage + 2 s", frame);
+        sealedTrialReportRequest("auto: named engage + 2 s", frame);
+    }
+    if (journalOnFootKnown() && journalOnFoot()) {
+        if (g_onFootSinceMs == 0) g_onFootSinceMs = now;
+        if (!g_onFootReported && now - g_onFootSinceMs >= 10000) {
+            g_onFootReported = true;
+            logBay("on foot + 10 s", frame);
+            sealedTrialReportRequest("auto: on foot + 10 s", frame);
+        }
+    } else {
+        g_onFootSinceMs = 0;
+        g_onFootReported = false;
+    }
     if (now - g_windowStartMs < sealed::kWindowMs) return;
     g_windowStartMs = now;
     noteWindow();
@@ -1555,6 +1733,7 @@ struct RigSlot {
     bool named = false;
     char name[48] = {};              // the name of the rig's first record (for the own-ship prefix)
     uintptr_t coll = 0;              // the rig's collection (rig+0x348), as last read at a decision
+    uint32_t collStamp = 0;          // Built v13.1: the frame stamp the collection was last read in (once per rig per frame)
     uint8_t verdict = 0;             // kVerdictUnknown / kVerdictMixed / kVerdictOutside, refreshed once per frame (refreshRigVerdicts)
 };
 constexpr uint8_t kVerdictUnknown = 0, kVerdictMixed = 1, kVerdictOutside = 2;
@@ -1694,27 +1873,43 @@ void rigNoteRecord(uintptr_t bucket, uintptr_t record, const float c[3], float r
 // Built v12: the early rig veto's decision (kinematic_eval_hook.cpp rigEvalObserved calls it before the forward, only while the veto is attached).
 // Only in named or all mode with the trial on. The bound is last frame's records (this frame's, if they were already noted, is the frame before).
 // True vetoes; count mode counts the decision and forwards.
+// Built v13.1 (d): the decision's cache: the last rig's slot and the frame it was found in (one probe per rig per frame, not per decision). No
+// timer is read on the decision path (the frame tick times the refresh; the decisions' own time is not measured in this build).
+uintptr_t g_rigCacheRig = 0;
+RigSlot* g_rigCacheSlot = nullptr;
+uint32_t g_rigCacheStamp = 0;
+
 bool sealedTrialRigVeto(uintptr_t rig, uintptr_t ctx) noexcept {
     (void)ctx;
     if (!g_on.load(std::memory_order_acquire) || !rig) return false;
     const sealed::Mode mode = g_mode.load(std::memory_order_relaxed);
     if (mode == sealed::Mode::kSphere) return false;
-    LARGE_INTEGER t0{}, t1{};
-    QueryPerformanceCounter(&t0);
     std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     const uint32_t stamp = g_frameStamp.load(std::memory_order_relaxed);
-    RigSlot* s = rigFind(rig, true);
     ++g_rigTally.seen;
-    if (!s) {
-        ++g_rigTally.unknown;
-        return false;
+    RigSlot* s = nullptr;
+    if (rig == g_rigCacheRig && g_rigCacheStamp == stamp && g_rigCacheSlot && g_rigCacheSlot->rig == rig) {
+        s = g_rigCacheSlot;
+    } else {
+        s = rigFind(rig, true);
+        if (!s) {
+            ++g_rigTally.unknown;
+            return false;
+        }
+        g_rigCacheRig = rig;
+        g_rigCacheStamp = stamp;
+        g_rigCacheSlot = s;
     }
     s->evalStamp = stamp;
-    // The rig's collection (rig+0x348, read with SEH): recorded so the store's job path can associate its batch entries with this rig.
-    uintptr_t coll = 0;
-    if (readVal(&coll, rig + 0x348) && coll && coll != s->coll) {
-        s->coll = coll;
-        collInsert(coll, rig);
+    // The rig's collection (rig+0x348, read with SEH), once per rig per frame: recorded so the store's job path can associate its batch entries
+    // with this rig.
+    if (s->collStamp != stamp) {
+        s->collStamp = stamp;
+        uintptr_t coll = 0;
+        if (readVal(&coll, rig + 0x348) && coll && coll != s->coll) {
+            s->coll = coll;
+            collInsert(coll, rig);
+        }
     }
     // One lookup: the verdict was computed once this frame (refreshRigVerdicts, on the frame tick). No record is scanned here.
     bool veto = false;
@@ -1738,8 +1933,6 @@ bool sealedTrialRigVeto(uintptr_t rig, uintptr_t ctx) noexcept {
             s->vetoedRun = 0;
             break;
     }
-    QueryPerformanceCounter(&t1);
-    g_rigTally.ns += static_cast<uint64_t>(nanoseconds(t0, t1));
     return veto;
 }
 
@@ -1811,7 +2004,8 @@ void sealedTrialRigTake(uint64_t out[8]) noexcept {
 }
 
 // The fault-safe cull of one record, with its counters (called under the lock). containing: the record's sphere contains the camera (named mode).
-static void cullCounted(uintptr_t record, bool containing) noexcept {
+// True when the record was culled (the caller tallies its name then).
+static bool cullCounted(uintptr_t record, bool containing) noexcept {
     RecordFields fields{record};
     sealed::CullField failed = sealed::CullField::kMaskRead;
     uint64_t value = 0;
@@ -1819,16 +2013,17 @@ static void cullCounted(uintptr_t record, bool containing) noexcept {
         case sealed::Cull::kCulled:
             g_culled.fetch_add(1, std::memory_order_relaxed);
             if (containing) g_culledContaining.fetch_add(1, std::memory_order_relaxed);
-            break;
+            return true;
         case sealed::Cull::kUntouched:
         case sealed::Cull::kRestored:
             g_faults.fetch_add(1, std::memory_order_relaxed);   // the record is as the store wrote it: kept, not judged
-            break;
+            return false;
         case sealed::Cull::kTorn:
             g_faults.fetch_add(1, std::memory_order_relaxed);
             g_torn.fetch_add(1, std::memory_order_relaxed);     // the one case the record may be left half culled
-            break;
+            return false;
     }
+    return false;
 }
 
 // The rule for one record the store has written. Every read and write is validated; a failure leaves the record as the store wrote it and counts
@@ -1882,7 +2077,10 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
     }
     g_cameraKnown.store(true, std::memory_order_relaxed);
     // The frame's first record: the previous frame's pads become this frame's cell (the camera used is the previous frame's, still in g_frameCam).
-    if (g_cellStamp != stamp) promoteFrame(stamp, stamp);
+    if (g_cellStamp != stamp) {
+        promoteFrame(stamp, stamp);
+        noteCameraFrame();   // Built v13.1 (c): the camera's origin once per frame (the on-foot motion check)
+    }
     std::memcpy(g_frameCam, cam, sizeof(g_frameCam));
     g_frameCamValid = true;
     const float trialR = g_radius.load(std::memory_order_relaxed);
@@ -1944,6 +2142,21 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
             why = v.why;
             containing = v.containing;
             sphereJudged = v.sphereJudged;
+            // Built v13.1 (b): the own hangar's parts stay inside the bay volume, even where the box alone would cull them (whatever their size,
+            // camera-containing ones included). The shaft is the held cell's; without a capsule there is no bay.
+            if (!keep && g_cellPrev.capsule) {
+                float u[3] = {};
+                if (sealed::unitBetween(g_cellPrev.capA, g_cellPrev.capB, u) &&
+                    sealed::inBayVolume(centre, g_cellPrev.capA, u, g_cellPrev.capLen)) {
+                    char bn[48] = {};
+                    if (cachedName(record, bn, sizeof(bn)) && sealed::bayPartName(bn)) {
+                        keep = true;   // why stays as the box rule's (kNone): the bay is counted in bay_kept, not in kept_by_cell
+                        ++g_bayKept;
+                        ++g_bayKeptEngage;
+                        if (g_bayNameCount < kBayNameSlots) std::snprintf(g_bayNames[g_bayNameCount++], sizeof(g_bayNames[0]), "%s", bn);
+                    }
+                }
+            }
         } else {
             keep = sealed::keepRecord(centre, radius, cam, trialR);
             why = keep ? sealed::KeepWhy::kSphere : sealed::KeepWhy::kNone;
@@ -1976,7 +2189,22 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
             if (why == sealed::KeepWhy::kCell && !sphereJudged) g_keptByCell.fetch_add(1, std::memory_order_relaxed);
             if (why == sealed::KeepWhy::kExplicit) g_keptExplicit.fetch_add(1, std::memory_order_relaxed);
         } else {
-            cullCounted(record, named && g_cellPrev.has && containing);
+            const bool culled = cullCounted(record, named && g_cellPrev.has && containing);
+            // Built v13.1 (a): the culled names, for the window's top three: those containing the camera, and those just outside the held box.
+            if (culled && named && g_cellPrev.has) {
+                char tn[48] = {};
+                // Coordinates: the box's own axes when the cell is a box; else the offset from the pad's centre.
+                float x[3] = {centre[0] - g_cellPrev.centre[0], centre[1] - g_cellPrev.centre[1], centre[2] - g_cellPrev.centre[2]};
+                if (containing) {
+                    if (cachedName(record, tn, sizeof(tn))) {
+                        if (g_cellPrev.box) sealed::boxCoordsOf(g_cellPrev, centre, x);
+                        tallyNote(g_tallyContain, &g_tallyContainUsed, &g_tallyContainOver, tn, x);
+                    }
+                } else if (g_cellPrev.box && sealed::nearBox(g_cellPrev, centre) && cachedName(record, tn, sizeof(tn))) {
+                    sealed::boxCoordsOf(g_cellPrev, centre, x);
+                    tallyNote(g_tallyNear, &g_tallyNearUsed, &g_tallyNearOver, tn, x);
+                }
+            }
         }
     }
     if (g_repPhase.load(std::memory_order_relaxed) == kRepCollecting && g_observed.size() < g_observed.capacity())

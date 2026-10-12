@@ -768,6 +768,46 @@ int main(int argc, char** argv) {
         check(se::percentileOf(hundred, 0.50) == 50.0f && se::percentileOf(hundred, 0.95) == 95.0f,
               "the nearest-rank percentile of 1..100: p50 is 50 and p95 is 95");
         check(se::percentileOf(std::vector<float>{}, 0.5) == 0.0f, "no values: the percentile is 0");
+
+        // Built v13.1 (b): the bay's name classes and volume.
+        check(!se::bayPartName("CobraMkV_") && !se::bayPartName("SocialSpace") && !se::bayPartName(nullptr) && !se::bayPartName(""),
+              "the bay keeps none of: a ship, the concourse, a null or empty name");
+        check(se::bayPartName("Hangar_Small") && se::bayPartName("Hanger_Medium") && se::bayPartName("LandingPad_Large") &&
+                  se::bayPartName("Lift_Dock") && se::bayPartName("Gate_X") && se::bayPartName("BlastShieldBase") && se::bayPartName("Skirt_Y") &&
+                  se::bayPartName("Lobby_Z"),
+              "the bay keeps Hangar, Hanger, LandingPad, Lift, Gate, BlastShield, Skirt and Lobby names at any size");
+        const float bo[3] = {0.0f, 0.0f, 0.0f};
+        const float bu[3] = {0.0f, 0.0f, 1.0f};
+        const float lp[3] = {3.0f, 4.0f, 10.0f};
+        float along = -1.0f;
+        check(se::lateralToAxis(lp, bo, bu, &along) == 5.0f && along == 10.0f, "lateral of (3,4,10) to the z axis is 5; along is 10");
+        const float p1[3] = {0.0f, 0.0f, 50.0f}, p2[3] = {61.0f, 0.0f, 50.0f}, p3[3] = {60.0f, 0.0f, 50.0f};
+        const float p4[3] = {0.0f, 0.0f, -21.0f}, p5[3] = {0.0f, 0.0f, -20.0f}, p6[3] = {0.0f, 0.0f, 120.0f}, p7[3] = {0.0f, 0.0f, 121.0f};
+        check(se::inBayVolume(p1, bo, bu, 100.0f) && !se::inBayVolume(p2, bo, bu, 100.0f) && se::inBayVolume(p3, bo, bu, 100.0f),
+              "the bay: on the shaft is in; 61 m lateral is out; 60 m lateral is in (the limit is inclusive)");
+        check(!se::inBayVolume(p4, bo, bu, 100.0f) && se::inBayVolume(p5, bo, bu, 100.0f),
+              "the bay: 21 m below the pad is out; 20 m below is in");
+        check(se::inBayVolume(p6, bo, bu, 100.0f) && !se::inBayVolume(p7, bo, bu, 100.0f),
+              "the bay: 20 m past a target 100 m away is in; 21 m past is out");
+        const float ua[3] = {0.0f, 0.0f, 0.0f}, ub[3] = {0.0f, 0.0f, 5.0f}, uc[3] = {0.0f, 0.0f, 0.5f};
+        float uu[3] = {};
+        check(se::unitBetween(ua, ub, uu) && uu[2] == 1.0f && !se::unitBetween(ua, uc, uu),
+              "the unit vector from a to b is (0,0,1); a pair under a metre apart has none");
+
+        // Built v13.1 (a): the box's coordinates and its footprint expanded by 20 m.
+        se::OwnCell box;
+        box.box = true;
+        box.boxCentre[0] = box.boxCentre[1] = box.boxCentre[2] = 0.0f;
+        box.boxU[0] = 1.0f; box.boxV[1] = 1.0f; box.boxW[2] = 1.0f;
+        box.boxHalf[0] = 10.0f; box.boxHalf[1] = 5.0f; box.boxHalf[2] = 3.0f;
+        const float pc[3] = {3.0f, 4.0f, 5.0f};
+        float cc[3] = {};
+        check(se::boxCoordsOf(box, pc, cc) && cc[0] == 3.0f && cc[1] == 4.0f && cc[2] == 5.0f, "the box coordinates of (3,4,5) are (3,4,5)");
+        const float n1[3] = {29.0f, 0.0f, 0.0f}, n2[3] = {31.0f, 0.0f, 0.0f}, n3[3] = {0.0f, 0.0f, 22.0f}, n4[3] = {0.0f, 0.0f, 24.0f};
+        check(se::nearBox(box, n1) && !se::nearBox(box, n2), "the box footprint: 29 m along u (half 10, margin 20) is near; 31 m is not");
+        check(se::nearBox(box, n3) && !se::nearBox(box, n4), "the box footprint: 22 m along w (half 3, margin 20) is near; 24 m is not");
+        se::OwnCell none;
+        check(!se::nearBox(none, n1) && !se::boxCoordsOf(none, pc, cc), "no box: no footprint and no coordinates");
     }
 
     std::printf("sealed_trial_test: %d checks, %d failures\n", g_checks, g_failures);
