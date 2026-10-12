@@ -122,6 +122,8 @@ struct NameTally {
     char name[48];
     uint32_t n;
     float coords[3];
+    float radius;        // Built v13.2: the first record's sphere radius (metres)
+    uint64_t children;   // Built v13.2: the first record's child count
 };
 constexpr size_t kTallySlots = 48;
 constexpr size_t kBayNameSlots = 20;
@@ -148,6 +150,37 @@ double g_camMovedM = 0.0;
 uint64_t g_camFrames = 0;
 uint64_t g_camOnFootFrames = 0;
 double g_camOnFootMovedM = 0.0;
+
+// Built v13.2 (a): the distance under the pad: the box's bottom and the bay's lower bound (diag.sealed_cell_below_m).
+float g_belowM = sealed::kBelowDefaultM;
+// Built v13.2 (a): the running minima of the position along the shaft (from the pad's centre) since the last engage: the own ship's records and
+// the Door* records, each within the bay's lateral distance of the shaft.
+float g_minOwnAlong = 0.0f, g_minOwnLat = 0.0f, g_minDoorAlong = 0.0f, g_minDoorLat = 0.0f;
+bool g_minOwnSet = false, g_minDoorSet = false;
+char g_minOwnName[48] = {}, g_minDoorName[48] = {};
+uint64_t g_minFrames = 0;   // the frames the minima were taken over
+
+// Built v13.2 (b): the own ship. Each frame the records within kOwnNearM of the camera (address, name, sphere) are listed; the previous frame's
+// list is the source at an engage. The own record is re-read by address each frame: its live sphere keeps every record whose centre lies within
+// it plus kOwnSphereMarginM.
+constexpr float kOwnNearM = 40.0f;
+constexpr float kOwnSphereMarginM = 5.0f;
+constexpr size_t kNearSlots = 24;
+struct NearRec {
+    uintptr_t addr = 0;
+    char name[48] = {};
+    float centre[3] = {};
+    float radius = 0.0f;
+    float dist = 0.0f;
+};
+NearRec g_nearCur[kNearSlots], g_nearPrev[kNearSlots];
+size_t g_nearCurN = 0, g_nearPrevN = 0;
+uintptr_t g_ownRecAddr = 0;
+char g_ownRecName[48] = {};
+bool g_ownLiveValid = false;
+float g_ownLiveCentre[3] = {};
+float g_ownLiveRadius = 0.0f;
+uint64_t g_ownSphereKeptFrame = 0, g_ownSphereKeptLast = 0, g_ownSphereKeptWin = 0;
 
 // The class cache (lock-free): a slot per node, a word per slot (sealed_trial_core.h packs it). Written by any thread that runs the store.
 std::atomic<uint64_t> g_classSlots[kClassSlots] = {};
@@ -218,7 +251,8 @@ double nanoseconds(const LARGE_INTEGER& a, const LARGE_INTEGER& b) noexcept {
 }
 
 // Built v13.1: counts one culled record under its name, in a tally of at most kTallySlots names (the rest are counted as over).
-void tallyNote(NameTally* t, uint32_t* used, uint64_t* over, const char* name, const float coords[3]) noexcept {
+void tallyNote(NameTally* t, uint32_t* used, uint64_t* over, const char* name, const float coords[3], float radius,
+               uint64_t children) noexcept {
     for (uint32_t i = 0; i < *used; ++i) {
         if (std::strcmp(t[i].name, name) == 0) {
             ++t[i].n;
@@ -233,6 +267,8 @@ void tallyNote(NameTally* t, uint32_t* used, uint64_t* over, const char* name, c
     std::snprintf(s.name, sizeof(s.name), "%s", name);
     s.n = 1;
     for (int k = 0; k < 3; ++k) s.coords[k] = coords[k];
+    s.radius = radius;
+    s.children = children;
 }
 
 // The top three names by count as "name xN at (a, b, c)", then the distinct and overflow counts.
@@ -247,8 +283,9 @@ std::string tallyText(const NameTally* t, uint32_t used, uint64_t over) {
         if (best < 0) break;
         taken[best] = true;
         char part[160];
-        std::snprintf(part, sizeof(part), "%s%s x%u at (%.1f, %.1f, %.1f)", k ? ", " : "", t[best].name, t[best].n,
-                      static_cast<double>(t[best].coords[0]), static_cast<double>(t[best].coords[1]), static_cast<double>(t[best].coords[2]));
+        std::snprintf(part, sizeof(part), "%s%s x%u at (%.1f, %.1f, %.1f) r=%.1f children=%llu", k ? ", " : "", t[best].name, t[best].n,
+                      static_cast<double>(t[best].coords[0]), static_cast<double>(t[best].coords[1]), static_cast<double>(t[best].coords[2]),
+                      static_cast<double>(t[best].radius), static_cast<unsigned long long>(t[best].children));
         out += part;
     }
     if (out == "[") out += "none";
@@ -288,6 +325,8 @@ void beginBay(const sealed::OwnCell& c, uint32_t frame) {
         for (size_t i = 0; i < g_padCount; ++i) {
             const sealed::PadObs& p = g_pads[i];
             if (p.addr == c.pad) continue;
+            // Built v13.2: the own pad's second platform (the same size, within 30 m of its centre) is not a neighbour (it moves with the pad).
+            if (p.size == c.size && sealed::distance(p.centre, c.centre) < 30.0f) continue;
             ++others;
             const float lat = sealed::lateralToAxis(p.centre, c.capA, u);
             if (best < 0.0f || lat < best) {
@@ -302,9 +341,20 @@ void beginBay(const sealed::OwnCell& c, uint32_t frame) {
                           static_cast<double>(best), others);
     }
     Log::get().note("sealed bay (engage frame %u): keeps records named Hanger, Hangar, Lobby, BlastShield, Skirt, LandingPad, Lift or Gate within %.0f m "
-                    "lateral of the shaft, from %.0f m below the pad to %.0f m past the target (target %.1f m from the pad). Nearest other pad: %s.",
-                    frame, static_cast<double>(sealed::kBayLateralM), static_cast<double>(sealed::kBayBelowM),
+                    "lateral of the shaft, from %.0f m below the pad to %.0f m past the target (target %.1f m from the pad; diag.sealed_cell_below_m). "
+                    "Nearest other pad: %s.", frame, static_cast<double>(sealed::kBayLateralM), static_cast<double>(g_belowM),
                     static_cast<double>(sealed::kBayPastM), static_cast<double>(c.capLen), g_bayNeighbour);
+    // Built v13.2 (a): the minima over the frames since the previous engage, so the next flight can size the below distance. Own ship: the records
+    // with the type prefix; doors: the Door* records. Both within the bay's lateral distance of the shaft.
+    if (g_minFrames > 0)
+        Log::get().note("sealed bay minima (since the previous engage, %llu frames): own ship %s at along %.1f m (lateral %.1f m); doors %s at "
+                        "along %.1f m (lateral %.1f m). Along is up the shaft from the pad's centre: negative is below the pad.",
+                        static_cast<unsigned long long>(g_minFrames), g_minOwnSet ? g_minOwnName : "none",
+                        static_cast<double>(g_minOwnSet ? g_minOwnAlong : 0.0f), static_cast<double>(g_minOwnSet ? g_minOwnLat : 0.0f),
+                        g_minDoorSet ? g_minDoorName : "none", static_cast<double>(g_minDoorSet ? g_minDoorAlong : 0.0f),
+                        static_cast<double>(g_minDoorSet ? g_minDoorLat : 0.0f));
+    g_minOwnSet = g_minDoorSet = false;
+    g_minFrames = 0;
 }
 
 // Built v13.1 (c): the camera's origin once per frame, its motion over the window, and the part of it on foot.
@@ -348,6 +398,7 @@ void resetWindow() noexcept {
     g_bayKept = 0;
     g_camFrames = g_camOnFootFrames = 0;
     g_camMovedM = g_camOnFootMovedM = 0.0;
+    g_ownSphereKeptWin = 0;
     g_centreDist.clear();
     if (g_centreDist.capacity() < kCentreDistCap) g_centreDist.reserve(kCentreDistCap);   // at a window's end, not on the store's hot path
 }
@@ -427,7 +478,12 @@ sealed::Window takeWindow() noexcept {
     std::string extra = "top_culled_containing=" + tallyText(g_tallyContain, g_tallyContainUsed, g_tallyContainOver) +
                         " top_culled_near_box=" + tallyText(g_tallyNear, g_tallyNearUsed, g_tallyNearOver) +
                         " bay_kept=" + std::to_string(g_bayKept) + " " + camText +
-                        " early_ms_scope=frame_tick_refresh_only (decisions untimed in v13.1) ";
+                        " early_ms_scope=frame_tick_refresh_only (decisions untimed in v13.1) own_record=" +
+                        (g_ownRecAddr && g_ownRecName[0] ? std::string(g_ownRecName) : std::string("none")) +
+                        " own_record_live=" + (g_ownLiveValid ? "yes" : "no") + " own_record_radius_m=" +
+                        std::to_string(g_ownLiveValid ? static_cast<double>(g_ownLiveRadius) : 0.0) +
+                        " own_sphere_kept_last_frame=" + std::to_string(g_ownSphereKeptLast) +
+                        " own_sphere_kept_window=" + std::to_string(g_ownSphereKeptWin) + " ";
     std::snprintf(w.extraText, sizeof(w.extraText), "%s", extra.c_str());
     return w;
 }
@@ -790,7 +846,7 @@ void buildBoxFor(sealed::OwnCell& cell, const float target[3]) {
             const float* wiki = sealed::kPadWikiM[sealed::sizeIndex(cell.size)];
             const float halfLen = wiki[0] * 0.5f * (g_doubleLength ? 2.0f : 1.0f);
             const float halfWid = wiki[1] * 0.5f * (g_doubleLength ? 1.0f : 2.0f);
-            if (!sealed::buildBox(cell.centre, target, axes[li], halfLen, halfWid, g_margin, &cell)) {
+            if (!sealed::buildBox(cell.centre, target, axes[li], halfLen, halfWid, g_margin, g_belowM, &cell)) {
                 std::snprintf(why, sizeof(why), "the box could not be built");
             } else {
                 // v12.1: the axis is pad->target; the angle between it and the pad's own e2 is logged (the v12 flight's question).
@@ -931,9 +987,73 @@ void logEngage(const sealed::OwnCell& c, uint32_t frame) {
 
 // Promotes the previous frame's pads into the cell for the frame now starting, and the explicit instances for that cell. Called under the lock
 // at the frame's first record. The pads and explicit parts are the previous frame's; the camera is the previous frame's too.
+// Built v13.2 (b): re-reads the own record by address (its centre and radius move with the pad). A record whose name no longer matches is dropped:
+// the address was freed or reused, and the rule stands down until the next engage.
+void readOwnLive() noexcept {
+    g_ownLiveValid = false;
+    if (!g_ownRecAddr) return;
+    const WorldRead wr = worldOfRecord(g_ownRecAddr);
+    char nm[48] = {};
+    if (wr.source == 4 || !cachedName(g_ownRecAddr, nm, sizeof(nm)) || !sealed::ownRecordMatch(nm, g_ownRecName)) {
+        g_ownRecAddr = 0;
+        return;
+    }
+    if (!std::isfinite(wr.radius) || !(wr.radius > 0.0f)) return;
+    std::memcpy(g_ownLiveCentre, wr.world, sizeof(g_ownLiveCentre));
+    g_ownLiveRadius = wr.radius;
+    g_ownLiveValid = true;
+}
+
+// Built v13.2 (b): at a named engage the own record is the one named as the stripped type prefix in the previous frame's near list: containing the
+// camera preferred, then the nearest. Logged either way.
+void pickOwnRecord(uint32_t frame) {
+    g_ownRecAddr = 0;
+    g_ownLiveValid = false;
+    g_ownRecName[0] = '\0';
+    char stripped[48] = {};
+    if (!sealed::strippedPrefix(g_ownPrefix, stripped, sizeof(stripped))) {
+        Log::get().note("sealed own ship (engage frame %u): no type prefix with an underscore; no own record, the small-sphere exemption alone applies.",
+                        frame);
+        return;
+    }
+    int best = -1;
+    bool bestIn = false;
+    for (size_t i = 0; i < g_nearPrevN; ++i) {
+        const NearRec& r = g_nearPrev[i];
+        if (!sealed::ownRecordMatch(r.name, stripped)) continue;
+        const bool in = r.dist <= r.radius;
+        if (best < 0 || (in && !bestIn) || (in == bestIn && r.dist < g_nearPrev[best].dist)) {
+            best = static_cast<int>(i);
+            bestIn = in;
+        }
+    }
+    if (best < 0) {
+        Log::get().note("sealed own ship (engage frame %u): no record named %s within %.0f m of the camera in the previous frame; the prefix rule alone "
+                        "applies.", frame, stripped, static_cast<double>(kOwnNearM));
+        return;
+    }
+    const NearRec& r = g_nearPrev[best];
+    g_ownRecAddr = r.addr;
+    std::snprintf(g_ownRecName, sizeof(g_ownRecName), "%s", r.name);
+    readOwnLive();
+    Log::get().note("sealed own ship (engage frame %u): own record %s, %.2f m from the camera, radius %.2f m (the camera %s it). Every frame, each record "
+                    "whose centre lies within its current sphere plus %.0f m is kept; %s.", frame, g_ownRecName, static_cast<double>(r.dist),
+                    static_cast<double>(r.radius), bestIn ? "is inside" : "is outside",
+                    static_cast<double>(kOwnSphereMarginM), g_ownLiveValid ? "live sphere read" : "the live read failed; the rule stands down");
+}
+
 void promoteFrame(uint32_t stamp, uint32_t frame) {
     sealed::OwnCell next;
     g_ownCandidateDist = -1.0f;   // Built v13: the own-ship candidate is re-chosen from this frame's records
+    // Built v13.2: the previous frame's near list is the engage's source; the own record's live sphere is re-read this frame; the per-frame keep
+    // count rolls over; the minima count frames while a cell is in force.
+    std::memcpy(g_nearPrev, g_nearCur, sizeof(g_nearPrev));
+    g_nearPrevN = g_nearCurN;
+    g_nearCurN = 0;
+    g_ownSphereKeptLast = g_ownSphereKeptFrame;
+    g_ownSphereKeptFrame = 0;
+    readOwnLive();
+    if (g_cellPrev.capsule) ++g_minFrames;
     if (g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed) {
         if (g_frameCamValid) {
             const float radii[3] = {g_cellRadius[0], g_cellRadius[1], g_cellRadius[2]};
@@ -1005,6 +1125,7 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
                                 static_cast<double>(kLoweredToleranceM));
             } else {
                 setOwnPrefixAtEngage(frame);   // Built v13 (fix 1): the own ship's type prefix, taken at each engage
+                pickOwnRecord(frame);          // Built v13.2 (b): the own record, named as the prefix without its underscore
                 g_heldCell = next;
                 g_heldValid = true;
                 g_engagePending = false;
@@ -1390,6 +1511,12 @@ void sealedTrialInstall(bool flatProfile) {
         if (!doubleText.empty() && doubleText != "length")
             Log::get().note("sealed box: diag.sealed_cell_double = '%s' is not length or width; the length axis is doubled.", doubleText.c_str());
     }
+    const std::string belowText = Config::get().getString("diag.sealed_cell_below_m", "");
+    if (!sealed::parseBelowM(belowText.c_str(), sealed::kBelowDefaultM, &g_belowM))
+        Log::get().note("sealed box: diag.sealed_cell_below_m = '%s' is not a number of metres from 0 to 200; the distance is %.0f m.",
+                        belowText.c_str(), static_cast<double>(sealed::kBelowDefaultM));
+    Log::get().note("sealed box: the bottom is %.0f m under the pad's centre along the shaft (diag.sealed_cell_below_m; the bay keeps from the same "
+                    "distance). Built v13.2: a guess from a doorway at -45 m; the flight's minima log sizes it.", static_cast<double>(g_belowM));
     const std::string marginText = Config::get().getString("diag.sealed_cell_margin_m", "");
     if (!sealed::parseMarginM(marginText.c_str(), sealed::kMarginDefaultM, &g_margin))
         Log::get().note("sealed box: diag.sealed_cell_margin_m = '%s' is not a number of metres; the margin is %.0f m.", marginText.c_str(),
@@ -2144,10 +2271,38 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
             sphereJudged = v.sphereJudged;
             // Built v13.1 (b): the own hangar's parts stay inside the bay volume, even where the box alone would cull them (whatever their size,
             // camera-containing ones included). The shaft is the held cell's; without a capsule there is no bay.
+            // Built v13.2 (a): the minima along the shaft of the own ship's records and the Door* records within the bay's lateral distance.
+            if (g_cellPrev.capsule) {
+                float u[3] = {};
+                float a = 0.0f;
+                if (sealed::unitBetween(g_cellPrev.capA, g_cellPrev.capB, u)) {
+                    const float lat = sealed::lateralToAxis(centre, g_cellPrev.capA, u, &a);
+                    if (std::isfinite(lat) && lat <= sealed::kBayLateralM) {
+                        char mn[48] = {};
+                        if (cachedName(record, mn, sizeof(mn))) {
+                            const bool ownNamed = (g_ownPrefix[0] != '\0' && std::strncmp(mn, g_ownPrefix, std::strlen(g_ownPrefix)) == 0) ||
+                                                  (g_ownRecName[0] != '\0' && std::strstr(mn, g_ownRecName) != nullptr);
+                            const bool door = std::strstr(mn, "Door") != nullptr;
+                            if (ownNamed && (!g_minOwnSet || a < g_minOwnAlong)) {
+                                g_minOwnSet = true;
+                                g_minOwnAlong = a;
+                                g_minOwnLat = lat;
+                                std::snprintf(g_minOwnName, sizeof(g_minOwnName), "%s", mn);
+                            }
+                            if (door && (!g_minDoorSet || a < g_minDoorAlong)) {
+                                g_minDoorSet = true;
+                                g_minDoorAlong = a;
+                                g_minDoorLat = lat;
+                                std::snprintf(g_minDoorName, sizeof(g_minDoorName), "%s", mn);
+                            }
+                        }
+                    }
+                }
+            }
             if (!keep && g_cellPrev.capsule) {
                 float u[3] = {};
                 if (sealed::unitBetween(g_cellPrev.capA, g_cellPrev.capB, u) &&
-                    sealed::inBayVolume(centre, g_cellPrev.capA, u, g_cellPrev.capLen)) {
+                    sealed::inBayVolume(centre, g_cellPrev.capA, u, g_cellPrev.capLen, g_belowM)) {
                     char bn[48] = {};
                     if (cachedName(record, bn, sizeof(bn)) && sealed::bayPartName(bn)) {
                         keep = true;   // why stays as the box rule's (kNone): the bay is counted in bay_kept, not in kept_by_cell
@@ -2165,6 +2320,22 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
         // ship's candidate (the nearest one per frame names it); the type prefix taken at engage keeps the records of that type.
         {
             const bool containsCam = sealed::containsCamera(centre, radius, cam);
+            // Built v13.2 (b): the near list (the records within kOwnNearM of the camera, with names and spheres), the previous frame's source for
+            // the engage's own-record pick.
+            {
+                const float dCam = sealed::distance(centre, cam);
+                if (dCam <= kOwnNearM && g_nearCurN < kNearSlots) {
+                    char nn[48] = {};
+                    if (cachedName(record, nn, sizeof(nn))) {
+                        NearRec& nr = g_nearCur[g_nearCurN++];
+                        nr.addr = record;
+                        std::snprintf(nr.name, sizeof(nr.name), "%s", nn);
+                        for (int k = 0; k < 3; ++k) nr.centre[k] = centre[k];
+                        nr.radius = radius;
+                        nr.dist = dCam;
+                    }
+                }
+            }
             if (containsCam && radius < sealed::kOwnShipRadiusM) {
                 const float dCam = sealed::distance(centre, cam);
                 if (g_ownCandidateDist < 0.0f || dCam < g_ownCandidateDist) {
@@ -2182,6 +2353,12 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
                     keep = true;
                     ++g_ownExempt;
                 }
+                // Built v13.2 (b): the own record's live sphere, re-read this frame: any record whose centre lies within it plus 5 m is kept.
+                if (!keep && g_ownLiveValid && sealed::ownSphereKeeps(centre, g_ownLiveCentre, g_ownLiveRadius, kOwnSphereMarginM)) {
+                    keep = true;
+                    ++g_ownSphereKeptFrame;
+                    ++g_ownSphereKeptWin;
+                }
             }
         }
         if (keep) {
@@ -2195,14 +2372,16 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
                 char tn[48] = {};
                 // Coordinates: the box's own axes when the cell is a box; else the offset from the pad's centre.
                 float x[3] = {centre[0] - g_cellPrev.centre[0], centre[1] - g_cellPrev.centre[1], centre[2] - g_cellPrev.centre[2]};
+                uint64_t nch = 0;   // Built v13.2: the record's child count (with its radius, the HangerLarge/Floor00 question)
+                readVal(&nch, record + kRecChildCount);
                 if (containing) {
                     if (cachedName(record, tn, sizeof(tn))) {
                         if (g_cellPrev.box) sealed::boxCoordsOf(g_cellPrev, centre, x);
-                        tallyNote(g_tallyContain, &g_tallyContainUsed, &g_tallyContainOver, tn, x);
+                        tallyNote(g_tallyContain, &g_tallyContainUsed, &g_tallyContainOver, tn, x, radius, nch);
                     }
                 } else if (g_cellPrev.box && sealed::nearBox(g_cellPrev, centre) && cachedName(record, tn, sizeof(tn))) {
                     sealed::boxCoordsOf(g_cellPrev, centre, x);
-                    tallyNote(g_tallyNear, &g_tallyNearUsed, &g_tallyNearOver, tn, x);
+                    tallyNote(g_tallyNear, &g_tallyNearUsed, &g_tallyNearOver, tn, x, radius, nch);
                 }
             }
         }

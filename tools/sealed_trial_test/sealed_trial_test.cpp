@@ -371,7 +371,7 @@ int main(int argc, char** argv) {
             check(axS[0][0] == 1.0f && axS[1][1] == 1.0f && axS[2][2] == 1.0f && axS[1][0] == 0.0f, "the store-style identity pose has world axes");
             se::OwnCell box;
             const float padC[3] = {0, 0, 0}, tgt[3] = {0, 100, 0}, lenAx[3] = {1, 0, 0};
-            check(se::buildBox(padC, tgt, lenAx, 66.0f, 27.5f, 5.0f, &box) && box.box, "a box builds along the shaft");
+            check(se::buildBox(padC, tgt, lenAx, 66.0f, 27.5f, 5.0f, 10.0f, &box) && box.box, "a box builds along the shaft");
             check(box.boxHalf[0] == 71.0f && box.boxHalf[1] == 32.5f && box.boxHalf[2] == 65.0f, "the half-extents are 71 (length), 32.5 (width), 65 (height)");
             check(box.boxCentre[1] == 55.0f && box.boxCentre[0] == 0.0f, "the box centre is 55 m up the shaft from the pad");
             const float in1[3] = {60, 55, 0}, out1[3] = {75, 55, 0}, bottomIn[3] = {0, -10, 0}, bottomOut[3] = {0, -11, 0}, topIn[3] = {0, 120, 0},
@@ -397,7 +397,7 @@ int main(int argc, char** argv) {
             // v12.1: the axis is pad -> target. A target 80 m up and 60 m across: the axis is (0.6, 0.8, 0), the box's centre is 55 m along it
             // from the pad, the length axis is (0.8, -0.6, 0) (lenAx made orthogonal to the axis), and the half-height is 65 m.
             const float tgtDiag[3] = {60, 80, 0};
-            check(se::buildBox(padC, tgtDiag, lenAx, 66.0f, 27.5f, 5.0f, &lat) && std::fabs(lat.boxW[0] - 0.6f) < 1e-5f &&
+            check(se::buildBox(padC, tgtDiag, lenAx, 66.0f, 27.5f, 5.0f, 10.0f, &lat) && std::fabs(lat.boxW[0] - 0.6f) < 1e-5f &&
                   std::fabs(lat.boxW[1] - 0.8f) < 1e-5f && std::fabs(lat.boxCentre[0] - 33.0f) < 1e-3f && std::fabs(lat.boxCentre[1] - 44.0f) < 1e-3f &&
                   std::fabs(lat.boxU[0] - 0.8f) < 1e-5f && std::fabs(lat.boxU[1] + 0.6f) < 1e-5f && std::fabs(lat.boxHalf[2] - 65.0f) < 1e-3f,
                   "the box runs along the pad-to-target axis, centred on the pad's line, its length axis orthogonal to that axis");
@@ -405,15 +405,15 @@ int main(int argc, char** argv) {
                   "the length axis is orthogonal to the box axis");
             se::OwnCell down;
             const float tgtDown[3] = {0, -100, 0};
-            check(se::buildBox(padC, tgtDown, lenAx, 66.0f, 27.5f, 5.0f, &down) && down.boxCentre[1] == -55.0f && down.boxHalf[2] == 65.0f,
+            check(se::buildBox(padC, tgtDown, lenAx, 66.0f, 27.5f, 5.0f, 10.0f, &down) && down.boxCentre[1] == -55.0f && down.boxHalf[2] == 65.0f,
                   "a target below the pad: the box runs down the pad-to-target axis");
             se::OwnCell tz;
             const float tgtZ[3] = {0, 0, 140};
-            check(se::buildBox(padC, tgtZ, lenAx, 66.0f, 27.5f, 5.0f, &tz) && tz.boxCentre[2] == 75.0f && tz.boxHalf[2] == 85.0f,
+            check(se::buildBox(padC, tgtZ, lenAx, 66.0f, 27.5f, 5.0f, 10.0f, &tz) && tz.boxCentre[2] == 75.0f && tz.boxHalf[2] == 85.0f,
                   "a target along z: centre 75 m out, half-height 85 m (from -10 to 140 + 20)");
             se::OwnCell flat;
             const float tgtFlat[3] = {0, 0.5f, 0};
-            check(!se::buildBox(padC, tgtFlat, lenAx, 66.0f, 27.5f, 5.0f, &flat), "a target closer than 1 m builds no box");
+            check(!se::buildBox(padC, tgtFlat, lenAx, 66.0f, 27.5f, 5.0f, 10.0f, &flat), "a target closer than 1 m builds no box");
             const float axW[3] = {0, 0, 1}, padE2[3] = {0, 0, -1};
             check(std::fabs(se::angleDeg(axW, padE2) - 180.0f) < 1e-3f && std::fabs(se::angleDeg(axW, lenAx) - 90.0f) < 1e-3f,
                   "the angle between the box axis and the pad's e2 is 180 deg for opposite axes and 90 deg across");
@@ -783,11 +783,11 @@ int main(int argc, char** argv) {
         check(se::lateralToAxis(lp, bo, bu, &along) == 5.0f && along == 10.0f, "lateral of (3,4,10) to the z axis is 5; along is 10");
         const float p1[3] = {0.0f, 0.0f, 50.0f}, p2[3] = {61.0f, 0.0f, 50.0f}, p3[3] = {60.0f, 0.0f, 50.0f};
         const float p4[3] = {0.0f, 0.0f, -21.0f}, p5[3] = {0.0f, 0.0f, -20.0f}, p6[3] = {0.0f, 0.0f, 120.0f}, p7[3] = {0.0f, 0.0f, 121.0f};
-        check(se::inBayVolume(p1, bo, bu, 100.0f) && !se::inBayVolume(p2, bo, bu, 100.0f) && se::inBayVolume(p3, bo, bu, 100.0f),
+        check(se::inBayVolume(p1, bo, bu, 100.0f, 20.0f) && !se::inBayVolume(p2, bo, bu, 100.0f, 20.0f) && se::inBayVolume(p3, bo, bu, 100.0f, 20.0f),
               "the bay: on the shaft is in; 61 m lateral is out; 60 m lateral is in (the limit is inclusive)");
-        check(!se::inBayVolume(p4, bo, bu, 100.0f) && se::inBayVolume(p5, bo, bu, 100.0f),
+        check(!se::inBayVolume(p4, bo, bu, 100.0f, 20.0f) && se::inBayVolume(p5, bo, bu, 100.0f, 20.0f),
               "the bay: 21 m below the pad is out; 20 m below is in");
-        check(se::inBayVolume(p6, bo, bu, 100.0f) && !se::inBayVolume(p7, bo, bu, 100.0f),
+        check(se::inBayVolume(p6, bo, bu, 100.0f, 20.0f) && !se::inBayVolume(p7, bo, bu, 100.0f, 20.0f),
               "the bay: 20 m past a target 100 m away is in; 21 m past is out");
         const float ua[3] = {0.0f, 0.0f, 0.0f}, ub[3] = {0.0f, 0.0f, 5.0f}, uc[3] = {0.0f, 0.0f, 0.5f};
         float uu[3] = {};
@@ -808,6 +808,34 @@ int main(int argc, char** argv) {
         check(se::nearBox(box, n3) && !se::nearBox(box, n4), "the box footprint: 22 m along w (half 3, margin 20) is near; 24 m is not");
         se::OwnCell none;
         check(!se::nearBox(none, n1) && !se::boxCoordsOf(none, pc, cc), "no box: no footprint and no coordinates");
+
+        // Built v13.2 (a): the below distance parses (empty is the default; a number in [0, 200]; other text refused).
+        float bl = -1.0f;
+        check(se::parseBelowM("", 60.0f, &bl) && bl == 60.0f, "diag.sealed_cell_below_m: empty is the 60 m default");
+        check(se::parseBelowM("45", 60.0f, &bl) && bl == 45.0f && se::parseBelowM(" 0 ", 60.0f, &bl) && bl == 0.0f,
+              "diag.sealed_cell_below_m: 45 and 0 (with spaces) are read");
+        check(!se::parseBelowM("sixty", 60.0f, &bl) && !se::parseBelowM("-1", 60.0f, &bl) && !se::parseBelowM("201", 60.0f, &bl),
+              "diag.sealed_cell_below_m: text, a negative and 201 are refused");
+        // The box's bottom at the below distance: pad at the origin, target 100 m up the z axis, below 60: the box runs -60 to 120 along z.
+        const float zpad[3] = {0.0f, 0.0f, 0.0f}, ztgt[3] = {0.0f, 0.0f, 100.0f}, zlen[3] = {1.0f, 0.0f, 0.0f};
+        se::OwnCell zb;
+        check(se::buildBox(zpad, ztgt, zlen, 66.0f, 27.5f, 5.0f, 60.0f, &zb) && zb.boxHalf[2] == 90.0f && zb.boxCentre[2] == 30.0f &&
+                  zb.boxW[2] == 1.0f,
+              "the box with a 60 m below distance runs from -60 to 120 m along the shaft (half 90, centre 30)");
+
+        // Built v13.2 (b): the stripped prefix, the own record name match, and the own sphere's keep (plus the margin).
+        char stripped[48] = {};
+        check(se::strippedPrefix("CobraMkV_", stripped, sizeof(stripped)) && std::strcmp(stripped, "CobraMkV") == 0 &&
+                  !se::strippedPrefix("CobraMkV", stripped, sizeof(stripped)) && !se::strippedPrefix("_", stripped, sizeof(stripped)),
+              "the prefix CobraMkV_ strips to CobraMkV; a name with no trailing underscore, or a lone underscore, does not");
+        check(se::ownRecordMatch("CobraMkV", "CobraMkV") && !se::ownRecordMatch("CobraMkV_Door", "CobraMkV") &&
+                  !se::ownRecordMatch("CobraMkV", "") && !se::ownRecordMatch(nullptr, "CobraMkV"),
+              "the own record matches its exact name only: not CobraMkV_Door, not an empty name");
+        const float oc[3] = {0.0f, 0.0f, 0.0f};
+        const float in1[3] = {34.0f, 0.0f, 0.0f}, in2[3] = {36.0f, 0.0f, 0.0f};
+        check(se::ownSphereKeeps(in1, oc, 30.0f, 5.0f) && !se::ownSphereKeeps(in2, oc, 30.0f, 5.0f) &&
+                  !se::ownSphereKeeps(in1, oc, 0.0f, 5.0f),
+              "a record 34 m from a 30 m own sphere is kept with a 5 m margin; 36 m is not; no radius, no keep");
     }
 
     std::printf("sealed_trial_test: %d checks, %d failures\n", g_checks, g_failures);

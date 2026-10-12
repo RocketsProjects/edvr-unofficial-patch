@@ -532,10 +532,12 @@ inline bool buildCapsule(const float p[3], const float q[3], float extend, float
 }
 
 // Built v13.1 (b): the own hangar's parts are kept in named mode. The bay volume is the shaft from the pad's centre o along its unit axis u:
-// lateral distance from the shaft within kBayLateralM, along it from -kBayBelowM (below the pad) to the target's distance plus kBayPastM.
+// lateral distance from the shaft within kBayLateralM, along it from -below (under the pad; diag.sealed_cell_below_m, default kBelowDefaultM) to
+// the target's distance plus kBayPastM. Built v13.2: the below distance is the box's (one key), 60 m.
 constexpr float kBayLateralM = 60.0f;
-constexpr float kBayBelowM = 20.0f;
 constexpr float kBayPastM = 20.0f;
+// Built v13.2 (a): the default below distance: the box bottom and the bay's lower bound, measured from the pad record's centre along the shaft.
+constexpr float kBelowDefaultM = 60.0f;
 // Built v13.1 (a): the footprint margin for the culled-name tallies (the records just outside a face of the box).
 constexpr float kTallyMarginM = 20.0f;
 
@@ -558,11 +560,46 @@ inline float lateralToAxis(const float p[3], const float o[3], const float u[3],
     return std::sqrt(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]);
 }
 
-// True when p lies in the bay volume of the shaft from o along u, the target at targetA metres from o.
-inline bool inBayVolume(const float p[3], const float o[3], const float u[3], float targetA) noexcept {
+// True when p lies in the bay volume of the shaft from o along u, the target at targetA metres from o, and below metres under o.
+inline bool inBayVolume(const float p[3], const float o[3], const float u[3], float targetA, float below) noexcept {
     float a = 0.0f;
     const float lat = lateralToAxis(p, o, u, &a);
-    return std::isfinite(lat) && std::isfinite(a) && lat <= kBayLateralM && a >= -kBayBelowM && a <= targetA + kBayPastM;
+    return std::isfinite(lat) && std::isfinite(a) && lat <= kBayLateralM && a >= -below && a <= targetA + kBayPastM;
+}
+
+// Built v13.2 (a): diag.sealed_cell_below_m, a number of metres in [0, 200]; empty is the default. False for text that is not one.
+inline bool parseBelowM(const char* text, float defaultM, float* out) noexcept {
+    *out = defaultM;
+    if (!text || !*text) return true;
+    char* end = nullptr;
+    const double v = std::strtod(text, &end);
+    if (end == text || !std::isfinite(v) || v < 0.0 || v > 200.0) return false;
+    while (*end == ' ' || *end == '\t') ++end;
+    if (*end != '\0') return false;
+    *out = static_cast<float>(v);
+    return true;
+}
+
+// Built v13.2 (b): the own ship's record name is the type prefix without its trailing underscore ("CobraMkV_" -> "CobraMkV").
+inline bool strippedPrefix(const char* prefix, char* out, size_t cap) noexcept {
+    out[0] = '\0';
+    if (!prefix || !cap) return false;
+    const size_t n = std::strlen(prefix);
+    if (n < 2 || prefix[n - 1] != '_' || n >= cap) return false;
+    std::memcpy(out, prefix, n - 1);
+    out[n - 1] = '\0';
+    return true;
+}
+
+// True when the record's name is exactly the stripped prefix (both non-empty).
+inline bool ownRecordMatch(const char* name, const char* stripped) noexcept {
+    return name && stripped && stripped[0] && std::strcmp(name, stripped) == 0;
+}
+
+// Built v13.2 (b): the own ship's per-frame keep: a record whose centre lies within the own record's CURRENT sphere plus marginM.
+inline bool ownSphereKeeps(const float centre[3], const float ownCentre[3], float ownRadius, float marginM) noexcept {
+    if (!std::isfinite(ownRadius) || !(ownRadius > 0.0f)) return false;
+    return distance(centre, ownCentre) <= ownRadius + marginM;
 }
 
 // The unit vector from a to b (false when they are closer than a metre, or not finite).
@@ -618,10 +655,9 @@ inline bool pickCapsuleTarget(const ExplicitObs* obs, size_t n, const float p[3]
 
 // Built v11 (second addendum): the oriented box. Elite's pad sizes (the wiki), length x width in metres, small, medium, large. The hangar is the
 // pad doubled along one axis (diag.sealed_cell_double), so each half-extent is half the pad's size times 2 on that axis and 1 on the other, plus
-// the margin (diag.sealed_cell_margin_m). Vertically the box runs from kBoxBelowM under the pad's centre up the shaft to kBoxBeyondM past the
+// the margin (diag.sealed_cell_margin_m). Vertically the box runs from the below distance (diag.sealed_cell_below_m) under the pad's centre up the shaft to kBoxBeyondM past the
 // target (the nearest BlastShieldBase). A round cell cannot hold a rectangular bay without the neighbours: this is the bay's footprint.
 constexpr float kPadWikiM[3][2] = {{66.0f, 55.0f}, {150.0f, 90.0f}, {213.0f, 128.0f}};
-constexpr float kBoxBelowM = 10.0f;
 constexpr float kBoxBeyondM = 20.0f;
 constexpr float kMarginDefaultM = 10.0f;   // v12.1: 10 m (was 5; a guess)
 constexpr size_t kMarginLadderCount = 7;
@@ -720,10 +756,10 @@ inline bool footprintAxes(const float axes[3][3], const float u[3], const float*
 
 // v12.1 (flight): the box's axis W is the unit vector from the pad's centre to the target (BlastShieldBase): the shaft is the direction the pad
 // travels, not the pad's own e2 (the v12 flight: the pad rose along the pad-to-BlastShieldBase line). The pad is on the axis, so the box is
-// centred laterally on it: from kBoxBelowM under the pad's centre to kBoxBeyondM past the target along W. The footprint's length axis lenAxis is
+// centred laterally on it: from the below distance (diag.sealed_cell_below_m) under the pad's centre to kBoxBeyondM past the target along W. The footprint's length axis lenAxis is
 // made orthogonal to W (Gram-Schmidt, length first); the width is W x length. False when the target is closer than 1 m or the axes are degenerate.
 inline bool buildBox(const float pad[3], const float target[3], const float lenAxis[3], float halfLen, float halfWid, float margin,
-                     OwnCell* cell) noexcept {
+                     float below, OwnCell* cell) noexcept {
     const float d[3] = {target[0] - pad[0], target[1] - pad[1], target[2] - pad[2]};
     const float proj = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     if (!std::isfinite(proj) || !(proj >= 1.0f)) return false;
@@ -736,7 +772,7 @@ inline bool buildBox(const float pad[3], const float target[3], const float lenA
     for (float& v : U) v /= ul;
     const float w[3] = {W[0], W[1], W[2]};
     const float V[3] = {w[1] * U[2] - w[2] * U[1], w[2] * U[0] - w[0] * U[2], w[0] * U[1] - w[1] * U[0]};
-    const float lo = -kBoxBelowM, hi = proj + kBoxBeyondM;
+    const float lo = -below, hi = proj + kBoxBeyondM;
     const float along = (lo + hi) * 0.5f;
     const float half = (hi - lo) * 0.5f;
     float hx = halfLen + margin, hy = halfWid + margin;
