@@ -86,6 +86,11 @@ std::atomic<DirectVetoFn> directVeto{nullptr};
 std::atomic<bool> directVetoWanted{false};
 // Built v11: the draw-list probe's path C observer (producer 1's bracket, after the forward). Null = off.
 std::atomic<ProducerCObserverFn> producerCObserver{nullptr};
+// Built v12: the early rig veto (0x431AFE0's entry). rigVeto decides; rigVetoWanted holds the relay gate open. rigEmulateFaults counts the vetoes
+// whose off-screen emulation could not run (they forward).
+std::atomic<RigVetoFn> rigVeto{nullptr};
+std::atomic<bool> rigVetoWanted{false};
+std::atomic<uint64_t> rigEmulateFaults{0};
 alignas(8) std::atomic<GateProbePartFn> gateProbePart{nullptr};
 // FUN_1442B3FC0's relay gate: a cell of its own, not evalGate, so the
 // per-part patch (installed only for the gate probe) costs the evalGate
@@ -385,12 +390,53 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uint
     return result;
 }
 
+// Built v12: Elite's own off-screen branch of the rig eval 0x431AFE0, performed in place of its body (bytes 0x431B221..0x431B240; decomp_431AFE0.txt
+// lines 97 to 103). With collection = rig+0x348 (decomp line 78): [collection+0x629] = 0 (the byte written as r13b, which is zero on this path: r13
+// is cleared at 0x431B017 and not written again); FUN_14434DD50(collection+0x300), which is mov dword [rcx+0x2A4], 0 (owner count); then, when
+// [collection+0x2E0] (the pipe) is non-null, FUN_1442B5760(pipe), which is add rcx,0x78 and jmp 0x14434DD50 (pipe+0x31C = 0). Both callees are
+// Microsoft x64 with one argument in rcx: void(__fastcall*)(uintptr_t). Returns false, having written nothing, when the collection cannot be read;
+// any fault after the first write is counted and reported as a forward (the caller forwards).
+using OffScreenCallFn = void (__fastcall*)(uintptr_t);
+bool rigOffScreenEmulate(uintptr_t rig) noexcept {
+    const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    uintptr_t coll=0;
+    uintptr_t pipe=0;
+    bool ok=false;
+    __try {
+        coll=*reinterpret_cast<const volatile uintptr_t*>(rig+0x348);
+        if(coll) pipe=*reinterpret_cast<const volatile uintptr_t*>(coll+0x2E0);
+        ok=coll!=0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ok=false;
+    }
+    if(!ok||!base) {
+        rigEmulateFaults.fetch_add(1,std::memory_order_relaxed);
+        return false;
+    }
+    bool done=false;
+    __try {
+        *reinterpret_cast<volatile uint8_t*>(coll+0x629)=0;                       // mov byte [rbx+0x629], r13b (0)
+        reinterpret_cast<OffScreenCallFn>(base+0x434DD50)(coll+0x300);             // lea rcx,[rbx+0x300]; call 0x434DD50
+        if(pipe) reinterpret_cast<OffScreenCallFn>(base+0x42B5760)(pipe);          // rcx = [rbx+0x2E0]; call 0x42B5760
+        done=true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        done=false;
+    }
+    if(!done) rigEmulateFaults.fetch_add(1,std::memory_order_relaxed);
+    return done;
+}
+
 __declspec(noinline) uintptr_t __fastcall rigEvalObserved(uintptr_t rig,uintptr_t poseCtx) noexcept {
     emcpu::count(emcpu::kEval);
     KinematicEvalProbe* probe=observer.load(std::memory_order_acquire);
     if(probe) {
         emcpu::Scope clocked(emcpu::kEval,false);
         probe->noteRigLink(rig,poseCtx); // noteRigLink() gates on active()
+    }
+    // Built v12: the early veto. A veto performs Elite's off-screen branch in place of the body and returns without the forward. The decision is
+    // the trial's (sealedTrialRigVeto); it runs only while the veto is attached (the trial on).
+    if(const auto veto=rigVeto.load(std::memory_order_acquire)) {
+        if(veto(rig,poseCtx) && rigOffScreenEmulate(rig)) return 0;
     }
     const auto forward=reinterpret_cast<RigEvalFn>(g_rigEvalEntry.forward.load(std::memory_order_acquire));
     return forward(rig,poseCtx);
@@ -1116,7 +1162,8 @@ void recomputeGateLocked() noexcept {
                     schedulerWanted.load(std::memory_order_acquire) ||
                     gateProbeWanted.load(std::memory_order_acquire) ||
                     builderWanted.load(std::memory_order_acquire) ||
-                    directVetoWanted.load(std::memory_order_acquire);
+                    directVetoWanted.load(std::memory_order_acquire) ||
+                    rigVetoWanted.load(std::memory_order_acquire);
     evalGate.store(open?uintptr_t(1):uintptr_t(0),std::memory_order_release);
     primaryGate.store(emitWanted.load(std::memory_order_acquire) &&
         g_primaryEntry.ready.load(std::memory_order_acquire) &&
@@ -1292,6 +1339,41 @@ void kinematicEvalBuilderObserverDetach() noexcept {
 
 bool kinematicEvalBuilderGateOpen() noexcept {
     return evalGate.load(std::memory_order_acquire)!=0;
+}
+
+// Built v12: the early rig veto's own want (no second detour: 0x431AFE0's entry, already hooked as rigEvalObserved). The attach installs through the
+// shared install like the producer veto; "installed" or the reason why not.
+void kinematicEvalSetRigVeto(RigVetoFn fn) noexcept {
+    rigVeto.store(fn,std::memory_order_release);
+}
+
+uint64_t kinematicEvalRigEmulateFaults() noexcept {
+    return rigEmulateFaults.load(std::memory_order_acquire);
+}
+
+const char* kinematicEvalRigVetoAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base)return "identity_mismatch";
+        if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
+            return "identity_mismatch";
+        if(!ensureInstalled(base))return "install_failed";
+        if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
+        if(!g_rigEvalEntry.ready.load(std::memory_order_acquire))
+            return "CodeHook refused kinematic-rig-eval; its own line names why";
+        rigVetoWanted.store(true,std::memory_order_release);
+        recomputeGateLocked();
+        return "installed";
+    } catch(...) {return "install_failed";}
+}
+
+void kinematicEvalRigVetoDetach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        rigVetoWanted.store(false,std::memory_order_release);
+        recomputeGateLocked();
+    } catch(...) {}
 }
 
 void kinematicEvalSetProducerCObserver(ProducerCObserverFn fn) noexcept {

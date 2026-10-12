@@ -151,6 +151,13 @@ void kinematicEvalDirectVetoDetach() noexcept;
 // Built v11: path C's observer (producer 1, FUN_14369C9C0): called after its forward with the items it appended and whether its counters faulted.
 using ProducerCObserverFn = void (*)(uint64_t items, uint32_t fault) noexcept;
 void kinematicEvalSetProducerCObserver(ProducerCObserverFn fn) noexcept;
+// Built v12: the early rig veto on 0x431AFE0's entry. The decision (sealed_trial.cpp) returns true to veto; the hook then performs Elite's own
+// off-screen branch for the rig and returns without the forward (kinematic_eval_hook.cpp rigOffScreenEmulate). Attach/detach hold the relay gate.
+using RigVetoFn = bool (*)(uintptr_t rig, uintptr_t ctx) noexcept;
+void kinematicEvalSetRigVeto(RigVetoFn fn) noexcept;
+const char* kinematicEvalRigVetoAttach() noexcept;
+void kinematicEvalRigVetoDetach() noexcept;
+uint64_t kinematicEvalRigEmulateFaults() noexcept;
 // FUN_1442B3FC0's hook: "hooked", or why it stood down ("not requested",
 // "not build 332841 (PE timestamp/size)", "prologue mismatch at RVA 0x42B3FC0",
 // "builder frame/call-site mismatch at RVA 0x...", "CodeHook refused the patch").

@@ -214,6 +214,24 @@ struct Window {
     bool boxOn = false;
     float boxHalf[3] = {};
     float boxMargin = 0.0f;
+    // Built v12: the early rig veto's counts in the window: the rig decisions, the vetoes (in count mode: the ones that would veto), the rigs
+    // mixed with the cell, the unbounded ones, the refreshes, the time the decisions took, the store records matched to a rig evaluated this frame
+    // (and the rest), the emulation faults, and the mode.
+    uint64_t rigsSeen = 0;
+    uint64_t rigsVetoed = 0;
+    uint64_t rigsMixed = 0;
+    uint64_t rigsUnknown = 0;
+    uint64_t rigsRefresh = 0;
+    double earlyMs = 0.0;
+    uint64_t rigRecMatched = 0;
+    uint64_t rigRecUnevaluated = 0;
+    uint64_t rigEmuFaults = 0;
+    const char* earlyMode = "count";
+    // Built v12 (flight fix b): the named cell is frozen (held) at the window's latest frame; the frames it was held and the fresh picks that
+    // differed from it (no pad, or a moved pad, ignored).
+    bool cellFrozen = false;
+    uint64_t frozenFrames = 0;
+    uint64_t frozenSkipped = 0;
 };
 
 // The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named is the own-pad cell rule.
@@ -373,6 +391,7 @@ struct OwnCell {
     float boxW[3] = {};
     float boxHalf[3] = {};
     float boxMargin = 0.0f;
+    float boxLateral = 0.0f;         // Built v12: the BlastShieldBase (the target) off the pad's up axis, metres (the box stands on the up axis)
     char boxInfo[320] = {};
 };
 
@@ -598,7 +617,7 @@ inline void storeAxes(const float A[15], const float B[16], float axes[3][3]) no
 
 // The footprint of the pad's box: of its three local axes, the one most along the shaft u is the up axis; of the other two, the one with the
 // larger builder extent is the length axis (lenIdx), the other the width (widIdx). False with no extent: the box cannot tell length from width.
-inline bool footprintAxes(const float axes[3][3], const float u[3], const float* ext, int* lenIdx, int* widIdx) noexcept {
+inline bool footprintAxes(const float axes[3][3], const float u[3], const float* ext, int* lenIdx, int* widIdx, int* upIdx) noexcept {
     if (!ext) return false;
     int up = 0;
     float best = -1.0f;
@@ -609,6 +628,7 @@ inline bool footprintAxes(const float axes[3][3], const float u[3], const float*
             up = k;
         }
     }
+    if (upIdx) *upIdx = up;
     int a = -1, b = -1;
     for (int k = 0; k < 3; ++k) {
         if (k == up) continue;
@@ -625,27 +645,41 @@ inline bool footprintAxes(const float axes[3][3], const float u[3], const float*
     return true;
 }
 
-// The box from the pad's centre to the target along the shaft, with the length axis lenAxis (projected off the shaft). Sets the cell's box fields.
-// False when the target is not a distance away or the length axis is along the shaft.
-inline bool buildBox(const float pad[3], const float target[3], const float lenAxis[3], float halfLen, float halfWid, float margin,
-                     OwnCell* cell) noexcept {
-    float w[3] = {target[0] - pad[0], target[1] - pad[1], target[2] - pad[2]};
-    const float D = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
-    if (!std::isfinite(D) || !(D >= 1.0f)) return false;
-    for (float& v : w) v /= D;
-    const float dp = lenAxis[0] * w[0] + lenAxis[1] * w[1] + lenAxis[2] * w[2];
-    float U[3] = {lenAxis[0] - dp * w[0], lenAxis[1] - dp * w[1], lenAxis[2] - dp * w[2]};
+// The box STANDS ON THE PAD'S UP AXIS (Built v12, flight fix a): W is the pad's up axis upAxis (flipped to point at the target). Its centre is
+// laterally on the pad's centre, not on the pad-to-target midpoint: it runs from kBoxBelowM under the pad's centre to kBoxBeyondM past the target's
+// projection onto W. The target's lateral offset from W is recorded (cell->boxLateral). The length axis lenAxis is projected off W. False when the
+// target is not above the pad along W (proj < 1 m) or the axes are degenerate.
+inline bool buildBox(const float pad[3], const float target[3], const float upAxis[3], const float lenAxis[3], float halfLen, float halfWid,
+                     float margin, OwnCell* cell) noexcept {
+    float W[3] = {upAxis[0], upAxis[1], upAxis[2]};
+    const float wl = std::sqrt(W[0] * W[0] + W[1] * W[1] + W[2] * W[2]);
+    if (!std::isfinite(wl) || !(wl > 1e-3f)) return false;
+    for (float& v : W) v /= wl;
+    const float d[3] = {target[0] - pad[0], target[1] - pad[1], target[2] - pad[2]};
+    const float D2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    float proj = d[0] * W[0] + d[1] * W[1] + d[2] * W[2];
+    if (proj < 0.0f) {
+        for (float& v : W) v = -v;
+        proj = -proj;
+    }
+    if (!std::isfinite(proj) || !(proj >= 1.0f)) return false;
+    const float lateral = std::sqrt(std::fmax(D2 - proj * proj, 0.0f));
+    const float dp = lenAxis[0] * W[0] + lenAxis[1] * W[1] + lenAxis[2] * W[2];
+    float U[3] = {lenAxis[0] - dp * W[0], lenAxis[1] - dp * W[1], lenAxis[2] - dp * W[2]};
     const float ul = std::sqrt(U[0] * U[0] + U[1] * U[1] + U[2] * U[2]);
     if (!std::isfinite(ul) || !(ul > 1e-3f)) return false;
     for (float& v : U) v /= ul;
+    const float w[3] = {W[0], W[1], W[2]};
     const float V[3] = {w[1] * U[2] - w[2] * U[1], w[2] * U[0] - w[0] * U[2], w[0] * U[1] - w[1] * U[0]};
-    const float along = (D + kBoxBeyondM - kBoxBelowM) * 0.5f;
-    const float half = (D + kBoxBeyondM + kBoxBelowM) * 0.5f;
+    const float lo = -kBoxBelowM, hi = proj + kBoxBeyondM;
+    const float along = (lo + hi) * 0.5f;
+    const float half = (hi - lo) * 0.5f;
     float hx = halfLen + margin, hy = halfWid + margin;
     if (hx < 1.0f) hx = 1.0f;
     if (hy < 1.0f) hy = 1.0f;
     cell->box = true;
     cell->boxMargin = margin;
+    cell->boxLateral = lateral;
     for (int k = 0; k < 3; ++k) {
         cell->boxCentre[k] = pad[k] + w[k] * along;
         cell->boxU[k] = U[k];
@@ -671,6 +705,50 @@ inline bool inBox(const float c[3], const OwnCell& cell) noexcept {
     float o[3];
     boxCoords(c, cell, o);
     return std::fabs(o[0]) <= cell.boxHalf[0] && std::fabs(o[1]) <= cell.boxHalf[1] && std::fabs(o[2]) <= cell.boxHalf[2];
+}
+
+// Built v12 (flight fix b): the held cell's freeze. A fresh pick differs from the held cell when it is missing (no pad, no cell) or its centre is
+// more than 0.5 m from the held one (a moved pad, or another pad). A differing fresh pick never changes the held cell; the caller counts it.
+inline bool cellDiffers(const OwnCell& fresh, const OwnCell& held) noexcept {
+    if (!fresh.has) return true;
+    return distance(fresh.centre, held.centre) > 0.5f;
+}
+
+// Built v12: the early rig veto's rule (pure). A rig's bound is the box of its records' last-frame world spheres; its bounding sphere has the box
+// centre and the half-diagonal as radius (conservative). The cell in force is the named box, the capsule or the pad's sphere; mode all has no cell
+// and vetoes every bounded rig. A rig is OUTSIDE when its bounding sphere lies wholly outside the cell. A rig that is outside is vetoed, except every
+// kRigRefreshN-th time, when it is let through so its records are re-judged (vetoedRun counts the vetoes since that).
+constexpr uint32_t kRigRefreshN = 30;
+enum class RigVerdict : uint8_t { kUnknown = 0, kMixed = 1, kOutside = 2, kRefresh = 3 };
+
+// The distance from a point to the cell (0 inside it): the box, the capsule's segment less its radius, or the sphere less its radius.
+inline float distanceToCell(const float c[3], const OwnCell& cell) noexcept {
+    if (cell.box) {
+        float o[3];
+        boxCoords(c, cell, o);
+        const float dx = std::max(std::fabs(o[0]) - cell.boxHalf[0], 0.0f);
+        const float dy = std::max(std::fabs(o[1]) - cell.boxHalf[1], 0.0f);
+        const float dz = std::max(std::fabs(o[2]) - cell.boxHalf[2], 0.0f);
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    if (cell.capsule) return std::max(distToSegment(c, cell.capA, cell.capB) - cell.radius, 0.0f);
+    return std::max(distance(c, cell.centre) - cell.radius, 0.0f);
+}
+
+// The verdict for one rig. bounded: the rig has a bound from its records. c and r: the bounding sphere's centre and radius. hasCell: a named cell is
+// in force (mode all does not need one). vetoedRun: the vetoes since the rig was last let through.
+inline RigVerdict rigVerdict(bool bounded, const float c[3], float r, bool hasCell, const OwnCell& cell, bool allMode, uint32_t vetoedRun) noexcept {
+    if (!bounded) return RigVerdict::kUnknown;
+    bool outside;
+    if (allMode) {
+        outside = true;
+    } else {
+        if (!hasCell) return RigVerdict::kUnknown;
+        outside = distanceToCell(c, cell) > r;
+    }
+    if (!outside) return RigVerdict::kMixed;
+    if (vetoedRun >= kRigRefreshN) return RigVerdict::kRefresh;
+    return RigVerdict::kOutside;
 }
 
 // Built v11 (addendum): with a capsule, the explicit picks are the nearest instance of each part node to the capsule's AXIS, and only within
@@ -900,6 +978,9 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          "centre_dist_m p50=%.2f p95=%.2f max=%.2f n=%llu ptr290 null=%llu image=%llu other=%llu unread=%llu "
                          "producer_b_calls=%llu producer_b_vetoed=%llu producer_b_kept=%llu world_sphere_store_style=%llu "
                          "world_sphere_unreadable=%llu producer_mode=%s world_centre producer=%llu pose=%llu store=%llu raw=%llu none=%llu "
+                         "cell_frozen=%s frozen_frames=%llu frozen_skipped=%llu "
+                         "rigs_seen=%llu rigs_vetoed=%llu rigs_mixed=%llu rigs_unknown=%llu rigs_refresh=%llu early_ms=%.3f early_mode=%s "
+                         "rig_records_matched=%llu rig_records_unevaluated=%llu rig_emulate_faults=%llu "
                          "box=%s half_length_m=%.1f half_width_m=%.1f height_m=%.1f margin_m=%.1f view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
                          static_cast<unsigned long long>(w.kept), static_cast<unsigned long long>(w.keptUnknown),
@@ -917,7 +998,13 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          static_cast<unsigned long long>(w.producerUnread), w.producerMode,
                          static_cast<unsigned long long>(w.worldSrc[0]), static_cast<unsigned long long>(w.worldSrc[1]),
                          static_cast<unsigned long long>(w.worldSrc[2]), static_cast<unsigned long long>(w.worldSrc[3]),
-                         static_cast<unsigned long long>(w.worldSrc[4]), w.boxOn ? "on" : "off", static_cast<double>(w.boxHalf[0]),
+                         static_cast<unsigned long long>(w.worldSrc[4]), w.cellFrozen ? "on" : "off",
+                         static_cast<unsigned long long>(w.frozenFrames), static_cast<unsigned long long>(w.frozenSkipped),
+                         static_cast<unsigned long long>(w.rigsSeen),
+                         static_cast<unsigned long long>(w.rigsVetoed), static_cast<unsigned long long>(w.rigsMixed),
+                         static_cast<unsigned long long>(w.rigsUnknown), static_cast<unsigned long long>(w.rigsRefresh), w.earlyMs,
+                         w.earlyMode, static_cast<unsigned long long>(w.rigRecMatched), static_cast<unsigned long long>(w.rigRecUnevaluated),
+                         static_cast<unsigned long long>(w.rigEmuFaults), w.boxOn ? "on" : "off", static_cast<double>(w.boxHalf[0]),
                          static_cast<double>(w.boxHalf[1]), static_cast<double>(w.boxHalf[2]), static_cast<double>(w.boxMargin),
                          viewSource);
 }

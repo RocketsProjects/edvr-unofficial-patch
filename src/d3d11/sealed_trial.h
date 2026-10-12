@@ -40,6 +40,13 @@ void sealedTrialNoteSunSkip() noexcept;
 // Built v10: producer B's pre-forward decision (kinematic_eval_hook.h DirectVetoFn): true skips FUN_144312E00 for the record the rule culls
 // (diag.sealed_trial_producer = veto). Called on the job thread that calls B, only while the trial is on.
 bool sealedTrialProducerVeto(uintptr_t rec, uintptr_t owner) noexcept;
+// Built v12: the early rig veto's decision (0x431AFE0's entry; kinematic_eval_hook.h RigVetoFn). Named or all mode, trial on; true vetoes only in
+// diag.sealed_trial_early = veto.
+bool sealedTrialRigVeto(uintptr_t rig, uintptr_t ctx) noexcept;
+// hotkey.sealed_trial_early: flips diag.sealed_trial_early between count and veto, live.
+void sealedTrialEarlyToggle(const char* trigger, uint32_t frame);
+// The drawlist probe's take of the rig counts since its last take: seen, vetoed, mixed, unknown, refresh, matched, unevaluated, ns.
+void sealedTrialRigTake(uint64_t out[8]) noexcept;
 // The admission store calls this after it has written a record (bucket = the collection, record = its record).
 void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept;
 

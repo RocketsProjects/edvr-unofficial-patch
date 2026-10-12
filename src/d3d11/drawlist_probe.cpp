@@ -165,6 +165,16 @@ void closeFrame() {
     uint64_t fam = 0;
     for (auto& d : g_famDraws) fam += d.load(std::memory_order_relaxed);
     c.familyDraws = fam;
+    // Built v12: the early rig veto's decisions since the last frame's take (sealedTrialRigTake; its counts are the window's own, not reset here).
+    uint64_t rig[8] = {};
+    sealedTrialRigTake(rig);
+    c.rigSeen = rig[0];
+    c.rigVetoed = rig[1];
+    c.rigMixed = rig[2];
+    c.rigUnknown = rig[3];
+    c.rigRefresh = rig[4];
+    c.rigMatched = rig[5];
+    c.rigMs = static_cast<double>(rig[7]) / 1.0e6;
 
     std::string names = "Top " + std::to_string(kTopNames) + " names. appended_A: " + namesOf(g_namesA, false, g_frameNo) +
                         "; appended_B: " + namesOf(g_namesB, false, g_frameNo) + "; carried (appended earlier in the window, not this frame): " +

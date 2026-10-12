@@ -371,7 +371,8 @@ int main(int argc, char** argv) {
             check(axS[0][0] == 1.0f && axS[1][1] == 1.0f && axS[2][2] == 1.0f && axS[1][0] == 0.0f, "the store-style identity pose has world axes");
             se::OwnCell box;
             const float padC[3] = {0, 0, 0}, tgt[3] = {0, 100, 0}, lenAx[3] = {1, 0, 0};
-            check(se::buildBox(padC, tgt, lenAx, 66.0f, 27.5f, 5.0f, &box) && box.box, "a box builds along the shaft");
+            const float upY[3] = {0, 1, 0};
+            check(se::buildBox(padC, tgt, upY, lenAx, 66.0f, 27.5f, 5.0f, &box) && box.box, "a box builds along the shaft");
             check(box.boxHalf[0] == 71.0f && box.boxHalf[1] == 32.5f && box.boxHalf[2] == 65.0f, "the half-extents are 71 (length), 32.5 (width), 65 (height)");
             check(box.boxCentre[1] == 55.0f && box.boxCentre[0] == 0.0f, "the box centre is 55 m up the shaft from the pad");
             const float in1[3] = {60, 55, 0}, out1[3] = {75, 55, 0}, bottomIn[3] = {0, -10, 0}, bottomOut[3] = {0, -11, 0}, topIn[3] = {0, 120, 0},
@@ -386,9 +387,41 @@ int main(int argc, char** argv) {
             const float up[3] = {0, 1, 0};
             int li = -1, wi = -1;
             const float extA[3] = {10, 5, 3}, extB[3] = {3, 5, 10};
-            check(se::footprintAxes(axI, up, extA, &li, &wi) && li == 0 && wi == 2, "the larger extent of the two footprint axes is the length");
-            check(se::footprintAxes(axI, up, extB, &li, &wi) && li == 2 && wi == 0, "the other way round when the extents say so");
-            check(!se::footprintAxes(axI, up, nullptr, &li, &wi), "no extent, no footprint: the box is not built");
+            int ui = -1;
+            check(se::footprintAxes(axI, up, extA, &li, &wi, &ui) && li == 0 && wi == 2 && ui == 1,
+                  "the larger extent of the two footprint axes is the length; the up axis is the one along the shaft");
+            check(se::footprintAxes(axI, up, extB, &li, &wi, &ui) && li == 2 && wi == 0 && ui == 1, "the other way round when the extents say so");
+            check(!se::footprintAxes(axI, up, nullptr, &li, &wi, &ui), "no extent, no footprint: the box is not built");
+            // Built v12 (flight fix a): the box stands on the up axis, centred laterally on the pad. A target 40 m off the up axis leaves the
+            // box where it was and records the 40 m lateral offset.
+            se::OwnCell lat;
+            const float tgtLat[3] = {40, 100, 0};
+            check(se::buildBox(padC, tgtLat, upY, lenAx, 66.0f, 27.5f, 5.0f, &lat) && lat.boxCentre[0] == 0.0f && lat.boxCentre[1] == 55.0f &&
+                  std::fabs(lat.boxLateral - 40.0f) < 1e-4f, "a lateral target does not move the box off the pad; its offset is recorded");
+            // A target below the pad along the up axis: the up axis is flipped to point at it, so the box stands on the flipped axis.
+            se::OwnCell down;
+            const float tgtDown[3] = {0, -100, 0};
+            check(se::buildBox(padC, tgtDown, upY, lenAx, 66.0f, 27.5f, 5.0f, &down) && down.boxCentre[1] == -55.0f && down.boxHalf[2] == 65.0f,
+                  "a target below the pad flips the up axis: the box stands below the pad");
+            // A tilted up axis (z) with the target along it: the box runs along z from -10 to 140 + 20.
+            se::OwnCell tz;
+            const float upZ[3] = {0, 0, 1}, tgtZ[3] = {0, 0, 140};
+            check(se::buildBox(padC, tgtZ, upZ, lenAx, 66.0f, 27.5f, 5.0f, &tz) && tz.boxCentre[2] == 75.0f && tz.boxHalf[2] == 85.0f,
+                  "the box stands on the pad's own up axis: centre 75 m up, half-height 85 m");
+            se::OwnCell flat;
+            const float upX[3] = {1, 0, 0};
+            check(!se::buildBox(padC, tgt, upX, lenAx, 66.0f, 27.5f, 5.0f, &flat), "a target not above the pad along its up axis builds no box");
+            // The freeze: a fresh pick differs from the held cell when it is missing or its centre moved by more than 0.5 m.
+            se::OwnCell held;
+            held.has = true;
+            held.centre[0] = 0; held.centre[1] = 0; held.centre[2] = 0;
+            se::OwnCell moved = held, none;
+            moved.centre[0] = 2.0f;
+            check(se::cellDiffers(none, held), "a frame with no pad record differs from the held cell (counted, not used)");
+            check(se::cellDiffers(moved, held), "a pad moved by 2 m differs from the held cell (counted, not used)");
+            se::OwnCell same = held;
+            same.centre[0] = 0.2f;
+            check(!se::cellDiffers(same, held), "a pad within 0.5 m is the held cell's pad");
             // The margin: a signed number; the ladder -10, -5, 0, 5, 10, 20, 40.
             float mg = 0.0f;
             check(se::parseMarginM("", 5.0f, &mg) && mg == 5.0f, "an empty margin is the default 5 m");
@@ -399,6 +432,48 @@ int main(int argc, char** argv) {
             check(se::stepMarginRung(5.0f, -1, &mv) == 0.0f && mv, "the margin steps down from 5 m to 0 m");
             check(se::stepMarginRung(40.0f, +1, &mv) == 40.0f && !mv, "the margin clamps at 40 m");
             check(se::stepMarginRung(-10.0f, -1, &mv) == -10.0f && !mv, "the margin clamps at -10 m");
+            // Built v12: the early rig veto's rule. The cell is the box from above (centre (0,55,0), half-extents 71, 32.5, 65).
+            const float farPt[3] = {500, 500, 0}, inside[3] = {60, 55, 0}, nearOut[3] = {90, 55, 0};
+            using RV = se::RigVerdict;
+            check(se::rigVerdict(false, farPt, 5.0f, true, box, false, 0) == RV::kUnknown, "a rig with no bound is unknown, not vetoed");
+            check(se::rigVerdict(true, farPt, 5.0f, true, box, false, 0) == RV::kOutside, "a rig bound wholly outside the box is vetoed");
+            check(se::rigVerdict(true, inside, 2.0f, true, box, false, 0) == RV::kMixed, "a rig bound inside the box is mixed (forwarded)");
+            check(se::rigVerdict(true, nearOut, 2.0f, true, box, false, 0) == RV::kOutside, "19 m outside the box with a 2 m bound is outside");
+            check(se::rigVerdict(true, nearOut, 25.0f, true, box, false, 0) == RV::kMixed, "19 m outside with a 25 m bound reaches the box: mixed");
+            check(se::rigVerdict(true, farPt, 5.0f, false, box, false, 0) == RV::kUnknown, "named mode with no cell judges nothing");
+            check(se::rigVerdict(true, farPt, 5.0f, false, box, true, 0) == RV::kOutside, "all mode needs no cell: a bounded rig is vetoed");
+            check(se::rigVerdict(true, farPt, 5.0f, true, box, false, 29) == RV::kOutside, "the 29th veto in a row is still a veto");
+            check(se::rigVerdict(true, farPt, 5.0f, true, box, false, se::kRigRefreshN) == RV::kRefresh,
+                  "the 30th veto in a row is let through (a refresh)");
+            check(std::fabs(se::distanceToCell(inside, box)) == 0.0f, "a point inside the box is at distance 0");
+            check(std::fabs(se::distanceToCell(nearOut, box) - 19.0f) < 1e-4f, "a point 19 m beyond the box face is 19 m away");
+            se::OwnCell capc;
+            capc.has = true;
+            capc.capsule = true;
+            capc.radius = 10.0f;
+            capc.capA[0] = 0; capc.capA[1] = 0; capc.capA[2] = 0;
+            capc.capB[0] = 0; capc.capB[1] = 120; capc.capB[2] = 0;
+            const float sideOfAxis[3] = {30, 60, 0};
+            check(std::fabs(se::distanceToCell(sideOfAxis, capc) - 20.0f) < 1e-4f, "a capsule of radius 10 is 20 m from a point 30 m off the axis");
+            se::OwnCell sph;
+            sph.has = true;
+            sph.radius = 10.0f;
+            const float sphPt[3] = {30, 0, 0};
+            check(std::fabs(se::distanceToCell(sphPt, sph) - 20.0f) < 1e-4f, "a sphere of radius 10 is 20 m from a point 30 m off");
+            // The cadence: thirty vetoes, then the thirty-first decision is a refresh (the caller resets the run), then vetoes again.
+            uint32_t run = 0;
+            int outs = 0, refreshes = 0;
+            for (int i = 0; i < 62; ++i) {
+                const RV v = se::rigVerdict(true, farPt, 5.0f, true, box, false, run);
+                if (v == RV::kRefresh) {
+                    ++refreshes;
+                    run = 0;
+                } else if (v == RV::kOutside) {
+                    ++outs;
+                    ++run;
+                }
+            }
+            check(outs == 60 && refreshes == 2, "over 62 decisions a bound rig is vetoed 60 times and refreshed twice (every 31st)");
         }
         // Built v10: producer B's veto mode parses (veto is the default), and the world sphere follows the store's formula.
         se::ProducerMode pm = se::ProducerMode::kCount;

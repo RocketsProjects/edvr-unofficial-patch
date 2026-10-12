@@ -311,6 +311,8 @@ struct State {
     std::string hatchProbeKeyText;
     Hotkey sealedTrialModeKey;
     std::string sealedTrialModeKeyText;
+    Hotkey sealedTrialEarlyKey;      // TEMPORARY, Built v12: flips diag.sealed_trial_early (count or veto), live
+    std::string sealedTrialEarlyKeyText;
     // TEMPORARY, Built v8.3b: the named mode's cell radius, one rung larger or smaller (the current size). Unbound by default.
     Hotkey sealedCellLargerKey;
     std::string sealedCellLargerKeyText;
@@ -1417,6 +1419,8 @@ void tickHotkeys() {
     if (g_state->hatchProbeKey.pressed()) hatchProbeToggle("hotkey.hatch_probe", static_cast<uint32_t>(g_state->frameCounter));
     if (g_state->sealedTrialModeKey.pressed())
         sealedTrialModeStep("hotkey.sealed_trial_mode", static_cast<uint32_t>(g_state->frameCounter));
+    if (g_state->sealedTrialEarlyKey.pressed())
+        sealedTrialEarlyToggle("hotkey.sealed_trial_early", static_cast<uint32_t>(g_state->frameCounter));
     // TEMPORARY, Built v8.3b: the named mode's cell radius of the current size, one rung up or down the ladder while named mode is on.
     if (g_state->sealedCellLargerKey.pressed())
         sealedTrialCellStep(+1, "hotkey.sealed_cell_larger", static_cast<uint32_t>(g_state->frameCounter));
@@ -2220,6 +2224,11 @@ void configureDiagnosticHotkeys() {
          "hotkey.sealed_cell_smaller", "sealed cell smaller",
          "hotkey: sealed_cell_smaller is set but bound nothing, so the cell's radius cannot be stepped smaller by key this session.",
          " Steps the named mode's cell radius of the current size one rung smaller while the trial is on in named mode (temporary probe)."},
+        // TEMPORARY, Built v12: flips diag.sealed_trial_early (count or veto) live. Empty is off.
+        {&s.sealedTrialEarlyKey, &s.sealedTrialEarlyKeyText, Config::get().getString("hotkey.sealed_trial_early", ""),
+         "hotkey.sealed_trial_early", "sealed trial early rig veto",
+         "hotkey: sealed_trial_early is set but bound nothing, so the early rig veto cannot be toggled by key this session.",
+         " Toggles the early rig veto between count and veto, live, while the sealed-hangar trial runs in named or all mode (temporary probe)."},
         {&s.sealedTrialModeKey, &s.sealedTrialModeKeyText, Config::get().getString("hotkey.sealed_trial_mode", ""),
          "hotkey.sealed_trial_mode", "sealed trial mode",
          "hotkey: sealed_trial_mode is set but bound nothing, so the trial's record rule cannot be cycled by key this session.",
