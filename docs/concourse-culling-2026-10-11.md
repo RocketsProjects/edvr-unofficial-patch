@@ -4,6 +4,7 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 
 ## Status
 
+- **Built v8 (`claude/hangar-test-8`, commit 7a466ee3, DLL v0.19.1-67-g7a466ee3; full build and dll-only promotion green, not installed, not flown):** three TEMPORARY instruments (see "Built v8"): the builder probe on 0x42B4420, the hatch-state probe on the docking object O, and a named record rule for the sealed trial. The builder's arguments are settled (six, the return unused); skip is REFUSED because its side effects are not proven absent.
 - **State:** analysis and design. Built v7 (`claude/asset-census`, full build green, not installed, not flown) proves the record's identity chain to its fields (C1 to C5, see Built v7) and adds a one-frame name census, `hotkey.asset_census`, that groups the records by that chain. M1 (the draw side) is still open. Flight 7 flew the sealed-hangar trial at 80 m in the docked hangar: nothing missing (see Measurement). Built v6 on `claude/hangar-test-7` (see Built v6): the box is ruled out; the cull is fault-safe and the window line counts `torn=`; the step census and the approach flight are not flown yet. Nothing fixed. M1 is blocked on draw identity (see Measurement).
 - **Primary: sealed hangar.** Docked, pad lowered, doors closed. Submit only the hangar cell and suppress the sun. Blocked on storage of pad and door state (P9).
 - **Secondary: closed panes.** Seated inside a station (doors open, or flying inside). Cull the SocialSpace (concourse) records and replace the bay windows with mirror-like opaque glass (stage 1, Sean's decision). Impostor is a later stage only.
@@ -13,6 +14,7 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 - **Hangar state (RE 2026-10-12, offline):** the four docking readers are virtual methods of one class O, reached through vtable 0x51A9F00 at O+0x58, which is the AAB8 object (`this`). Its state byte is this+0x3C8 (2 on the readers' docked path), its state name is a typed value at this+0x340, and its owner is at this-8 (occupancy count at owner+0x10). EDVR's reader detours already receive `this`. PadRetraction and HangarLiftDoors__ storage is still not located, and no link from a render record to O is found. Next flight: the state dump over a launch cycle, with owner+0x10 added (see "Hangar door state (RE, 2026-10-12)").
 - **Open:** pad and door storage (P9); cell radius; pane draw hashes and ownership; env slot numbers; player_location read path (P10).
 - **Next flight, no engine change:** the Built v7 census in three captures (see Built v7): (a) docked, hatch closed, seated; (b) on foot in the bay; (c) on foot in the concourse. Then the Built v5 plan (with the `torn=` check of Built v6). Older steps, still open: the Built v4 plan in Measurement: docked, step the trial down the ladder one rung at a time with a census (F6) at each rung, and note the smallest radius where everything still looks complete; then the approach state dump (F3, `diag.state_dump_frames = 6000`) and the look probe at the concourse bay windows. The Built v3 and v2 plans still stand for the rest (the open-pad outpost, M3, is in v2). The M1 draw link is the open item.
+- **Probe keys (TEMPORARY, Built v8):** `hotkey.builder_probe` (arms one frame of builder calls), `hotkey.hatch_probe` (toggles the hatch-state lines), `hotkey.sealed_trial_mode` (cycles sphere and named while the trial is on), `diag.sealed_trial_mode = sphere` (or named), `diag.sealed_trial_builder = count` (skip is refused). All unbound or default off; all on the flat allow-list; all in the template commented. Suggested bare keys: F9 (builder probe), F11 (hatch probe), INSERT (trial mode).
 - **Probe keys (TEMPORARY):** `hotkey.asset_census` (Built v7; unbound by default; on the flat allow-list), `hotkey.state_dump`, `hotkey.look_probe`, `hotkey.sealed_trial`, `hotkey.sealed_trial_smaller` and `hotkey.sealed_trial_larger` (all unbound by default), `diag.state_dump = off`, `diag.state_dump_frames = 3000` (60 to 6000; 6000 for the approach dump), and `diag.sealed_trial_radius_m = 80`. **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
 - **Dynamic actors (RE, 2026-10-12, offline, no build):** the store is not the only admission. Both record loops (0x4320370 and 0x4321A13) test rec+0x234 and call the one builder 0x42B4420 (two direct call sites, PROVEN). The trial clears inside the store call, before those loops, so H2 (mask re-OR'd after the store) is RULED OUT. Open: H1 (a submitter outside both loops), H3 (other records), H5 (array members the store never visits keep stale flags, new). H4 (containment keeps near-camera actors) is PARTLY PROVEN and explains the on-foot list. Hook candidates: the store (already hooked) and the builder entry. Decide with the one-flight probe in the section "Dynamic actors (RE, 2026-10-12)". Nothing built.
 
@@ -415,5 +417,67 @@ Decision rule for the sealed cull (not yet decided): this+0x3C8 == 2, owner coun
 2. Decode A22140 and A21560 (variant tag and text) so EDVR can read the name safely.
 3. Link O to the render records: find a field in X or SRC that points to O or to its owner.
 4. Find the storage of PadRetraction and HangarLiftDoors__ (P9).
+
+## Built v8 (2026-10-12, `claude/hangar-test-8`)
+
+Commit `7a466ee3` (source; the branch also holds the merges of `claude/dynamic-actor-path` and `claude/hangar-door-state`). Full `build.bat` green (every gate, including `sealed_trial_test` at 80 checks and the new `builder_probe_test` at 48), then `build.bat --dll-only` green for the version stamp `v0.19.1-67-g7a466ee3`. Nothing installed, nothing flown. Every new key is TEMPORARY and default off; with no key pressed and the trial off, nothing is hooked.
+
+### Part 1: the builder 0x42B4420, arguments and return (PROVEN from the exe bytes, capstone 5.0.7)
+
+- **Prologue** `4C 8B DC 55 56 41 54 41 57 49 8D AB 08 FC FF FF` matches. Both call sites 0x43204F3 and 0x4321ADB are `call 1442b4420`. The return addresses are 0x43204F8 and 0x4321AE0; `builder_probe_core.h` classes a call by them.
+- **Correction to Dynamic actors D3 and "Hook candidates".** rcx is not the address rec+0x290. The caller loads the VALUE at rec+0x290 (`mov r11,[rbx+0x5C]`, with rbx = rec+0x234), so rcx is the instance pointer stored in the record. The probe therefore checks agreement by reading the memory at (r9 - 0x210) + 0x290 and comparing it with rcx. r9 = rec+0x210 (an address), so the record base r9 - 0x210 stands.
+- **The six arguments at the call.** rcx = the value at rec+0x290; rdx = `*ctx` (the context's first qword); r8 = the window value `[rsp+0x60]`; r9 = rec+0x210; `[rsp+0x20]` = the callback rec+0x2C0 (or 0 when the global byte at RVA 0x5EA3483 is 0), always written; `[rsp+0x28]` = `[rdi-0x28]`, always written. Both stack slots are written on both paths of the `je`.
+- **Argument count: six.** The builder reads rcx, rdx, r8 and the sixth argument (`[entry+0x30]`, read at 0x42B47F8 and 0x42B4D14). It never reads the fifth (`[entry+0x28]`). It does not read r9 as an incoming argument. No seventh argument is read. The observer therefore takes and forwards six arguments.
+- **Return value: undefined.** One `ret` at 0x42B50B5. RAX there is left from the security-cookie call, not set by the builder. Both callers ignore RAX, and no argument is read back after either call. The callers reload rcx, rdx, r8 and r9 on each iteration.
+- **Writes through the arguments: none directly.** The builder appends draw-command records (0x150-byte entries) to a per-pipeline command table (pointer slot at `[list+0xAA0+n*8]`, `inc [list+0x18]`), allocates list nodes through 140540DB0 when a bucket is full, and increments the dword at `[pipeline+0x2A4]`. It also calls 143696FA0 (a bucket lookup, not traced) and 817260 and 4C835D0 (not traced).
+- **Skip verdict: NOT PROVEN SAFE, so skip is refused.** Caller-visible state is unchanged by a skip, but a skipped record loses its draw-command appends, and the counter at `[pipeline+0x2A4]` and the effects of 143696FA0 are not shown to stay consistent. The count runs in every case.
+- **Why skip would change little anyway (INFERRED, to test in flight).** The admission loop tests rec+0x234 before it calls the builder (D3), and the trial clears rec+0x234 inside the store call (D5). A record the trial culled should therefore never reach the builder, so `builder_after_cull=` should read 0. A non-zero value refutes that and is a finding in itself.
+
+### Part 1: the probe (`hotkey.builder_probe`, `builder_probe.cpp`)
+
+- **Install.** The detour goes in on the first want: a press, or the sealed trial on. The pin is the 16 prologue bytes; a mismatch refuses the install and logs why. The relay gate is closed unless a frame is armed or collecting, or the trial is on.
+- **Collection.** A press arms one frame (`builder probe: armed`). The next frame's builder calls are recorded with the entry state: the record, its name (rec+0x18 to node, node+0 to text, the census's accept rules), mask (+0x208), admitted flag (+0x234), sphere (+0x240, +0x280), distance from the frame's camera, the caller, and the rcx agreement. The store visits of that frame are recorded, and each call is classed by whether its record was visited (`store_seen`).
+- **Writing.** At the Present after the collected frame: a `builder probe: frame F:` summary (calls, distinct records, calls whose record the store did not visit, agreement and disagreement, callers A/B/other), name lines of eight names each (top 20 by calls, with the unseen count), a line naming the builder hook's status, the store hook's status and the camera's source, and `edvr_logs\builder_probe_<stamp>.csv` (one row per name, then the calls, capped at 4000 rows).
+- **Trial window.** While the sealed trial is on, each frame's calls are classed. The window line gains `builder_after_cull=` (calls for records the trial culled in that frame) and `builder_unvisited=` (calls for records the store did not visit in that frame), and `mode=`.
+- **Reading a zero.** A zero summary with the hook installed means the builder was not called for any record that frame. A zero with the hook refused means nothing was recorded, and the refusal line says so before the summary.
+
+### Part 2: the hatch-state probe (`hotkey.hatch_probe`, `state_dump_probe.cpp`, `hatch_probe_core.h`)
+
+- **The AAB8 pin is removed.** It matched by address suffix and never fired. The reader detours now remember every distinct `this` they are called with (up to eight), while the observers are armed (the hatch probe on, the census, or a dump). The state dump's general tracks already cover +0x3C0, so the key bytes are still in its CSV. The census's `# hatch state` line lists the remembered objects (four at most), not the pin.
+- **On.** The four reader detours are installed if not yet in (their status is logged). The eight state-name table pointers at 0x5E78C40 are logged once (`hatch probe: state-name table at image+0x5E78C40`), so the +0x340 bytes can be compared with them offline.
+- **Each frame.** For each remembered object: the dword at +0x3C8, the 16 bytes at +0x340, the owner (`[this-8]`), owner+0x10 (dword), and owner+0x2C and +0x2F (bytes). A line is written only when one of these changes: `hatch probe: object O frame F t=T ms: 3C8 a->b; 340 <hex>-><hex>; owner ..; owner_10 ..; owner_2C ..; owner_2F ..; status flags=.. flags2=..`. The first read of an object is the baseline. Lines are capped at 400 per session; the off line gives the count written and the count suppressed.
+- **Off.** `hatch probe: off at frame F`, with the lines written and suppressed.
+
+### Part 3: the named sealed-trial mode (`diag.sealed_trial_mode`, `hotkey.sealed_trial_mode`)
+
+- **Sphere** (default): the sphere rule, as before. **Named:** a record with an unreadable sphere is kept as before (unjudged). Otherwise it is kept when its name holds Hanger, Hangar, BlastShield, LandingPad, Lift or Skirt (case-insensitive), or it has no readable name, or its radius is 100 m or less and its sphere meets the trial sphere. Everything else is culled, including a giant record that contains the camera.
+- **Cycling.** `hotkey.sealed_trial_mode` cycles the rule while the trial is on. The window of the old rule closes first, so each rule has its own window line. Off, the key logs a refusal.
+- **Names** are cached per node for the frame (direct-mapped, 512 slots), so the store does not allocate per record.
+- **Kept report.** The name is the last column (18 fields, `(none)` when unreadable).
+- **`diag.sealed_trial_builder = count|skip`.** skip logs its refusal at install and counts only.
+
+### Keys added
+
+`hotkey.builder_probe`, `hotkey.hatch_probe`, `hotkey.sealed_trial_mode`, `diag.sealed_trial_mode`, `diag.sealed_trial_builder`. All are on the flat allow-list in `runtime_profile.h` under a TEMPORARY comment, commented in the `edvr.ini` template with explanations, and listed in the Status block. The config contract passes (154 keys read, 154 documented).
+
+### Flight plan (one session, with the trial and both probes)
+
+1. Docked, seated, trial on in named mode (`hotkey.sealed_trial_mode`, then `hotkey.sealed_trial` at 80 m). Press `hotkey.builder_probe` and wait one frame. Read `builder_after_cull=` (expected 0; a non-zero is a finding) and the summary's unseen count.
+2. Watch ships outside, then in the station, with a builder probe capture at each. Note which named actors are called with `store_seen=no`.
+3. On foot in the concourse, with a builder probe capture.
+4. Hatch probe on before docking, through a full launch and re-dock cycle (the pad raises, the doors close, launch, fly, dock, the pad lowers). Expect `3C8` to change before the LandingPad records move (S4), and the owner count to change on dock and undock (S2).
+
+### Refutation criteria (H5 against H1 and H3)
+
+- **H5 (stale flags on members the store never visits)** holds for an actor if a builder call names it with `store_seen=no` in a frame where the actor is drawn. It is refuted if every named actor call in visible-actor frames has `store_seen=yes`, and the unseen count is zero in those frames.
+- **H1 (a submitter outside both loops)** is supported if an actor is drawn in a frame with no builder call naming it. The look probe's draw record for the frame gives the draw; the builder summary gives the calls. It is refuted if every drawn named actor has a builder call in its frame.
+- **H3 (the visible ships are other records)** is supported if the calls naming a drawn ship come from records that no census row names. It is refuted if every drawn ship's calls name records already in the census.
+- **H4 (containment keeps near-camera actors)** is checked by the named mode alone: if the named rule removes the on-foot list (the actors within 80 m that the sphere rule keeps), H4 is the mechanism.
+
+### Not done
+
+- The skip is not implemented, and its side effects are not traced (143696FA0, 140540DB0, 817260, 4C835D0).
+- The hatch probe does not decode the name at +0x340 (A22140). The 16 bytes are logged raw; comparison with the table pointers is offline.
+- No flight. No install. No merge to main.
 
 Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
