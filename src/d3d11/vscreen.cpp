@@ -2,6 +2,7 @@
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
+#include "gpu_pass_profile.h" // TEMPORARY GPU pass profiler (hotkey.gpu_pass_profile): one bool read per hook unarmed
 #include "../common/d3d11_gpu_command_slots.h"
 #include "vr_runtime.h"
 
@@ -2793,6 +2794,7 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
     // The census's record of this clear, before the probes and before
     // the void fix touches the colour: the line carries what the GAME
     // asked for.
+    if (gpuPassProfileCapturing()) gpuPassProfileNoteClear(self, rtv, nullptr);
     if (c && drawCensusArmed()) drawCensusClearColor(rtv, c, false);
     // The clear probe, before the void fix so it reports what the GAME asked
     // for rather than what EDVR left. Costs one size compare while armed and
@@ -2889,6 +2891,7 @@ void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT 
     bindingSet(BindSlot::Rtv0, (n && rtvs) ? rtvs[0] : nullptr);
     bindingSet(BindSlot::Dsv0, dsv);
     if (flatTemporalCapturing()) flatTemporalBind((n && rtvs) ? rtvs[0] : nullptr, dsv);
+    if (gpuPassProfileCapturing()) gpuPassProfileNoteOm(self, n, rtvs, dsv);
     g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
 }
 
@@ -2902,6 +2905,7 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
     // A foreign deferred context cannot write the immediate target yet, but
     // an eventual command list or undocumented cross-context path must not
     // silently preserve the protected suffix.
+    if (gpuPassProfileCapturing()) gpuPassProfileNoteOm(self, n, rtvs, dsv);
     flatRuntimeOverlayUavBind(self,uavCount,uavs);
     if (foreignContext(self)) {
         g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs,
@@ -4281,6 +4285,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
                                       FLOAT depth, UINT8 stencil) {
     if (g_flatComputeInternal) { g_state->realClearDsv(self, dsv, flags, depth, stencil); return; }
     gpuFrameCommand(self);
+    if (gpuPassProfileCapturing()) gpuPassProfileNoteClear(self, nullptr, dsv);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     noteStaleForward(kSlotClearDepthStencilView, reinterpret_cast<const void*>(g_state->realClearDsv),
                      "ClearDepthStencilView");
@@ -4671,6 +4676,7 @@ static void flatCensusDraw(ID3D11DeviceContext* self, char kind, uint32_t count,
 }
 
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
+    if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'D', count, 1);
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDraw];
         // Capture original game bindings before the temporal scope substitutes
@@ -4714,6 +4720,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
+    if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'A', 0, 1);
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
         FlatRuntimeDrawScope flatDraw(self, 0, 'A');
@@ -4732,6 +4739,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
+    if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'I', count, 1);
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDrawIndexed];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
@@ -4777,6 +4785,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'N', perInstance, instances);
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
@@ -4834,6 +4843,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
+    if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'X', perInstance, instances);
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
@@ -5929,6 +5939,7 @@ void vScreenFrameBoundary() {
     // Before this frame's counters are read or reset: a pending census starts
     // here, a running one advances, a spent one writes its tables.
     tkDrawCensusBoundary.run([&] { drawCensusFrameBoundary(s->frameNo); });
+    gpuPassProfileFrameBoundary(g_state->ownerCtx, s->frameNo, s->eyeW, s->eyeH);
     tkFssReveal.run([&] { fssRevealFrameBoundary(); });
 
     // FSS frame pacing (round 31): the left-only squares are now measured
@@ -7143,6 +7154,7 @@ void shutdownVScreenFixes() {
     fssPanelRectShutdown();
     fssRevealShutdown();
     gpuCensusShutdown();
+    gpuPassProfileShutdown();
     billboardShutdown();
     // Both halves of the intro. Neither was on this roll-call, so a session
     // that ended without a rendered scene ever arriving -- quitting from the

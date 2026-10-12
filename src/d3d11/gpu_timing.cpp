@@ -64,6 +64,21 @@ std::shared_ptr<Domain>& registry() {
     return *value;
 }
 std::shared_ptr<Domain> current() { return std::atomic_load(&registry()); }
+// The pass profiler's scopes, one per slot (gpu_timing.h).
+DisjointClock::Lease g_passLease[kPassScopeSlots]{};
+const char* disjointReasonText(DisjointReason r) {
+    switch (r) {
+    case DisjointReason::None: return "ok";
+    case DisjointReason::InvalidLease: return "invalid lease";
+    case DisjointReason::WrongOwner: return "wrong owner thread or context";
+    case DisjointReason::Incomplete: return "incomplete";
+    case DisjointReason::DriverFailure: return "driver failure";
+    case DisjointReason::Disjoint: return "the GPU clock changed inside the scope (disjoint)";
+    case DisjointReason::ZeroFrequency: return "zero frequency";
+    case DisjointReason::Stale: return "stale: not read within 2 s of its close";
+    }
+    return "unknown";
+}
 void stop(const std::shared_ptr<Domain>& d) noexcept {
     if (!d->unavailable.exchange(true, std::memory_order_acq_rel))
         Log::get().note("GPU timing: an unfinished sample was abandoned without its owner context; "
@@ -109,6 +124,51 @@ void gpuTimingAbandon() noexcept {
     if (d) d->unavailable.store(true, std::memory_order_release);
     // The clock's destructor issues nothing; native backend destruction only
     // Releases. Outstanding timer states retain this domain until reset.
+}
+
+bool gpuTimingPassScopeOpen(ID3D11DeviceContext* ctx, unsigned slot, uint64_t now) noexcept {
+    auto d = current();
+    if (!d || slot >= kPassScopeSlots || g_passLease[slot] || !d->owns(ctx) ||
+        d->unavailable.load(std::memory_order_acquire) || d->clock.scopeOpen())
+        return false;
+    d->collectExpired(now);
+    g_passLease[slot] = d->clock.acquireInterval(now);   // scopeOpen was false, so this opens a standalone scope
+    return static_cast<bool>(g_passLease[slot]);
+}
+bool gpuTimingPassScopeClose(ID3D11DeviceContext* ctx, unsigned slot, uint64_t now) noexcept {
+    auto d = current();
+    if (!d || slot >= kPassScopeSlots || !g_passLease[slot] || !d->owns(ctx)) return false;
+    return d->clock.endInterval(g_passLease[slot], now);
+}
+GpuPassScopeResult gpuTimingPassScopePoll(ID3D11DeviceContext* ctx, unsigned slot, uint64_t now) noexcept {
+    GpuPassScopeResult out{};
+    auto d = current();
+    if (!d || slot >= kPassScopeSlots || !g_passLease[slot]) {
+        out.status = GpuPassScopeStatus::Failed;
+        out.reason = "no scope was opened in this slot";
+        return out;
+    }
+    if (!d->owns(ctx)) {
+        out.status = GpuPassScopeStatus::Failed;
+        out.reason = "polled off the owner context";
+        return out;
+    }
+    const DisjointResult r = d->clock.poll(g_passLease[slot], now);
+    if (r.status == DisjointStatus::Pending) return out;
+    if (r.status == DisjointStatus::Ready) {
+        out.status = GpuPassScopeStatus::Ready;
+        out.frequency = r.frequency;
+        return out;
+    }
+    out.status = GpuPassScopeStatus::Failed;
+    out.reason = disjointReasonText(r.reason);
+    return out;
+}
+void gpuTimingPassScopeRelease(ID3D11DeviceContext* ctx, unsigned slot, uint64_t now) noexcept {
+    auto d = current();
+    if (!d || slot >= kPassScopeSlots || !g_passLease[slot]) return;
+    if (d->owns(ctx)) d->clock.release(g_passLease[slot], now);
+    g_passLease[slot] = {};
 }
 
 struct GpuTimer::State : TimerRegistration {
