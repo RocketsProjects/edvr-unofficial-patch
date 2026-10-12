@@ -18,6 +18,7 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 - **Probe keys (TEMPORARY, Built v8):** `hotkey.builder_probe` (arms one frame of builder calls), `hotkey.hatch_probe` (toggles the hatch-state lines), `hotkey.sealed_trial_mode` (cycles sphere and named while the trial is on), `diag.sealed_trial_mode = sphere` (or named), `diag.sealed_trial_builder = count` (skip is refused). All unbound or default off; all on the flat allow-list; all in the template commented. Suggested bare keys: F9 (builder probe), F11 (hatch probe), INSERT (trial mode).
 - **Probe keys (TEMPORARY):** `hotkey.asset_census` (Built v7; unbound by default; on the flat allow-list), `hotkey.state_dump`, `hotkey.look_probe`, `hotkey.sealed_trial`, `hotkey.sealed_trial_smaller` and `hotkey.sealed_trial_larger` (all unbound by default), `diag.state_dump = off`, `diag.state_dump_frames = 3000` (60 to 6000; 6000 for the approach dump), and `diag.sealed_trial_radius_m = 80`. **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
 - **Dynamic actors (RE, 2026-10-12, offline, no build):** the store is not the only admission. Both record loops (0x4320370 and 0x4321A13) test rec+0x234 and call the one builder 0x42B4420 (two direct call sites, PROVEN). The trial clears inside the store call, before those loops, so H2 (mask re-OR'd after the store) is RULED OUT. Open: H1 (a submitter outside both loops), H3 (other records), H5 (array members the store never visits keep stale flags, new). H4 (containment keeps near-camera actors) is PARTLY PROVEN and explains the on-foot list. Hook candidates: the store (already hooked) and the builder entry. Decide with the one-flight probe in the section "Dynamic actors (RE, 2026-10-12)". Nothing built.
+- **Draw paths (RE, 2026-10-12, offline, no build; section "Draw paths (RE, 2026-10-12)"):** two appenders of 0x150 pool records. Path B = FUN_144312E00, called INSIDE the store (rigid movers: ships, drones), so the trial's post-store clear never reaches it. Path A = builder FUN_1442B4420 (instance-bearing records, admitted in the traversal and the single-entry path by rec+0x234/0x208/0x290/0x298). Leaf records (rec+0x290 = 0, rec+0x240 never written) cannot reach the builder. Veto points: builder bracket 0x42B4420 (A), producer entry 0x4312E00 (B). The .rdata/.pdata "callers" are range records, not calls. Next flight: the probe in "Draw paths", not built.
 
 ## Proven
 
@@ -510,3 +511,129 @@ v8.4, commit `0be37478` (DLL `v0.19.1-77-g0be37478`; full build green, then `bui
 - No flight. No install. No merge to main.
 
 Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+
+
+## Draw paths (RE, 2026-10-12)
+
+Offline, build 332841 (gate matched). No C++ changed, no build, no flight. Sources: `analysis\decomp\decomp_*.txt` (Ghidra; line numbers are the file's lines), the exe bytes (`analysis\EliteDangerous64.exe`, read with a PE reader in the scratchpad), and the docs cited. **PROVEN** = bytes or decompile lines cited. **INFERRED** = not closed by the bytes.
+
+### Correction: the .rdata and .pdata "callers" are range records
+
+- PROVEN: every .pdata or .rdata reference that Ghidra lists as a caller of a draw function is a 16-byte record of the form (leading dword, begin RVA, end RVA, unwind RVA). Examples: RVA 0x5DD54FC holds `042B4420 042B4478 05DD54C4` (begin 0x42B4420, end 0x42B4478); RVA 0x5DDB604 holds `04320340 04320370 05DDB5D4`; RVA 0x5DDA058 holds `04312040 0431207B 05DDA034`. They are the hot and cold ranges of split functions, not vtables or job tables.
+- Consequence: the "vtable-referenced callers" in the Dynamic actors H1 entry have no support. Indirect callers through 8-byte function-pointer tables are NOT ruled out; no scan for those was run.
+
+Direct call sites (PROVEN, from the Ghidra callers lists and the decompiles):
+- 0x42B4420 (builder): 0x43204F3 in the traversal 0x4320340; 0x4321ADB in the single entry 0x4321940.
+- 0x4312E00 (producer B): 0x43125DF in the store 0x4312040, and nowhere else.
+- 0x4312040 (store): 0x43203F1 (traversal), 0x43219BB (single entry), 0x4312650 (recursion over the child list).
+- 0x4320340 (traversal): called from an unnamed region at 0x1442DFAF3 (after FUN_1442DF9D0; no Ghidra function there).
+- 0x4321940 (single entry): called from 0x431AFE0 only (decomp_431AFE0 line 124). The "0x431B20D" call in the Dynamic actors notes lies inside 0x431AFE0's range (0x431AFE0 + 699 = 0x431B29B), not in 0x431B2A0.
+- 0x431AFE0 (rig eval): called at 0x1442DF47A in FUN_1442DF460 (31 bytes; decomp_42DF460). Its other dispatch is the collection's object vtable slot +0x50 (decomp_431AFE0 line 127), used when collection+8 is non-null.
+- 0x42B4130 and 0x42B3FC0: builder only (decomp_42B4420 lines 369 and 512).
+- 0x369C9C0 (producer C): 0x36A0F50 only, at four sites (decomp_36A0F50 lines 60, 74, 89, 98).
+- 0x434D470 (producer D driver): from 0x434D3C4 (in 0x434D320), 0x434D421 (in 0x434D3E0), 0x434D460 (in 0x434D440).
+
+### Q1: every appender
+
+An appender writes a 0x150 pool record to a node from DAT_145EFDD30 and increments the per-pipeline draw count at [owner+0x2A4].
+
+| Path | Function | Appends (PROVEN) | Reads rec+0x208 or rec+0x234? | What it iterates |
+|---|---|---|---|---|
+| B | FUN_144312E00 (hot split chunk 0x431305C) | yes: 4312E00 lines 179-250, key rec+0x250 (179), +0x2A4 at 250; chunk line 115 | no. Its mask is the store's per-view result (4312040:326-337) | one rig record, mask words up to 7 qwords |
+| A | FUN_1442B4420 builder | yes: inline appends at 663-734 (owner = *(pauVar24[2]); +0x2A4 at 734), and through 0x42B4130 | no. Reads the instance pose (rcx), ctx (rdx), window (r8) | group members admitted by the traversal; sub-item list at instance+0x14 (0x58 stride, count +0x12), or parts of instance+0x28 |
+| A' | FUN_1442B4130 primary emit | yes: lines 141 (alloc) and 203 (+0x2A4) | no | parts of instance+0x28, one per mask bit from 0x142817260 |
+| C | FUN_14369C9C0 | yes: calls 140540DB0 and 143696FA0 (lines in decomp_369C9C0) | no | lists of a non-rig object (0xA0, 0x60, 0x70, 0x80 strides), gated by ctx masks +0x570, +0x580, +0x690 (36A0F50 lines 35-45) |
+| D | FUN_14434D120 via FUN_14434D470 | yes: calls 140540DB0 and 143696FA0; INC per doc | no | one record per call, a packed 4-vector built from a transform |
+
+Not appenders (PROVEN: no [owner+0x2A4] write in their decompile; they touch collection-level +0x2A0 lists and node allocation): 0x4316820, 0x4328B80, 0x431B2A0, 0x430A060, 0x431B4D5, 0x431F31F, 0x432A4E8, 0x43697140. INFERRED: list management. 0x4331300 is the group's per-view mask and window evaluator (it loops ctx+0x1A940 views with stride 0x6A0, decomp_4331300 line 112). It is not an appender.
+
+Gates, not appenders: 0x431AFE0, 0x4320340, 0x4321940, 0x4312040, 0x430EFE0.
+
+The main-view chain. PROVEN up to the dispatch, INFERRED after it:
+1. FUN_1442DF460 calls 0x431AFE0 per rig. 0x431AFE0 returns at once unless rig+0x380 == 4 (line 39). It ORs view masks +0x570 for the views that pass FUN_142840840 and FUN_14432C520 (lines 44-76) into uVar9. It clears ctx+0x1A950 bits when collection+0x70 bit 7 is set (lines 80-87). It then either calls the collection's dispatch object vtable +0x50 (collection+8 non-null, line 127) or calls 0x4321940 synchronously (line 124).
+2. INFERRED: the dispatch object runs the traversal 0x4320340 as a job. Its caller is not found.
+3. 0x4320340 walks up to 8 groups (entries of 0x60 bytes at collection+0x40, count at +0x300). For each group it calls 0x4331300 (mask and window), then the store 0x4312040 on the group's record array base (entry+0x28). If the pipeline pointer is non-null it runs the admission loop over all members (count entry+0x30, stride 0x2F0) and calls the builder (lines 40-108).
+4. The store 0x4312040, per record: LOD nibble filter, sphere test, per-view gate, producer B when the rig kind is 2, the pose update, and recursion over the child list (rec+0x2A8, count rec+0x2B0). Producer B runs inside the store (line 337).
+5. The single entry 0x4321940 is item 3 for one record.
+
+### Q2: which path draws what
+
+- (a) Station static geometry: path A, the builder. PROVEN: the kinematic doc (capture 165433) finds builder parts behind 85.4% of static t33 records. FUN_1442B4420 made 252,659 calls and 3.82M items, against 430,886 items from FUN_144312E00 (engine-render-performance-2026-09-19 lines 586-596). INFERRED for named walls; the probe decides.
+- (b) Ships, drones, turrets, rigid movers: path B, FUN_144312E00. PROVEN: the kinematic doc says moving pool records are rig records and "NOT the draw-item builder's records" (2 of 82 movers claimed by builder parts; kinematic doc lines 1683-1690). PROVEN: FUN_144312E00 copies the rig's +0x170/+0x178 and +0x17C/+0x180 into the record (4312E00 lines 66-76). INFERRED: the singleton items (max 3 per call) are ship-scale parts.
+- (c) Characters (skinned): not path B. PROVEN: "Skinned records never reach the FUN_144312E00 emit hook (log tainted 0)" (kinematic doc line 4067). INFERRED: they go through the builder (path A), through either the instance+0x28 branch or the sub-item branch. The probe does not separate these yet.
+- (d) Decals, screens, billboards: NOT FOUND. Producer D is the only candidate outside the rig path. Its callers (0x1435A0720, 0x143AE9130, 0x143AF1240, 0x144714FE0, 0x1430656F0) lie outside the draw cluster and were not traced.
+
+### Q3: where the visibility decision is made
+
+Path B (producer 0):
+- The store computes each record's world sphere inline (4312040 lines 212-262). Centre comes from the node's bounds block: *(node+0x08)+0x20 (xyz), radius *(node+0x08)+0x2C. It is transformed by A = *(rec+0x190) and B = *(A+0x50) (PROVEN offsets; B's role INFERRED as the base transform). The radius is the raw node radius, not scaled by the instance (PROVEN: line 262 copies it unchanged).
+- Per view, FUN_14430EFE0 (store line 304) tests the sphere against the view: centre minus view origin (view+0x540 to +0x54C), a distance threshold from view+0x550 and +0x560, and the view mask view+0x570 (decomp_430EFE0 lines 76-99, 125-160). Its struct argument, by PROVEN offsets: [2] = rec, [3] = pointer to the candidate mask (local_288), [5] = pointer to the world centre, [6] = pointer to the radius, [11] = pointer to a store-local byte.
+- The surviving view bits (local_288) go to FUN_142817260 and then to producer B (4312040 lines 326-337). This gate does not change rec+0x208 or rec+0x234 (see Ruled out).
+
+Path A (builder):
+- Record level (traversal lines 64-86): rec+0x290 non-zero, rec+0x234 set, rec+0x298 set, and some set bit v of rec+0x208 whose LOD nibble (rec+0x210) is at most node+0x6A.
+- Store level: LOD nibble filter against node+0x68 (4312040 lines 137-149), and FUN_144308B30 on the record's sphere (lines 156-165; decompile not read). Both write rec+0x208. rec+0x234 is set from the nibble-filtered mask before the sphere test (line 150).
+- Builder level (42B4420 lines 194-275): the pose at rcx gives q (pose+0x10), centre (R(q)c + t, with c at pose+0x80), and extent (pose+0x90). For each view with (view+0x570 & window r8) non-zero, FUN_1404F4E10(view, centre, extent) must not return -1 (a box test; leaf, decompile not in the set, bytes at 0x4F4E10). Then, if DAT_145EA3399 and view+0x68D bit 0 are set, FUN_14288AC40 (visibility callback; bytes at 0x288AC40) must return true. Surviving views OR into local_4B8.
+- Sub-item branch: FUN_1442B3FC0 per (sub-item, view) (lines 41-113): a distance test against view+0x540 and the thresholds view+0x550 and +0x560, using the pose centre, then FUN_1404F4E10.
+
+Hook points (addresses and prologue bytes PROVEN from the exe):
+- V-A: builder 0x42B4420. Prologue `4C 8B DC 55 56 41 54 41 57 49 8D AB 08 FC FF FF` (matches the Built v8.3 note). At entry: rcx = instance (the value at rec+0x290), rdx = ctx, r8 = window mask, r9 = rec+0x210 (so the record is r9 - 0x210), [rsp+0x20] = callback, [rsp+0x28] = f. Name: rec+0x18 gives the node, node+0 the C string. EDVR already hooks this address: kinematic_eval_hook.cpp bucketBuildObserved (about lines 538-560) calls an observer before the forward. That observer returns void and the forward is unconditional, so a veto needs a new return protocol (the bracket returns 0 before the forward when the observer asks for a skip). Confidence: high that it is the single point for every builder call from the traversal and the single-entry path, since one entry covers both direct sites. Medium-high that a skip before the forward is side-effect free: the builder's global writes are the appends after line 663.
+- V-B: producer B, FUN_144312E00. Prologue `40 55 53 56 57 41 54 41 55 48 8D AC 24 38 FF FF`. At entry: rcx = rec (name rec+0x18 to node), rdx = owner (pipeline), r8 = mask array (7 qwords), r9 = tail. EDVR already has a direct-producer relay (kinematic_eval_probe.h line 45, kDirectBuildRvas 0x4312E00), which observes after the forward. A veto needs the observer to run before the forward and return skip. Side effects before the appends: the dictionary lookup FUN_143696FA0 (pure on a hit) and, on a miss, an empty node from FUN_140540DB0 (no draw effect). Confidence: high; its only caller is the store.
+- Observer only, for the trial's sphere (not a veto): the store's per-view gate FUN_14430EFE0, prologue `40 53 55 56 57 41 54 41 56 41 57 48 83 EC 70 48`. On entry it gives the record and its true world sphere, which the trial should use in place of rec+0x240 and rec+0x280.
+- Not recommended: a veto at the store entry 0x4312040 (prologue `40 55 53 56 57 41 56 41 57 48 8D AC 24 68 FE FF`). Zeroing its input mask also skips the pose update FUN_14433DB20 (store line 153), which the children and the builder depend on.
+
+### Q4: the zero rec+0x240 and the unreadable rec+0x290
+
+PROVEN (decomp_433DB20):
+- Lines 298-305: rec+0x240 to +0x24C are written only when rec+0x2B0 (child count) or rec+0x290 (instance pointer) is non-zero. Otherwise they keep their old value.
+- Lines 306-355: the instance pose is written (FUN_1442B6410(rec+0x290, ...)) only when rec+0x290 is non-zero.
+- Lines 391-397: the no-child, no-instance case takes no centre.
+- 4320340 lines 64-67 admit only records with rec+0x290 non-zero, so a record with rec+0x290 = 0 never reaches the builder.
+
+So a record with no children and no instance has rec+0x240 = origin (never written), and *(rec+0x290) is a null read. That is the roughly 70% in the v8.3 flight.
+
+INFERRED: these are leaf records of the rig family. They carry a rig link (rec+0x2B8), so they can reach producer B when the rig kind is 2. Their world transform is formed in the store from A and B (4312040 lines 239-261). They are not a different record type, and I found no evidence of instanced batches.
+
+Consequences:
+1. rec+0x240 is not the sphere centre for leaves, so the trial's origin-based decisions for them measure nothing about the record.
+2. The v8.4 pose-derived hypothesis has no pose to read for these records.
+3. These records cannot be builder draws. Producer B runs before the trial's post-store clear, so the trial never affects them.
+
+### Ruled out
+
+- ruled out: rdata and pdata references as vtable callers, because each is a range record (bytes above).
+- ruled out: the post-store trial clear reaching producer B, because producer B is called inside the store (4312040 line 337) and the trial runs after the store returns (store_hook.cpp lines 106-115).
+- ruled out: the store's per-view gate writing rec+0x234 or rec+0x208. Both derive from the LOD-filtered mask (4312040 lines 150 and 346); local_288 feeds only FUN_142817260 (lines 326-337). This confirms the correction in the Dynamic actors section.
+- ruled out: leaf records as builder draws, because admission requires rec+0x290 non-zero (4320340 lines 64-67).
+- ruled out for this capture: FUN_14369C9C0 as the station-geometry producer, because it made zero calls in 11.7k frames (engine-render-performance-2026-09-19 line 594). Not ruled out for other scenes.
+- ruled out: 0x4316820, 0x4328B80, 0x431B2A0 and 0x430A060 as draw appenders (no [owner+0x2A4] write in their decompile).
+
+### What the flight result implies (INFERRED)
+
+The trial clears rec+0x208 and rec+0x234 after the store. That reaches path A only, and only for records the store visited. So:
+- Producer B draws (ships, drones) are untouched by the trial.
+- Most store-visited records are leaves that the builder never admits, so clearing them removes nothing that is drawn.
+- Instance-bearing records (walls, walkers) are drawn by path A. They survive when they are admission-loop members that the store never visited. That is H5 (stale flags on members outside the group base's child tree). It is the leading explanation for "the draw count does not fall". The v8 counter builder_unvisited= tests it.
+
+### One-flight probe (designed, not built)
+
+Armed frame with the trial on: docked and in the concourse, plus one frame in open space with a ship in view.
+1. Producer B pre-forward observer (new, read-only). Per call: rec, name, rig kind (rig+0x160 to +0x4B), popcount of the mask, owner+0x2A4 delta.
+2. Builder bracket observer (exists since v8.3). Per call: return address (site), rec = r9 - 0x210, name, instance non-zero, instance+0x28 non-zero, instance+0x14 count, store_seen (v8), and the key of each appended record. Builder keys are the sub-item address +0x40 (42B4420:663), not rec+0x250.
+3. Per group: entry+0x30 (count) against store-visited records. builder_unvisited= already logs this.
+4. Draw side: the census row for each drawn record and its pool key. Producer B keys are rec+0x250 (4312E00:179). Map each key back to its rec.
+
+Read-out:
+- Station wall drawn, its rec in path A with store_seen = no: H5 supported.
+- Station wall drawn, store_seen = yes and flag cleared: contradicts the clear. H1 or a missed input.
+- Ship drawn via producer B: confirms the trial cannot reach ships, so a veto must sit at V-B.
+- NPC drawn via path A with a named sub-branch: resolves the walker sub-branch. An NPC drawn with no A or B record: H1.
+- Decal or screen drawn with no A or B record: producer D (14434D120). The probe should count it too.
+
+### Recommended hook points
+
+1. V-A: builder entry 0x42B4420 (existing bracket). Confidence high for path A coverage. The bracket needs a skip return.
+2. V-B: producer entry 0x4312E00 (existing relay). Confidence high for path B (sole caller).
+3. Trial sphere source: observer on 0x430EFE0 entry (no veto). Confidence high on the offsets. Caution: the radius is the unscaled node radius.
+
+No key added, no config change, no install.
