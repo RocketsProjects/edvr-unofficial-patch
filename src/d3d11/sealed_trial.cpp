@@ -120,27 +120,8 @@ sealed::Window takeWindow() noexcept {
 // The centre the rule uses. In the explorer cam it is the free camera's rows (the view 0 origin may not be the free camera there). Seated and
 // on foot it is the view 0 origin, which the flights have proven; the rows are the fallback where no origin is read. The frame gap between
 // the two is logged at each toggle, so the flight can check that they agree.
-bool cameraOf(const view::Resolved& v, float out[3]) noexcept {
-    if (v.poseOk && v.source == view::Source::kExplorerCam) {
-        out[0] = v.pose.pos[0];
-        out[1] = v.pose.pos[1];
-        out[2] = v.pose.pos[2];
-        return true;
-    }
-    if (v.originOk) {
-        out[0] = v.origin[0];
-        out[1] = v.origin[1];
-        out[2] = v.origin[2];
-        return true;
-    }
-    if (v.poseOk) {   // no origin read: the rows are the only position
-        out[0] = v.pose.pos[0];
-        out[1] = v.pose.pos[1];
-        out[2] = v.pose.pos[2];
-        return true;
-    }
-    return false;
-}
+// The rule itself is view::sphereCentre (view_source.h), shared with the asset census.
+bool cameraOf(const view::Resolved& v, float out[3]) noexcept { return view::sphereCentre(v, out); }
 
 // The label the trial's lines carry: the view source, and where the sphere centre came from (see cameraOf).
 const char* viewLabel(const view::Resolved& v) noexcept {

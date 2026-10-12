@@ -23,4 +23,20 @@ struct Resolved {
 // nor the origin can be read.
 bool resolveView(uintptr_t ctx, Resolved* out) noexcept;
 
+// The centre the sphere rules use (the sealed trial and the asset census): the explorer cam's rows in the explorer cam; otherwise the
+// view 0 origin, which the flights proved; otherwise the rows. False when none can be read. fromRows (optional) says whether the rows
+// were the source.
+inline bool sphereCentre(const Resolved& v, float out[3], bool* fromRows = nullptr) noexcept {
+    const bool rows = v.poseOk && (v.source == Source::kExplorerCam || !v.originOk);
+    const float* src = nullptr;
+    if (rows) src = v.pose.pos;
+    else if (v.originOk) src = v.origin;
+    if (!src) return false;
+    out[0] = src[0];
+    out[1] = src[1];
+    out[2] = src[2];
+    if (fromRows) *fromRows = rows;
+    return true;
+}
+
 }  // namespace edvr::view

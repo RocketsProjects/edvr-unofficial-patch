@@ -87,6 +87,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "state_dump_probe.h"     // the state dump (TEMPORARY, M2): install, per-frame, the key
 #include "sealed_trial.h"         // the sealed-hangar trial (TEMPORARY): install, per-frame, the key
 #include "look_probe.h"           // the look probe (TEMPORARY): install, per-frame, the key
+#include "asset_census.h"         // the asset census (TEMPORARY): the key, the one-frame collection and its write
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
 #include "hmd_camera_tag_hook.h"       // hmdCameraTagInstall at startup: the headset camera tag's coordinator hook (VR; fix.hmd_camera_tag)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
@@ -302,6 +303,9 @@ struct State {
     // The look probe's key (TEMPORARY; look_probe.h). Unbound by default.
     Hotkey lookProbeKey;
     std::string lookProbeKeyText;
+    // The asset census's key (TEMPORARY; asset_census.h): a press arms one frame. Unbound by default.
+    Hotkey assetCensusKey;
+    std::string assetCensusKeyText;
     bool        diagnosticKeysBound = false;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings; they give the FSS mode latch its frame-exact edges.
@@ -1259,6 +1263,8 @@ EDVR_BOUNDARY_TICK(tkStateDumpProbe, "state_dump_probe");
 EDVR_BOUNDARY_TICK(tkSealedTrial, "sealed_trial");
 // The look probe's frame tick (TEMPORARY; look_probe.cpp): under its own fault budget.
 EDVR_BOUNDARY_TICK(tkLookProbe, "look_probe");
+// The asset census's frame tick (TEMPORARY; asset_census.cpp): under its own fault budget.
+EDVR_BOUNDARY_TICK(tkAssetCensus, "asset_census");
 EDVR_BOUNDARY_TICK(tkEngineVelocityClock, "engine_velocity_clock");
 EDVR_BOUNDARY_TICK(tkSchedulerProbe, "scheduler_probe");
 EDVR_BOUNDARY_TICK(tkVtableWatch, "vtable_watch");
@@ -1388,6 +1394,8 @@ void tickHotkeys() {
         sealedTrialReportRequest("hotkey.sealed_trial_report", static_cast<uint32_t>(g_state->frameCounter));
     // The look probe (TEMPORARY; look_probe.h): a press arms one capture of the next frame.
     if (g_state->lookProbeKey.pressed()) lookProbeRequest("hotkey.look_probe");
+    // The asset census (TEMPORARY; asset_census.h): a press arms one frame of records, grouped by identity.
+    if (g_state->assetCensusKey.pressed()) assetCensusRequest("hotkey.asset_census", static_cast<uint32_t>(g_state->frameCounter));
     // The two keys above are gated on focus like the others, and said nothing when a press was refused for it.
     missedDiagnosticPressNote(g_state->occlusionKey, g_state->missedOcclusionNotes, "The occlusion census key");
     missedDiagnosticPressNote(g_state->sunSkipKey, g_state->missedSunSkipNotes, "The hangar sun probe skip key");
@@ -1622,6 +1630,10 @@ void presentFrameBoundary() {
     // The look probe's frame tick (TEMPORARY): starts, finishes and reads back its capture; a branch when idle.
     tkLookProbe.run([] {
         lookProbeFrame(static_cast<uint32_t>(g_state->frameCounter));
+    });
+    // The asset census's frame tick: starts its collection and writes it at the next Present; a branch when idle.
+    tkAssetCensus.run([] {
+        assetCensusFrame(static_cast<uint32_t>(g_state->frameCounter));
     });
     // Engine-record velocity's clock (the emit table's frame stamps and
     // the per-eye snapshots), the same exactly-once-per-owned-present tick.
@@ -2153,6 +2165,11 @@ void configureDiagnosticHotkeys() {
          "hotkey.look_probe", "look probe",
          "hotkey: look_probe is set but bound nothing, so the look probe cannot be armed by key this session.",
          " Arms one capture of the next frame's records on the forward ray and its centre draws (temporary probe)."},
+        // TEMPORARY, the asset census (asset_census.h): a press arms one frame. Empty is off.
+        {&s.assetCensusKey, &s.assetCensusKeyText, Config::get().getString("hotkey.asset_census", ""),
+         "hotkey.asset_census", "asset census",
+         "hotkey: asset_census is set but bound nothing, so the asset census cannot be armed by key this session.",
+         " Arms one frame of the render records grouped by identity; writes edvr_logs\\asset_census_<stamp>.csv (temporary probe)."},
     };
     for (Item& it : items) {
         if (!first && *it.applied == it.value) continue;

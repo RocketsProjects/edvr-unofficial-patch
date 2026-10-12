@@ -13,6 +13,7 @@
 // Output: "state dump:" lines in the graphics log (a start line, one line per event, a done line) and
 // edvr_logs\state_dump_<stamp>.csv, one row per frame (state_dump_core.h has the columns).
 #include <cstdint>
+#include <string>
 
 namespace edvr {
 
@@ -22,5 +23,18 @@ void stateDumpInstall(bool flatProfile);
 void stateDumpRequest(const char* trigger);
 // The render thread's Present tick, once per owned frame: collects a finished frame's row, starts or finishes a capture.
 void stateDumpFrame(uint32_t frame);
+
+// For the asset census (asset_census.cpp), which reads the same four docking readers for one frame. stateDumpCensusArm(true) installs
+// the reader detours if they are not yet in and opens their observers; (false) closes the census's share and leaves a capture's own
+// observers as they are. It returns the detour status ("" when off). The snapshot is read-only.
+struct StateReaderSnapshot {
+    bool installed = false;        // all four detours are in place
+    uint32_t calls[4] = {};        // cumulative calls while observed (a capture start resets them)
+    uint32_t codes[4] = {};        // the AL code the last call returned
+    uintptr_t objects[4] = {};     // the object the last call named
+    uintptr_t lastAab8 = 0;        // the last object a reader named whose address ends in 0xAAB8
+};
+std::string stateDumpCensusArm(bool on);
+void stateDumpCensusSnapshot(StateReaderSnapshot* out);
 
 }  // namespace edvr

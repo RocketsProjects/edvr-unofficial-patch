@@ -132,6 +132,8 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         std::strcmp(key, "hotkey.sealed_trial_report") == 0 ||
         std::strcmp(key, "diag.sealed_trial_radius_m") == 0 ||
         std::strcmp(key, "hotkey.look_probe") == 0 ||
+        // TEMPORARY, the asset census (asset_census.h): its key, so the flat profile reads it (the census itself is profile-blind).
+        std::strcmp(key, "hotkey.asset_census") == 0 ||
         std::strcmp(key, "fix.render_sharpness") == 0 ||
         // The interface quality (flat panel row; ui_panel_scale.cpp's flat factor and the flat UI layer). The VR layer reads it
         // too, but stays inert in flat: it is live only with fix.temporal_aa on through this gate, which refuses that key.

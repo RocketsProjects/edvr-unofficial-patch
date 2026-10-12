@@ -4,15 +4,15 @@ Offline analysis of `EliteDangerous64.exe` build 332841 (TimeDateStamp 178838482
 
 ## Status
 
-- **State:** analysis and design. Flight 7 flew the sealed-hangar trial at 80 m in the docked hangar: nothing missing (see Measurement). Built v6 on `claude/hangar-test-7` (see Built v6): the box is ruled out; the cull is fault-safe and the window line counts `torn=`; the step census and the approach flight are not flown yet. Nothing fixed. M1 is blocked on draw identity (see Measurement).
+- **State:** analysis and design. Built v7 (`claude/asset-census`, full build green, not installed, not flown) proves the record's identity chain to its fields (C1 to C5, see Built v7) and adds a one-frame name census, `hotkey.asset_census`, that groups the records by that chain. M1 (the draw side) is still open. Flight 7 flew the sealed-hangar trial at 80 m in the docked hangar: nothing missing (see Measurement). Built v6 on `claude/hangar-test-7` (see Built v6): the box is ruled out; the cull is fault-safe and the window line counts `torn=`; the step census and the approach flight are not flown yet. Nothing fixed. M1 is blocked on draw identity (see Measurement).
 - **Primary: sealed hangar.** Docked, pad lowered, doors closed. Submit only the hangar cell and suppress the sun. Blocked on storage of pad and door state (P9).
 - **Secondary: closed panes.** Seated inside a station (doors open, or flying inside). Cull the SocialSpace (concourse) records and replace the bay windows with mirror-like opaque glass (stage 1, Sean's decision). Impostor is a later stage only.
 - **Concourse:** the SocialSpace sub-area under StationInteriorHub, created at station load (P1).
 - **Triggers now:** seated = Status Flags bits 24-26 or Flags2 bits 1-2 (EDVR `journalSeatedFromFlags`). Disembark = journal Disembark with SRV, Taxi and Multicrew false (P5). Status OnFoot lags about 6 s, so it is not a restore trigger.
 - **Ruled out:** Status.json as the sealed signal; ToggleCockpitRender as a render switch; InteriorStateChangeActivity as a switch (P7).
 - **Open:** pad and door storage (P9); cell radius; pane draw hashes and ownership; env slot numbers; player_location read path (P10).
-- **Next flight, no engine change:** the Built v5 plan (with the `torn=` check of Built v6) comes first. Older steps, still open: the Built v4 plan in Measurement: docked, step the trial down the ladder one rung at a time with a census (F6) at each rung, and note the smallest radius where everything still looks complete; then the approach state dump (F3, `diag.state_dump_frames = 6000`) and the look probe at the concourse bay windows. The Built v3 and v2 plans still stand for the rest (the open-pad outpost, M3, is in v2). The M1 draw link is the open item.
-- **Probe keys (TEMPORARY):** `hotkey.state_dump`, `hotkey.look_probe`, `hotkey.sealed_trial`, `hotkey.sealed_trial_smaller` and `hotkey.sealed_trial_larger` (all unbound by default), `diag.state_dump = off`, `diag.state_dump_frames = 3000` (60 to 6000; 6000 for the approach dump), and `diag.sealed_trial_radius_m = 80`. **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
+- **Next flight, no engine change:** the Built v7 census in three captures (see Built v7): (a) docked, hatch closed, seated; (b) on foot in the bay; (c) on foot in the concourse. Then the Built v5 plan (with the `torn=` check of Built v6). Older steps, still open: the Built v4 plan in Measurement: docked, step the trial down the ladder one rung at a time with a census (F6) at each rung, and note the smallest radius where everything still looks complete; then the approach state dump (F3, `diag.state_dump_frames = 6000`) and the look probe at the concourse bay windows. The Built v3 and v2 plans still stand for the rest (the open-pad outpost, M3, is in v2). The M1 draw link is the open item.
+- **Probe keys (TEMPORARY):** `hotkey.asset_census` (Built v7; unbound by default; on the flat allow-list), `hotkey.state_dump`, `hotkey.look_probe`, `hotkey.sealed_trial`, `hotkey.sealed_trial_smaller` and `hotkey.sealed_trial_larger` (all unbound by default), `diag.state_dump = off`, `diag.state_dump_frames = 3000` (60 to 6000; 6000 for the approach dump), and `diag.sealed_trial_radius_m = 80`. **Gate for any hook:** TimeDateStamp 1788384820, SizeOfImage 104894464.
 
 ## Proven
 
@@ -227,6 +227,43 @@ Hypotheses and refutations:
 **Faults.** The store's observer runs the cull through `cullRecordFaultSafe`: it reads the record's mask and admitted flag, writes both, and puts the mask back if the admitted write fails. A failed read or write leaves the record as the store wrote it (kept, counted in `faults`). A put-back that also fails is `torn`: the one case where the record may be left half culled (mask zero, admitted flag still set). The window line reads `faults=N torn=N`.
 
 **Next flight.** The Built v5 plan, with one check added: `torn=` on every window line reads 0. A nonzero `torn` is the first thing to report, with its window line.
+
+### Built v7, 2026-10-11 (branch `claude/asset-census`; full build green; not installed, not flown)
+
+**The record's identity chain (build 332841).** Proven: read from `analysis\decomp` (decomp_4312040, decomp_4330194), with the line numbers. Inferred: the bytes do not close the point.
+
+- **C1. Proven: the identity writer.** `FUN_144330194` (decomp_4330194, lines 36 to 81) walks the record array (its pointer at object+0x280, its count at object+0x298, stride 0x2F0). For each record whose source node SRC is non-zero (rec+0x2B8), it copies SRC+0xF0 to rec+0x250, the model M to rec+0x258, SRC+0x1A0 to rec+0x260, and a u32 combined hash to rec+0x268 (lines 64 to 76).
+- **C2. Proven: the component and the model.** X = *(SRC+0x160) and M = *(X+0x470) (lines 40 to 42). M's dword at +0x08 holds a qword count in bits 17 to 27 (line 50); the qwords start at M+0x10 (line 52). The store reads the same SRC and X (decomp_4312040, lines 322 to 326) and tests X's byte at +0x4B against 2.
+- **C3. Proven: the hash arithmetic.** mix(x) = low32(h >> 22) ^ low32(h), where h = wang(x): h = (x << 18) + ~x; h = (h >> 31 ^ h) * 21; h = (h >> 11 ^ h) * 65, in 64-bit arithmetic. The combined hash is mix(SRC+0xF0) ^ mix(SRC+0x1A0) ^ (the XOR of mix over M's list) (line 49 and lines 57 to 60). The rig checks this against an independent Python transcription of the same lines.
+- **C4. Proven: the record's other fields.** The store reads the node at rec+0x18: the LOD limit is the ushort at node+0x68, and the bounds object P = *(node+0x08) holds the local sphere, centre at P+0x20 and radius at P+0x2C (decomp_4312040, lines 143 to 144 and 207 to 262). It reads the pose pointer at rec+0x190, the sphere at rec+0x240 and rec+0x280, the child list at +0x2A8 (count at +0x2B0), and a callback object at +0x2C0 (lines 129 to 130). The offsets are the decompile's `param_5` offsets times four.
+- **C5. Proven: rec+0 is not a vtable.** The store tests the low dword of rec+0 against 0xFFFFFFFF and, when it matches, writes two u16 values there (decomp_4312040, lines 265 to 275). The sealed trial's kept report reads rec+0 as a vtable pointer (`readVal(&vt, w.rec)`, `sealed_trial.cpp`), which explains its garbage `vtable_rva`. The look probe reads its record and node vtables the same way (`look_probe.cpp`, `readVal(&vt, r.address)`), and those columns are unvalidated.
+
+**Inferred (not closed by the bytes):**
+- **I-a.** SRC+0xF0 and SRC+0x1A0 are content keys (asset or name hashes), so they recur across visits and stations. The census's `key1_is_pointer` flag (a value in the user address range) and the flight decide it.
+- **I-b.** M+0x10 onward is the model's part or mesh key list. The count and the hash fit; the content is unread.
+- **I-c.** X is the owning component. Its vtable RVA (`component_vt_rva`) identifies its class if the vtable check passes.
+- **I-d.** A human-readable name, if the engine keeps one, sits behind a pointer in node, source, component or model. The census scans each object's first 0x100 bytes for pointers to text (ASCII or UTF-16LE, 4 to 48 characters). No name is known yet.
+
+**The census (`hotkey.asset_census`, TEMPORARY).** A press arms one frame. Only while it is collecting does the store's observer run. It reads each record once (0x2F0 bytes), then the record's live chain through a per-source and per-model cache. Every hop is validated, and a hop that does not read refuses the chain; its row says which hop. At the Present after the frame it writes `edvr_logs\asset_census_<stamp>.csv`: a summary line, a hatch-state line, the header, and one row per group, keyed by (status, key1, key2, live hash). The columns: observations, records, buckets, children, the radius range, the nearest centre to the camera, `contains_camera`, `main_admitted` (the mask bit of view 0), `mask_zero`, `admitted_flag`, `block_agree` and `hash_agree` (the engine's copy and hash against the live chain), `key1_is_pointer`, models, model count and first qword, the vtable RVAs of model, component and source, `record_vtable`, names, and a sample record with its bucket base. Unknown values print as -1. The camera is `view::sphereCentre`, the sealed trial's rule (the explorer cam's rows in the explorer cam, else the view 0 origin, else the rows); the summary says which was used. The hatch state, in the CSV and the log: the four docking readers' calls in the frame and last codes (-1 when a reader was not called), the AAB8 object's quad at +0x3C8 (16 bytes, as words and floats), the Status `flags` and `flags2` words, `status_docked`, and `loc_docked`. The census arms the readers' observers for its own frame (`stateDumpCensusArm`). Until a reader has named an AAB8 object while armed, the line reads `aab8=none`.
+
+**Changes.** New: `src\d3d11\asset_census_core.h` (pure: chain, hash, PE and vtable check, grouping, names, CSV), `src\d3d11\asset_census.cpp` and `.h` (the press, the collection, the write), `tools\asset_census_test` (93 checks). Changed: `state_dump_probe.cpp` and `.h` (the census arms the same observers; the gate stays open while either wants it; `stateDumpCensusArm` and `stateDumpCensusSnapshot`); `view_source.h` (`sphereCentre`, the sealed trial's rule moved here unchanged; `sealed_trial.cpp`'s `cameraOf` now calls it); `store_hook.cpp` (the observer call and the gate); `device_hook.cpp` (the key, the tick, the binding row); `common\runtime_profile.h` (the flat allow-list); `edvr.ini` (a commented template key); `build.bat` (the DLL source and `:rig_asset_census_test`).
+
+**Build.** Full `build.bat` green on `claude/asset-census`, based on `7fed41c8`. Not installed, not flown. Flat is not tested.
+
+**Flight plan (v7): three captures.** Each capture is one press and one CSV. Put a bare key on `hotkey.asset_census` in the live ini after the install, which this session does not do.
+0. A first press in the cockpit, then about ten seconds of play. It arms the readers so that an AAB8 object can be named. Discard its CSV. If the next capture's hatch line still reads `aab8=none`, run `hotkey.state_dump` for 3000 frames (it pins AAB8), then read the census again.
+a. Docked, pad lowered, hatch closed, seated in the cockpit.
+b. On foot in the bay, at the same station and docking.
+c. On foot in the concourse.
+d. Optional: flying inside the station.
+
+Then compare the groups. The bay set is what (a) and (b) share and (c) lacks. The on-foot set is what (b) and (c) share and (a) lacks. Repeat (a) on a second docking at the same station to test stability across visits: a content key recurs with the same key1, key2 and hash, and a pointer does not.
+
+Hypotheses and what would refute them:
+- **K1 (the hash chain, C3).** `hash_agree` equals `identified` in every group. Refuted if it is zero in every group: then M+0x10 is not the list the writer folds, and the chain is wrong at C2 or C3.
+- **K2 (stable keys, I-a).** The same key1 and key2 appear for the same bay on the second docking. Refuted if they change while the bay does not, or if `key1_is_pointer` is 1 for every group.
+- **K3 (rec+0, C5).** `record_vtable` is 0 in every group. Refuted if any record passes the vtable check; C5 would then be wrong for that record.
+- **K4 (names, I-d).** A row with a name (`node+`, `source+`, `component+` or `model+`) is a name route. Refuted if no row in any capture has a name; the name is then not behind these objects, and I-d is closed.
 
 ## Open items
 

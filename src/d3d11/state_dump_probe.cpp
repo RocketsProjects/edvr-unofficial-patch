@@ -147,18 +147,22 @@ struct Slot {
 };
 Slot g_slot[sd::kReaders];
 std::atomic<bool> g_armed{false};
+// The asset census (asset_census.cpp) arms the same observers for its own frame: the slots fill, and no capture starts.
+std::atomic<bool> g_censusArmed{false};
+std::atomic<uintptr_t> g_lastAab8{0};  // the last object a reader named whose address ends in 0xAAB8 (the census's quad)
 std::atomic<uint32_t> g_stamp{0};      // the frame the work now running belongs to
 
 uintptr_t observeReader(int i, uintptr_t self) noexcept {
     const auto forward = reinterpret_cast<ReaderFn>(g_readers[i].forward.load(std::memory_order_acquire));
     if (!forward) return 0;
     const uintptr_t result = forward(self);
-    if (g_armed.load(std::memory_order_acquire)) {
+    if (g_armed.load(std::memory_order_acquire) || g_censusArmed.load(std::memory_order_acquire)) {
         Slot& s = g_slot[i];
         s.object.store(self, std::memory_order_relaxed);
         s.code.store(static_cast<uint32_t>(result & 0xFFu), std::memory_order_relaxed);
         s.stamp.store(g_stamp.load(std::memory_order_relaxed), std::memory_order_relaxed);
         s.calls.fetch_add(1, std::memory_order_relaxed);
+        if ((self & 0xFFFFu) == 0xAAB8u) g_lastAab8.store(self, std::memory_order_release);
     }
     return result;
 }
@@ -436,9 +440,15 @@ void logEvents(const Row& r) {
     }
 }
 
+// The reader gate is open while a capture or the asset census wants the readers' observations.
+void updateGate() noexcept {
+    const bool want = g_armed.load(std::memory_order_acquire) || g_censusArmed.load(std::memory_order_acquire);
+    g_stateGate.store(want ? 1u : 0u, std::memory_order_release);
+}
+
 void finishCapture(uint32_t frame) {
-    g_stateGate.store(0, std::memory_order_release);
     g_armed.store(false, std::memory_order_release);
+    updateGate();
     g_capturing = false;
 
     SYSTEMTIME st{};
@@ -596,6 +606,34 @@ void stateDumpFrame(uint32_t frame) {
         g_pending = false;
         startCapture(frame + 1, g_pendingTrigger);
     }
+}
+
+static_assert(sd::kReaders == 4, "StateReaderSnapshot holds four readers.");
+
+std::string stateDumpCensusArm(bool on) {
+    if (!on) {
+        g_censusArmed.store(false, std::memory_order_release);
+        updateGate();
+        return "";
+    }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if (!base) return "the module base is unknown";
+    std::string status = ensureDetours(base);
+    g_censusArmed.store(true, std::memory_order_release);
+    updateGate();
+    return status;
+}
+
+void stateDumpCensusSnapshot(StateReaderSnapshot* out) {
+    out->installed = true;
+    for (int i = 0; i < sd::kReaders; ++i) {
+        const Slot& s = g_slot[i];
+        out->calls[i] = s.calls.load(std::memory_order_relaxed);
+        out->codes[i] = s.code.load(std::memory_order_relaxed);
+        out->objects[i] = s.object.load(std::memory_order_relaxed);
+        if (!g_readers[i].ready.load(std::memory_order_acquire)) out->installed = false;
+    }
+    out->lastAab8 = g_lastAab8.load(std::memory_order_acquire);
 }
 
 }  // namespace edvr

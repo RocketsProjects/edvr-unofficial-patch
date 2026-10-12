@@ -12,6 +12,7 @@
 
 #include "../common/code_hook.h"
 #include "../common/log.h"
+#include "asset_census.h"
 #include "look_probe.h"
 #include "sealed_trial.h"
 
@@ -109,6 +110,7 @@ __declspec(noinline) uintptr_t __fastcall storeObserved(uintptr_t bucket, uintpt
     const uintptr_t result = forward(bucket, mask, out, lod, record);
     if (sealedTrialOn()) sealedTrialAfterStore(bucket, record);
     if (lookProbeCollecting()) lookProbeAfterStore(bucket, record);
+    if (assetCensusCollecting()) assetCensusAfterStore(bucket, record);
     return result;
 }
 
@@ -156,7 +158,7 @@ void installOnce() noexcept {
 }  // namespace
 
 void storeHookRecompute() noexcept {
-    const bool want = sealedTrialOn() || lookProbeCollecting();
+    const bool want = sealedTrialOn() || lookProbeCollecting() || assetCensusWanted();
     if (want) installOnce();
     g_storeGate.store(want && g_store.ready.load(std::memory_order_acquire) ? 1u : 0u, std::memory_order_release);
 }
