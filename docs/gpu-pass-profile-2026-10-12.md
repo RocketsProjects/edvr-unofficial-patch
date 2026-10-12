@@ -54,8 +54,12 @@ Let E be the eye size (eyeW x eyeH, the same size vscreen publishes), and C be t
 1. Inside an EDVR census section: edvr.
 2. Dispatches and no draws: compute.
 3. No draws: clear if it cleared, else other.
-4. Depth only (no colour) and square with width at least 512, or with more than one slice: shadow.
+4. Depth only (no colour), and the depth target is not E: shadow (v13.7: square or not, large or small; the 2048x1024 D16 pair and the
+   256x256 D16 map were other before). With no E known, only a square map of width 512 or more, or an array of slices, is shadow.
 5. Depth only and the depth target is E: scene_gbuffer (a depth prepass at the eye size).
+5a. (v13.7) A colour target, at most four draws, and the most-drawn VS is a known HUD, holo or UI family: hud_overlay. The families are
+   the game's: EyeDrawSnapshot::kHud (eye_draw_snapshot.h), kHoloGuiFxOffVs (holo_material.h) and kHoloTargetSphere (holo_families.h),
+   matched by vertex shader hash; a pixel shader is not part of the match. Without them the same pass is fullscreen_at_eye.
 6. C is square and a cube resource: probe_cube.
 7. Two or more colour targets, C at E: scene_gbuffer.
 8. One colour target at E: fullscreen_at_eye with one or two draws, otherwise forward_at_eye.
@@ -72,7 +76,10 @@ UI is NOT a class: no reliable target signature identifies it. Elite's UI draws 
 - edvr_logs\gpu_pass_profile_<YYYYMMDD-HHMMSS>.csv, one row per segment per frame. Columns: frame (0-3), pass (index within the
   frame), class, edvr (1 or 0), ms, draws, dispatches, clears, tris (estimate: count/3 x instances for triangle draws; 0 for the
   indirect and auto draws), colours, rt (WxH of C, or -), rt_fmt (DXGI format), slices, cube, dsv (WxH or -), dsv_fmt,
-  top_vs_ps_draws (vs:ps:draws, up to three, hex).
+  top_vs_ps_draws (vs:ps:draws, up to three, hex), top_cs_dispatches (v13.7: the compute shaders bound at the pass's dispatches, most
+  dispatches first, as hash(NAME):count in hex; NAME only for the two the repo names, APPLY_BIND_POSE_TRANSFORMS_CS and
+  CLEAR_TRANSFORM_DATA_CS from skin_ledger.h; "-" when none).
+- (v13.7) The class lines and the top groups print the median of one pass's ms beside the mean, so a single spike is visible as a spike.
 - "gpu pass profile:" lines: "means over N frames: frame X ms = elite Y ms + edvr Z ms (unattributed U ms)"; one line per
   class with its ms and passes per frame; the top 15 groups by ms per frame (class, target signature, draws, passes); and an
   overflow line when a frame hit its stamp cap.

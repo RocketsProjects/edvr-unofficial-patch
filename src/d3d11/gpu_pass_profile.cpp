@@ -3,6 +3,10 @@
 #include "gpu_pass_profile.h"
 #include "gpu_pass_profile_core.h"
 #include "binding_shadow.h"
+#include "eye_draw_snapshot.h"   // Built v13.7 (3): EyeDrawSnapshot::kHud, the HUD family (the families are the game's, not copied here)
+#include "holo_material.h"       // kHoloGuiFxOffVs, the holo GUI family
+#include "holo_families.h"       // kHoloTargetSphere, the holo target sphere family
+#include "skin_ledger.h"         // Built v13.7 (1): skin::kChainHash and skin::kClearHash, the named compute shaders
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"   // Built v13.6: the application-frame yield (gpuFrameYieldBegin, gpuFrameTakeYieldSkips)
 #include "../common/config.h"
@@ -28,9 +32,30 @@ constexpr uint32_t kMaxPolls = 240;
 
 struct SegRec {
     PassFacts facts;
-    PassHashes hashes;
+    PassHashes hashes;      // the VS:PS pairs of the segment's draws
+    PassHashes csHashes;    // Built v13.7 (1): the compute shaders bound at its dispatches (the pixel half is 0)
     uint64_t tris = 0;
 };
+
+// Built v13.7 (3): the HUD, holo and UI families, read from the game's headers (EyeDrawSnapshot::kHud, kHoloGuiFxOffVs, kHoloTargetSphere).
+gpupass::HudFamilies hudFamilies() {
+    gpupass::HudFamilies f;
+    f.vs[0] = EyeDrawSnapshot::kHud;
+    f.vs[1] = kHoloGuiFxOffVs;
+    f.vs[2] = kHoloTargetSphere;
+    f.n = 3;
+    return f;
+}
+
+// Built v13.7 (1): the compute shaders the repo names (skin_ledger.h), for the top_cs_dispatches column. Others print as hex.
+const gpupass::ComputeName* computeNames() {
+    static const gpupass::ComputeName kNames[] = {
+        {skin::kChainHash, "APPLY_BIND_POSE_TRANSFORMS_CS"},
+        {skin::kClearHash, "CLEAR_TRANSFORM_DATA_CS"},
+    };
+    return kNames;
+}
+size_t computeNameCount() { return 2; }
 
 struct Bound {
     uint32_t colours = 0;
@@ -274,14 +299,17 @@ void buildRows(FrameRec& fr, uint32_t slot) {
             carry += d;
             continue;
         }
-        facts.push_back(s.facts);
+        PassFacts pf = s.facts;
+        const std::vector<HashTally> topPair = s.hashes.top();   // Built v13.7 (3): the most-drawn VS, for the HUD family rule
+        pf.topVs = topPair.empty() ? 0 : topPair[0].vs;
+        facts.push_back(pf);
         ms.push_back(d + carry);
         carry = 0;
         kept.push_back(&s);
     }
     if (carry > 0 && !ms.empty()) ms.back() += carry;
     std::vector<PassClass> cls(facts.size());
-    for (size_t k = 0; k < facts.size(); ++k) cls[k] = classifyPass(facts[k], fr.eye);
+    for (size_t k = 0; k < facts.size(); ++k) cls[k] = classifyPass(facts[k], fr.eye, hudFamilies());
     markCubeRuns(facts, cls);
     uint32_t index = 0;
     for (size_t k = 0; k < facts.size(); ++k) {
@@ -305,6 +333,7 @@ void buildRows(FrameRec& fr, uint32_t slot) {
         r.dsv = f.hasDepth ? targetText(f.depth) : "-";
         r.dsvFormat = f.hasDepth ? f.depth.format : 0;
         r.top = topText(s.hashes.top());
+        r.topCs = csText(s.csHashes.top(), computeNames(), computeNameCount());   // Built v13.7 (1): the compute shaders this pass dispatched with
         fr.rows.push_back(r);
     }
 }
@@ -397,13 +426,13 @@ void emitBatch() {
     for (size_t c = 0; c < static_cast<size_t>(PassClass::Count); ++c) {
         const ClassMean& m = s.cls[c];
         if (m.passes > 0)
-            Log::get().note("gpu pass profile: class %-18s %8.3f ms  %6.1f passes", passClassName(static_cast<PassClass>(c)),
-                            m.ms, m.passes);
+            Log::get().note("gpu pass profile: class %-18s %8.3f ms  %6.1f passes  median pass %.4f ms", passClassName(static_cast<PassClass>(c)),
+                            m.ms, m.passes, m.median);   // Built v13.7 (4): the median beside the mean (a single spike moves the mean, not this)
     }
     for (size_t k = 0; k < s.top.size(); ++k) {
         const Summary::Group& g = s.top[k];
-        Log::get().note("gpu pass profile: top %zu: %.3f ms  class=%s  draws=%.1f  passes=%.1f  %s", k + 1, g.ms,
-                        passClassName(g.cls), g.draws, g.passes, g.sig.c_str());
+        Log::get().note("gpu pass profile: top %zu: %.3f ms  median pass %.4f ms  class=%s  draws=%.1f  passes=%.1f  %s", k + 1, g.ms,
+                        g.median, passClassName(g.cls), g.draws, g.passes, g.sig.c_str());
     }
     if (overflow)
         Log::get().note("gpu pass profile: %u boundaries were not stamped (a frame holds %u stamps); the passes after the cap "
@@ -478,7 +507,10 @@ void gpuPassProfileNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 void gpuPassProfileNoteDispatch(ID3D11DeviceContext* ctx, uint32_t, uint32_t, uint32_t) {
     if (!live(ctx)) return;
     boundary(static_cast<uint32_t>(g_active));
-    if (SegRec* s = curSeg()) ++s->facts.dispatches;
+    if (SegRec* s = curSeg()) {
+        ++s->facts.dispatches;
+        s->csHashes.note(bindingShaderHash(BindSlot::Cs), 0);   // Built v13.7 (1): the compute shader this dispatch ran
+    }
 }
 
 void gpuPassProfileNoteEdvr(ID3D11DeviceContext* ctx, bool enter) {

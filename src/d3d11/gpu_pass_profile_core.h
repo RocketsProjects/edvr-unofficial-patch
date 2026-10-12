@@ -32,12 +32,13 @@ enum class PassClass : uint8_t {
     FullscreenAtEye,  // one colour target at the eye size with one or two draws (a full-screen triangle or quad)
     ForwardAtEye,     // one colour target at the eye size with three or more draws
     PostSmaller,      // draws into a colour target smaller than the eye (downsampled post chains)
+    HudOverlay,       // Built v13.7: one to kHudMaxDraws draws whose most-drawn VS is a known HUD, holo or UI family (the caller's families)
     Other,
     Count
 };
 inline constexpr const char* kPassClassNames[] = {
     "edvr", "compute", "clear", "shadow", "probe_cube", "scene_gbuffer",
-    "fullscreen_at_eye", "forward_at_eye", "post_smaller", "other"};
+    "fullscreen_at_eye", "forward_at_eye", "post_smaller", "hud_overlay", "other"};
 static_assert(sizeof(kPassClassNames) / sizeof(kPassClassNames[0]) == static_cast<size_t>(PassClass::Count),
               "one name for each pass class");
 
@@ -65,6 +66,29 @@ struct PassFacts {
     bool hasDepth = false;
     TargetShape depth;
     uint32_t draws = 0, dispatches = 0, clears = 0;
+    uint64_t topVs = 0;         // Built v13.7: the segment's most-drawn vertex shader (its content hash); 0 when it drew nothing
+};
+
+// Built v13.7 (3): the HUD, holo and UI shader families a HUD overlay is known by: vertex shader hashes, taken by the caller from the game
+// headers (eye_draw_snapshot.h, holo_material.h, holo_families.h) so this core stays free of them.
+constexpr uint32_t kHudFamilySlots = 4;
+constexpr uint32_t kHudMaxDraws = 4;        // a HUD overlay is a few draws: more than this is a forward or post pass
+struct HudFamilies {
+    uint64_t vs[kHudFamilySlots] = {};
+    uint32_t n = 0;
+};
+inline bool isHudFamily(uint64_t vs, const HudFamilies& fam) noexcept {
+    if (vs == 0) return false;
+    for (uint32_t i = 0; i < fam.n && i < kHudFamilySlots; ++i)
+        if (fam.vs[i] == vs) return true;
+    return false;
+}
+
+// Built v13.7 (1): a known compute shader, by its content hash, from the repo's own catalogues (skin_ledger.h's kChainHash and kClearHash, given
+// by the caller).
+struct ComputeName {
+    uint64_t hash = 0;
+    const char* name = "";
 };
 
 struct EyeSize {
@@ -77,16 +101,22 @@ inline std::string targetText(const TargetShape& t) {
 }
 
 // The class of one segment. Order matters: the first rule that holds wins.
-inline PassClass classifyPass(const PassFacts& f, EyeSize eye) {
+inline PassClass classifyPass(const PassFacts& f, EyeSize eye, const HudFamilies& fam = HudFamilies{}) {
     if (f.edvr) return PassClass::Edvr;
     if (f.draws == 0 && f.dispatches > 0) return PassClass::Compute;
     if (f.draws == 0) return f.clears > 0 ? PassClass::Clear : PassClass::Other;
     const bool eyeColour = eye.w != 0 && f.colour.w == eye.w && f.colour.h == eye.h;
     if (f.colours == 0 && f.hasDepth) {
-        if (f.depth.square() && (f.depth.w >= 512 || f.depth.slices > 1)) return PassClass::Shadow;
+        // Built v13.7 (2): a depth-only map that is not at the eye size is a shadow map, square or not, large or small (the 2048x1024 D16 pair and
+        // the 256x256 D16 map were other). With no eye size known, only a square map of 512 or more, or an array of slices, is one.
         if (eye.w != 0 && f.depth.w == eye.w && f.depth.h == eye.h) return PassClass::SceneGBuffer;
+        if (eye.w != 0) return PassClass::Shadow;
+        if (f.depth.square() && (f.depth.w >= 512 || f.depth.slices > 1)) return PassClass::Shadow;
         return PassClass::Other;
     }
+    // Built v13.7 (3): a few draws whose most-drawn vertex shader is a known HUD, holo or UI family: its own class, so the HUD and holo cost is
+    // not counted as fullscreen_at_eye.
+    if (f.colours >= 1 && f.draws <= kHudMaxDraws && isHudFamily(f.topVs, fam)) return PassClass::HudOverlay;
     if (f.colours >= 1 && f.colour.square() && f.colour.cube) return PassClass::ProbeCube;
     if (f.colours >= 2 && eyeColour) return PassClass::SceneGBuffer;
     if (eyeColour) return f.draws <= 2 ? PassClass::FullscreenAtEye : PassClass::ForwardAtEye;
@@ -166,6 +196,7 @@ struct Row {
     uint64_t tris = 0;          // estimate: count / 3 x instances for the triangle draws; 0 otherwise
     uint32_t colours = 0;
     std::string rt = "-", dsv = "-", top = "-";
+    std::string topCs = "-";   // Built v13.7 (1): the segment's most-dispatched compute shaders, "hash(NAME):count;..."; "-" when none
     uint32_t rtFormat = 0, dsvFormat = 0, slices = 1;
     bool cube = false;
     // The grouping key: class and target signature, not the frame or the index.
@@ -187,7 +218,7 @@ inline std::string csvField(const std::string& s) {
 }
 
 inline const char* csvHeader() {
-    return "frame,pass,class,edvr,ms,draws,dispatches,clears,tris,colours,rt,rt_fmt,slices,cube,dsv,dsv_fmt,top_vs_ps_draws";
+    return "frame,pass,class,edvr,ms,draws,dispatches,clears,tris,colours,rt,rt_fmt,slices,cube,dsv,dsv_fmt,top_vs_ps_draws,top_cs_dispatches";
 }
 
 inline std::string csvRow(const Row& r) {
@@ -199,7 +230,7 @@ inline std::string csvRow(const Row& r) {
            std::to_string(r.dispatches) + "," + std::to_string(r.clears) + "," + std::to_string(r.tris) + "," +
            std::to_string(r.colours) + "," + csvField(r.rt) + "," + std::to_string(r.rtFormat) + "," +
            std::to_string(r.slices) + "," + (r.cube ? "1" : "0") + "," + csvField(r.dsv) + "," +
-           std::to_string(r.dsvFormat) + "," + csvField(r.top);
+           std::to_string(r.dsvFormat) + "," + csvField(r.top) + "," + csvField(r.topCs);
     return out;
 }
 
@@ -217,12 +248,37 @@ inline std::string topText(const std::vector<HashTally>& top) {
     return out;
 }
 
+// Built v13.7 (1): "hash(NAME):count;..." for the compute shaders a pass dispatched with, most dispatches first. The name is in parentheses when the
+// caller's catalogue knows the hash; the hash is the bound compute shader's content hash in hex.
+inline std::string csText(const std::vector<HashTally>& top, const ComputeName* names, size_t nNames) {
+    if (top.empty()) return "-";
+    std::string out;
+    for (size_t i = 0; i < top.size(); ++i) {
+        if (i) out += ';';
+        const char* name = "";
+        for (size_t k = 0; k < nNames; ++k)
+            if (names[k].hash == top[i].vs) {
+                name = names[k].name;
+                break;
+            }
+        char buf[96];
+        if (*name)
+            std::snprintf(buf, sizeof buf, "%016llx(%s):%u", static_cast<unsigned long long>(top[i].vs), name, top[i].draws);
+        else
+            std::snprintf(buf, sizeof buf, "%016llx:%u", static_cast<unsigned long long>(top[i].vs), top[i].draws);
+        out += buf;
+    }
+    return out;
+}
+
 struct ClassMean {
     double ms = 0, passes = 0;   // per frame
+    double median = 0;           // Built v13.7 (4): the median of one pass's ms over the frames read (a single spike does not move it)
 };
 struct Summary {
     struct Group {
         double ms = 0, passes = 0, draws = 0;
+        double median = 0;       // Built v13.7 (4): the median of one pass's ms in this group over the frames read
         PassClass cls = PassClass::Other;
         std::string sig;
     };
@@ -231,6 +287,14 @@ struct Summary {
     ClassMean cls[static_cast<size_t>(PassClass::Count)]{};
     std::vector<Group> top;                // per frame, most ms first, at most kTopPasses
 };
+
+// Built v13.7 (4): the median of a list (the mean of the two middle values for an even count); 0 for an empty list.
+inline double medianOf(std::vector<double> v) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    const size_t m = v.size() / 2;
+    return v.size() % 2 ? v[m] : 0.5 * (v[m - 1] + v[m]);
+}
 
 // frameMs[f] is frame f's span; frameOk[f] is false for a frame whose result
 // was not read (its rows must be absent). Every mean is over the frames that
@@ -247,12 +311,16 @@ inline Summary summarise(const std::vector<Row>& rows, const std::vector<double>
     if (!s.frames) return s;
     const double n = static_cast<double>(s.frames);
     std::map<std::string, Summary::Group> groups;
+    std::map<std::string, std::vector<double>> groupSamples;              // Built v13.7 (4): one pass's ms per row, for the medians
+    std::vector<double> clsSamples[static_cast<size_t>(PassClass::Count)];
     double elite = 0, edvr = 0;
     for (const Row& r : rows) {
         if (r.frame >= frameOk.size() || !frameOk[r.frame]) continue;
         ClassMean& c = s.cls[static_cast<size_t>(r.cls)];
         c.ms += r.ms;
         c.passes += 1;
+        clsSamples[static_cast<size_t>(r.cls)].push_back(r.ms);
+        groupSamples[r.key()].push_back(r.ms);
         (r.edvr ? edvr : elite) += r.ms;
         Summary::Group& g = groups[r.key()];
         g.ms += r.ms;
@@ -265,15 +333,17 @@ inline Summary summarise(const std::vector<Row>& rows, const std::vector<double>
     s.frameMs = frameSum / n;
     s.eliteMs = elite / n;
     s.edvrMs = edvr / n;
-    for (ClassMean& c : s.cls) {
-        c.ms /= n;
-        c.passes /= n;
+    for (size_t c = 0; c < static_cast<size_t>(PassClass::Count); ++c) {
+        s.cls[c].ms /= n;
+        s.cls[c].passes /= n;
+        s.cls[c].median = medianOf(clsSamples[c]);
     }
     for (auto& kv : groups) {
         Summary::Group g = kv.second;
         g.ms /= n;
         g.passes /= n;
         g.draws /= n;
+        g.median = medianOf(groupSamples[kv.first]);
         s.top.push_back(g);
     }
     std::stable_sort(s.top.begin(), s.top.end(),

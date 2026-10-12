@@ -197,6 +197,20 @@ uintptr_t g_lowestPad = 0;
 char g_droppedName[64] = {};
 sealed::PadSize g_droppedSize = sealed::PadSize::kNone;
 
+// Built v13.7 (a, b, c): the held cell in the held pad's own frame (localized at the engage, rebuilt from the pad's live pose every frame), the
+// hangar shell that is the static reference for the pad's motion along the shaft, and the numbers the window reports.
+sealed::OwnCell g_heldLocal;
+bool g_heldLocalValid = false;
+float g_engageCentre[3] = {};
+float g_engageAxes[3][3] = {};
+uintptr_t g_shellAddr = 0;
+char g_shellName[48] = {};
+bool g_shellValid = false;
+float g_shellRelEngage = 0.0f;
+float g_frameShiftM = 0.0f;    // the held pad's live centre to its engage-time centre, metres (the frame shift plus any real motion)
+float g_shellDeltaM = 0.0f;    // the pad's motion along the shaft relative to the shell since the engage, metres
+bool g_releaseMotion = false;  // a frame's check found the pad moved more than kPadMoveReleaseM along the shaft: the next promote drops the cell
+
 // Built v13.4 (b): the deepest lift or door record (name contains Door or Lift) within the bay's lateral distance of the pick's shaft, per frame.
 // The current frame's is collected by the observer; the engage reads the previous frame's (rolled over at each promote).
 struct DeepRec {
@@ -522,7 +536,12 @@ sealed::Window takeWindow() noexcept {
                         " own_record_live=" + (g_ownLiveValid ? "yes" : "no") + " own_record_radius_m=" +
                         std::to_string(g_ownLiveValid ? static_cast<double>(g_ownLiveRadius) : 0.0) +
                         " own_sphere_kept_last_frame=" + std::to_string(g_ownSphereKeptLast) +
-                        " own_sphere_kept_window=" + std::to_string(g_ownSphereKeptWin) + " ";
+                        " own_sphere_kept_window=" + std::to_string(g_ownSphereKeptWin) +
+                        " held_frame=" + (g_heldLocalValid ? std::string("pad-local") : std::string("store")) +
+                        " frame_shift_m=" + std::to_string(static_cast<double>(g_frameShiftM)) +
+                        " shell=" + (g_shellValid ? std::string(g_shellName) : std::string("none")) +
+                        " shell_delta_m=" + std::to_string(static_cast<double>(g_shellDeltaM)) +
+                        " release_motion=" + (g_releaseMotion ? "yes" : "no") + " ";
     std::snprintf(w.extraText, sizeof(w.extraText), "%s", extra.c_str());
     return w;
 }
@@ -1111,6 +1130,93 @@ void logPadAxes(const sealed::OwnCell& c, uint32_t frame) {
     if (logged == 0) Log::get().note("sealed pad (engage frame %u): no pad of size %c in the last frame's records.", frame, sealed::padSizeLetter(c.size));
 }
 
+// Built v13.7 (a, b, c): at a named engage the held cell is localized to the held pad's frame (its centre and its three unit axes, read now). The
+// hangar shell (the nearest named Hanger* or Hangar* part within 150 m, from the explicit parts the store saw last frame) is the static reference
+// for the pad's motion along the shaft. The engage logs the pad-local box and the shell.
+void setHeldFrame(const sealed::OwnCell& cell, uint32_t frame) {
+    g_heldLocalValid = false;
+    g_shellValid = false;
+    g_releaseMotion = false;
+    float axes[3][3] = {};
+    float ext[3] = {};
+    bool extOk = false;
+    uint8_t src = 4;
+    if (!poseOrientOf(cell.pad, axes, ext, &extOk, &src)) {
+        Log::get().note("sealed cell (engage frame %u): the pad's pose is not readable, so the cell is not localized (it stays in the store's frame, "
+                        "which a frame shift displaces).", frame);
+        return;
+    }
+    std::memcpy(g_engageAxes, axes, sizeof(g_engageAxes));
+    std::memcpy(g_engageCentre, cell.centre, sizeof(g_engageCentre));
+    sealed::localizeCell(cell, cell.centre, axes, &g_heldLocal);
+    g_heldLocalValid = true;
+    float best = -1.0f;
+    size_t bestI = g_explicitCount;
+    for (size_t i = 0; i < g_explicitCount; ++i) {
+        const sealed::ExplicitObs& x = g_explicits[i];
+        if (std::strstr(x.name, "Hanger") == nullptr && std::strstr(x.name, "Hangar") == nullptr) continue;
+        const float d = sealed::distance(x.centre, cell.centre);
+        if (d <= 150.0f && (best < 0.0f || d < best)) {
+            best = d;
+            bestI = i;
+        }
+    }
+    if (bestI < g_explicitCount) {
+        const sealed::ExplicitObs& x = g_explicits[bestI];
+        g_shellAddr = x.addr;
+        std::snprintf(g_shellName, sizeof(g_shellName), "%s", x.name);
+        g_shellValid = true;
+        g_shellRelEngage = sealed::shellRelative(cell.centre, x.centre, axes[2]);
+        Log::get().note("sealed shell (engage frame %u): %s at %.1f m from the pad; the pad stands %.2f m up the shaft from it. The pad moving more than "
+                        "%.0f m along the shaft against it releases the cell.", frame, g_shellName, static_cast<double>(best),
+                        static_cast<double>(g_shellRelEngage), static_cast<double>(sealed::kPadMoveReleaseM));
+    } else {
+        Log::get().note("sealed shell (engage frame %u): no Hanger or Hangar part within 150 m of the pad in the last frame's records; the pad's motion "
+                        "along the shaft is not checked.", frame);
+    }
+    Log::get().note("sealed cell (engage frame %u): pad-local box of %s (size %c), in the pad's own frame (centre (0,0,0), up = axis 2): target at (%.2f, "
+                    "%.2f, %.2f), %.1f m from the pad's centre; box centre (%.2f, %.2f, %.2f); length axis (%.3f, %.3f, %.3f), width axis (%.3f, %.3f, "
+                    "%.3f), up axis (%.3f, %.3f, %.3f); half extents (length %.1f, width %.1f, height %.1f) m; floor %.0f m under the pad.", frame,
+                    cell.padName, sealed::padSizeLetter(cell.size), static_cast<double>(g_heldLocal.capB[0]),
+                    static_cast<double>(g_heldLocal.capB[1]), static_cast<double>(g_heldLocal.capB[2]), static_cast<double>(cell.capLen),
+                    static_cast<double>(g_heldLocal.boxCentre[0]), static_cast<double>(g_heldLocal.boxCentre[1]),
+                    static_cast<double>(g_heldLocal.boxCentre[2]), static_cast<double>(g_heldLocal.boxU[0]), static_cast<double>(g_heldLocal.boxU[1]),
+                    static_cast<double>(g_heldLocal.boxU[2]), static_cast<double>(g_heldLocal.boxV[0]), static_cast<double>(g_heldLocal.boxV[1]),
+                    static_cast<double>(g_heldLocal.boxV[2]), static_cast<double>(g_heldLocal.boxW[0]), static_cast<double>(g_heldLocal.boxW[1]),
+                    static_cast<double>(g_heldLocal.boxW[2]), static_cast<double>(cell.boxHalf[0]), static_cast<double>(cell.boxHalf[1]),
+                    static_cast<double>(cell.boxHalf[2]), static_cast<double>(belowFor(cell.size)));
+}
+
+// Built v13.7 (a, b): the held cell rebuilt in the held pad's CURRENT frame from its live pose (its centre by worldOfRecord, its axes by
+// poseOrientOf), and the pad's height along the shaft against the shell. Called at the frame's promote (before the drop decisions) and at the frame
+// tick (before the rig verdicts), so every judgement of a frame uses the cell as the frame's records are expressed. A pose that cannot be read
+// this frame keeps the cell as it was. A shell that cannot be read stands the motion check down until the next engage.
+void refreshHeldWorld() {
+    if (!g_heldValid || !g_heldLocalValid) return;
+    const WorldRead pw = worldOfRecord(g_heldCell.pad);
+    float axes[3][3] = {};
+    float ext[3] = {};
+    bool extOk = false;
+    uint8_t src = 4;
+    if (pw.source == 4 || !poseOrientOf(g_heldCell.pad, axes, ext, &extOk, &src)) return;
+    sealed::OwnCell w = g_heldCell;
+    sealed::worldizeCell(g_heldLocal, pw.world, axes, &w);
+    g_heldCell = w;
+    g_cellPrev = w;
+    g_frameShiftM = sealed::distance(pw.world, g_engageCentre);
+    if (!g_shellValid) return;
+    char nm[48] = {};
+    const WorldRead sw = worldOfRecord(g_shellAddr);
+    if (sw.source == 4 || !cachedName(g_shellAddr, nm, sizeof(nm)) || std::strcmp(nm, g_shellName) != 0) {
+        g_shellValid = false;
+        return;
+    }
+    const float up[3] = {g_engageAxes[2][0], g_engageAxes[2][1], g_engageAxes[2][2]};
+    const float relNow = sealed::shellRelative(pw.world, sw.world, up);
+    g_shellDeltaM = relNow - g_shellRelEngage;
+    if (sealed::padMovedAway(g_shellRelEngage, relNow)) g_releaseMotion = true;
+}
+
 void promoteFrame(uint32_t stamp, uint32_t frame) {
     sealed::OwnCell next;
     g_ownCandidateDist = -1.0f;   // Built v13: the own-ship candidate is re-chosen from this frame's records
@@ -1122,6 +1228,7 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
     g_ownSphereKeptLast = g_ownSphereKeptFrame;
     g_ownSphereKeptFrame = 0;
     readOwnLive();
+    refreshHeldWorld();   // Built v13.7 (a): the held cell in the pad's live frame before this frame's judgements and drop decisions
     if (g_cellPrev.capsule) ++g_minFrames;
     g_deepPrev = g_deepCur;   // Built v13.4 (b): the previous frame's deepest lift or door record (the engage reads it)
     g_deepCur = DeepRec{};
@@ -1182,6 +1289,26 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
     // Built v13.3 (b): the held cell is dropped when its pad record is absent from the store for kHeldLostFrames frames, or when another own pad
     // candidate (a pad containing the camera or within kOwnPadNearM of it, any size) is the nearest one for that many frames while the held pad is
     // not the one picked. Each drop is logged with the old and the new pad. The sphere rule holds until a pad is lowered; then the cell re-freezes.
+    // Built v13.7 (b): the held pad moved more than kPadMoveReleaseM along the shaft relative to the hangar shell: the cell is dropped (the sphere
+    // rule holds) and re-freezes from the pad once it is lowered, as after any drop.
+    if (g_releaseMotion && g_heldValid && g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed) {
+        g_releaseMotion = false;
+        std::snprintf(g_droppedName, sizeof(g_droppedName), "%s", g_heldCell.padName);
+        g_droppedSize = g_heldCell.size;
+        Log::get().note("sealed cell: DROPPED (frame %u): held pad %s (size %c) moved %.1f m along the shaft relative to the hangar shell %s (more "
+                        "than %.0f m); the sphere rule holds until the pad is lowered, then the cell re-freezes from it.", frame, g_heldCell.padName,
+                        sealed::padSizeLetter(g_heldCell.size), static_cast<double>(g_shellDeltaM), g_shellName,
+                        static_cast<double>(sealed::kPadMoveReleaseM));
+        g_heldValid = false;
+        g_heldCell = sealed::OwnCell{};
+        g_heldLocalValid = false;
+        g_shellValid = false;
+        g_heldAbsent = 0;
+        g_otherPicked = 0;
+        g_refreezeWatch = true;
+        g_ownRecAddr = 0;
+        g_ownLiveValid = false;
+    }
     if (g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed && g_heldValid) {
         bool heldSeen = false;
         const sealed::PadObs* best = nullptr;
@@ -1210,6 +1337,8 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
                             absent ? g_heldAbsent : g_otherPicked, otherPick ? best->name : "none");
             g_heldValid = false;
             g_heldCell = sealed::OwnCell{};
+            g_heldLocalValid = false;   // Built v13.7: the pad-local frame goes with the cell
+            g_shellValid = false;
             g_heldAbsent = 0;
             g_otherPicked = 0;
             g_refreezeWatch = true;
@@ -1228,6 +1357,9 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
     if (g_mode.load(std::memory_order_relaxed) != sealed::Mode::kNamed) {
         g_engagePending = false;
         g_heldValid = false;
+        g_heldLocalValid = false;   // Built v13.7
+        g_shellValid = false;
+        g_releaseMotion = false;
         g_refreezeWatch = false;
     } else if (g_engagePending) {
         ++g_engageTries;
@@ -1249,6 +1381,7 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
                 pickOwnRecord(frame);          // Built v13.2 (b): the own record, named as the prefix without its underscore
                 g_heldCell = next;
                 g_heldValid = true;
+                setHeldFrame(g_heldCell, frame);   // Built v13.7 (a, b, c): the cell in the held pad's frame, the shell, the pad-local box log
                 g_engagePending = false;
                 logEngage(g_heldCell, frame);
                 if (g_droppedName[0] != '\0') {   // Built v13.3 (b): the re-freeze after a drop, named both ways
@@ -1863,6 +1996,7 @@ void sealedTrialFrame(uint32_t frame) {
     std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     g_frameStamp.fetch_add(1, std::memory_order_relaxed);
     ++g_trialFrames;
+    if (g_on.load(std::memory_order_acquire)) refreshHeldWorld();     // Built v13.7 (a): the held cell in the pad's live frame before the verdicts
     if (g_on.load(std::memory_order_acquire)) refreshRigVerdicts();   // Built v12.1: once per frame, the verdicts for the next frame's rig decisions
     const int phase = g_repPhase.load(std::memory_order_acquire);
     if (phase == kRepArmed) {

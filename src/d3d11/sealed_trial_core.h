@@ -568,6 +568,58 @@ constexpr uint32_t kHeldLostFrames = 30;
 inline bool heldCellDrops(uint32_t absentFrames, uint32_t otherFrames, uint32_t limit) noexcept {
     return absentFrames >= limit || otherFrames >= limit;
 }
+
+// Built v13.7 (a): the held cell in the held PAD's own frame. A point is written as its coordinates along the pad's three unit axes from the
+// pad's centre; a direction the same way without the centre. The frame the records are expressed in can shift (the v13.6 flight: a static pad
+// moved 34 m when the player went on foot, the same offset for the box), so the cell is frozen in the pad's frame at engage and rebuilt from the
+// pad's live pose before every judgement. axes[k] is the k-th unit axis in world coordinates (axes[2] is up).
+inline void pointToLocal(const float p[3], const float centre[3], const float axes[3][3], float out[3]) noexcept {
+    const float d[3] = {p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]};
+    for (int k = 0; k < 3; ++k) out[k] = axes[k][0] * d[0] + axes[k][1] * d[1] + axes[k][2] * d[2];
+}
+inline void pointToWorld(const float local[3], const float centre[3], const float axes[3][3], float out[3]) noexcept {
+    for (int j = 0; j < 3; ++j) out[j] = centre[j] + local[0] * axes[0][j] + local[1] * axes[1][j] + local[2] * axes[2][j];
+}
+inline void dirToLocal(const float v[3], const float axes[3][3], float out[3]) noexcept {
+    for (int k = 0; k < 3; ++k) out[k] = axes[k][0] * v[0] + axes[k][1] * v[1] + axes[k][2] * v[2];
+}
+inline void dirToWorld(const float local[3], const float axes[3][3], float out[3]) noexcept {
+    for (int j = 0; j < 3; ++j) out[j] = local[0] * axes[0][j] + local[1] * axes[1][j] + local[2] * axes[2][j];
+}
+
+// The cell's points (centre, capA, capB, boxCentre) and directions (boxU, boxV, boxW) written in the pad's frame. Every other field is copied.
+inline void localizeCell(const OwnCell& world, const float centre[3], const float axes[3][3], OwnCell* local) noexcept {
+    *local = world;
+    pointToLocal(world.centre, centre, axes, local->centre);
+    pointToLocal(world.capA, centre, axes, local->capA);
+    pointToLocal(world.capB, centre, axes, local->capB);
+    pointToLocal(world.boxCentre, centre, axes, local->boxCentre);
+    dirToLocal(world.boxU, axes, local->boxU);
+    dirToLocal(world.boxV, axes, local->boxV);
+    dirToLocal(world.boxW, axes, local->boxW);
+}
+// The inverse: the local cell placed in the pad's CURRENT frame (its live centre and axes). Only the points and directions of *world are written;
+// its other fields (the names, the reasons, the sizes) keep their values.
+inline void worldizeCell(const OwnCell& local, const float centre[3], const float axes[3][3], OwnCell* world) noexcept {
+    pointToWorld(local.centre, centre, axes, world->centre);
+    pointToWorld(local.capA, centre, axes, world->capA);
+    pointToWorld(local.capB, centre, axes, world->capB);
+    pointToWorld(local.boxCentre, centre, axes, world->boxCentre);
+    dirToWorld(local.boxU, axes, world->boxU);
+    dirToWorld(local.boxV, axes, world->boxV);
+    dirToWorld(local.boxW, axes, world->boxW);
+}
+
+// Built v13.7 (b): the pad's height along the shaft (up) relative to a static reference, the hangar shell record: the pad minus the shell, dotted
+// with up. A frame shift moves both alike and cancels; only the pad's own motion changes it.
+constexpr float kPadMoveReleaseM = 5.0f;
+inline float shellRelative(const float pad[3], const float shell[3], const float up[3]) noexcept {
+    return (pad[0] - shell[0]) * up[0] + (pad[1] - shell[1]) * up[1] + (pad[2] - shell[2]) * up[2];
+}
+// True when the pad has moved more than limitM along the shaft since the engage (the two relative heights differ).
+inline bool padMovedAway(float engageRel, float nowRel, float limitM = kPadMoveReleaseM) noexcept {
+    return std::isfinite(engageRel) && std::isfinite(nowRel) && std::fabs(nowRel - engageRel) > limitM;
+}
 // Built v13.1 (a): the footprint margin for the culled-name tallies (the records just outside a face of the box).
 constexpr float kTallyMarginM = 20.0f;
 

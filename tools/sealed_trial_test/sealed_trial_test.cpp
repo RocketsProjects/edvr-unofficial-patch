@@ -865,6 +865,74 @@ int main(int argc, char** argv) {
               "a record 34 m from a 30 m own sphere is kept with a 5 m margin; 36 m is not; no radius, no keep");
     }
 
+    {
+        // Built v13.7 (a): the pad frame. A rotated pad at (10, 2, 3): a point taken to the pad's frame and back is itself; the cell placed back
+        // after a frame shift moves by exactly the shift; a pad turned about up turns the box's directions with it, and a point at a fixed place on
+        // the pad keeps that place on the pad.
+        const float th = 0.5235988f;   // 30 degrees
+        const float axesA[3][3] = {{std::cos(th), std::sin(th), 0.0f}, {-std::sin(th), std::cos(th), 0.0f}, {0.0f, 0.0f, 1.0f}};
+        const float padC[3] = {10.0f, 2.0f, 3.0f};
+        const float p0[3] = {14.0f, -5.0f, 20.0f};
+        float loc0[3] = {}, back0[3] = {};
+        se::pointToLocal(p0, padC, axesA, loc0);
+        se::pointToWorld(loc0, padC, axesA, back0);
+        check(std::fabs(back0[0] - p0[0]) < 1e-3f && std::fabs(back0[1] - p0[1]) < 1e-3f && std::fabs(back0[2] - p0[2]) < 1e-3f,
+              "a point taken to the rotated pad's frame and back is the same point");
+        check(std::fabs(loc0[2] - 17.0f) < 1e-3f, "a point 17 m above the pad's centre is 17 m along the pad's up axis");
+
+        // A cell with a shaft, a box, frozen at engage; then the pad's live frame is shifted by T (the record frame moves).
+        se::OwnCell cellW;
+        cellW.has = true;
+        cellW.centre[0] = padC[0]; cellW.centre[1] = padC[1]; cellW.centre[2] = padC[2];
+        cellW.capA[0] = padC[0]; cellW.capA[1] = padC[1]; cellW.capA[2] = padC[2];
+        cellW.capB[0] = 12.0f; cellW.capB[1] = 40.0f; cellW.capB[2] = 90.0f;
+        cellW.capsule = true;
+        cellW.box = true;
+        cellW.boxCentre[0] = 9.0f; cellW.boxCentre[1] = 3.0f; cellW.boxCentre[2] = 60.0f;
+        cellW.boxU[0] = std::cos(th); cellW.boxU[1] = std::sin(th);
+        cellW.boxV[0] = -std::sin(th); cellW.boxV[1] = std::cos(th);
+        cellW.boxW[2] = 1.0f;
+        cellW.boxHalf[0] = 33.0f; cellW.boxHalf[1] = 14.0f; cellW.boxHalf[2] = 60.0f;
+        se::OwnCell cellL;
+        se::localizeCell(cellW, padC, axesA, &cellL);
+        const float T[3] = {-5.18f, -2.99f, 34.0f};   // the v13.6 flight's shift
+        const float padS[3] = {padC[0] + T[0], padC[1] + T[1], padC[2] + T[2]};
+        se::OwnCell cellS = cellW;
+        se::worldizeCell(cellL, padS, axesA, &cellS);
+        check(std::fabs(cellS.centre[0] - padS[0]) < 1e-3f && std::fabs(cellS.centre[2] - padS[2]) < 1e-3f,
+              "the pad-frame cell's centre follows the pad's live centre after a frame shift");
+        check(std::fabs(cellS.capB[0] - (cellW.capB[0] + T[0])) < 1e-3f && std::fabs(cellS.capB[1] - (cellW.capB[1] + T[1])) < 1e-3f &&
+                  std::fabs(cellS.capB[2] - (cellW.capB[2] + T[2])) < 1e-3f,
+              "the shaft target moves with the frame shift, by the same offset as the pad");
+        check(std::fabs(cellS.boxCentre[2] - (cellW.boxCentre[2] + T[2])) < 1e-3f && std::fabs(cellS.boxU[0] - cellW.boxU[0]) < 1e-5f &&
+                  std::fabs(cellS.boxHalf[2] - 60.0f) < 1e-6f,
+              "the box moves by the shift; its axes and half-extents do not change under a pure shift");
+
+        // A pad turned 90 degrees about up: the box's length axis (world +x at 30 degrees, which is the pad's own axis 0) turns with the pad to
+        // world +y; the shaft target keeps its height along the pad's up axis.
+        const float axesR[3][3] = {{0.0f, 1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+        se::OwnCell cellT = cellW;
+        se::worldizeCell(cellL, padC, axesR, &cellT);
+        check(std::fabs(cellT.boxU[0]) < 1e-3f && std::fabs(cellT.boxU[1] - 1.0f) < 1e-3f,
+              "a pad turned 90 degrees turns the box's length axis with it (to world +y)");
+        const float rotCap[3] = {cellT.capB[0] - padC[0], cellT.capB[1] - padC[1], cellT.capB[2] - padC[2]};
+        check(std::fabs(rotCap[2] - cellL.capB[2]) < 1e-3f,
+              "the shaft target keeps its height along the pad's up axis when the pad turns about up");
+
+        // Built v13.7 (b): the release by the pad's own motion along the shaft, against the hangar shell. A shift of the whole frame (pad and shell
+        // alike) changes nothing; the pad rising 6 m relative to the shell releases; rising 4 m or 5 m does not (the limit is more than 5 m).
+        const float up[3] = {0.0f, 0.0f, 1.0f};
+        const float shellE[3] = {0.0f, 0.0f, 50.0f}, padE[3] = {0.0f, 0.0f, 10.0f};
+        const float relE = se::shellRelative(padE, shellE, up);
+        const float shellS[3] = {T[0], T[1], 50.0f + T[2]}, padSh[3] = {T[0], T[1], 10.0f + T[2]};
+        check(!se::padMovedAway(relE, se::shellRelative(padSh, shellS, up)),
+              "a frame shift that moves the pad and the shell alike does not release the cell");
+        const float padUp6[3] = {0.0f, 0.0f, 16.0f}, padUp4[3] = {0.0f, 0.0f, 14.0f}, padUp5[3] = {0.0f, 0.0f, 15.0f};
+        check(se::padMovedAway(relE, se::shellRelative(padUp6, shellE, up)) && !se::padMovedAway(relE, se::shellRelative(padUp4, shellE, up)) &&
+                  !se::padMovedAway(relE, se::shellRelative(padUp5, shellE, up)),
+              "the pad rising 6 m against the shell releases the cell; 4 m and exactly 5 m do not");
+        check(!se::padMovedAway(NAN, 0.0f), "an unreadable reference never releases");
+    }
     std::printf("sealed_trial_test: %d checks, %d failures\n", g_checks, g_failures);
     if (g_failures) return 1;
     std::printf("sealed trial self-test passed\n");
