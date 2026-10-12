@@ -37,6 +37,9 @@ const char* sealedTrialModeText() noexcept;
 bool sealedTrialSkipsSunPair() noexcept;
 // The sun pass probe counts a skipped sun pair here.
 void sealedTrialNoteSunSkip() noexcept;
+// Built v10: producer B's pre-forward decision (kinematic_eval_hook.h DirectVetoFn): true skips FUN_144312E00 for the record the rule culls
+// (diag.sealed_trial_producer = veto). Called on the job thread that calls B, only while the trial is on.
+bool sealedTrialProducerVeto(uintptr_t rec, uintptr_t owner) noexcept;
 // The admission store calls this after it has written a record (bucket = the collection, record = its record).
 void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept;
 

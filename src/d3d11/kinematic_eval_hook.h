@@ -139,6 +139,15 @@ const char* kinematicEvalBuilderObserverAttach() noexcept;
 void kinematicEvalBuilderObserverDetach() noexcept;
 // Built v8.5: whether the bracket's relay gate (evalGate) is open right now: the builder observer is called only while it is. Read-only.
 bool kinematicEvalBuilderGateOpen() noexcept;
+// Built v10: a PRE-FORWARD veto on producer 0 (FUN_144312E00, the emit hook's bracket, kinematic_eval_hook.cpp directBracket). Called with the
+// rig record (rcx) and the owner (rdx) before the forward. Returning true skips the forward and the post-forward emit observer: nothing is
+// appended, and the record's engine-motion history gaps (the emit's own rule re-baselines it). Producer 1 is never vetoed. Null = off.
+using DirectVetoFn = bool (*)(uintptr_t rec, uintptr_t owner) noexcept;
+void kinematicEvalSetDirectVeto(DirectVetoFn fn) noexcept;
+// The veto's own want on the producer bracket (no emit want, no second detour): installs the bracket with the shared install if needed.
+// "installed" or the reason why not.
+const char* kinematicEvalDirectVetoAttach() noexcept;
+void kinematicEvalDirectVetoDetach() noexcept;
 // FUN_1442B3FC0's hook: "hooked", or why it stood down ("not requested",
 // "not build 332841 (PE timestamp/size)", "prologue mismatch at RVA 0x42B3FC0",
 // "builder frame/call-site mismatch at RVA 0x...", "CodeHook refused the patch").

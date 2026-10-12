@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <cstring>
 #include <string>
 
@@ -86,7 +87,7 @@ int main(int argc, char** argv) {
         w.sunSkipped = 40;
         w.evalNs = 2500000;   // 2.5 ms
         w.faults = 0;
-        char line[960];
+        char line[1400];
         se::formatWindow(line, sizeof(line), w, 80.0f, "eye rows");
         const std::string s = line;
         check(s.find("window 5 s culled=12 kept=3 kept_unjudged=1 sun_pairs_skipped=40") != std::string::npos,
@@ -107,7 +108,7 @@ int main(int argc, char** argv) {
 
     // --- The toggle line, on and off, with and without a camera.
     {
-        char line[960];
+        char line[1400];
         const float c[3] = {1.0f, 2.0f, 3.0f};
         se::formatToggle(line, sizeof(line), true, 4242, 80.0f, c, true, "vscreen");
         check(std::string(line).find("on at frame 4242 (radius 80.0 m; view source = vscreen; camera (1.0,2.0,3.0)") !=
@@ -302,8 +303,32 @@ int main(int argc, char** argv) {
         check(se::ptrKindOf(true, 0x9000, 0x1000, 0x2000) == se::PtrKind::kOther, "a pointer outside the image is other");
         check(se::ptrKindOf(false, 0x1800, 0x1000, 0x2000) == se::PtrKind::kUnread, "a failed read is unreadable, whatever the value");
         check(std::strcmp(se::ptrKindName(se::PtrKind::kOther), "other") == 0, "the pointer kind name is other");
+        // Built v10: producer B's veto mode parses (veto is the default), and the world sphere follows the store's formula.
+        se::ProducerMode pm = se::ProducerMode::kCount;
+        check(se::parseProducerMode("", &pm) && pm == se::ProducerMode::kVeto, "an empty diag.sealed_trial_producer is veto");
+        check(se::parseProducerMode("count", &pm) && pm == se::ProducerMode::kCount, "count parses");
+        check(!se::parseProducerMode("Veto", &pm) && pm == se::ProducerMode::kVeto, "an unknown producer word is refused and the mode is veto");
         {
-            char buf[1200] = {};
+            const float L[3] = {1.0f, 2.0f, 3.0f};
+            float A[15] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0};   // identity 3x3 (A[4k+j]), no translation
+            float B[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            float out[3] = {};
+            check(se::storeWorldSphere(L, A, B, out) && out[0] == 1.0f && out[1] == 2.0f && out[2] == 3.0f,
+                  "identity poses leave the centre where the node's bounds put it");
+            A[12] = 10.0f;                     // the pose's translation along x
+            B[13] = 5.0f;                      // the base matrix's translation along y
+            check(se::storeWorldSphere(L, A, B, out) && out[0] == 11.0f && out[1] == 7.0f && out[2] == 3.0f,
+                  "the pose translation then the base translation: (11, 2+5, 3)");
+            // A pose whose 3x3 swaps x and y: u0 = A[0]*L0 + A[4]*L1 = L1, u1 = A[1]*L0 + A[5]*L1 = L0 (its translation zero).
+            float A2[15] = {0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0};   // A2[4k+j]: A2[1] = A2[4] = A2[10] = 1
+            float I[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            check(se::storeWorldSphere(L, A2, I, out) && out[0] == 2.0f && out[1] == 1.0f && out[2] == 3.0f,
+                  "a swapped x and y in the pose swaps the centre's x and y");
+            const float Nan[3] = {std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f};
+            check(!se::storeWorldSphere(Nan, A, B, out), "a non-finite input is not a world sphere");
+        }
+        {
+            char buf[1400] = {};
             se::Window w;
             w.ptrNull = 3;
             w.ptrImage = 5;

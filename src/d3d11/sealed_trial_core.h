@@ -196,6 +196,14 @@ struct Window {
     uint64_t ptrImage = 0;
     uint64_t ptrOther = 0;
     uint64_t ptrUnread = 0;
+    // Built v10: producer B (FUN_144312E00, the pre-forward veto): calls seen in the window, the records vetoed (in count mode: the ones that
+    // WOULD be vetoed), the records kept, the world sphere computed the store's way (styleOk) and the ones it could not read (unread, kept).
+    uint64_t producerCalls = 0;
+    uint64_t producerVetoed = 0;
+    uint64_t producerKept = 0;
+    uint64_t producerStyle = 0;
+    uint64_t producerUnread = 0;
+    const char* producerMode = "veto";
 };
 
 // The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named is the own-pad cell rule.
@@ -532,6 +540,42 @@ inline bool unpackSlot(uint64_t v, uintptr_t node, uint32_t stamp, NameClass* ou
     return true;
 }
 
+// Built v10: producer B's veto mode (diag.sealed_trial_producer): veto skips FUN_144312E00 for a record the rule culls; count only counts the
+// decisions and forwards every call (the A/B control).
+enum class ProducerMode : uint8_t { kVeto = 0, kCount = 1 };
+
+inline bool parseProducerMode(const char* text, ProducerMode* out) noexcept {
+    if (!text || !*text || std::strcmp(text, "veto") == 0) {
+        *out = ProducerMode::kVeto;
+        return true;
+    }
+    if (std::strcmp(text, "count") == 0) {
+        *out = ProducerMode::kCount;
+        return true;
+    }
+    *out = ProducerMode::kVeto;
+    return false;
+}
+
+inline const char* producerModeName(ProducerMode m) noexcept { return m == ProducerMode::kCount ? "count" : "veto"; }
+
+// Built v10: a record's world sphere centre the way the store computes it for the records producer B appends (decomp_4312040.txt, lines
+// 212-262; the derivation is in docs\concourse-culling-2026-10-11.md, Built v10). L is the node's bounds centre (*(node+8)+0x20, xyz), A the
+// record's pose block (*(rec+0x190): 15 floats), B the matrix at *(A+0x50) (16 floats). With u_j = sum_k A[4k+j] L_k + A[12+j] and
+// v_j = sum_i B[4i+j] u_i + B[12+j], the centre is v. The radius is the node block's +0x2C, unscaled. False when the result is not finite.
+inline bool storeWorldSphere(const float L[3], const float A[15], const float B[16], float out[3]) noexcept {
+    float u[3];
+    for (int j = 0; j < 3; ++j) {
+        u[j] = A[12 + j];
+        for (int k = 0; k < 3; ++k) u[j] += A[4 * k + j] * L[k];
+    }
+    for (int j = 0; j < 3; ++j) {
+        out[j] = B[12 + j];
+        for (int i = 0; i < 3; ++i) out[j] += B[4 * i + j] * u[i];
+    }
+    return finite3(out);
+}
+
 // Built v8.5: the kind of a pointer read from a record (rec+0x290): null, inside the game image [imageBase, imageEnd), any other non-null
 // value, or unreadable. Pure; the caller supplies the read result and the image bounds.
 enum class PtrKind : uint8_t { kNull = 0, kImage = 1, kOther = 2, kUnread = 3 };
@@ -581,7 +625,8 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          "eval_ms=%.3f faults=%llu torn=%llu radius_m=%.1f builder_after_cull=%llu mode=%s %s "
                          "kept_explicit=%llu kept_by_cell=%llu culled_containing=%llu zero_centre=%llu pose_fallback=%llu "
                          "centre_dist_m p50=%.2f p95=%.2f max=%.2f n=%llu ptr290 null=%llu image=%llu other=%llu unread=%llu "
-                         "view source = %s",
+                         "producer_b_calls=%llu producer_b_vetoed=%llu producer_b_kept=%llu world_sphere_store_style=%llu "
+                         "world_sphere_unreadable=%llu producer_mode=%s view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
                          static_cast<unsigned long long>(w.kept), static_cast<unsigned long long>(w.keptUnknown),
                          static_cast<unsigned long long>(w.sunSkipped), static_cast<double>(w.evalNs) / 1.0e6,
@@ -592,7 +637,10 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          static_cast<unsigned long long>(w.poseFallback), static_cast<double>(w.distP50),
                          static_cast<double>(w.distP95), static_cast<double>(w.distMax), static_cast<unsigned long long>(w.distN),
                          static_cast<unsigned long long>(w.ptrNull), static_cast<unsigned long long>(w.ptrImage),
-                         static_cast<unsigned long long>(w.ptrOther), static_cast<unsigned long long>(w.ptrUnread), viewSource);
+                         static_cast<unsigned long long>(w.ptrOther), static_cast<unsigned long long>(w.ptrUnread),
+                         static_cast<unsigned long long>(w.producerCalls), static_cast<unsigned long long>(w.producerVetoed),
+                         static_cast<unsigned long long>(w.producerKept), static_cast<unsigned long long>(w.producerStyle),
+                         static_cast<unsigned long long>(w.producerUnread), w.producerMode, viewSource);
 }
 
 // "sealed trial: on at frame F (radius R m; camera (x,y,z) or unknown; the sun pair is skipped; records outside the sphere

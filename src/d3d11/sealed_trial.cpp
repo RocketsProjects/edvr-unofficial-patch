@@ -19,6 +19,7 @@
 #include "../common/log.h"
 #include "asset_census_core.h"
 #include "kept_report_core.h"
+#include "kinematic_eval_hook.h"
 #include "sealed_trial_core.h"
 #include "store_hook.h"
 #include "view_source.h"
@@ -63,6 +64,9 @@ uint64_t g_zeroCentre = 0, g_poseFallback = 0;
 std::vector<float> g_centreDist;
 // Built v8.5: the kind of the pointer at rec+0x290 for each record the store visits in the window (under the lock).
 uint64_t g_ptrNull = 0, g_ptrImage = 0, g_ptrOther = 0, g_ptrUnread = 0;
+// Built v10: producer B's veto: the mode (diag.sealed_trial_producer) and the window's counts (under the lock).
+sealed::ProducerMode g_producerMode = sealed::ProducerMode::kVeto;
+uint64_t g_prodCalls = 0, g_prodVetoed = 0, g_prodKept = 0, g_prodStyle = 0, g_prodUnread = 0;
 std::atomic<uint32_t> g_frameStamp{0};       // advanced at every Present tick: the observer resolves the view once per frame
 std::atomic<bool> g_cameraKnown{false};
 
@@ -157,6 +161,7 @@ void resetWindow() noexcept {
     g_zeroCentre = 0;
     g_poseFallback = 0;
     g_ptrNull = g_ptrImage = g_ptrOther = g_ptrUnread = 0;
+    g_prodCalls = g_prodVetoed = g_prodKept = g_prodStyle = g_prodUnread = 0;
     g_centreDist.clear();
     if (g_centreDist.capacity() < kCentreDistCap) g_centreDist.reserve(kCentreDistCap);   // at a window's end, not on the store's hot path
 }
@@ -181,6 +186,12 @@ sealed::Window takeWindow() noexcept {
     w.ptrImage = g_ptrImage;
     w.ptrOther = g_ptrOther;
     w.ptrUnread = g_ptrUnread;
+    w.producerCalls = g_prodCalls;
+    w.producerVetoed = g_prodVetoed;
+    w.producerKept = g_prodKept;
+    w.producerStyle = g_prodStyle;
+    w.producerUnread = g_prodUnread;
+    w.producerMode = sealed::producerModeName(g_producerMode);
     w.distN = g_centreDist.size();
     if (!g_centreDist.empty()) {
         w.distP50 = sealed::percentileOf(g_centreDist, 0.50);
@@ -215,7 +226,7 @@ const char* viewLabel(const view::Resolved& v) noexcept {
 
 // Writes the window's line at the current radius and the view it ran against, then starts a new window. Called under the lock.
 void noteWindow() {
-    char line[960];
+    char line[1400];
     sealed::formatWindow(line, sizeof(line), takeWindow(), g_radius.load(std::memory_order_relaxed), viewLabel(g_view),
                          g_mode.load(std::memory_order_relaxed));
     Log::get().note("%s", line);
@@ -676,6 +687,13 @@ void sealedTrialInstall(bool flatProfile) {
     if (policy == sealed::BuilderPolicy::kSkip)
         Log::get().note("sealed trial: diag.sealed_trial_builder = skip is REFUSED: the builder's side effects are not proven absent "
                         "(draw-command appends, the counter at pipeline+0x2A4, the bucket lookup); the builder is counted only.");
+    // Built v10: producer B's veto mode. veto (the default) skips FUN_144312E00 for a record the rule culls; count forwards every call and counts
+    // the decisions (the A/B control).
+    const std::string producerText = Config::get().getString("diag.sealed_trial_producer", "");
+    sealed::ProducerMode producer = sealed::ProducerMode::kVeto;
+    if (!sealed::parseProducerMode(producerText.c_str(), &producer))
+        Log::get().note("sealed trial: diag.sealed_trial_producer = '%s' is not veto or count; producer B is vetoed.", producerText.c_str());
+    g_producerMode = producer;
     Log::get().note("sealed trial: off. hotkey.sealed_trial toggles it; the sphere starts at %.1f m (diag.sealed_trial_radius_m); the "
                     "record rule is %s (diag.sealed_trial_mode; hotkey.sealed_trial_mode cycles it while on). Named mode's cell radii are "
                     "small %.1f, medium %.1f, large %.1f m (diag.sealed_cell_*_m; guesses until measured); hotkey.sealed_cell_larger and "
@@ -716,6 +734,9 @@ void sealedTrialToggle(const char* trigger, uint32_t frame) {
         // Built v8.5: the toggle never changes the record rule; the mode is the last one set (install, or the mode key).
         Log::get().note("sealed trial: off; the record rule stays %s across the toggle (trigger %s)",
                         sealed::modeName(g_mode.load(std::memory_order_relaxed)), trigger);
+        // Built v10: the producer B veto leaves with the trial (its own want; the emit's want is untouched).
+        kinematicEvalSetDirectVeto(nullptr);
+        kinematicEvalDirectVetoDetach();
         return;
     }
     g_on.store(true, std::memory_order_release);
@@ -730,6 +751,16 @@ void sealedTrialToggle(const char* trigger, uint32_t frame) {
     // The camera is read now, from the same view the rule uses, so the toggle line names it (it used to wait for the first store call).
     resolveNow();
     resetWindow();
+    // Built v10: producer B's pre-forward veto on the emit bracket (kinematic_eval_hook.cpp). Its line says whether it applies: when the bracket
+    // is not installed the veto is not live, and the window's producer_b_* counts stay zero for that reason.
+    {
+        const char* attach = kinematicEvalDirectVetoAttach();
+        const bool live = std::strcmp(attach, "installed") == 0;
+        kinematicEvalSetDirectVeto(live ? &sealedTrialProducerVeto : nullptr);
+        Log::get().note("sealed trial: producer B veto (FUN_144312E00, pre-forward): %s; mode %s (diag.sealed_trial_producer)%s.",
+                        live ? "live" : "NOT live", sealed::producerModeName(g_producerMode),
+                        live ? "" : (std::string(": ") + attach).c_str());
+    }
     g_windowStartMs = GetTickCount64();
     float cam[3] = {};
     const bool known = cameraOf(g_view, cam);
@@ -858,6 +889,62 @@ void sealedTrialFrame(uint32_t frame) {
 bool sealedTrialOn() noexcept { return g_on.load(std::memory_order_acquire); }
 
 bool sealedTrialSkipsSunPair() noexcept { return g_on.load(std::memory_order_acquire); }
+
+// Built v10: producer B's pre-forward decision (FUN_144312E00, called inside the store for each rig record with a mask; decomp_4312040.txt
+// line 337, decomp_4312E00.txt). The record's world sphere is the store's own (node block: centre at +0x20, radius at +0x2C; pose block at
+// rec+0x190; its +0x50 matrix; sealed_trial_core.h storeWorldSphere). The rule is the store observer's: all culls every record, named keeps the
+// cell test against the previous frame's cell, sphere keeps a record whose sphere meets the trial sphere. A record whose sphere cannot be read
+// is kept (counted). The camera is the frame's, from the store observer: before the first store observer of a frame, the previous frame's.
+// True skips the forward (veto mode); count mode only counts the decision.
+namespace {
+bool producerDecide(uintptr_t rec) noexcept {
+    constexpr uintptr_t kNodeOff = 0x18;       // rec+0x18: the node (census's name pointer)
+    constexpr uintptr_t kBlockOff = 0x08;      // node+0x08: the bounds block
+    constexpr uintptr_t kPoseOff = 0x190;      // rec+0x190: the pose block A
+    constexpr uintptr_t kMatrixOff = 0x50;     // A+0x50: the matrix B
+    float L[3] = {}, A[15] = {}, B[16] = {}, centre[3] = {};
+    float radius = 0.0f;
+    uintptr_t node = 0, block = 0, pose = 0, matrix = 0;
+    bool ok = readVal(&node, rec + kNodeOff) && node && readVal(&block, node + kBlockOff) && block &&
+              readMem(L, block + 0x20, sizeof(L)) && readVal(&radius, block + 0x2C) && readVal(&pose, rec + kPoseOff) && pose &&
+              readMem(A, pose, sizeof(A)) && readVal(&matrix, pose + kMatrixOff) && matrix && readMem(B, matrix, sizeof(B));
+    ok = ok && std::isfinite(radius) && radius > 0.0f && sealed::storeWorldSphere(L, A, B, centre);
+    ++g_prodCalls;
+    if (!ok) {
+        ++g_prodUnread;
+        ++g_prodKept;
+        return false;
+    }
+    ++g_prodStyle;
+    if (!g_frameCamValid) {
+        ++g_prodKept;
+        return false;
+    }
+    const float trialR = g_radius.load(std::memory_order_relaxed);
+    bool keep = false;
+    const sealed::Mode mode = g_mode.load(std::memory_order_relaxed);
+    if (mode == sealed::Mode::kAll) {
+        keep = false;
+    } else if (mode == sealed::Mode::kNamed) {
+        keep = sealed::keepNamedCell(centre, radius, g_frameCam, trialR, g_cellPrev, g_explicitPrev, g_explicitPrevCount, rec).keep;
+    } else {
+        keep = sealed::keepRecord(centre, radius, g_frameCam, trialR);
+    }
+    if (keep) {
+        ++g_prodKept;
+        return false;
+    }
+    ++g_prodVetoed;
+    return g_producerMode == sealed::ProducerMode::kVeto;
+}
+}  // namespace
+
+bool sealedTrialProducerVeto(uintptr_t rec, uintptr_t owner) noexcept {
+    (void)owner;
+    if (!g_on.load(std::memory_order_acquire) || !rec) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
+    return producerDecide(rec);
+}
 
 const char* sealedTrialModeText() noexcept {
     return g_on.load(std::memory_order_acquire) ? sealed::modeName(g_mode.load(std::memory_order_relaxed)) : "off";

@@ -81,6 +81,9 @@ alignas(8) std::atomic<GateProbeBuilderFn> gateProbeBuilder{nullptr};
 // Built v8.3: the hatch/builder probe's observer on this bracket, and its want (holds the eval gate open with the other consumers).
 std::atomic<BuilderObserverFn> builderObserver{nullptr};
 std::atomic<bool> builderWanted{false};
+// Built v10: the trial's pre-forward veto on producer 0 (kinematic_eval_hook.h DirectVetoFn), and its own want (it holds the relay gate open).
+std::atomic<DirectVetoFn> directVeto{nullptr};
+std::atomic<bool> directVetoWanted{false};
 alignas(8) std::atomic<GateProbePartFn> gateProbePart{nullptr};
 // FUN_1442B3FC0's relay gate: a cell of its own, not evalGate, so the
 // per-part patch (installed only for the gate probe) costs the evalGate
@@ -734,6 +737,12 @@ uintptr_t __fastcall directBracket(uint32_t producer,uintptr_t a,uintptr_t b,
     // producer 0 is the emit hook (its census reads and the emit observer),
     // producer 1 the second direct producer (the census reads only). A POD
     // token, the function has __try.
+    // Built v10: the trial's veto, before anything else (producer 0 only). A veto skips the forward and every observer after it: nothing is
+    // appended for the record, and the emit's history gaps it (engine_velocity_emit.h's rules re-baseline the record when it returns).
+    if(producer==0) {
+        const DirectVetoFn veto=directVeto.load(std::memory_order_acquire);
+        if(veto && veto(a,b)) return 0;
+    }
     emcpu::Token engineMotion;
     emcpu::enter(engineMotion,producer==0?emcpu::kEmit:emcpu::kBuilder);
     int32_t start=0;
@@ -1099,7 +1108,8 @@ void recomputeGateLocked() noexcept {
                     emitWanted.load(std::memory_order_acquire) ||
                     schedulerWanted.load(std::memory_order_acquire) ||
                     gateProbeWanted.load(std::memory_order_acquire) ||
-                    builderWanted.load(std::memory_order_acquire);
+                    builderWanted.load(std::memory_order_acquire) ||
+                    directVetoWanted.load(std::memory_order_acquire);
     evalGate.store(open?uintptr_t(1):uintptr_t(0),std::memory_order_release);
     primaryGate.store(emitWanted.load(std::memory_order_acquire) &&
         g_primaryEntry.ready.load(std::memory_order_acquire) &&
@@ -1275,6 +1285,35 @@ void kinematicEvalBuilderObserverDetach() noexcept {
 
 bool kinematicEvalBuilderGateOpen() noexcept {
     return evalGate.load(std::memory_order_acquire)!=0;
+}
+
+void kinematicEvalSetDirectVeto(DirectVetoFn fn) noexcept {
+    directVeto.store(fn,std::memory_order_release);
+}
+
+const char* kinematicEvalDirectVetoAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base)return "identity_mismatch";
+        if(!g_evalEntry.ready.load(std::memory_order_acquire) && !targetValid(base))
+            return "identity_mismatch";
+        if(!ensureInstalled(base))return "install_failed";
+        if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
+        if(!g_directEntries[0].ready.load(std::memory_order_acquire))
+            return "CodeHook refused kinematic-build-144312e00; its own line names why";
+        directVetoWanted.store(true,std::memory_order_release);
+        recomputeGateLocked();
+        return "installed";
+    } catch(...) {return "install_failed";}
+}
+
+void kinematicEvalDirectVetoDetach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        directVetoWanted.store(false,std::memory_order_release);
+        recomputeGateLocked();
+    } catch(...) {}
 }
 
 const char* kinematicEvalPartTestStatus() noexcept {
