@@ -707,6 +707,25 @@ inline bool inBox(const float c[3], const OwnCell& cell) noexcept {
     return std::fabs(o[0]) <= cell.boxHalf[0] && std::fabs(o[1]) <= cell.boxHalf[1] && std::fabs(o[2]) <= cell.boxHalf[2];
 }
 
+// Built v12: the off-screen emulation's steps, in Elite's order (decomp_431AFE0.txt lines 99 to 102; bytes 0x431B221..0x431B240). Kind 1: the byte
+// store [coll+0x629] = 0. Kind 2: the call of 0x434DD50 with rcx = coll+0x300 (the owner count reset). Kind 3: the call of 0x42B5760 with rcx = the
+// pipe, only when the pipe is non-null (it adds 0x78 and jumps to 0x434DD50: pipe+0x31C). Returns the number of steps written to kinds and args.
+inline int offScreenSteps(uintptr_t coll, uintptr_t pipe, int* kinds, uintptr_t* args) noexcept {
+    int n = 0;
+    kinds[n] = 1;
+    args[n] = coll + 0x629;
+    ++n;
+    kinds[n] = 2;
+    args[n] = coll + 0x300;
+    ++n;
+    if (pipe) {
+        kinds[n] = 3;
+        args[n] = pipe;
+        ++n;
+    }
+    return n;
+}
+
 // Built v12 (flight fix b): the held cell's freeze. A fresh pick differs from the held cell when it is missing (no pad, no cell) or its centre is
 // more than 0.5 m from the held one (a moved pad, or another pad). A differing fresh pick never changes the held cell; the caller counts it.
 inline bool cellDiffers(const OwnCell& fresh, const OwnCell& held) noexcept {

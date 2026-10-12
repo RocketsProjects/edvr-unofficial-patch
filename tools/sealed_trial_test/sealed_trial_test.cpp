@@ -422,6 +422,19 @@ int main(int argc, char** argv) {
             se::OwnCell same = held;
             same.centre[0] = 0.2f;
             check(!se::cellDiffers(same, held), "a pad within 0.5 m is the held cell's pad");
+            // Built v12: the off-screen emulation's call order (decomp_431AFE0 lines 99 to 102): the byte store, the owner-count call, then the
+            // pipe call only with a pipe. The pipe call adds 0x78 and the owner-count call writes +0x2A4: pipe+0x31C.
+            {
+                int kinds[3] = {};
+                uintptr_t args[3] = {};
+                const uintptr_t coll = 0x10000, pipe = 0x20000;
+                check(se::offScreenSteps(coll, 0, kinds, args) == 2 && kinds[0] == 1 && args[0] == coll + 0x629 && kinds[1] == 2 &&
+                          args[1] == coll + 0x300,
+                      "without a pipe: the byte store to collection+0x629, then the owner-count call on collection+0x300");
+                check(se::offScreenSteps(coll, pipe, kinds, args) == 3 && kinds[2] == 3 && args[2] == pipe,
+                      "with a pipe: the same two steps, then the pipe call");
+                check(args[2] + 0x78 + 0x2A4 == pipe + 0x31C, "the pipe call's owner count is pipe+0x31C (0x78 + 0x2A4)");
+            }
             // The margin: a signed number; the ladder -10, -5, 0, 5, 10, 20, 40.
             float mg = 0.0f;
             check(se::parseMarginM("", 5.0f, &mg) && mg == 5.0f, "an empty margin is the default 5 m");

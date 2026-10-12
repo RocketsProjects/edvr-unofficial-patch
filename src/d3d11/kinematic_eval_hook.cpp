@@ -1,4 +1,5 @@
 #include "kinematic_eval_hook.h"
+#include "sealed_trial_core.h"   // Built v12: the off-screen emulation's step order (offScreenSteps)
 #include "kinematic_eval_probe.h"
 #include "engine_velocity_emit.h"
 #include "engine_motion_cpu.h"   // the CPU instrument: EDVR's own work in every relay below is clocked per call
@@ -414,10 +415,16 @@ bool rigOffScreenEmulate(uintptr_t rig) noexcept {
         return false;
     }
     bool done=false;
+    // The steps and their order are sealed_trial_core.h's offScreenSteps (rig-checked): the byte store, the owner-count call, the pipe call.
+    int kinds[3]={};
+    uintptr_t args[3]={};
+    const int steps=edvr::sealed::offScreenSteps(coll,pipe,kinds,args);
     __try {
-        *reinterpret_cast<volatile uint8_t*>(coll+0x629)=0;                       // mov byte [rbx+0x629], r13b (0)
-        reinterpret_cast<OffScreenCallFn>(base+0x434DD50)(coll+0x300);             // lea rcx,[rbx+0x300]; call 0x434DD50
-        if(pipe) reinterpret_cast<OffScreenCallFn>(base+0x42B5760)(pipe);          // rcx = [rbx+0x2E0]; call 0x42B5760
+        for(int i=0;i<steps;++i) {
+            if(kinds[i]==1)      *reinterpret_cast<volatile uint8_t*>(args[i])=0;          // mov byte [rbx+0x629], r13b (0)
+            else if(kinds[i]==2) reinterpret_cast<OffScreenCallFn>(base+0x434DD50)(args[i]);  // lea rcx,[rbx+0x300]; call 0x434DD50
+            else if(kinds[i]==3) reinterpret_cast<OffScreenCallFn>(base+0x42B5760)(args[i]);  // rcx = [rbx+0x2E0]; call 0x42B5760
+        }
         done=true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         done=false;
