@@ -327,13 +327,13 @@ int main(int argc, char** argv) {
 
         se::Window w;
         w.builderAfterCull = 3;
-        w.builderUnvisited = 5;
         char line[640];
         se::formatWindow(line, sizeof(line), w, 80.0f, "eye rows", se::Mode::kNamed);
-        check(contains(line, "radius_m=80.0 builder_after_cull=3 builder_unvisited=5 mode=named view source = eye rows"),
-              "the window line appends builder_after_cull, builder_unvisited and the mode before the view source");
+        check(contains(line, "radius_m=80.0 builder_after_cull=3 mode=named view source = eye rows"),
+              "the window line appends builder_after_cull and the mode before the view source (Built v8.1: no unvisited field)");
+        check(!contains(line, "builder_unvisited"), "the window line no longer carries builder_unvisited (the F9 capture has the visit count)");
         se::formatWindow(line, sizeof(line), w, 80.0f, "eye rows");
-        check(contains(line, "builder_unvisited=5 mode=sphere"), "the window line defaults to mode sphere");
+        check(contains(line, "builder_after_cull=3 mode=sphere"), "the window line defaults to mode sphere");
 
         se::formatModeLine(line, sizeof(line), se::Mode::kNamed, 12, "hotkey.sealed_trial_mode");
         check(contains(line, "mode = named at frame 12 (trigger hotkey.sealed_trial_mode)") && contains(line, "Hangar"),

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -16,7 +17,6 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include "asset_census_core.h"
-#include "builder_probe.h"
 #include "kept_report_core.h"
 #include "sealed_trial_core.h"
 #include "store_hook.h"
@@ -49,7 +49,11 @@ std::atomic<sealed::Mode> g_mode{sealed::Mode::kSphere};
 // TEMPORARY (diag.sealed_trial_builder): read at install. skip is refused in builder_probe.cpp (not proven safe), so it counts only.
 sealed::BuilderPolicy g_builderPolicy = sealed::BuilderPolicy::kCount;
 std::atomic<uint64_t> g_culled{0}, g_kept{0}, g_keptUnknown{0}, g_sunSkipped{0}, g_evalNs{0}, g_faults{0}, g_torn{0};
-std::atomic<uint64_t> g_builderAfterCull{0}, g_builderUnvisited{0};
+std::atomic<uint64_t> g_builderAfterCull{0};  // TEMPORARY (Built v8.1): builder calls cleared at entry, counted by the builder probe's tick
+// Built v8.1 (the crash fix): every piece of state the store observer and the frame's code share (the view, the view stamp, the render context,
+// the report's observed list, the name cache, the window clock and the report's trigger) is guarded by this lock. It is recursive because the
+// store re-enters the observer through its own recursion; nothing takes it across a call into the game (forward() is never called under it).
+std::recursive_mutex g_sealedMutex;
 std::atomic<uint32_t> g_frameStamp{0};       // advanced at every Present tick: the observer resolves the view once per frame
 std::atomic<bool> g_cameraKnown{false};
 uint64_t g_windowStartMs = 0;                // render thread only
@@ -110,7 +114,6 @@ void resetWindow() noexcept {
     g_faults.store(0);
     g_torn.store(0);
     g_builderAfterCull.store(0);
-    g_builderUnvisited.store(0);
 }
 
 sealed::Window takeWindow() noexcept {
@@ -123,7 +126,6 @@ sealed::Window takeWindow() noexcept {
     w.faults = g_faults.load();
     w.torn = g_torn.load();
     w.builderAfterCull = g_builderAfterCull.load();
-    w.builderUnvisited = g_builderUnvisited.load();
     return w;
 }
 
@@ -332,11 +334,14 @@ void writeKeptReport() {
     if (!f) Log::get().note("sealed trial report: could not open edvr_logs\\%s; the line above is complete.", csvName);
 }
 
-// The cached name of a record: a pointer into the cache slot (valid until the slot is reused), or null when no name can be read. Allocation-free,
-// for the store's hot path (named mode).
-const char* cachedName(uintptr_t record) noexcept {
+// The name of a record, copied out under the trial's lock (Built v8.1: the slot may be reused by another thread the moment the lock is let go, so
+// no pointer into the cache escapes). False when no name can be read. Allocation-free on a hit: the cache holds the text.
+bool cachedName(uintptr_t record, char* out, size_t cap) noexcept {
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
     uintptr_t node = 0;
-    if (!record || !readVal(&node, record + 0x18) || !node) return nullptr;
+    if (!record || !readVal(&node, record + 0x18) || !node) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     const uint32_t stamp = g_frameStamp.load(std::memory_order_relaxed);
     NameSlot& slot = g_nameCache[(node >> 4) % kNameSlots];
     if (slot.node != node || slot.stamp != stamp) {
@@ -353,7 +358,9 @@ const char* cachedName(uintptr_t record) noexcept {
             slot.ok = true;
         }
     }
-    return slot.ok ? slot.name : nullptr;
+    if (!slot.ok) return false;
+    std::snprintf(out, cap, "%s", slot.name);
+    return true;
 }
 
 }  // namespace
@@ -392,13 +399,14 @@ void sealedTrialInstall(bool flatProfile) {
 // The record's name, cached per node for the frame. Needed only by named mode, the builder probe and the kept report; the store does not
 // ask for it otherwise.
 bool sealedTrialRecordName(uintptr_t record, std::string* out) noexcept {
-    const char* name = cachedName(record);
-    if (!name) return false;
+    char name[64];
+    if (!cachedName(record, name, sizeof(name))) return false;
     *out = name;
     return true;
 }
 
 void sealedTrialToggle(const char* trigger, uint32_t frame) {
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     char line[480];
     const float radius = g_radius.load(std::memory_order_relaxed);
     if (g_on.load(std::memory_order_acquire)) {
@@ -436,6 +444,7 @@ void sealedTrialToggle(const char* trigger, uint32_t frame) {
 
 // TEMPORARY (named mode): cycles the record rule while the trial is on. The window of the old rule closes first, so each rule has its own line.
 void sealedTrialModeStep(const char* trigger, uint32_t frame) {
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     char line[400];
     if (!g_on.load(std::memory_order_acquire)) {
         Log::get().note("sealed trial: the mode key acts only while the trial is on (mode %s at frame %u); nothing changed (trigger %s).",
@@ -453,6 +462,7 @@ void sealedTrialModeStep(const char* trigger, uint32_t frame) {
 // One rung while the trial is on. A rung that moves closes the window of the old radius first, so the new radius starts a window of its
 // own; a clamp changes nothing and says so. Off, the key logs a refusal.
 void sealedTrialStep(int dir, const char* trigger, uint32_t frame) {
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     char line[320];
     const float before = g_radius.load(std::memory_order_relaxed);
     if (!g_on.load(std::memory_order_acquire)) {
@@ -472,6 +482,7 @@ void sealedTrialStep(int dir, const char* trigger, uint32_t frame) {
 }
 
 void sealedTrialReportRequest(const char* trigger, uint32_t frame) {
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     (void)frame;
     if (!g_on.load(std::memory_order_acquire)) {
         Log::get().note("sealed trial report: refused (trigger %s): the trial is off; press hotkey.sealed_trial first.", trigger);
@@ -488,6 +499,7 @@ void sealedTrialReportRequest(const char* trigger, uint32_t frame) {
 }
 
 void sealedTrialFrame(uint32_t frame) {
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     g_frameStamp.fetch_add(1, std::memory_order_relaxed);
     const int phase = g_repPhase.load(std::memory_order_acquire);
     if (phase == kRepArmed) {
@@ -522,9 +534,8 @@ bool sealedTrialSkipsSunPair() noexcept { return g_on.load(std::memory_order_acq
 
 void sealedTrialNoteSunSkip() noexcept { g_sunSkipped.fetch_add(1, std::memory_order_relaxed); }
 
-void sealedTrialNoteBuilderCalls(uint64_t afterCull, uint64_t unvisited) noexcept {
+void sealedTrialNoteBuilderCalls(uint64_t afterCull) noexcept {
     if (afterCull) g_builderAfterCull.fetch_add(afterCull, std::memory_order_relaxed);
-    if (unvisited) g_builderUnvisited.fetch_add(unvisited, std::memory_order_relaxed);
 }
 
 // The record's view mask and admitted flag through the guarded reads and writes, for the fault-safe cull (sealed_trial_core.h).
@@ -541,8 +552,9 @@ struct RecordFields {
 bool keepByRule(uintptr_t record, const float centre[3], float radius, const float cam[3], float R) noexcept {
     const sealed::Mode m = g_mode.load(std::memory_order_relaxed);
     if (m == sealed::Mode::kSphere) return sealed::keepRecord(centre, radius, cam, R);
-    const char* name = cachedName(record);
-    return sealed::keepRecordNamed(name != nullptr, name, centre, radius, cam, R);
+    char name[64];
+    const bool hasName = cachedName(record, name, sizeof(name));
+    return sealed::keepRecordNamed(hasName, name, centre, radius, cam, R);
 }
 
 }  // namespace
@@ -550,6 +562,9 @@ bool keepByRule(uintptr_t record, const float centre[3], float radius, const flo
 // The rule for one record the store has written. Every read and write is validated; a failure leaves the record as the store wrote it and
 // counts a fault. The view the sphere is centred on is resolved once per frame (the first record of the frame).
 void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
+    // The lock covers the view, the render context, the observed list and the name cache. It is never held across a call into the game (this
+    // observer runs after the store's forward has returned), and it is recursive for the store's own recursion.
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     LARGE_INTEGER t0{}, t1{};
     QueryPerformanceCounter(&t0);
     uintptr_t ctx = 0;
@@ -599,7 +614,6 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
         switch (sealed::cullRecordFaultSafe(fields, &failed, &value)) {
             case sealed::Cull::kCulled:
                 g_culled.fetch_add(1, std::memory_order_relaxed);
-                builderProbeNoteCulled(record);   // the builder probe's frame counts (builder_probe.cpp)
                 break;
             case sealed::Cull::kUntouched:
             case sealed::Cull::kRestored:

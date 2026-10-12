@@ -76,10 +76,9 @@ struct Window {
     uint64_t evalNs = 0;
     uint64_t faults = 0;          // reads or writes that failed (the record is left as it was)
     uint64_t torn = 0;            // a cull whose put-back failed too: the record may be left half culled (see cullRecordFaultSafe)
-    // TEMPORARY (builder probe, builder_probe.cpp): builder calls in the window whose record the trial culled in its frame, and
-    // builder calls whose record the admission store did not visit in that frame (the H5 signature). Both should be 0 when the cull holds.
+    // TEMPORARY (builder probe, builder_probe.cpp, Built v8.1): builder calls in the window whose record was cleared at the builder's entry
+    // (rec+0x234 reads 0). Should be 0 when the cull holds. The visit count (H5) is in the F9 frame's capture, not in this line.
     uint64_t builderAfterCull = 0;
-    uint64_t builderUnvisited = 0;
 };
 
 // The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named adds the name rule (see keepRecordNamed).
@@ -175,19 +174,19 @@ inline int formatModeLine(char* out, size_t cap, Mode m, uint32_t frame, const c
 }
 
 // "sealed trial: window 5 s culled=.. kept=.. kept_unjudged=.. sun_pairs_skipped=.. eval_ms=.. faults=.. torn=.. radius_m=.. builder_after_cull=..
-// builder_unvisited=.. mode=.. view source = ..". The radius is the one the window ran at (a step closes the window of the old radius first).
+// mode=.. view source = ..". The radius is the one the window ran at (a step closes the window of the old radius first).
 // The view the rule's sphere was centred on is named at the end: "view source = explorer cam" (or eye rows, vscreen, origin).
 inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, const char* viewSource, Mode mode = Mode::kSphere) noexcept {
     return std::snprintf(out, cap,
                          "sealed trial: window %llu s culled=%llu kept=%llu kept_unjudged=%llu sun_pairs_skipped=%llu "
-                         "eval_ms=%.3f faults=%llu torn=%llu radius_m=%.1f builder_after_cull=%llu builder_unvisited=%llu mode=%s "
+                         "eval_ms=%.3f faults=%llu torn=%llu radius_m=%.1f builder_after_cull=%llu mode=%s "
                          "view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
                          static_cast<unsigned long long>(w.kept), static_cast<unsigned long long>(w.keptUnknown),
                          static_cast<unsigned long long>(w.sunSkipped), static_cast<double>(w.evalNs) / 1.0e6,
                          static_cast<unsigned long long>(w.faults), static_cast<unsigned long long>(w.torn),
-                         static_cast<double>(radiusM), static_cast<unsigned long long>(w.builderAfterCull),
-                         static_cast<unsigned long long>(w.builderUnvisited), modeName(mode), viewSource);
+                         static_cast<double>(radiusM), static_cast<unsigned long long>(w.builderAfterCull), modeName(mode),
+                         viewSource);
 }
 
 // "sealed trial: on at frame F (radius R m; camera (x,y,z) or unknown; the sun pair is skipped; records outside the sphere

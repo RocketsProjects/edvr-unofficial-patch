@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -57,10 +58,13 @@ std::atomic<bool> g_rayOk{false};
 float g_eye[3] = {};
 float g_fwd[3] = {};
 float g_nearM = 0.0f, g_farM = 0.0f;
-const char* g_viewName = "";          // the view the aim came from: explorer cam | eye rows | origin | frustum fallback
+std::atomic<const char*> g_viewName{""};   // the view the aim came from: explorer cam | eye rows | origin | frustum fallback (Built v8.1: atomic, written by the store path)
 const char* g_noAimReason = "";       // why there is no forward: the resolver's reason, and the frustum's
 char g_noAimBuf[256] = {};            // the text g_noAimReason points at when it is built here
 uintptr_t g_collectBucket = 0;        // the collection's first bucket: the aim is tried again at its draws (the rows exist after the eye treat)
+// Built v8.1 (the crash fix): guards g_collectBucket, the aim's tries and computeRay, which the store's observer (any thread that runs the store)
+// and the draw path (the render thread) both reach. Never held across a call into the game.
+std::mutex g_storeMutex;
 float g_originGapM = -1.0f;           // the rows' distance from the render context's view 0 origin (-1: unknown)
 
 struct Cand {
@@ -369,6 +373,7 @@ bool probeDraw(ID3D11DeviceContext* ctx, DrawEntry& e, LookReplayFn replay, void
 void lookProbeDrawImpl(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances, LookReplayFn replay,
                        void* arg) {
     // The eye has treated by the draws, so the rows of this frame may exist now: a last try at the aim while it is missing.
+    std::lock_guard<std::mutex> lock(g_storeMutex);
     if (!g_rayOk.load(std::memory_order_acquire) && g_collectBucket && g_aimTries.load(std::memory_order_relaxed) < kAimTries) {
         g_aimTries.fetch_add(1, std::memory_order_relaxed);
         g_rayOk.store(computeRay(g_collectBucket), std::memory_order_release);
@@ -460,7 +465,10 @@ void resetCollection() {
     g_drawOverflow.store(0, std::memory_order_relaxed);
     g_probeFails.store(0, std::memory_order_relaxed);
     g_aimTries.store(0, std::memory_order_relaxed);
-    g_collectBucket = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_storeMutex);
+        g_collectBucket = 0;
+    }
     g_rawN.store(0, std::memory_order_relaxed);
     g_rawOverflow.store(0, std::memory_order_relaxed);
     g_rayOk.store(false, std::memory_order_relaxed);
@@ -717,6 +725,9 @@ bool lookProbeWantsDraws() noexcept {
 
 void lookProbeAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
     if (g_phase.load(std::memory_order_acquire) != kCollecting || !record) return;
+    // Built v8.1: the store path's shared state (the collection's bucket, the aim) is written under the probe's lock. Nothing is called
+    // from the game under it: computeRay reads memory and the view only.
+    std::lock_guard<std::mutex> lock(g_storeMutex);
     g_recScanned.fetch_add(1, std::memory_order_relaxed);
     if (!g_collectBucket) g_collectBucket = bucket;
     // The frame's aim: the first store call that can read a pose fixes it; up to kAimTries calls try.

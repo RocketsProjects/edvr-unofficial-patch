@@ -7,9 +7,11 @@
 // closed when nothing wants it, so the relay goes straight to the builder.
 //
 // A press arms one frame: the next frame's builder calls are recorded (the record, its name, its view mask, admitted flag, sphere, distance,
-// the caller), and at the Present after that the frame is written to edvr_logs\builder_probe_<stamp>.csv (grouped by name, then the calls),
-// with a "builder probe:" summary line. Every frame while the sealed trial is on, the calls are classed for the trial's window line:
-// builder_after_cull= (the record the trial culled in that frame) and builder_unvisited= (the store did not visit it in that frame).
+// the caller, the thread), and at the Present after that the frame is written to edvr_logs\builder_probe_<stamp>.csv (grouped by name, then
+// the calls), with a "builder probe:" summary line and a thread line.
+// Built v8.1: with only the sealed trial on, the detours do no container work. A builder call whose record was cleared at entry (rec+0x234
+// reads 0) is counted in an atomic, and the tick passes it to the trial's window as builder_after_cull=. The F9 frame's containers are guarded
+// by the collector's lock (builder_probe_core.h).
 //
 // The builder takes six arguments and reads four plus the sixth; its return value is undefined (docs Built v8). Its callers ignore it.
 #include <cstdint>
@@ -20,14 +22,14 @@ namespace edvr {
 void builderProbeInstall(bool flatProfile);
 // A press of hotkey.builder_probe: arms one frame. Refused while one is armed or collecting.
 void builderProbeRequest(const char* trigger, uint32_t frame);
-// The render thread's frame tick: classes the frame's calls, writes a collected frame, starts an armed one, and sets the gates.
+// The render thread's frame tick: passes the window's count to the trial, writes a collected frame, starts an armed one, and sets the gates.
 void builderProbeFrame(uint32_t frame);
-// Whether the probe wants the admission store observed (armed, collecting, or the sealed trial on).
+// Whether the probe wants the builder detour (armed, collecting, or the sealed trial on).
 bool builderProbeWanted() noexcept;
-// The admission store calls these for each record it writes, while wanted (bucket = the collection, record = its record).
+// Whether a frame is being collected (the store's visits are recorded only then).
+bool builderProbeCollecting() noexcept;
+// The admission store calls this for each record it writes, while a frame is collected (bucket = the collection, record = its record).
 void builderProbeAfterStore(uintptr_t bucket, uintptr_t record) noexcept;
-// The sealed trial calls this when it culls a record, so the builder calls of that record can be classed.
-void builderProbeNoteCulled(uintptr_t record) noexcept;
 // Sets the builder gate from what wants it. The admission store's recompute calls this.
 void builderProbeRecompute() noexcept;
 

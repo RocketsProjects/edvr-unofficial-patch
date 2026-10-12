@@ -112,7 +112,7 @@ __declspec(noinline) uintptr_t __fastcall storeObserved(uintptr_t bucket, uintpt
     if (sealedTrialOn()) sealedTrialAfterStore(bucket, record);
     if (lookProbeCollecting()) lookProbeAfterStore(bucket, record);
     if (assetCensusCollecting()) assetCensusAfterStore(bucket, record);
-    if (builderProbeWanted()) builderProbeAfterStore(bucket, record);
+    if (builderProbeCollecting()) builderProbeAfterStore(bucket, record);   // the probe's visit set: only while a frame is collected
     return result;
 }
 

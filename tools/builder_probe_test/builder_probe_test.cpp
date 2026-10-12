@@ -5,9 +5,14 @@
 #include "../../src/d3d11/builder_probe_core.h"
 #include "../../src/d3d11/hatch_probe_core.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace bp = edvr::builder;
 namespace hp = edvr::hatch;
@@ -255,6 +260,96 @@ int main(int argc, char** argv) {
         hp::formatClearLine(clr, sizeof(clr), 5, 12, "hotkey.hatch_probe");
         check(std::string(clr) == "hatch probe: on, cleared 5 remembered objects (frame 12, trigger hotkey.hatch_probe)",
               "the toggle-on line says how many objects were cleared");
+    }
+
+    // --- Built v8.1: the shared collection. The record set and the thread set in one thread; then the collector under a stress: four writers
+    //     push calls and visits while a swapper takes the storage whole again and again. Every attempt must land in exactly one place: a taken
+    //     storage's contents, or its drops. The same core code the engine runs (Collector<std::mutex>), driven by threads.
+    {
+        bp::RecordSet set;
+        set.reset(3);
+        check(set.insert(0x10) == bp::RecordSet::Result::kAdded, "a new record is added");
+        check(set.insert(0x10) == bp::RecordSet::Result::kPresent, "a record already in the set is present, not added twice");
+        check(set.insert(0) == bp::RecordSet::Result::kPresent && set.size() == 1, "key 0 is ignored");
+        check(set.insert(0x20) == bp::RecordSet::Result::kAdded && set.insert(0x30) == bp::RecordSet::Result::kAdded,
+              "the set takes up to its reserve");
+        check(set.insert(0x40) == bp::RecordSet::Result::kFull && set.size() == 3, "past the reserve a record is refused, not stored");
+        check(set.contains(0x10) && set.contains(0x30) && !set.contains(0x40), "contains finds stored records and not refused ones");
+
+        bp::ThreadSet threads;
+        for (uint32_t t = 1; t <= 17; ++t) threads.note(t);
+        check(threads.count == bp::kThreadIds && threads.more, "a seventeenth thread sets more; the first sixteen are kept");
+        threads.note(3);
+        check(threads.count == bp::kThreadIds, "a repeated thread is not counted twice");
+
+        bp::Collector<std::mutex> col;
+        {
+            bp::Storage s;
+            s.reserve(4, 2);
+            (void)col.exchange(std::move(s));
+        }
+        for (int i = 0; i < 5; ++i) {
+            bp::Call c;
+            c.rec = 0x1000u + static_cast<uint64_t>(i);
+            col.addCall(std::move(c), 1);
+        }
+        for (uintptr_t r = 0x100; r < 0x104; ++r) col.noteStore(r, r == 0x100 ? 0x7000 : 0, 2);
+        bp::Storage taken = col.exchange(bp::Storage{});
+        check(taken.calls.size() == 4 && taken.callDrops == 1, "four calls fit the reserve; the fifth is a drop");
+        check(taken.seen.size() == 2 && taken.seenDrops == 2, "two visits fit the reserve; the other two are drops");
+        check(taken.ctx == 0x7000 && taken.storeThreads.count == 1 && taken.builderThreads.count == 1,
+              "the storage keeps the context and the thread count of each detour");
+        check(taken.seen.contains(0x100) && taken.seen.contains(0x101) && !taken.seen.contains(0x102),
+              "a taken storage's visits are the ones that fit");
+    }
+    {
+        constexpr int kWriters = 4;
+        constexpr int kPerWriter = 20000;
+        bp::Collector<std::mutex> col;
+        {
+            bp::Storage s;
+            s.reserve(1 << 10, 1 << 11);
+            (void)col.exchange(std::move(s));
+        }
+        std::atomic<bool> done{false};
+        std::atomic<uint64_t> takenCalls{0}, takenCallDrops{0}, takenSeen{0}, takenSeenDrops{0};
+        auto absorb = [&](bp::Storage& old) {
+            takenCalls += old.calls.size();
+            takenCallDrops += old.callDrops;
+            takenSeen += old.seen.size();
+            takenSeenDrops += old.seenDrops;
+        };
+        std::thread swapper([&] {
+            while (!done.load()) {
+                bp::Storage fresh;
+                fresh.reserve(1 << 10, 1 << 11);
+                bp::Storage old = col.exchange(std::move(fresh));
+                absorb(old);
+                std::this_thread::yield();
+            }
+        });
+        std::vector<std::thread> writers;
+        for (int w = 0; w < kWriters; ++w) {
+            writers.emplace_back([&col, w, kPerWriter] {
+                for (int i = 0; i < kPerWriter; ++i) {
+                    bp::Call c;
+                    c.rec = (static_cast<uint64_t>(w + 1) << 32) | static_cast<uint64_t>(i + 1);
+                    col.addCall(std::move(c), static_cast<uint32_t>(w + 1));
+                    col.noteStore(static_cast<uintptr_t>((static_cast<uint64_t>(w + 1) << 32) | static_cast<uint64_t>(i + 1)), 0,
+                                  static_cast<uint32_t>(w + 1));
+                }
+            });
+        }
+        for (std::thread& t : writers) t.join();
+        done = true;
+        swapper.join();
+        bp::Storage last = col.exchange(bp::Storage{});
+        absorb(last);
+        const uint64_t attempts = static_cast<uint64_t>(kWriters) * kPerWriter;
+        check(takenCalls.load() + takenCallDrops.load() == attempts,
+              "under the stress every builder call is in a taken storage or counted as a drop (no call lost, none twice)");
+        check(takenSeen.load() + takenSeenDrops.load() == attempts,
+              "under the stress every store visit is in a taken storage or counted as a drop (no visit lost, none twice)");
     }
 
     std::printf("builder_probe_test: %d checks, %d failures\n", g_checks, g_failures);

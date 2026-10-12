@@ -41,11 +41,11 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept;
 // TEMPORARY (named mode, hotkey.sealed_trial_mode): a press cycles the record rule (sphere, named) while the trial is on; each change is
 // logged, and the window of the old rule closes first. Off, the key only logs a refusal.
 void sealedTrialModeStep(const char* trigger, uint32_t frame);
-// TEMPORARY (builder probe, builder_probe.cpp): the builder calls of one frame, classed by the trial's cull and by the store's visit. Added
-// to the trial's window line (builder_after_cull=, builder_unvisited=) at the probe's frame tick, before sealedTrialFrame.
-void sealedTrialNoteBuilderCalls(uint64_t afterCull, uint64_t unvisited) noexcept;
+// TEMPORARY (builder probe, builder_probe.cpp, Built v8.1): the builder calls since the last tick whose record was cleared at the builder's entry.
+// Added to the trial's window line (builder_after_cull=) at the probe's frame tick, before sealedTrialFrame.
+void sealedTrialNoteBuilderCalls(uint64_t afterCull) noexcept;
 // TEMPORARY, shared by the trial, the builder probe and the kept report: a record's name (rec+0x18 -> node, node+0 -> text, the census's accept
-// rules), cached per node for the frame. False when no name can be read.
+// rules), cached per node for the frame. False when no name can be read. Takes the trial's lock, so it is safe from any thread.
 bool sealedTrialRecordName(uintptr_t record, std::string* out) noexcept;
 
 }  // namespace edvr

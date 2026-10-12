@@ -4,14 +4,16 @@
 // record name, and the text of the CSV rows and the "builder probe:" summary line. The rig tools\builder_probe_test compiles it alone.
 //
 // The builder 0x42B4420 is called from two sites (PROVEN, docs Dynamic actors D2): RVA 0x43204F3 (the traversal) and RVA 0x4321ADB (the
-// single-entry form). A call's return address is therefore 0x43204F8 and 0x4321AE0. At the builder's entry rcx = rec+0x290 and
-// r9 = rec+0x210, so the record base is r9 - 0x210 and rcx - 0x290 must equal it. Both are counted, agreement and disagreement.
+// single-entry form). A call's return address is therefore 0x43204F8 and 0x4321AE0. At the builder's entry r9 = rec+0x210, so the record base
+// is r9 - 0x210; rcx is the VALUE stored at rec+0x290 (corrected in Built v8, see argsAgree). Agreement and disagreement are both counted.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <map>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace edvr::builder {
@@ -190,5 +192,132 @@ inline int formatCallRow(char* out, size_t cap, const Call& c) noexcept {
                          static_cast<double>(c.sphereOk ? c.radius : -1.0f), static_cast<double>(c.dist), c.storeSeen ? 1 : 0,
                          c.agree ? 1 : 0, callerName(c.caller), c.retRva);
 }
+
+// ---------------------------------------------------------------------------
+// The shared collection (Built v8.1, the crash fix). The store and builder detours write it on the game's threads; the frame tick drains it on
+// the render thread. Every container is touched only inside the collector's lock, and the lock covers that one container operation: nothing
+// holds it across a call into the game (the store is recursive, and the builder's forward re-enters the store). Storage is reserved before
+// the lock is taken, so a write takes no allocation: a write past the reserve is counted as a drop.
+
+// A fixed-capacity open-addressing set of record addresses. reset() sets the storage (it allocates; call it before taking a lock); insert()
+// and contains() never allocate. Key 0 is ignored.
+class RecordSet {
+public:
+    enum class Result : uint8_t { kAdded, kPresent, kFull };
+
+    void reset(size_t records) {
+        size_t slots = 16;
+        while (slots < records * 2) slots <<= 1;
+        table_.assign(slots, 0);
+        limit_ = records;
+        used_ = 0;
+    }
+
+    Result insert(uintptr_t key) noexcept {
+        if (!key || table_.empty()) return Result::kPresent;
+        const size_t mask = table_.size() - 1;
+        size_t i = hashOf(key) & mask;
+        for (size_t probes = 0; probes < table_.size(); ++probes, i = (i + 1) & mask) {
+            if (table_[i] == key) return Result::kPresent;
+            if (table_[i] == 0) {
+                if (used_ >= limit_) return Result::kFull;
+                table_[i] = key;
+                ++used_;
+                return Result::kAdded;
+            }
+        }
+        return Result::kFull;
+    }
+
+    bool contains(uintptr_t key) const noexcept {
+        if (!key || table_.empty()) return false;
+        const size_t mask = table_.size() - 1;
+        size_t i = hashOf(key) & mask;
+        for (size_t probes = 0; probes < table_.size(); ++probes, i = (i + 1) & mask) {
+            if (table_[i] == key) return true;
+            if (table_[i] == 0) return false;
+        }
+        return false;
+    }
+
+    size_t size() const noexcept { return used_; }
+
+private:
+    static size_t hashOf(uintptr_t key) noexcept {
+        return static_cast<size_t>((static_cast<uint64_t>(key) * 0x9E3779B97F4A7C15ull) >> 17);
+    }
+    std::vector<uintptr_t> table_;
+    size_t limit_ = 0;
+    size_t used_ = 0;
+};
+
+// The distinct thread ids one detour saw in the frame: up to kThreadIds are kept; a thread past them sets `more`.
+constexpr size_t kThreadIds = 16;
+struct ThreadSet {
+    uint32_t ids[kThreadIds] = {};
+    uint32_t count = 0;
+    bool more = false;
+    void note(uint32_t tid) noexcept {
+        for (uint32_t i = 0; i < count; ++i)
+            if (ids[i] == tid) return;
+        if (count < kThreadIds) ids[count++] = tid;
+        else more = true;
+    }
+};
+
+// One collection's storage: the calls, the store's visits, the thread ids of each detour, the drops, and the render context the store read.
+struct Storage {
+    std::vector<Call> calls;
+    RecordSet seen;
+    ThreadSet storeThreads;
+    ThreadSet builderThreads;
+    uint64_t callDrops = 0;
+    uint64_t seenDrops = 0;
+    uintptr_t ctx = 0;
+
+    // Allocates the reserves (call before taking the lock).
+    void reserve(size_t callCap, size_t recordCap) {
+        calls.clear();
+        calls.reserve(callCap);
+        seen.reset(recordCap);
+        storeThreads = ThreadSet{};
+        builderThreads = ThreadSet{};
+        callDrops = 0;
+        seenDrops = 0;
+        ctx = 0;
+    }
+};
+
+// The lock is any type with lock() and unlock() (std::mutex in the engine; the rig drives the same code with threads).
+template <class Mutex>
+class Collector {
+public:
+    // Puts `next` in place of the current storage and returns the old storage whole. Both are moved, never copied; the lock covers the swap.
+    Storage exchange(Storage&& next) {
+        std::lock_guard<Mutex> lock(mutex_);
+        std::swap(storage_, next);
+        return std::move(next);
+    }
+
+    // A builder call. Pushed when the reserve has room; otherwise counted as a drop. The call's name and fields were read before this.
+    void addCall(Call&& c, uint32_t tid) {
+        std::lock_guard<Mutex> lock(mutex_);
+        storage_.builderThreads.note(tid);
+        if (storage_.calls.size() < storage_.calls.capacity()) storage_.calls.push_back(std::move(c));
+        else ++storage_.callDrops;
+    }
+
+    // The store visited a record in the frame (and read the render context from its bucket, when it could).
+    void noteStore(uintptr_t record, uintptr_t ctx, uint32_t tid) {
+        std::lock_guard<Mutex> lock(mutex_);
+        storage_.storeThreads.note(tid);
+        if (ctx) storage_.ctx = ctx;
+        if (storage_.seen.insert(record) == RecordSet::Result::kFull) ++storage_.seenDrops;
+    }
+
+private:
+    Mutex mutex_;
+    Storage storage_;
+};
 
 }  // namespace edvr::builder

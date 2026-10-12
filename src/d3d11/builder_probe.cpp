@@ -1,7 +1,11 @@
-// The builder probe's engine side (builder_probe.h; TEMPORARY). The pure half (the entry agreement, the call sites, the grouping, the CSV rows and
-// the summary) is in builder_probe_core.h. The detour is a CodeHook on the builder 0x42B4420 with its sixteen prologue bytes pinned, built the way
-// store_hook.cpp builds the store's detour. The observer takes the builder's six arguments: four in registers, then the fifth and sixth on the
-// stack (the caller's [rsp+0x20] and [rsp+0x28]), and forwards all six unchanged. The builder never reads the fifth argument (docs Built v8).
+// The builder probe's engine side (builder_probe.h; TEMPORARY). The pure half (the entry agreement, the call sites, the grouping, the CSV rows, the
+// summary, and the shared collection's containers and lock) is in builder_probe_core.h. The detour is a CodeHook on the builder 0x42B4420 with
+// its sixteen prologue bytes pinned, built the way store_hook.cpp builds the store's detour. The observer takes the builder's six arguments: four
+// in registers, then the fifth and sixth on the stack (the caller's [rsp+0x20] and [rsp+0x28]), and forwards all six unchanged.
+//
+// Built v8.1 (the crash fix): the detours do no container work unless a frame is being collected. With only the sealed trial on, a builder
+// call costs one flag read and one atomic add. During the collected frame, every container is written under the collector's lock, which is
+// never held across a call into the game (the store is recursive: its observer runs again inside the forward of the builder's observer).
 #include "builder_probe.h"
 
 #include <windows.h>
@@ -11,8 +15,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #include "../common/code_hook.h"
@@ -33,18 +37,20 @@ constexpr uint8_t kBuilderPin[16] = {0x4C, 0x8B, 0xDC, 0x55, 0x56, 0x41, 0x54, 0
                                      0x57, 0x49, 0x8D, 0xAB, 0x08, 0xFC, 0xFF, 0xFF};
 constexpr size_t kRelayBytes = 44, kOriginalLiteral = 36;
 constexpr size_t kSummaryBytes = 2048;
+constexpr size_t kCallReserve = 16384;      // builder calls a collected frame can hold (more are counted as drops)
+constexpr size_t kRecordReserve = 32768;    // distinct records the store visits a collected frame can hold (more are counted as drops)
 
 // The six-argument form of the builder (its fifth and sixth arguments are on the stack).
 using BuilderFn = uintptr_t(__fastcall*)(uintptr_t rcx, uintptr_t rdx, uintptr_t r8, uintptr_t r9, uintptr_t p5, uintptr_t p6);
 
 enum Phase : int { kIdle = 0, kArmed = 1, kCollecting = 2 };
-std::atomic<int> g_phase{kIdle};      // the press arms one frame; the tick starts its collection; the next tick writes it
-uint32_t g_collectFrame = 0;          // the frame collected (render thread)
-uintptr_t g_imageBase = 0;            // set at install; the caller's return address is classed by its RVA
-uintptr_t g_ctx = 0;                  // the render context read from the store's bucket (for the camera), render thread
-std::vector<bp::Call> g_calls;        // the frame's builder calls, in order (render thread writes; the observer appends)
-std::unordered_set<uintptr_t> g_seen;     // records the store visited in the frame (wanted frames only)
-std::unordered_set<uintptr_t> g_culled;   // records the sealed trial culled in the frame (wanted frames only)
+std::atomic<int> g_phase{kIdle};             // the press arms one frame; the tick starts its collection; the next tick writes it
+uint32_t g_collectFrame = 0;                 // the frame collected (render thread only)
+std::atomic<uintptr_t> g_imageBase{0};       // set at install; the caller's return address is classed by its RVA
+// Builder calls whose record's rec+0x234 flag read 0 at the builder's entry, since the last tick: calls after the trial cleared the record.
+// Counted in every mode (the trial-only mode does nothing else). The tick takes it into the trial's window.
+std::atomic<uint64_t> g_afterCull{0};
+bp::Collector<std::mutex> g_collector;       // the collected frame's storage; its own lock covers each container operation
 
 bool readMem(void* dst, uintptr_t src, size_t n) noexcept {
     if (!src) return false;
@@ -132,23 +138,35 @@ bool prepareRelay(void* trampoline, void* context) noexcept {
     return true;
 }
 
-// Records one builder call. The entry state is read here, while the builder has not yet run: the record's view mask, admitted flag and sphere
-// (the store wrote them), its name, and whether rcx agrees with r9. Only the collected frame reads the fields; a trial-only frame counts calls.
+// Counts a builder call after the trial cleared its record: rec+0x234 reads 0 at the entry (rec = r9 - 0x210, so the flag is at r9 + 0x24).
+// One read and one atomic add; nothing else is touched.
+void countAfterCull(uintptr_t r9) noexcept {
+    if (r9 < bp::kRecFromR9) return;
+    uint8_t flag = 1;
+    if (readVal(&flag, r9 + 0x24 /* rec+0x234 */) && flag == 0) g_afterCull.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Records one builder call for the collected frame. Its fields are read here, before the builder runs; the name is read outside the collector's
+// lock (the sealed trial's name cache has its own lock), and only the push itself is under the collector's lock.
 void noteCall(uintptr_t rcx, uintptr_t r9, void* ret) noexcept {
     bp::Call c;
     c.rec = bp::recordBase(static_cast<uint64_t>(r9));
     const uintptr_t r = reinterpret_cast<uintptr_t>(ret);
-    c.retRva = (g_imageBase && r >= g_imageBase) ? static_cast<uint32_t>(r - g_imageBase) : 0u;
+    const uintptr_t base = g_imageBase.load(std::memory_order_acquire);
+    c.retRva = (base && r >= base) ? static_cast<uint32_t>(r - base) : 0u;
     c.caller = bp::callerOf(c.retRva);
     uint64_t value290 = 0;
     const bool read290 = c.rec != 0 && readVal(&value290, c.rec + bp::kRecFromRcx);
     c.agree = bp::argsAgree(static_cast<uint64_t>(rcx), static_cast<uint64_t>(r9), read290, value290);
-    if (g_phase.load(std::memory_order_acquire) == kCollecting && c.rec != 0) {
+    if (c.rec != 0) {
         uint8_t admitted = 0;
         float centre[3] = {};
         float radius = 0.0f;
         readVal(&c.mask, c.rec + 0x208);             // a failed read leaves the zero default
-        if (readVal(&admitted, c.rec + 0x234)) c.admitted = admitted;
+        if (readVal(&admitted, c.rec + 0x234)) {
+            c.admitted = admitted;
+            if (admitted == 0) g_afterCull.fetch_add(1, std::memory_order_relaxed);
+        }
         const bool sphere = readMem(centre, c.rec + 0x240, sizeof(centre)) && readVal(&radius, c.rec + 0x280) &&
                             std::isfinite(radius) && std::isfinite(centre[0]) && std::isfinite(centre[1]) && std::isfinite(centre[2]);
         c.sphereOk = sphere;
@@ -162,16 +180,17 @@ void noteCall(uintptr_t rcx, uintptr_t r9, void* ret) noexcept {
         c.hasName = sealedTrialRecordName(c.rec, &name);
         if (c.hasName) c.name = name;
     }
-    g_calls.push_back(std::move(c));
+    g_collector.addCall(std::move(c), GetCurrentThreadId());
 }
 
-// The builder's detour. The gate is closed unless the probe wants the builder; then the relay comes here. The return value is the builder's
-// own (RAX is undefined, and the callers ignore it), passed back unchanged.
+// The builder's detour. The gate is closed unless the probe or the trial wants the builder. A collected frame records the call; a trial-only
+// frame counts the cleared records and nothing more. Nothing is held across forward(): the store re-enters itself inside it.
 __declspec(noinline) uintptr_t __fastcall builderObserved(uintptr_t rcx, uintptr_t rdx, uintptr_t r8, uintptr_t r9, uintptr_t p5,
                                                           uintptr_t p6) noexcept {
     const auto forward = reinterpret_cast<BuilderFn>(g_builder.forward.load(std::memory_order_acquire));
     if (!forward) return 0;
-    if (g_phase.load(std::memory_order_acquire) != kIdle || sealedTrialOn()) noteCall(rcx, r9, _ReturnAddress());
+    if (g_phase.load(std::memory_order_acquire) == kCollecting) noteCall(rcx, r9, _ReturnAddress());
+    else if (sealedTrialOn()) countAfterCull(r9);
     return forward(rcx, rdx, r8, r9, p5, p6);
 }
 
@@ -183,7 +202,7 @@ void installBuilderOnce() noexcept {
         g_builder.status.store("the module base is unknown", std::memory_order_release);
         return;
     }
-    g_imageBase = base;
+    g_imageBase.store(base, std::memory_order_release);
     uint8_t got[sizeof(kBuilderPin)] = {};
     bool readOk = false;
     __try {
@@ -223,20 +242,25 @@ float distanceTo(const float a[3], const float b[3]) noexcept {
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-// Writes the collected frame: the summary line, then edvr_logs\builder_probe_<stamp>.csv (one row per name, then the calls, capped).
-void writeFrame(uint32_t frame) {
+// Writes the collected frame, taken whole from the collector (no lock is held here): the summary, the names, the hook and thread lines, then
+// edvr_logs\builder_probe_<stamp>.csv (one row per name, then the calls, capped).
+void writeFrame(uint32_t frame, bp::Storage& st) {
     float cam[3] = {};
     bool camOk = false;
     const char* camSource = "unknown";
-    if (g_ctx) {
+    if (st.ctx) {
         view::Resolved v;
-        view::resolveView(g_ctx, &v);
+        view::resolveView(st.ctx, &v);
         camOk = view::sphereCentre(v, cam);
         camSource = view::sourceName(v.source);
     }
-    for (bp::Call& c : g_calls) c.dist = (camOk && c.sphereOk) ? distanceTo(c.centre, cam) : -1.0f;
+    for (size_t i = 0; i < st.calls.size(); ++i) {
+        bp::Call& c = st.calls[i];
+        c.storeSeen = st.seen.contains(c.rec);
+        c.dist = (camOk && c.sphereOk) ? distanceTo(c.centre, cam) : -1.0f;
+    }
 
-    const bp::Summary s = bp::summarise(g_calls);
+    const bp::Summary s = bp::summarise(st.calls);
     char line[kSummaryBytes];
     bp::formatSummary(line, sizeof(line), frame, s);
     Log::get().note("%s", line);
@@ -249,13 +273,19 @@ void writeFrame(uint32_t frame) {
     Log::get().note("builder probe: frame %u: builder hook %s; store hook %s; camera %s%s.", frame,
                     g_builder.status.load(std::memory_order_acquire), storeHookStatus(), camSource,
                     camOk ? "" : " (no camera: distances are -1)");
+    // Built v8.1: the threads that reached each detour this frame, and what the bounded storage dropped.
+    Log::get().note("builder probe: frame %u threads: store detour %u distinct%s, builder detour %u distinct%s; dropped: calls %llu "
+                    "(reserve %zu), store visits %llu (reserve %zu).",
+                    frame, st.storeThreads.count, st.storeThreads.more ? " and more" : "", st.builderThreads.count,
+                    st.builderThreads.more ? " and more" : "", static_cast<unsigned long long>(st.callDrops), kCallReserve,
+                    static_cast<unsigned long long>(st.seenDrops), kRecordReserve);
 
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
+    SYSTEMTIME sysTime{};
+    GetLocalTime(&sysTime);
     char stamp[24] = {};
-    std::snprintf(stamp, sizeof(stamp), "%04u%02u%02u_%02u%02u%02u", static_cast<unsigned>(st.wYear),
-                  static_cast<unsigned>(st.wMonth), static_cast<unsigned>(st.wDay), static_cast<unsigned>(st.wHour),
-                  static_cast<unsigned>(st.wMinute), static_cast<unsigned>(st.wSecond));
+    std::snprintf(stamp, sizeof(stamp), "%04u%02u%02u_%02u%02u%02u", static_cast<unsigned>(sysTime.wYear),
+                  static_cast<unsigned>(sysTime.wMonth), static_cast<unsigned>(sysTime.wDay), static_cast<unsigned>(sysTime.wHour),
+                  static_cast<unsigned>(sysTime.wMinute), static_cast<unsigned>(sysTime.wSecond));
     char csvName[64] = {};
     std::snprintf(csvName, sizeof(csvName), "builder_probe_%s.csv", stamp);
     std::wstring path = Config::get().logDir() + L"\\builder_probe_";
@@ -272,18 +302,18 @@ void writeFrame(uint32_t frame) {
                  static_cast<unsigned long long>(s.unseen), static_cast<unsigned long long>(s.agree),
                  static_cast<unsigned long long>(s.disagree), camSource);
     std::fprintf(f, "%s\n", bp::groupCsvHeader());
-    const auto groups = bp::groupByName(g_calls);
+    const auto groups = bp::groupByName(st.calls);
     char row[512];
     for (const auto& kv : groups)
         if (bp::formatGroupRow(row, sizeof(row), kv.second) >= 0) std::fprintf(f, "%s\n", row);
-    const size_t written = g_calls.size() < bp::kCallRowCap ? g_calls.size() : bp::kCallRowCap;
-    std::fprintf(f, "# calls: %zu of %zu written\n", written, g_calls.size());
+    const size_t written = st.calls.size() < bp::kCallRowCap ? st.calls.size() : bp::kCallRowCap;
+    std::fprintf(f, "# calls: %zu of %zu written\n", written, st.calls.size());
     std::fprintf(f, "%s\n", bp::callCsvHeader());
     for (size_t i = 0; i < written; ++i)
-        if (bp::formatCallRow(row, sizeof(row), g_calls[i]) >= 0) std::fprintf(f, "%s\n", row);
+        if (bp::formatCallRow(row, sizeof(row), st.calls[i]) >= 0) std::fprintf(f, "%s\n", row);
     std::fclose(f);
     Log::get().note("builder probe: frame %u written: csv=%s, %zu name groups, %zu of %zu calls in the csv.", frame, csvName,
-                    groups.size(), written, g_calls.size());
+                    groups.size(), written, st.calls.size());
 }
 
 }  // namespace
@@ -296,6 +326,10 @@ void builderProbeInstall(bool flatProfile) {
 
 bool builderProbeWanted() noexcept {
     return g_phase.load(std::memory_order_acquire) != kIdle || sealedTrialOn();
+}
+
+bool builderProbeCollecting() noexcept {
+    return g_phase.load(std::memory_order_acquire) == kCollecting;
 }
 
 void builderProbeRecompute() noexcept {
@@ -316,37 +350,27 @@ void builderProbeRequest(const char* trigger, uint32_t frame) {
 }
 
 void builderProbeAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
-    if (!record) return;
-    g_seen.insert(record);
+    if (g_phase.load(std::memory_order_acquire) != kCollecting || !record) return;
     uintptr_t ctx = 0;
-    if (bucket && readVal(&ctx, bucket) && ctx) g_ctx = ctx;
-}
-
-void builderProbeNoteCulled(uintptr_t record) noexcept {
-    if (record && builderProbeWanted()) g_culled.insert(record);
+    if (bucket) readVal(&ctx, bucket);
+    g_collector.noteStore(record, ctx, GetCurrentThreadId());
 }
 
 void builderProbeFrame(uint32_t frame) {
-    const bool trial = sealedTrialOn();
-    uint64_t afterCull = 0, unvisited = 0;
-    for (bp::Call& c : g_calls) {
-        c.storeSeen = g_seen.count(c.rec) != 0;
-        if (g_culled.count(c.rec)) ++afterCull;
-        if (!c.storeSeen) ++unvisited;
-    }
-    if (trial) sealedTrialNoteBuilderCalls(afterCull, unvisited);
+    // The trial's window: the builder calls after a cull since the last tick (counted in every mode; zero when the trial is off).
+    sealedTrialNoteBuilderCalls(g_afterCull.exchange(0, std::memory_order_relaxed));
     if (g_phase.load(std::memory_order_acquire) == kCollecting) {
-        writeFrame(g_collectFrame);
         g_phase.store(kIdle, std::memory_order_release);
+        // A detour that read the phase before this store may still add one call or visit; it lands in the empty storage the exchange leaves,
+        // which the next arm replaces. The taken storage is the frame's.
+        bp::Storage taken = g_collector.exchange(bp::Storage{});
+        writeFrame(g_collectFrame, taken);
     }
-    g_calls.clear();
-    g_seen.clear();
-    g_culled.clear();
     if (g_phase.load(std::memory_order_acquire) == kArmed) {
+        bp::Storage next;
+        next.reserve(kCallReserve, kRecordReserve);   // every allocation happens here, before the lock
+        (void)g_collector.exchange(std::move(next));  // the previous storage (empty after the write) is dropped
         g_collectFrame = frame + 1;
-        g_calls.reserve(8192);
-        g_seen.reserve(16384);
-        g_culled.reserve(4096);
         g_phase.store(kCollecting, std::memory_order_release);
         Log::get().note("builder probe: collecting frame %u.", g_collectFrame);
     }
