@@ -238,6 +238,9 @@ struct Window {
     uint64_t assocJob = 0;
     uint64_t assocNone = 0;
     uint64_t frames = 0;
+    // Built v13 (fix 1): the records kept by the own-ship exemption in the window, and the own ship's type prefix ("" when none).
+    uint64_t ownKept = 0;
+    const char* ownPrefix = "";
 };
 
 // The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named is the own-pad cell rule.
@@ -779,6 +782,63 @@ inline RigVerdict rigVerdict(bool bounded, const float c[3], float r, bool hasCe
     return RigVerdict::kOutside;
 }
 
+// Built v13 (fix 1): the own ship is never culled in sphere or named mode (only all culls it). Exempt: a record or rig whose sphere contains the
+// camera with a radius under kOwnShipRadiusM, or whose name starts with the own ship's type prefix (taken at engage).
+constexpr float kOwnShipRadiusM = 40.0f;
+
+// The own ship's type prefix from its name: everything up to and including the first underscore ("CobraMkV_01" -> "CobraMkV_"). Empty when the
+// name has no underscore.
+inline void ownPrefixOf(const char* name, char* out, size_t cap) noexcept {
+    out[0] = '\0';
+    if (!name || !cap) return;
+    const char* u = std::strchr(name, '_');
+    if (!u) return;
+    const size_t n = static_cast<size_t>(u - name) + 1;
+    if (n >= cap) return;
+    std::memcpy(out, name, n);
+    out[n] = '\0';
+}
+
+// Whether a record (or rig) is the own ship: the camera inside a small sphere, or the type prefix matches the name.
+inline bool ownShipExempt(bool containsCamera, float radius, const char* name, const char* prefix) noexcept {
+    if (containsCamera && radius < kOwnShipRadiusM) return true;
+    if (prefix && prefix[0] && name && std::strncmp(name, prefix, std::strlen(prefix)) == 0) return true;
+    return false;
+}
+
+// Built v13 (fix 3): the shaft's target is the instance of the given name class nearest the LINE through the pad's centre along the pad's up
+// axis e2 (perpendicular distance; ties by the distance along the axis). Only instances above the pad (along > 0) and within kCapsuleMaxM of it.
+// Writes the target's centre and name and its perpendicular and along distances. False when there is none.
+inline bool pickTargetOnLine(const ExplicitObs* obs, size_t n, const float pad[3], const float e2[3], int passClass, float q[3], char* name,
+                             size_t cap, float* perp, float* along) noexcept {
+    int best = -1;
+    float bestPerp = 0.0f, bestAlong = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        const bool match = passClass == 0 ? isBlastBase(obs[i].name) : isOwnHanger(obs[i].name);
+        if (!match) continue;
+        const float v[3] = {obs[i].centre[0] - pad[0], obs[i].centre[1] - pad[1], obs[i].centre[2] - pad[2]};
+        const float a = v[0] * e2[0] + v[1] * e2[1] + v[2] * e2[2];
+        if (!(a > 0.0f)) continue;
+        const float d = distance(obs[i].centre, pad);
+        if (d > kCapsuleMaxM) continue;
+        const float pd = std::sqrt(std::fmax(d * d - a * a, 0.0f));
+        if (best < 0 || pd < bestPerp || (pd == bestPerp && a < bestAlong)) {
+            best = static_cast<int>(i);
+            bestPerp = pd;
+            bestAlong = a;
+        }
+    }
+    if (best < 0) return false;
+    for (int k = 0; k < 3; ++k) q[k] = obs[best].centre[k];
+    std::snprintf(name, cap, "%s", obs[best].name);
+    *perp = bestPerp;
+    *along = bestAlong;
+    return true;
+}
+
+// Built v13 (fix 2): the pad is lowered when its height along its up axis is within tol of the lowest height seen this session.
+inline bool padLowered(float along, float lowest, float tol) noexcept { return along - lowest <= tol; }
+
 // Built v12.1: the precomputed verdict's code, one byte per rig (the frame tick writes it, the decision reads it): 2 outside, 1 mixed, 0 unknown or
 // a refresh (the decision decides the refresh from its own run count).
 inline uint8_t verdictCode(RigVerdict v) noexcept {
@@ -1014,7 +1074,7 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          "world_sphere_unreadable=%llu producer_mode=%s world_centre producer=%llu pose=%llu store=%llu raw=%llu none=%llu "
                          "cell_frozen=%s frozen_frames=%llu frozen_skipped=%llu "
                          "rigs_seen=%llu rigs_vetoed=%llu rigs_mixed=%llu rigs_unknown=%llu rigs_refresh=%llu early_ms=%.3f early_mode=%s "
-                         "assoc_sync=%llu assoc_job=%llu assoc_none=%llu frames=%llu early_ms_per_frame=%.4f "
+                         "own_ship_kept=%llu own_prefix=%s assoc_sync=%llu assoc_job=%llu assoc_none=%llu frames=%llu early_ms_per_frame=%.4f "
                          "rig_records_matched=%llu rig_records_unevaluated=%llu rig_emulate_faults=%llu "
                          "box=%s half_length_m=%.1f half_width_m=%.1f height_m=%.1f margin_m=%.1f view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
@@ -1038,7 +1098,8 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          static_cast<unsigned long long>(w.rigsSeen),
                          static_cast<unsigned long long>(w.rigsVetoed), static_cast<unsigned long long>(w.rigsMixed),
                          static_cast<unsigned long long>(w.rigsUnknown), static_cast<unsigned long long>(w.rigsRefresh), w.earlyMs,
-                         w.earlyMode, static_cast<unsigned long long>(w.assocSync), static_cast<unsigned long long>(w.assocJob),
+                         w.earlyMode, static_cast<unsigned long long>(w.ownKept), w.ownPrefix[0] ? w.ownPrefix : "none",
+                         static_cast<unsigned long long>(w.assocSync), static_cast<unsigned long long>(w.assocJob),
                          static_cast<unsigned long long>(w.assocNone), static_cast<unsigned long long>(w.frames),
                          w.frames ? w.earlyMs / static_cast<double>(w.frames) : 0.0, static_cast<unsigned long long>(w.rigRecMatched), static_cast<unsigned long long>(w.rigRecUnevaluated),
                          static_cast<unsigned long long>(w.rigEmuFaults), w.boxOn ? "on" : "off", static_cast<double>(w.boxHalf[0]),

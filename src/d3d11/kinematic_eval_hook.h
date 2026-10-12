@@ -164,5 +164,18 @@ uintptr_t kinematicEvalCurrentRig() noexcept;
 // "not build 332841 (PE timestamp/size)", "prologue mismatch at RVA 0x42B3FC0",
 // "builder frame/call-site mismatch at RVA 0x...", "CodeHook refused the patch").
 const char* kinematicEvalPartTestStatus() noexcept;
+// Built v13, path D (FUN_14434D470): a count-only pinned entry hook, no veto. Attach opens the gate and returns "hooked" or why it stood down;
+// Detach closes it; Take returns and clears this frame's counts. site[]: 0 = FUN_14434D320's call, 1 = FUN_14434D3E0's, 2 = FUN_14434D440's, 3 = other.
+struct PathDTally {
+    uint64_t calls = 0;
+    uint64_t readable = 0;
+    uint64_t unreadable = 0;
+    uint64_t site[4] = {};
+    uintptr_t lastRecord = 0;
+    uintptr_t lastReturn = 0;
+};
+const char* kinematicEvalPathDAttach() noexcept;
+void kinematicEvalPathDDetach() noexcept;
+PathDTally kinematicEvalPathDTake() noexcept;
 
 } // namespace edvr

@@ -47,6 +47,7 @@ std::atomic<bool> g_wanted{false};     // armed or collecting: drawlistWanted()
 uint32_t g_windowFrames = 0;           // completed frames of the window (under g_mutex)
 uint32_t g_frameNo = 0;                // the game frame of the open window frame (under g_mutex)
 const char* g_modeText = "off";        // the trial's rule at the open frame (under g_mutex)
+std::atomic<const char*> g_pathDHook{"not attached"};   // Built v13: path D's hook status (kinematicEvalPathDAttach)
 dl::KeySet g_keysA, g_keysB;           // the keys each path appended (under g_mutex)
 std::vector<NameRec> g_namesA, g_namesB;
 dl::FrameCounts g_counts;
@@ -175,12 +176,19 @@ void closeFrame() {
     c.rigRefresh = rig[4];
     c.rigMatched = rig[5];
     c.rigMs = static_cast<double>(rig[7]) / 1.0e6;
+    // Built v13: path D's count-only hook for this frame (kinematicEvalPathDTake clears it).
+    const PathDTally pd = kinematicEvalPathDTake();
+    c.pathDCalls = pd.calls;
+    c.pathDReadable = pd.readable;
+    c.pathDUnreadable = pd.unreadable;
+    for (size_t i = 0; i < 4; ++i) c.pathDSite[i] = pd.site[i];
+    c.pathDHook = g_pathDHook.load(std::memory_order_acquire);
 
     std::string names = "Top " + std::to_string(kTopNames) + " names. appended_A: " + namesOf(g_namesA, false, g_frameNo) +
                         "; appended_B: " + namesOf(g_namesB, false, g_frameNo) + "; carried (appended earlier in the window, not this frame): " +
                         namesOf(g_namesA, true, g_frameNo) + " | " + namesOf(g_namesB, true, g_frameNo) +
                         "; unattributed scene draws: no per-draw join (see the window's join line).";
-    char line[1600];
+    char line[2400];
     dl::formatFrameLine(line, sizeof(line), c, names.c_str());
     Log::get().note("%s", line);
 
@@ -286,6 +294,8 @@ void drawlistRequest(const char* trigger, uint32_t frame) {
 void drawlistFrame(uint32_t frame) {
     if (!g_wanted.load(std::memory_order_acquire)) return;
     bool recompute = false;
+    bool attachPathD = false;
+    bool detachPathD = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_phase == Phase::kCollecting) {
@@ -295,6 +305,7 @@ void drawlistFrame(uint32_t frame) {
                 g_phase = Phase::kIdle;
                 g_drawlistCollecting.store(false, std::memory_order_release);
                 g_wanted.store(false, std::memory_order_release);
+                detachPathD = true;
                 recompute = true;
             } else {
                 openFrame(frame);
@@ -304,9 +315,17 @@ void drawlistFrame(uint32_t frame) {
             resetWindow();
             openFrame(frame);
             g_drawlistCollecting.store(true, std::memory_order_release);
+            attachPathD = true;
             Log::get().note("drawlist probe: collecting %u consecutive frames from frame %u (mode %s).", dl::kFrames, frame, g_modeText);
         }
     }
+    // Built v13: path D's count-only hook attaches and detaches outside g_mutex (it patches game code).
+    if (attachPathD) {
+        const char* status = kinematicEvalPathDAttach();
+        g_pathDHook.store(status, std::memory_order_release);
+        Log::get().note("drawlist probe: path D (FUN_14434D470, count-only, no veto) hook: %s.", status);
+    }
+    if (detachPathD) kinematicEvalPathDDetach();
     if (recompute) storeHookRecompute();
 }
 

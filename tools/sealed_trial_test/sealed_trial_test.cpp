@@ -422,6 +422,44 @@ int main(int argc, char** argv) {
             check(se::verdictCode(se::RigVerdict::kOutside) == 2 && se::verdictCode(se::RigVerdict::kMixed) == 1 &&
                   se::verdictCode(se::RigVerdict::kUnknown) == 0 && se::verdictCode(se::RigVerdict::kRefresh) == 0,
                   "the verdict codes: outside 2, mixed 1, unknown and refresh 0");
+            // Built v13 (fix 1): the own-ship prefix and exemption.
+            char pfx[32] = {};
+            se::ownPrefixOf("CobraMkV_02", pfx, sizeof(pfx));
+            check(std::strcmp(pfx, "CobraMkV_") == 0, "the own ship's prefix is up to and including the first underscore");
+            se::ownPrefixOf("NoUnderscore", pfx, sizeof(pfx));
+            check(pfx[0] == '\0', "a name with no underscore has no prefix");
+            check(se::ownShipExempt(true, 30.0f, "AnyRecord", "") && !se::ownShipExempt(true, 60.0f, "AnyRecord", "") &&
+                  !se::ownShipExempt(false, 30.0f, "AnyRecord", ""), "a small sphere holding the camera is the own ship; a big one or none is not");
+            check(se::ownShipExempt(false, 500.0f, "CobraMkV_02", "CobraMkV_") && !se::ownShipExempt(false, 500.0f, "Cobra_02", "CobraMkV_"),
+                  "a record with the own ship's prefix is the own ship; another type is not");
+            // Built v13 (fix 3): the shaft target is the BlastShieldBase nearest the LINE through the pad along its up axis e2 (perpendicular distance,
+            // ties by along), above the pad only, within the reach. Deterministic: the same inputs give the same target.
+            {
+                se::ExplicitObs cand[3];
+                const float padP[3] = {0, 0, 0}, e2z[3] = {0, 0, 1};
+                cand[0].centre[0] = 50; cand[0].centre[1] = 0; cand[0].centre[2] = 60;     // perpendicular 50, along 60 (nearest to the pad)
+                std::snprintf(cand[0].name, sizeof(cand[0].name), "BlastShieldBase");
+                cand[1].centre[0] = 0; cand[1].centre[1] = 0; cand[1].centre[2] = 100;    // perpendicular 0, along 100 (on the line)
+                std::snprintf(cand[1].name, sizeof(cand[1].name), "BlastShieldBase");
+                cand[2].centre[0] = 0; cand[2].centre[1] = 0; cand[2].centre[2] = -20;    // below the pad: never a target
+                std::snprintf(cand[2].name, sizeof(cand[2].name), "BlastShieldBase");
+                float q[3] = {};
+                char qn[48] = {};
+                float perp = -1.0f, along = -1.0f;
+                check(se::pickTargetOnLine(cand, 3, padP, e2z, 0, q, qn, sizeof(qn), &perp, &along) && q[2] == 100.0f && perp == 0.0f &&
+                      along == 100.0f, "the BlastShieldBase on the pad's up line is the target, not the nearest to the pad");
+                check(se::pickTargetOnLine(cand, 3, padP, e2z, 0, q, qn, sizeof(qn), &perp, &along) && q[2] == 100.0f,
+                      "the same inputs give the same target (deterministic across engages)");
+                cand[1].centre[0] = 0; cand[1].centre[1] = 0; cand[1].centre[2] = 30;     // a tie on the line: the smaller along wins
+                check(se::pickTargetOnLine(cand, 3, padP, e2z, 0, q, qn, sizeof(qn), &perp, &along) && q[2] == 30.0f && along == 30.0f,
+                      "a tie on the line goes to the instance nearer along the axis");
+                cand[1].centre[2] = 100;
+                float qb[3] = {};
+                check(!se::pickTargetOnLine(cand + 2, 1, padP, e2z, 0, qb, qn, sizeof(qn), &perp, &along),
+                      "an instance below the pad is not a target");
+                check(se::padLowered(30.0f, 30.0f, 15.0f) && se::padLowered(40.0f, 30.0f, 15.0f) && !se::padLowered(46.0f, 30.0f, 15.0f),
+                      "the pad is lowered within 15 m of its lowest height, and not beyond");
+            }
             // The freeze: a fresh pick differs from the held cell when it is missing or its centre moved by more than 0.5 m.
             se::OwnCell held;
             held.has = true;

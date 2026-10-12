@@ -266,6 +266,7 @@ __declspec(noinline) void __fastcall poolCopyObserved(uintptr_t) noexcept;
 __declspec(noinline) void __fastcall poolMergeObserved(uintptr_t,uintptr_t) noexcept;
 __declspec(noinline) void __fastcall poolClearObserved(uintptr_t,uintptr_t) noexcept;
 __declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t,uintptr_t,uintptr_t) noexcept;
+__declspec(noinline) void __fastcall pathDObserved(uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
 #define EDVR_DIRECT_PROTO(i) \
     __declspec(noinline) uintptr_t __fastcall directBuild##i(uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
 EDVR_DIRECT_PROTO(0) EDVR_DIRECT_PROTO(1)
@@ -354,6 +355,29 @@ constexpr CodeBytes kPartFrame[]={
      "call FUN_1442B3FC0)"},
 };
 HookEntry g_partEntry{"cull-gate-part-test",kPartTestRva,reinterpret_cast<void*>(&partTestObserved),&partGate};
+
+// --- Path D: FUN_14434D470, a count-only pinned entry hook (Built v13) -----
+// No veto in this build. Its callers (decomp_434D320/3E0/440, and one unnamed
+// site at 0x1462B7FF4) reach it through FUN_14434D120's wrapper; the hook sees
+// every call that reaches the entry. Gate pathDGate is set by
+// kinematicEvalPathDAttach; zero means the relay is a pass-through.
+constexpr uintptr_t kPathDRva=0x434D470u;
+alignas(8) std::atomic<uintptr_t> pathDGate{0};
+static_assert(decltype(pathDGate)::is_always_lock_free,
+              "the path D gate is read by the relay as a plain qword");
+HookEntry g_pathDEntry{"path-d-434d470",kPathDRva,reinterpret_cast<void*>(&pathDObserved),&pathDGate};
+std::atomic<uintptr_t> g_pathDBase{0};
+std::atomic<uint64_t> g_pathDCalls{0};
+std::atomic<uint64_t> g_pathDReadable{0};
+std::atomic<uint64_t> g_pathDUnreadable{0};
+std::atomic<uintptr_t> g_pathDLastRecord{0};
+std::atomic<uintptr_t> g_pathDLastReturn{0};
+// Calls by return site: [0] 0x434D3C9 (the call at 0x434D3C4 in FUN_14434D320),
+// [1] 0x434D426 (0x434D421 in FUN_14434D3E0), [2] 0x434D465 (0x434D460 in
+// FUN_14434D440), [3] everything else (the unnamed caller at 0x1462B7FF4).
+std::atomic<uint64_t> g_pathDSite[4]{};
+std::atomic<const char*> g_pathDStatus{"not attached"};
+using PathDFn = void (__fastcall*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t);
 
 // Per-thread mask of the job brackets currently on the stack (1u<<jobId),
 // maintained by bracket() and read by evalObserved: attributes every eval
@@ -785,6 +809,42 @@ __declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t items,uintp
         part(items,out,view,t_builderRow,from==g_partReturn.load(std::memory_order_relaxed));
     }
     return result;
+}
+
+// --- Path D's observer (FUN_14434D470, void, five arguments) -----------------
+// Reached only through its own relay (pathDGate). The relay JUMPS here, so the
+// return address is the caller's and param_5 sits where the caller stored it:
+// the relay touches neither. The record (param_2) is read-only: the probe reads
+// +0x10..+0x40 for readability and writes nothing. Counts, then forwards.
+__declspec(noinline) bool pathDRecordReadable(uintptr_t rec) noexcept {
+    __try {
+        volatile uint64_t sink=0;
+        for(uintptr_t o=0x10;o<0x40;o+=8) {
+            uint64_t v=0;
+            std::memcpy(&v,reinterpret_cast<const void*>(rec+o),8);
+            sink=sink^v;
+        }
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+
+__declspec(noinline) void __fastcall pathDObserved(uintptr_t p1,uintptr_t rec,uintptr_t p3,
+                                                   uintptr_t p4,uintptr_t p5) noexcept {
+    const uintptr_t from=reinterpret_cast<uintptr_t>(_ReturnAddress());
+    g_pathDCalls.fetch_add(1,std::memory_order_relaxed);
+    g_pathDLastRecord.store(rec,std::memory_order_relaxed);
+    g_pathDLastReturn.store(from,std::memory_order_relaxed);
+    if(pathDRecordReadable(rec)) g_pathDReadable.fetch_add(1,std::memory_order_relaxed);
+    else g_pathDUnreadable.fetch_add(1,std::memory_order_relaxed);
+    const uintptr_t base=g_pathDBase.load(std::memory_order_relaxed);
+    size_t site=3;
+    if(from==base+0x434D3C9u) site=0;
+    else if(from==base+0x434D426u) site=1;
+    else if(from==base+0x434D465u) site=2;
+    g_pathDSite[site].fetch_add(1,std::memory_order_relaxed);
+    const auto forward=reinterpret_cast<PathDFn>(g_pathDEntry.forward.load(std::memory_order_acquire));
+    if(!forward)return; // stood down at install; the relay is unreachable then
+    forward(p1,rec,p3,p4,p5);
 }
 
 // --- Direct-producer brackets (bucket = param_2) -----------------------------
@@ -1432,6 +1492,62 @@ void kinematicEvalDirectVetoDetach() noexcept {
 
 const char* kinematicEvalPartTestStatus() noexcept {
     return g_partStatus.load(std::memory_order_acquire);
+}
+
+// Path D's patch: the five bytes at FUN_14434D470 are E9 to our relay. The
+// build identity is targetValid's (PE timestamp and size, eval prologue).
+namespace {
+bool pathDPatchIsOurs(uintptr_t base) noexcept {
+    if(!g_pathDEntry.relay)return false;
+    const intptr_t displacement=reinterpret_cast<intptr_t>(g_pathDEntry.relay)-intptr_t(base+kPathDRva+5);
+    uint8_t bytes[5]{};
+    __try {std::memcpy(bytes,reinterpret_cast<const void*>(base+kPathDRva),sizeof(bytes));}
+    __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+    int32_t actual=0;std::memcpy(&actual,bytes+1,4);
+    return bytes[0]==0xE9 && actual==displacement;
+}
+} // namespace
+
+// Installs path D's count-only hook and opens the gate. Returns the status
+// the frame line prints: "hooked", or why it stood down.
+const char* kinematicEvalPathDAttach() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(g_installMutex);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if(!base || !targetValid(base)) {
+            g_pathDStatus.store("identity_mismatch",std::memory_order_release);
+            return "identity_mismatch";
+        }
+        g_pathDBase.store(base,std::memory_order_release);
+        if(!g_pathDEntry.ready.load(std::memory_order_acquire) && !installOne(g_pathDEntry,base)) {
+            g_pathDStatus.store("CodeHook refused the patch (its path-d-434d470 line says why)",
+                                std::memory_order_release);
+            return "CodeHook refused the patch";
+        }
+        const bool ours=pathDPatchIsOurs(base);
+        pathDGate.store(ours?uintptr_t(1):uintptr_t(0),std::memory_order_release);
+        g_pathDStatus.store(ours?"hooked":"the patch did not verify after install",std::memory_order_release);
+        return g_pathDStatus.load(std::memory_order_acquire);
+    } catch(...) {
+        g_pathDStatus.store("install_failed",std::memory_order_release);
+        return "install_failed";
+    }
+}
+
+void kinematicEvalPathDDetach() noexcept {
+    pathDGate.store(0,std::memory_order_release);
+}
+
+// This frame's counts, read and cleared (the drawlist probe's per-frame take).
+PathDTally kinematicEvalPathDTake() noexcept {
+    PathDTally t;
+    t.calls=g_pathDCalls.exchange(0,std::memory_order_acq_rel);
+    t.readable=g_pathDReadable.exchange(0,std::memory_order_acq_rel);
+    t.unreadable=g_pathDUnreadable.exchange(0,std::memory_order_acq_rel);
+    for(size_t i=0;i<4;++i) t.site[i]=g_pathDSite[i].exchange(0,std::memory_order_acq_rel);
+    t.lastRecord=g_pathDLastRecord.load(std::memory_order_relaxed);
+    t.lastReturn=g_pathDLastReturn.load(std::memory_order_relaxed);
+    return t;
 }
 
 } // namespace edvr

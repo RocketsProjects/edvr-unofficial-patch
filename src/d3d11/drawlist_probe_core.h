@@ -129,6 +129,13 @@ struct FrameCounts {
     uint64_t rigRefresh = 0;
     uint64_t rigMatched = 0;
     double rigMs = 0.0;
+    // Built v13: path D (FUN_14434D470) calls this frame, readable/unreadable records, calls by return site (0 = D320, 1 = D3E0, 2 = D440, 3 = other),
+    // and the hook's status (kinematicEvalPathDAttach: "hooked" or why it stood down).
+    uint64_t pathDCalls = 0;
+    uint64_t pathDReadable = 0;
+    uint64_t pathDUnreadable = 0;
+    uint64_t pathDSite[4] = {};
+    const char* pathDHook = "not attached";
 };
 
 // The per-frame summary line. joinLine is the fixed statement about the draw join (joinStatement()).
@@ -142,7 +149,8 @@ inline int formatFrameLine(char* out, size_t cap, const FrameCounts& c, const ch
                          "(%s), producer B calls %llu appended %lld items, copy %llu calls %llu records, merge %llu, clear %llu; "
                          "substituted pool draws %llu; appended this frame A %zu, B %zu; carried candidates %zu; collections rebuilt %zu. "
                          "path C (FUN_14369C9C0, the producer-1 bracket): calls %llu, items %lld, faults %llu; path D (FUN_14434D120 via "
-                         "D470): not hooked in this build, not counted. Early rig veto this frame: seen %llu, vetoed %llu, mixed %llu, unknown %llu, "
+                         "D470): hook %s; calls %llu (readable %llu, unreadable %llu; from D320 %llu, D3E0 %llu, D440 %llu, other %llu). "
+                         "Early rig veto this frame: seen %llu, vetoed %llu, mixed %llu, unknown %llu, "
                          "refresh %llu, records matched %llu, decision ms %.3f.%s%s%s",
                          c.frame, c.window, kFrames, c.mode, engine, static_cast<unsigned long long>(c.builderCalls), bracket,
                          static_cast<unsigned long long>(c.emitCalls), static_cast<long long>(c.emitItems),
@@ -150,7 +158,13 @@ inline int formatFrameLine(char* out, size_t cap, const FrameCounts& c, const ch
                          static_cast<unsigned long long>(c.mergeCalls), static_cast<unsigned long long>(c.clearCalls),
                          static_cast<unsigned long long>(c.familyDraws), c.appendedA, c.appendedB, c.carried, c.rebuilt,
                          static_cast<unsigned long long>(c.cCalls), static_cast<long long>(c.cItems),
-                         static_cast<unsigned long long>(c.cFaults), static_cast<unsigned long long>(c.rigSeen),
+                         static_cast<unsigned long long>(c.cFaults),
+                         c.pathDHook ? c.pathDHook : "unknown",
+                         static_cast<unsigned long long>(c.pathDCalls), static_cast<unsigned long long>(c.pathDReadable),
+                         static_cast<unsigned long long>(c.pathDUnreadable), static_cast<unsigned long long>(c.pathDSite[0]),
+                         static_cast<unsigned long long>(c.pathDSite[1]), static_cast<unsigned long long>(c.pathDSite[2]),
+                         static_cast<unsigned long long>(c.pathDSite[3]),
+                         static_cast<unsigned long long>(c.rigSeen),
                          static_cast<unsigned long long>(c.rigVetoed), static_cast<unsigned long long>(c.rigMixed),
                          static_cast<unsigned long long>(c.rigUnknown), static_cast<unsigned long long>(c.rigRefresh),
                          static_cast<unsigned long long>(c.rigMatched), c.rigMs,

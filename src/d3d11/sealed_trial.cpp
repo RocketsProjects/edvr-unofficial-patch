@@ -102,6 +102,16 @@ bool g_heldValid = false;
 bool g_engagePending = false;
 uint32_t g_engageTries = 0;
 uint64_t g_frozenFrames = 0, g_frozenSkipped = 0;
+// Built v13 (fix 2): the own pad's height along its up axis e2 this frame, and the lowest seen this session (the freeze needs the pad lowered).
+constexpr float kLoweredToleranceM = 15.0f;
+float g_padAlong = 0.0f, g_padLowest = 0.0f;
+bool g_padAlongValid = false, g_padLowestSet = false;
+// Built v13 (fix 1): the own ship's type prefix, taken at engage from the record nearest the camera that contains it (a small sphere), and that
+// record's name as last seen (the candidate; kept across frames, the nearest to the camera in each frame that has one).
+char g_ownPrefix[32] = {};
+char g_ownCandidateName[48] = {};
+float g_ownCandidateDist = -1.0f;   // the candidate's distance from the camera, this frame (reset at each promote)
+uint64_t g_ownExempt = 0;           // records kept by the own-ship exemption this window
 char g_lastSize = 'S';
 
 // The class cache (lock-free): a slot per node, a word per slot (sealed_trial_core.h packs it). Written by any thread that runs the store.
@@ -192,6 +202,7 @@ void resetWindow() noexcept {
     g_rigWinStart = g_rigTally;   // Built v12: the window's rig counts start here
     g_trialFramesWinStart = g_trialFrames;
     g_frozenFrames = g_frozenSkipped = 0;
+    g_ownExempt = 0;
     g_centreDist.clear();
     if (g_centreDist.capacity() < kCentreDistCap) g_centreDist.reserve(kCentreDistCap);   // at a window's end, not on the store's hot path
 }
@@ -236,6 +247,8 @@ sealed::Window takeWindow() noexcept {
     w.assocJob = g_rigTally.assocJob - g_rigWinStart.assocJob;
     w.assocNone = g_rigTally.assocNone - g_rigWinStart.assocNone;
     w.frames = g_trialFrames - g_trialFramesWinStart;
+    w.ownKept = g_ownExempt;
+    w.ownPrefix = g_ownPrefix;
     w.earlyMode = sealed::producerModeName(g_early);
     w.cellFrozen = g_heldValid;
     w.frozenFrames = g_frozenFrames;
@@ -704,6 +717,39 @@ void logCapsuleChange(const sealed::OwnCell& c, uint32_t frame) {
                     static_cast<double>(dy * inv), static_cast<double>(dz * inv), static_cast<double>(c.radius));
 }
 
+// Built v13 (fix 1): at each named engage, the own ship's type prefix from the candidate record (the one nearest the camera that contains it), logged.
+void setOwnPrefixAtEngage(uint32_t frame) {
+    sealed::ownPrefixOf(g_ownCandidateName, g_ownPrefix, sizeof(g_ownPrefix));
+    if (g_ownPrefix[0] != '\0')
+        Log::get().note("own ship (frame %u): type prefix '%s' from the record %s (nearest the camera among those containing it). It is not culled in "
+                        "sphere or named mode; all mode still culls it.", frame, g_ownPrefix, g_ownCandidateName);
+    else
+        Log::get().note("own ship (frame %u): no candidate with an underscored name yet; the small-sphere exemption (radius under %.0f m, camera "
+                        "inside) alone applies.", frame, static_cast<double>(sealed::kOwnShipRadiusM));
+}
+
+// Built v13 (fix 3): the shaft pick's log, once per change of the target: the target, its perpendicular and along distances from the pad's up line,
+// and the nearest-to-the-pad BlastShieldBase's distance, so the two picks can be compared in the log.
+void logAxisPick(const sealed::OwnCell& c, const float e2[3], bool haveAxes, float perp, float along, uint32_t frame) {
+    static char lastTarget[48] = {};
+    static float lastPerp = -1.0f;
+    if (std::strcmp(lastTarget, c.capTarget) == 0 && std::fabs(lastPerp - perp) < 0.05f) return;
+    std::snprintf(lastTarget, sizeof(lastTarget), "%s", c.capTarget);
+    lastPerp = perp;
+    float nearQ[3] = {};
+    char nearN[48] = {};
+    float nearD = -1.0f;
+    if (sealed::pickCapsuleTarget(g_explicits, g_explicitCount, c.centre, nearQ, nearN, sizeof(nearN))) nearD = sealed::distance(nearQ, c.centre);
+    if (haveAxes)
+        Log::get().note("sealed axis (frame %u): target %s chosen on the pad's up line: %.1f m perpendicular, %.1f m along it; the nearest to the pad "
+                        "was %s at %.1f m. Axis = pad to target, pad e2 (%.3f, %.3f, %.3f).", frame, c.capTarget, static_cast<double>(perp),
+                        static_cast<double>(along), nearN, static_cast<double>(nearD), static_cast<double>(e2[0]), static_cast<double>(e2[1]),
+                        static_cast<double>(e2[2]));
+    else
+        Log::get().note("sealed axis (frame %u): target %s, nearest to the pad (no pose, so no up line): %.1f m. ", frame, c.capTarget,
+                        static_cast<double>(nearD));
+}
+
 // Built v12 (flight fix c): once per named engage, the held cell, its source, and the frozen pad (its record, its centre, its axes and extent).
 void logEngage(const sealed::OwnCell& c, uint32_t frame) {
     if (c.box) {
@@ -730,18 +776,45 @@ void logEngage(const sealed::OwnCell& c, uint32_t frame) {
 // at the frame's first record. The pads and explicit parts are the previous frame's; the camera is the previous frame's too.
 void promoteFrame(uint32_t stamp, uint32_t frame) {
     sealed::OwnCell next;
+    g_ownCandidateDist = -1.0f;   // Built v13: the own-ship candidate is re-chosen from this frame's records
     if (g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed) {
         if (g_frameCamValid) {
             const float radii[3] = {g_cellRadius[0], g_cellRadius[1], g_cellRadius[2]};
             sealed::pickOwnPad(g_pads, g_padCount, g_frameCam, radii, &next);
-            // Built v11: the capsule. The axis runs from the pad's centre to the nearest BlastShieldBase* (else the own Hanger*), on 20 m past it.
+            // Built v11: the capsule. The axis runs from the pad's centre to the target, on 20 m past it. Built v13 (fix 3): the target is the
+            // BlastShieldBase nearest the line through the pad's centre along its own up axis e2 (perpendicular distance, ties by the distance along
+            // the axis), else the same for the own hangar parts, else (no pose to give an up axis) the nearest to the pad.
             if (next.has) {
+                float e2[3] = {};
+                float axes[3][3] = {};
+                float ext[3] = {};
+                bool extOk = false;
+                uint8_t src = 4;
+                const bool haveAxes = poseOrientOf(next.pad, axes, ext, &extOk, &src);
+                g_padAlongValid = false;
+                if (haveAxes) {
+                    for (int k = 0; k < 3; ++k) e2[k] = axes[2][k];
+                    // The pad's height along its up axis, tracked for the lowered-pad check at engage (fix 2).
+                    g_padAlong = next.centre[0] * e2[0] + next.centre[1] * e2[1] + next.centre[2] * e2[2];
+                    g_padAlongValid = true;
+                    if (!g_padLowestSet || g_padAlong < g_padLowest) {
+                        g_padLowest = g_padAlong;
+                        g_padLowestSet = true;
+                    }
+                }
                 float q[3] = {};
                 char qn[48] = {};
-                if (sealed::pickCapsuleTarget(g_explicits, g_explicitCount, next.centre, q, qn, sizeof(qn)) &&
-                    sealed::buildCapsule(next.centre, q, sealed::kCapsuleExtendM, next.capA, next.capB, &next.capLen)) {
+                float perp = 0.0f, along = 0.0f;
+                bool picked = false;
+                if (haveAxes) {
+                    picked = sealed::pickTargetOnLine(g_explicits, g_explicitCount, next.centre, e2, 0, q, qn, sizeof(qn), &perp, &along) ||
+                             sealed::pickTargetOnLine(g_explicits, g_explicitCount, next.centre, e2, 1, q, qn, sizeof(qn), &perp, &along);
+                }
+                if (!picked) picked = sealed::pickCapsuleTarget(g_explicits, g_explicitCount, next.centre, q, qn, sizeof(qn));
+                if (picked && sealed::buildCapsule(next.centre, q, sealed::kCapsuleExtendM, next.capA, next.capB, &next.capLen)) {
                     next.capsule = true;
                     std::snprintf(next.capTarget, sizeof(next.capTarget), "%s", qn);
+                    logAxisPick(next, e2, haveAxes, perp, along, frame);   // Built v13: both distances, once per change
                     buildBoxFor(next, q);   // Built v11 (second addendum): the box when the pad's orientation and extent are readable
                 }
             }
@@ -759,10 +832,25 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
     } else if (g_engagePending) {
         ++g_engageTries;
         if (next.has && next.radius > 0.0f) {
-            g_heldCell = next;
-            g_heldValid = true;
-            g_engagePending = false;
-            logEngage(g_heldCell, frame);
+            // Built v13 (fix 2): the freeze is taken only from a LOWERED pad, within kLoweredToleranceM of its lowest height seen this session.
+            // Otherwise the sphere rule holds and the log says why; re-engaging later (the mode key, or the trial) tries again.
+            if (!g_padAlongValid) {
+                g_engagePending = false;
+                Log::get().note("sealed cell: NOT frozen at the named engage (frame %u): the own pad's height cannot be read (no pose). Named mode is the "
+                                "sphere rule until the next engage.", frame);
+            } else if (!sealed::padLowered(g_padAlong, g_padLowest, kLoweredToleranceM)) {
+                g_engagePending = false;
+                Log::get().note("sealed cell: NOT frozen at the named engage (frame %u): the own pad is %.1f m above its lowest height seen this session "
+                                "(%.1f m; tolerance %.0f m). Named mode is the sphere rule; re-engage when the pad is lowered.", frame,
+                                static_cast<double>(g_padAlong - g_padLowest), static_cast<double>(g_padLowest),
+                                static_cast<double>(kLoweredToleranceM));
+            } else {
+                setOwnPrefixAtEngage(frame);   // Built v13 (fix 1): the own ship's type prefix, taken at each engage
+                g_heldCell = next;
+                g_heldValid = true;
+                g_engagePending = false;
+                logEngage(g_heldCell, frame);
+            }
         } else if (g_engageTries >= kEngageTries) {
             g_engagePending = false;
             Log::get().note("sealed cell: no cell could be built at the named engage (%u promotes; last: %s). Named mode is the sphere rule until the "
@@ -1407,6 +1495,12 @@ bool producerDecide(uintptr_t rec) noexcept {
     } else {
         keep = sealed::keepRecord(centre, radius, g_frameCam, trialR);
     }
+    // Built v13 (fix 1): the own ship is never vetoed in sphere or named mode (all mode vetoes it).
+    if (!keep && mode != sealed::Mode::kAll) {
+        char nm[48] = {};
+        if (g_ownPrefix[0] != '\0') cachedName(rec, nm, sizeof(nm));
+        if (sealed::ownShipExempt(sealed::containsCamera(centre, radius, g_frameCam), radius, nm, g_ownPrefix)) keep = true;
+    }
     if (keep) {
         ++g_prodKept;
         return false;
@@ -1459,6 +1553,7 @@ struct RigSlot {
     float lastMn[3] = {}, lastMx[3] = {};
     uint32_t vetoedRun = 0;          // vetoes since the rig was last let through
     bool named = false;
+    char name[48] = {};              // the name of the rig's first record (for the own-ship prefix)
     uintptr_t coll = 0;              // the rig's collection (rig+0x348), as last read at a decision
     uint8_t verdict = 0;             // kVerdictUnknown / kVerdictMixed / kVerdictOutside, refreshed once per frame (refreshRigVerdicts)
 };
@@ -1584,10 +1679,11 @@ void rigNoteRecord(uintptr_t bucket, uintptr_t record, const float c[3], float r
     s->curValid = true;
     if (!s->named) {
         s->named = true;
+        char name[64] = {};
+        if (!cachedName(record, name, sizeof(name))) std::snprintf(name, sizeof(name), "(none)");
+        std::snprintf(s->name, sizeof(s->name), "%s", name);   // Built v13: the own-ship prefix test reads it
         if (g_rigNamesLogged < 8) {
             ++g_rigNamesLogged;
-            char name[64] = {};
-            if (!cachedName(record, name, sizeof(name))) std::snprintf(name, sizeof(name), "(none)");
             Log::get().note("early rig veto: rig 0x%llX first seen with record 0x%llX (%s) at frame stamp %u.",
                             static_cast<unsigned long long>(rig), static_cast<unsigned long long>(record), name, stamp);
         }
@@ -1678,7 +1774,12 @@ void refreshRigVerdicts() noexcept {
             r = std::sqrt(d2);
         }
         const sealed::RigVerdict v = sealed::rigVerdict(bounded, c, r, g_cellPrev.has, g_cellPrev, allMode, 0);
-        s.verdict = sealed::verdictCode(v);   // 2 outside, 1 mixed, 0 unknown (kVerdictOutside, kVerdictMixed, kVerdictUnknown)
+        // Built v13 (fix 1): the own ship's rig is not vetoed in sphere or named mode: its bound holds the camera with a small radius, or its first
+        // record's name has the own-ship prefix. (All mode vetoes it.)
+        bool ownRig = false;
+        if (!allMode && bounded && g_frameCamValid) ownRig = sealed::containsCamera(c, r, g_frameCam) && r < sealed::kOwnShipRadiusM;
+        if (!allMode && !ownRig && g_ownPrefix[0] != '\0') ownRig = sealed::ownShipExempt(false, 0.0f, s.name, g_ownPrefix);
+        s.verdict = ownRig ? kVerdictUnknown : sealed::verdictCode(v);   // 2 outside, 1 mixed, 0 unknown
     }
     QueryPerformanceCounter(&t1);
     g_rigTally.ns += static_cast<uint64_t>(nanoseconds(t0, t1));
@@ -1846,6 +1947,29 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
         } else {
             keep = sealed::keepRecord(centre, radius, cam, trialR);
             why = keep ? sealed::KeepWhy::kSphere : sealed::KeepWhy::kNone;
+        }
+        // Built v13 (fix 1): the own ship is never culled in sphere or named mode (all mode culls it). A small sphere holding the camera is the own
+        // ship's candidate (the nearest one per frame names it); the type prefix taken at engage keeps the records of that type.
+        {
+            const bool containsCam = sealed::containsCamera(centre, radius, cam);
+            if (containsCam && radius < sealed::kOwnShipRadiusM) {
+                const float dCam = sealed::distance(centre, cam);
+                if (g_ownCandidateDist < 0.0f || dCam < g_ownCandidateDist) {
+                    char cn[48] = {};
+                    if (cachedName(record, cn, sizeof(cn))) {
+                        std::snprintf(g_ownCandidateName, sizeof(g_ownCandidateName), "%s", cn);
+                        g_ownCandidateDist = dCam;
+                    }
+                }
+            }
+            if (!keep && g_mode.load(std::memory_order_relaxed) != sealed::Mode::kAll) {
+                char nm[48] = {};
+                if (g_ownPrefix[0] != '\0') cachedName(record, nm, sizeof(nm));
+                if (sealed::ownShipExempt(containsCam, radius, nm, g_ownPrefix)) {
+                    keep = true;
+                    ++g_ownExempt;
+                }
+            }
         }
         if (keep) {
             g_kept.fetch_add(1, std::memory_order_relaxed);
