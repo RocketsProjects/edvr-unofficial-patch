@@ -43,6 +43,21 @@ public:
     void reset(ID3D11DeviceContext* = nullptr) noexcept;
 };
 
+// The GPU pass profiler's own frequency scopes (gpu_pass_profile.cpp): one per captured frame, held in its slot from open until
+// its result is read and released. Open refuses while ANY scope is open (a census timer, the application-frame ring, or another
+// slot), so the profiler never borrows a scope it did not open and each frame's stamps lie inside exactly that frame's scope.
+constexpr unsigned kPassScopeSlots = 4;
+bool gpuTimingPassScopeOpen(ID3D11DeviceContext*, unsigned slot, uint64_t now) noexcept;
+bool gpuTimingPassScopeClose(ID3D11DeviceContext*, unsigned slot, uint64_t now) noexcept;
+enum class GpuPassScopeStatus { Pending, Ready, Failed };
+struct GpuPassScopeResult {
+    GpuPassScopeStatus status = GpuPassScopeStatus::Pending;
+    uint64_t frequency = 0;     // valid when Ready
+    const char* reason = "";    // said when Failed
+};
+GpuPassScopeResult gpuTimingPassScopePoll(ID3D11DeviceContext*, unsigned slot, uint64_t now) noexcept;
+void gpuTimingPassScopeRelease(ID3D11DeviceContext*, unsigned slot, uint64_t now) noexcept;
+
 enum class GpuTimerPoll { Pending, Ready, Invalid };
 
 // A reusable timestamp pair that borrows the domain's disjoint interval.

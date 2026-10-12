@@ -77,6 +77,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "flat_temporal.h"   // flat profile discovery at owned Present
 #include "flat_shader_capture.h"
 #include "perf_monitor.h"
+#include "gpu_pass_profile.h"   // TEMPORARY hotkey.gpu_pass_profile: the GPU pass profiler's request
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
 #include "cpu_profile.h"      // cpuProfileBeat / cpuProfileRequest / cpuProfileFrameTick: the render-thread CPU profile
 #include "occlusion_census.h" // occlusionCensusRequest / occlusionCensusFrameTick: the scene's occluded-draw census
@@ -271,6 +272,7 @@ struct State {
     // The draw census key (issue 69074 instrumentation). Unbound by default;
     // the census costs nothing until this is both bound and pressed.
     Hotkey censusKey;
+    Hotkey gpuPassKey;   // TEMPORARY (GPU pass profile, 2026-10-12): hotkey.gpu_pass_profile, default unbound
     // The eye dump key: both eyes as the headset receives them, to
     // edvr_logs\eyes as BMP (temporalPassArmEyeDump). Unbound by default.
     Hotkey eyesKey;
@@ -287,7 +289,7 @@ struct State {
     // that changes one re-resolves it and one that does not says nothing: the
     // settings menu's Hotkeys page writes them while the game runs.
     std::string toggleKeyText, dumpKeyText, censusKeyText, eyesKeyText, cpuProfileKeyText, sunSkipKeyText,
-                shadowGateKeyText;
+                shadowGateKeyText, gpuPassKeyText;
     // The state dump's key (TEMPORARY; state_dump_probe.h). Unbound by default.
     Hotkey stateDumpKey;
     std::string stateDumpKeyText;
@@ -1387,6 +1389,7 @@ void tickHotkeys() {
             perfMonitorNoteEvent(kEvCensus);
         }
     }
+    if (g_state->gpuPassKey.pressed()) gpuPassProfileRequest();
     // The eye dump key: the next treated frame's two eyes to disk.
     if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
     // The render-thread CPU profile (cpu_profile.h): a press asks for one capture, started at the next Present; the `on`
@@ -2145,6 +2148,12 @@ void configureDiagnosticHotkeys() {
          "hotkey: dump_draws is set but bound nothing (the line above says why), so the draw census "
          "cannot be armed this session.",
          " Costs nothing until pressed."},
+        // TEMPORARY (GPU pass profile, 2026-10-12): default unbound; a press measures the next four whole frames' GPU passes
+        // (gpu_pass_profile.h). Remove with the arc.
+        {&s.gpuPassKey, &s.gpuPassKeyText, Config::get().getString("hotkey.gpu_pass_profile", ""),
+         "hotkey.gpu_pass_profile", "GPU pass profile",
+         "hotkey: gpu_pass_profile is set but bound nothing, so the GPU pass profile cannot be armed this session.",
+         " Measures the next 4 whole frames to edvr_logs\\gpu_pass_profile_<stamp>.csv. Costs nothing until pressed."},
         // The eye dump key: both eyes as the headset receives them, to edvr_logs\eyes as BMP --
         // what the player sees, readable off the desk (asked for 2026-09-09, with a debug view
         // up). The census key's shape: empty is off, and a bind is said.
