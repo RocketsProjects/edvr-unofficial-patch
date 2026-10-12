@@ -371,8 +371,7 @@ int main(int argc, char** argv) {
             check(axS[0][0] == 1.0f && axS[1][1] == 1.0f && axS[2][2] == 1.0f && axS[1][0] == 0.0f, "the store-style identity pose has world axes");
             se::OwnCell box;
             const float padC[3] = {0, 0, 0}, tgt[3] = {0, 100, 0}, lenAx[3] = {1, 0, 0};
-            const float upY[3] = {0, 1, 0};
-            check(se::buildBox(padC, tgt, upY, lenAx, 66.0f, 27.5f, 5.0f, &box) && box.box, "a box builds along the shaft");
+            check(se::buildBox(padC, tgt, lenAx, 66.0f, 27.5f, 5.0f, &box) && box.box, "a box builds along the shaft");
             check(box.boxHalf[0] == 71.0f && box.boxHalf[1] == 32.5f && box.boxHalf[2] == 65.0f, "the half-extents are 71 (length), 32.5 (width), 65 (height)");
             check(box.boxCentre[1] == 55.0f && box.boxCentre[0] == 0.0f, "the box centre is 55 m up the shaft from the pad");
             const float in1[3] = {60, 55, 0}, out1[3] = {75, 55, 0}, bottomIn[3] = {0, -10, 0}, bottomOut[3] = {0, -11, 0}, topIn[3] = {0, 120, 0},
@@ -395,22 +394,34 @@ int main(int argc, char** argv) {
             // Built v12 (flight fix a): the box stands on the up axis, centred laterally on the pad. A target 40 m off the up axis leaves the
             // box where it was and records the 40 m lateral offset.
             se::OwnCell lat;
-            const float tgtLat[3] = {40, 100, 0};
-            check(se::buildBox(padC, tgtLat, upY, lenAx, 66.0f, 27.5f, 5.0f, &lat) && lat.boxCentre[0] == 0.0f && lat.boxCentre[1] == 55.0f &&
-                  std::fabs(lat.boxLateral - 40.0f) < 1e-4f, "a lateral target does not move the box off the pad; its offset is recorded");
-            // A target below the pad along the up axis: the up axis is flipped to point at it, so the box stands on the flipped axis.
+            // v12.1: the axis is pad -> target. A target 80 m up and 60 m across: the axis is (0.6, 0.8, 0), the box's centre is 55 m along it
+            // from the pad, the length axis is (0.8, -0.6, 0) (lenAx made orthogonal to the axis), and the half-height is 65 m.
+            const float tgtDiag[3] = {60, 80, 0};
+            check(se::buildBox(padC, tgtDiag, lenAx, 66.0f, 27.5f, 5.0f, &lat) && std::fabs(lat.boxW[0] - 0.6f) < 1e-5f &&
+                  std::fabs(lat.boxW[1] - 0.8f) < 1e-5f && std::fabs(lat.boxCentre[0] - 33.0f) < 1e-3f && std::fabs(lat.boxCentre[1] - 44.0f) < 1e-3f &&
+                  std::fabs(lat.boxU[0] - 0.8f) < 1e-5f && std::fabs(lat.boxU[1] + 0.6f) < 1e-5f && std::fabs(lat.boxHalf[2] - 65.0f) < 1e-3f,
+                  "the box runs along the pad-to-target axis, centred on the pad's line, its length axis orthogonal to that axis");
+            check(std::fabs(lat.boxU[0] * lat.boxW[0] + lat.boxU[1] * lat.boxW[1] + lat.boxU[2] * lat.boxW[2]) < 1e-5f,
+                  "the length axis is orthogonal to the box axis");
             se::OwnCell down;
             const float tgtDown[3] = {0, -100, 0};
-            check(se::buildBox(padC, tgtDown, upY, lenAx, 66.0f, 27.5f, 5.0f, &down) && down.boxCentre[1] == -55.0f && down.boxHalf[2] == 65.0f,
-                  "a target below the pad flips the up axis: the box stands below the pad");
-            // A tilted up axis (z) with the target along it: the box runs along z from -10 to 140 + 20.
+            check(se::buildBox(padC, tgtDown, lenAx, 66.0f, 27.5f, 5.0f, &down) && down.boxCentre[1] == -55.0f && down.boxHalf[2] == 65.0f,
+                  "a target below the pad: the box runs down the pad-to-target axis");
             se::OwnCell tz;
-            const float upZ[3] = {0, 0, 1}, tgtZ[3] = {0, 0, 140};
-            check(se::buildBox(padC, tgtZ, upZ, lenAx, 66.0f, 27.5f, 5.0f, &tz) && tz.boxCentre[2] == 75.0f && tz.boxHalf[2] == 85.0f,
-                  "the box stands on the pad's own up axis: centre 75 m up, half-height 85 m");
+            const float tgtZ[3] = {0, 0, 140};
+            check(se::buildBox(padC, tgtZ, lenAx, 66.0f, 27.5f, 5.0f, &tz) && tz.boxCentre[2] == 75.0f && tz.boxHalf[2] == 85.0f,
+                  "a target along z: centre 75 m out, half-height 85 m (from -10 to 140 + 20)");
             se::OwnCell flat;
-            const float upX[3] = {1, 0, 0};
-            check(!se::buildBox(padC, tgt, upX, lenAx, 66.0f, 27.5f, 5.0f, &flat), "a target not above the pad along its up axis builds no box");
+            const float tgtFlat[3] = {0, 0.5f, 0};
+            check(!se::buildBox(padC, tgtFlat, lenAx, 66.0f, 27.5f, 5.0f, &flat), "a target closer than 1 m builds no box");
+            const float axW[3] = {0, 0, 1}, padE2[3] = {0, 0, -1};
+            check(std::fabs(se::angleDeg(axW, padE2) - 180.0f) < 1e-3f && std::fabs(se::angleDeg(axW, lenAx) - 90.0f) < 1e-3f,
+                  "the angle between the box axis and the pad's e2 is 180 deg for opposite axes and 90 deg across");
+            check(std::fabs(se::kMarginDefaultM - 10.0f) < 1e-6f, "the margin default is 10 m (v12.1)");
+            // Built v12.1 (d): the precomputed verdict's code (one byte per rig, read by the decision): 2 outside, 1 mixed, 0 unknown or refresh.
+            check(se::verdictCode(se::RigVerdict::kOutside) == 2 && se::verdictCode(se::RigVerdict::kMixed) == 1 &&
+                  se::verdictCode(se::RigVerdict::kUnknown) == 0 && se::verdictCode(se::RigVerdict::kRefresh) == 0,
+                  "the verdict codes: outside 2, mixed 1, unknown and refresh 0");
             // The freeze: a fresh pick differs from the held cell when it is missing or its centre moved by more than 0.5 m.
             se::OwnCell held;
             held.has = true;

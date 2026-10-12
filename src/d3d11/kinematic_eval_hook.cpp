@@ -397,6 +397,9 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uint
 // [collection+0x2E0] (the pipe) is non-null, FUN_1442B5760(pipe), which is add rcx,0x78 and jmp 0x14434DD50 (pipe+0x31C = 0). Both callees are
 // Microsoft x64 with one argument in rcx: void(__fastcall*)(uintptr_t). Returns false, having written nothing, when the collection cannot be read;
 // any fault after the first write is counted and reported as a forward (the caller forwards).
+// Built v12.1: the rig whose evaluation forward is running on this thread (0 outside one). Set by rigEvalObserved around its forward.
+thread_local uintptr_t t_rigCurrent=0;
+
 using OffScreenCallFn = void (__fastcall*)(uintptr_t);
 bool rigOffScreenEmulate(uintptr_t rig) noexcept {
     const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -445,8 +448,14 @@ __declspec(noinline) uintptr_t __fastcall rigEvalObserved(uintptr_t rig,uintptr_
     if(const auto veto=rigVeto.load(std::memory_order_acquire)) {
         if(veto(rig,poseCtx) && rigOffScreenEmulate(rig)) return 0;
     }
+    // Built v12.1 (flight fix c): the rig whose forward is running on this thread. The synchronous path's store observer reads it, so a record
+    // stored inside this forward belongs to this rig. Restored after the forward (it may nest).
     const auto forward=reinterpret_cast<RigEvalFn>(g_rigEvalEntry.forward.load(std::memory_order_acquire));
-    return forward(rig,poseCtx);
+    const uintptr_t previousRig=t_rigCurrent;
+    t_rigCurrent=rig;
+    const uintptr_t out=forward(rig,poseCtx);
+    t_rigCurrent=previousRig;
+    return out;
 }
 
 uintptr_t __fastcall bracket(uint32_t job,uintptr_t a,uintptr_t b,
@@ -1130,6 +1139,11 @@ void ensurePartTest(uintptr_t base) noexcept {
 }
 
 } // namespace
+
+// Built v12.1: the rig whose evaluation forward is running on this thread (outside the anonymous namespace: the store observer calls it).
+uintptr_t kinematicEvalCurrentRig() noexcept {
+    return t_rigCurrent;
+}
 
 bool kinematicEvalHooksMatch(uintptr_t evalTarget) noexcept {
     const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));

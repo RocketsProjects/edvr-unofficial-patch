@@ -40,7 +40,9 @@ constexpr uintptr_t kRecName = 0x18;        // pointer: the record's node (node+
 
 constexpr size_t kObservedCap = 32768;       // records the observer keeps for the report in one frame
 constexpr uint32_t kReportNodeCap = 40000;   // records the report walks at most
-constexpr size_t kKeptNamedRows = 4000;      // Built v11: kept named records the report lists (nearest the capsule's axis first)
+constexpr size_t kKeptNamedRows = 4000;
+constexpr float kCulledNearAxisM = 60.0f;    // Built v12.1: the culled named records listed are within this of the box axis
+constexpr size_t kCulledNearRows = 2000;      // Built v11: kept named records the report lists (nearest the capsule's axis first)
 constexpr uint32_t kReportDepth = 6;         // child-list generations the report walks below an observed record
 constexpr uint32_t kReportChildCap = 4096;   // children read from one child list
 constexpr size_t kClassSlots = 4096;         // the class cache: one slot per node (lock-free, valid for one frame)
@@ -86,8 +88,10 @@ float g_margin = sealed::kMarginDefaultM;
 // (count, the default, or veto).
 struct RigTally {
     uint64_t seen = 0, vetoed = 0, mixed = 0, unknown = 0, refresh = 0, matched = 0, unevaluated = 0, ns = 0;
+    uint64_t assocSync = 0, assocJob = 0, assocNone = 0;   // Built v12.1: the store records by association path
 };
 RigTally g_rigTally, g_rigWinStart, g_rigTakeLast;
+uint64_t g_trialFrames = 0, g_trialFramesWinStart = 0;   // the frame ticks (the per-frame cost) and the window's start
 sealed::ProducerMode g_early = sealed::ProducerMode::kCount;
 // Built v12 (flight fix b): the named cell is FROZEN at the named engage (trial on in named mode, or the mode key to named). g_heldCell is the cell
 // held until the trial turns off or the mode changes. An engage that finds no cell within kEngageTries promotes stays the sphere rule (no radius-0
@@ -186,6 +190,7 @@ void resetWindow() noexcept {
     g_prodCalls = g_prodVetoed = g_prodKept = g_prodStyle = g_prodUnread = 0;
     for (auto& v : g_worldSrc) v = 0;
     g_rigWinStart = g_rigTally;   // Built v12: the window's rig counts start here
+    g_trialFramesWinStart = g_trialFrames;
     g_frozenFrames = g_frozenSkipped = 0;
     g_centreDist.clear();
     if (g_centreDist.capacity() < kCentreDistCap) g_centreDist.reserve(kCentreDistCap);   // at a window's end, not on the store's hot path
@@ -227,6 +232,10 @@ sealed::Window takeWindow() noexcept {
     w.rigRecMatched = g_rigTally.matched - g_rigWinStart.matched;
     w.rigRecUnevaluated = g_rigTally.unevaluated - g_rigWinStart.unevaluated;
     w.rigEmuFaults = kinematicEvalRigEmulateFaults();
+    w.assocSync = g_rigTally.assocSync - g_rigWinStart.assocSync;
+    w.assocJob = g_rigTally.assocJob - g_rigWinStart.assocJob;
+    w.assocNone = g_rigTally.assocNone - g_rigWinStart.assocNone;
+    w.frames = g_trialFrames - g_trialFramesWinStart;
     w.earlyMode = sealed::producerModeName(g_early);
     w.cellFrozen = g_heldValid;
     w.frozenFrames = g_frozenFrames;
@@ -611,18 +620,23 @@ void buildBoxFor(sealed::OwnCell& cell, const float target[3]) {
             const float* wiki = sealed::kPadWikiM[sealed::sizeIndex(cell.size)];
             const float halfLen = wiki[0] * 0.5f * (g_doubleLength ? 2.0f : 1.0f);
             const float halfWid = wiki[1] * 0.5f * (g_doubleLength ? 1.0f : 2.0f);
-            if (!sealed::buildBox(cell.centre, target, axes[ui], axes[li], halfLen, halfWid, g_margin, &cell)) {
+            if (!sealed::buildBox(cell.centre, target, axes[li], halfLen, halfWid, g_margin, &cell)) {
                 std::snprintf(why, sizeof(why), "the box could not be built");
             } else {
+                // v12.1: the axis is pad->target; the angle between it and the pad's own e2 is logged (the v12 flight's question).
+                const float angleToE2 = sealed::angleDeg(cell.boxW, axes[2]);
                 std::snprintf(cell.boxInfo, sizeof(cell.boxInfo),
-                              "pad axes: e0 (%.2f, %.2f, %.2f), e1 (%.2f, %.2f, %.2f), e2 (%.2f, %.2f, %.2f); length e%d, width e%d, up e%d (the box stands on it); BlastShieldBase %.1f m lateral off the up axis; "
+                              "box axis = pad to BlastShieldBase (%.3f, %.3f, %.3f), %.1f deg from the pad's e2 (%.3f, %.3f, %.3f); "
+                              "pad axes e0 (%.2f, %.2f, %.2f), e1 (%.2f, %.2f, %.2f), e2 (%.2f, %.2f, %.2f); length e%d (orthogonalised), width e%d; "
                               "builder extent (%.1f, %.1f, %.1f) m; wiki %.0f x %.0f m; doubled on the %s axis; source %s",
-                              static_cast<double>(axes[0][0]), static_cast<double>(axes[0][1]), static_cast<double>(axes[0][2]),
-                              static_cast<double>(axes[1][0]), static_cast<double>(axes[1][1]), static_cast<double>(axes[1][2]),
-                              static_cast<double>(axes[2][0]), static_cast<double>(axes[2][1]), static_cast<double>(axes[2][2]), li, wi, ui, static_cast<double>(cell.boxLateral),
-                              static_cast<double>(ext[0]), static_cast<double>(ext[1]), static_cast<double>(ext[2]),
-                              static_cast<double>(wiki[0]), static_cast<double>(wiki[1]), g_doubleLength ? "length" : "width",
-                              src == 1 ? "builder quaternion" : "store-style pose");
+                              static_cast<double>(cell.boxW[0]), static_cast<double>(cell.boxW[1]), static_cast<double>(cell.boxW[2]),
+                              static_cast<double>(angleToE2), static_cast<double>(axes[2][0]), static_cast<double>(axes[2][1]),
+                              static_cast<double>(axes[2][2]), static_cast<double>(axes[0][0]), static_cast<double>(axes[0][1]),
+                              static_cast<double>(axes[0][2]), static_cast<double>(axes[1][0]), static_cast<double>(axes[1][1]),
+                              static_cast<double>(axes[1][2]), static_cast<double>(axes[2][0]), static_cast<double>(axes[2][1]),
+                              static_cast<double>(axes[2][2]), li, wi, static_cast<double>(ext[0]), static_cast<double>(ext[1]),
+                              static_cast<double>(ext[2]), static_cast<double>(wiki[0]), static_cast<double>(wiki[1]),
+                              g_doubleLength ? "length" : "width", src == 1 ? "builder quaternion" : "store-style pose");
                 return;
             }
         }
@@ -694,12 +708,11 @@ void logCapsuleChange(const sealed::OwnCell& c, uint32_t frame) {
 void logEngage(const sealed::OwnCell& c, uint32_t frame) {
     if (c.box) {
         Log::get().note("sealed cell: HELD at the named engage (frame %u): source OWN BOX; pad record 0x%llX at (%.2f, %.2f, %.2f); box centre (%.2f, "
-                        "%.2f, %.2f); half-extents length %.1f, width %.1f, height %.1f m; BlastShieldBase %.1f m lateral off the pad's up axis. "
+                        "%.2f, %.2f); half-extents length %.1f, width %.1f, height %.1f m (the box axis is the pad to BlastShieldBase). "
                         "Frozen pad: %s. Held until the trial is off or the mode changes.", frame, static_cast<unsigned long long>(c.pad),
                         static_cast<double>(c.centre[0]), static_cast<double>(c.centre[1]), static_cast<double>(c.centre[2]),
                         static_cast<double>(c.boxCentre[0]), static_cast<double>(c.boxCentre[1]), static_cast<double>(c.boxCentre[2]),
-                        static_cast<double>(c.boxHalf[0]), static_cast<double>(c.boxHalf[1]), static_cast<double>(c.boxHalf[2]),
-                        static_cast<double>(c.boxLateral), c.boxInfo);
+                        static_cast<double>(c.boxHalf[0]), static_cast<double>(c.boxHalf[1]), static_cast<double>(c.boxHalf[2]), c.boxInfo);
     } else if (c.capsule) {
         Log::get().note("sealed cell: HELD at the named engage (frame %u): source CAPSULE (no box: %s); pad record 0x%llX at (%.2f, %.2f, %.2f); "
                         "capsule radius %.1f m to %s. Held until the trial is off or the mode changes.", frame, c.boxInfo,
@@ -1038,6 +1051,23 @@ void writeKeptReport() {
                 if (kept::formatRow(row, sizeof(row), "named", static_cast<uint32_t>(k + 1), entries[keptNamed[k]]) >= 0)
                     std::fprintf(f, "%s\n", row);
             std::fprintf(f, "# named kept rows: %zu written of %zu (cap %zu)\n", written, keptNamed.size(), kKeptNamedRows);
+            // Built v12.1 (flight fix b): the named records CULLED in named mode whose centre lies within 60 m of the axis (the segment from the pad
+            // to the target), nearest first, with names and box coordinates: the collar, named if it still goes. Capped.
+            std::vector<uint32_t> culledNear;
+            for (uint32_t i = 0; i < entries.size(); ++i) {
+                const kept::Entry& e = entries[i];
+                if (!e.kept && e.readable && e.axisDist >= 0.0f && e.axisDist <= kCulledNearAxisM) culledNear.push_back(i);
+            }
+            std::sort(culledNear.begin(), culledNear.end(), [&entries](uint32_t a, uint32_t b) {
+                if (entries[a].axisDist != entries[b].axisDist) return entries[a].axisDist < entries[b].axisDist;
+                return entries[a].address < entries[b].address;
+            });
+            const size_t culledWritten = culledNear.size() < kCulledNearRows ? culledNear.size() : kCulledNearRows;
+            for (size_t k = 0; k < culledWritten; ++k)
+                if (kept::formatRow(row, sizeof(row), "culled_near_axis", static_cast<uint32_t>(k + 1), entries[culledNear[k]]) >= 0)
+                    std::fprintf(f, "%s\n", row);
+            std::fprintf(f, "# culled near the axis (within %.0f m): %zu written of %zu (cap %zu)\n", static_cast<double>(kCulledNearAxisM),
+                         culledWritten, culledNear.size(), kCulledNearRows);
         }
         std::fclose(f);
     }
@@ -1303,9 +1333,13 @@ void sealedTrialReportRequest(const char* trigger, uint32_t frame) {
                     "after it.", g_repTrigger.c_str());
 }
 
+void refreshRigVerdicts() noexcept;   // Built v12.1: defined with the rig decision (below)
+
 void sealedTrialFrame(uint32_t frame) {
     std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     g_frameStamp.fetch_add(1, std::memory_order_relaxed);
+    ++g_trialFrames;
+    if (g_on.load(std::memory_order_acquire)) refreshRigVerdicts();   // Built v12.1: once per frame, the verdicts for the next frame's rig decisions
     const int phase = g_repPhase.load(std::memory_order_acquire);
     if (phase == kRepArmed) {
         if (!g_on.load(std::memory_order_acquire)) {
@@ -1425,8 +1459,50 @@ struct RigSlot {
     float lastMn[3] = {}, lastMx[3] = {};
     uint32_t vetoedRun = 0;          // vetoes since the rig was last let through
     bool named = false;
+    uintptr_t coll = 0;              // the rig's collection (rig+0x348), as last read at a decision
+    uint8_t verdict = 0;             // kVerdictUnknown / kVerdictMixed / kVerdictOutside, refreshed once per frame (refreshRigVerdicts)
 };
+constexpr uint8_t kVerdictUnknown = 0, kVerdictMixed = 1, kVerdictOutside = 2;
 RigSlot g_rigSlots[kRigSlots];
+
+// The collection table (Built v12.1): collection -> rig, for the job path's association. Open addressing, written at a decision when a rig's
+// collection is read, read per bucket by the store's observer. Under the trial's lock.
+constexpr size_t kCollSlots = 1024;
+struct CollSlot {
+    uintptr_t coll = 0;
+    uintptr_t rig = 0;
+};
+CollSlot g_collSlots[kCollSlots];
+
+size_t collIndex(uintptr_t coll) noexcept {
+    return static_cast<size_t>((static_cast<uint64_t>(coll) >> 4) * 0x9E3779B97F4A7C15ull >> 54) & (kCollSlots - 1);
+}
+
+void collInsert(uintptr_t coll, uintptr_t rig) noexcept {
+    size_t i = collIndex(coll);
+    for (size_t n = 0; n < kCollSlots; ++n, i = (i + 1) & (kCollSlots - 1)) {
+        CollSlot& s = g_collSlots[i];
+        if (s.coll == coll || s.coll == 0) {
+            s.coll = coll;
+            s.rig = rig;
+            return;
+        }
+    }
+}
+
+uintptr_t collFind(uintptr_t coll) noexcept {
+    size_t i = collIndex(coll);
+    for (size_t n = 0; n < kCollSlots; ++n, i = (i + 1) & (kCollSlots - 1)) {
+        const CollSlot& s = g_collSlots[i];
+        if (s.coll == coll) return s.rig;
+        if (s.coll == 0) return 0;
+    }
+    return 0;
+}
+
+// The job path's one-entry cache per frame: the last store bucket and the rig it resolved to (a bucket's records come in a run).
+uintptr_t g_rigBucketCache = 0, g_rigBucketRig = 0;
+uint32_t g_rigBucketStamp = 0;
 size_t g_rigSlotsUsed = 0;
 uint64_t g_rigNamesLogged = 0;
 
@@ -1451,13 +1527,37 @@ RigSlot* rigFind(uintptr_t rig, bool insert) noexcept {
 
 // The store's observer, for each record with a world sphere: the record's rig gets the record's box (this frame) and, the first time, the record's
 // name is logged (eight names a session at most, so the identity can be checked by eye).
-void rigNoteRecord(uintptr_t record, const float c[3], float r) noexcept {
-    uintptr_t rig = 0;
-    if (!readVal(&rig, record + 0x2B8) || !rig) return;
+void rigNoteRecord(uintptr_t bucket, uintptr_t record, const float c[3], float r) noexcept {
     if (!(r > 0.0f) || !std::isfinite(r)) return;
+    const uint32_t stamp = g_frameStamp.load(std::memory_order_relaxed);
+    // The association (Built v12.1, flight fix c; the record's +0x2B8 is NOT used: the v12 flight showed it is not the evaluated object). Synchronous
+    // path: the rig evaluation's forward is on this thread's stack, so the record belongs to that rig. Job path: the store's bucket is the batch
+    // entry copied from the Submit's entry (decomp_431AFE0 lines 106 to 117: [0] ctx, [2] = collection+0x300, [5] record array), so the rig is the
+    // one whose collection is bucket[2] - 0x300. One cache entry per bucket per frame; the lookup is per bucket, not per record.
+    uintptr_t rig = kinematicEvalCurrentRig();
+    if (rig) {
+        ++g_rigTally.assocSync;
+    } else {
+        if (g_rigBucketStamp != stamp) {
+            g_rigBucketStamp = stamp;
+            g_rigBucketCache = 0;
+            g_rigBucketRig = 0;
+        }
+        if (bucket && bucket == g_rigBucketCache) {
+            rig = g_rigBucketRig;
+        } else {
+            uintptr_t owner = 0;
+            rig = 0;
+            if (bucket && readVal(&owner, bucket + 0x10) && owner > 0x300) rig = collFind(owner - 0x300);
+            g_rigBucketCache = bucket;
+            g_rigBucketRig = rig;
+        }
+        if (rig) ++g_rigTally.assocJob;
+        else ++g_rigTally.assocNone;
+    }
+    if (!rig) return;
     RigSlot* s = rigFind(rig, true);
     if (!s) return;
-    const uint32_t stamp = g_frameStamp.load(std::memory_order_relaxed);
     if (s->evalStamp == stamp) ++g_rigTally.matched;
     else ++g_rigTally.unevaluated;
     if (s->curStamp != stamp) {
@@ -1508,60 +1608,80 @@ bool sealedTrialRigVeto(uintptr_t rig, uintptr_t ctx) noexcept {
     std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     const uint32_t stamp = g_frameStamp.load(std::memory_order_relaxed);
     RigSlot* s = rigFind(rig, true);
+    ++g_rigTally.seen;
     if (!s) {
         ++g_rigTally.unknown;
-        ++g_rigTally.seen;
         return false;
     }
     s->evalStamp = stamp;
-    const float* mn = nullptr;
-    const float* mx = nullptr;
-    if (s->curStamp == stamp) {
-        if (s->lastValid) {
-            mn = s->lastMn;
-            mx = s->lastMx;
-        }
-    } else if (s->curValid) {
-        mn = s->curMn;
-        mx = s->curMx;
+    // The rig's collection (rig+0x348, read with SEH): recorded so the store's job path can associate its batch entries with this rig.
+    uintptr_t coll = 0;
+    if (readVal(&coll, rig + 0x348) && coll && coll != s->coll) {
+        s->coll = coll;
+        collInsert(coll, rig);
     }
-    const bool bounded = mn != nullptr;
-    float c[3] = {0.0f, 0.0f, 0.0f};
-    float r = 0.0f;
-    if (bounded) {
-        float d2 = 0.0f;
-        for (int k = 0; k < 3; ++k) {
-            c[k] = 0.5f * (mn[k] + mx[k]);
-            const float h = 0.5f * (mx[k] - mn[k]);
-            d2 += h * h;
-        }
-        r = std::sqrt(d2);
-    }
-    const sealed::RigVerdict v = sealed::rigVerdict(bounded, c, r, g_cellPrev.has, g_cellPrev, mode == sealed::Mode::kAll, s->vetoedRun);
-    ++g_rigTally.seen;
+    // One lookup: the verdict was computed once this frame (refreshRigVerdicts, on the frame tick). No record is scanned here.
     bool veto = false;
-    switch (v) {
-        case sealed::RigVerdict::kUnknown:
-            ++g_rigTally.unknown;
-            s->vetoedRun = 0;
+    switch (s->verdict) {
+        case kVerdictOutside:
+            if (s->vetoedRun >= sealed::kRigRefreshN) {
+                ++g_rigTally.refresh;
+                s->vetoedRun = 0;
+            } else {
+                ++g_rigTally.vetoed;
+                ++s->vetoedRun;
+                veto = g_early == sealed::ProducerMode::kVeto;
+            }
             break;
-        case sealed::RigVerdict::kMixed:
+        case kVerdictMixed:
             ++g_rigTally.mixed;
             s->vetoedRun = 0;
             break;
-        case sealed::RigVerdict::kRefresh:
-            ++g_rigTally.refresh;
+        default:
+            ++g_rigTally.unknown;
             s->vetoedRun = 0;
-            break;
-        case sealed::RigVerdict::kOutside:
-            ++g_rigTally.vetoed;
-            ++s->vetoedRun;
-            veto = g_early == sealed::ProducerMode::kVeto;
             break;
     }
     QueryPerformanceCounter(&t1);
     g_rigTally.ns += static_cast<uint64_t>(nanoseconds(t0, t1));
     return veto;
+}
+
+// Built v12.1 (flight fix d): the per-frame refresh of every rig's verdict, on the frame tick (render thread), from its bound: the box of its
+// records' spheres in the last frame that had records. The cell is the one in force. The decision then reads one slot per rig.
+void refreshRigVerdicts() noexcept {
+    LARGE_INTEGER t0{}, t1{};
+    QueryPerformanceCounter(&t0);
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
+    const bool allMode = g_mode.load(std::memory_order_relaxed) == sealed::Mode::kAll;
+    for (RigSlot& s : g_rigSlots) {
+        if (s.rig == 0) continue;
+        const float* mn = nullptr;
+        const float* mx = nullptr;
+        if (s.curValid) {
+            mn = s.curMn;
+            mx = s.curMx;
+        } else if (s.lastValid) {
+            mn = s.lastMn;
+            mx = s.lastMx;
+        }
+        const bool bounded = mn != nullptr;
+        float c[3] = {0.0f, 0.0f, 0.0f};
+        float r = 0.0f;
+        if (bounded) {
+            float d2 = 0.0f;
+            for (int k = 0; k < 3; ++k) {
+                c[k] = 0.5f * (mn[k] + mx[k]);
+                const float h = 0.5f * (mx[k] - mn[k]);
+                d2 += h * h;
+            }
+            r = std::sqrt(d2);
+        }
+        const sealed::RigVerdict v = sealed::rigVerdict(bounded, c, r, g_cellPrev.has, g_cellPrev, allMode, 0);
+        s.verdict = sealed::verdictCode(v);   // 2 outside, 1 mixed, 0 unknown (kVerdictOutside, kVerdictMixed, kVerdictUnknown)
+    }
+    QueryPerformanceCounter(&t1);
+    g_rigTally.ns += static_cast<uint64_t>(nanoseconds(t0, t1));
 }
 
 // hotkey.sealed_trial_early: flips the early rig veto between count and veto, live, and logs it. Works with the trial off too (the decision runs
@@ -1679,7 +1799,7 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
     // Built v11: the named rule's position is the world centre of worldOfRecord (the producer B cache, the pose, the store-style sphere, raw).
     const WorldRead wr = worldOfRecord(record);
     ++g_worldSrc[wr.source];
-    if (wr.source != 4) rigNoteRecord(record, wr.world, wr.radius);   // Built v12: the record's rig gets its box
+    if (wr.source != 4) rigNoteRecord(bucket, record, wr.world, wr.radius);   // Built v12: the record's rig gets its box (v12.1: by association)
     const float* centre = wr.world;
     const float radius = wr.radius;
     if (wr.source == 4 || !std::isfinite(radius) || !(radius > 0.0f) ||

@@ -232,6 +232,12 @@ struct Window {
     bool cellFrozen = false;
     uint64_t frozenFrames = 0;
     uint64_t frozenSkipped = 0;
+    // Built v12.1: the store records by association path (synchronous: the rig evaluation's forward on this thread; job: the bucket's collection;
+    // none), the frame ticks of the window, and the per-frame decision cost (earlyMs / frames).
+    uint64_t assocSync = 0;
+    uint64_t assocJob = 0;
+    uint64_t assocNone = 0;
+    uint64_t frames = 0;
 };
 
 // The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named is the own-pad cell rule.
@@ -550,7 +556,7 @@ inline bool pickCapsuleTarget(const ExplicitObs* obs, size_t n, const float p[3]
 constexpr float kPadWikiM[3][2] = {{66.0f, 55.0f}, {150.0f, 90.0f}, {213.0f, 128.0f}};
 constexpr float kBoxBelowM = 10.0f;
 constexpr float kBoxBeyondM = 20.0f;
-constexpr float kMarginDefaultM = 5.0f;
+constexpr float kMarginDefaultM = 10.0f;   // v12.1: 10 m (was 5; a guess)
 constexpr size_t kMarginLadderCount = 7;
 constexpr float kMarginLadder[kMarginLadderCount] = {-10.0f, -5.0f, 0.0f, 5.0f, 10.0f, 20.0f, 40.0f};
 
@@ -645,25 +651,17 @@ inline bool footprintAxes(const float axes[3][3], const float u[3], const float*
     return true;
 }
 
-// The box STANDS ON THE PAD'S UP AXIS (Built v12, flight fix a): W is the pad's up axis upAxis (flipped to point at the target). Its centre is
-// laterally on the pad's centre, not on the pad-to-target midpoint: it runs from kBoxBelowM under the pad's centre to kBoxBeyondM past the target's
-// projection onto W. The target's lateral offset from W is recorded (cell->boxLateral). The length axis lenAxis is projected off W. False when the
-// target is not above the pad along W (proj < 1 m) or the axes are degenerate.
-inline bool buildBox(const float pad[3], const float target[3], const float upAxis[3], const float lenAxis[3], float halfLen, float halfWid,
-                     float margin, OwnCell* cell) noexcept {
-    float W[3] = {upAxis[0], upAxis[1], upAxis[2]};
-    const float wl = std::sqrt(W[0] * W[0] + W[1] * W[1] + W[2] * W[2]);
-    if (!std::isfinite(wl) || !(wl > 1e-3f)) return false;
-    for (float& v : W) v /= wl;
+// v12.1 (flight): the box's axis W is the unit vector from the pad's centre to the target (BlastShieldBase): the shaft is the direction the pad
+// travels, not the pad's own e2 (the v12 flight: the pad rose along the pad-to-BlastShieldBase line). The pad is on the axis, so the box is
+// centred laterally on it: from kBoxBelowM under the pad's centre to kBoxBeyondM past the target along W. The footprint's length axis lenAxis is
+// made orthogonal to W (Gram-Schmidt, length first); the width is W x length. False when the target is closer than 1 m or the axes are degenerate.
+inline bool buildBox(const float pad[3], const float target[3], const float lenAxis[3], float halfLen, float halfWid, float margin,
+                     OwnCell* cell) noexcept {
     const float d[3] = {target[0] - pad[0], target[1] - pad[1], target[2] - pad[2]};
-    const float D2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-    float proj = d[0] * W[0] + d[1] * W[1] + d[2] * W[2];
-    if (proj < 0.0f) {
-        for (float& v : W) v = -v;
-        proj = -proj;
-    }
+    const float proj = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     if (!std::isfinite(proj) || !(proj >= 1.0f)) return false;
-    const float lateral = std::sqrt(std::fmax(D2 - proj * proj, 0.0f));
+    float W[3] = {d[0] / proj, d[1] / proj, d[2] / proj};
+    const float lateral = 0.0f;
     const float dp = lenAxis[0] * W[0] + lenAxis[1] * W[1] + lenAxis[2] * W[2];
     float U[3] = {lenAxis[0] - dp * W[0], lenAxis[1] - dp * W[1], lenAxis[2] - dp * W[2]};
     const float ul = std::sqrt(U[0] * U[0] + U[1] * U[1] + U[2] * U[2]);
@@ -705,6 +703,17 @@ inline bool inBox(const float c[3], const OwnCell& cell) noexcept {
     float o[3];
     boxCoords(c, cell, o);
     return std::fabs(o[0]) <= cell.boxHalf[0] && std::fabs(o[1]) <= cell.boxHalf[1] && std::fabs(o[2]) <= cell.boxHalf[2];
+}
+
+// The angle in degrees between two directions (not necessarily unit); 0 for a zero vector. Used for the box axis against the pad's e2 in the log.
+inline float angleDeg(const float a[3], const float b[3]) noexcept {
+    const float la = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+    const float lb = std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+    if (!(la > 0.0f) || !(lb > 0.0f)) return 0.0f;
+    float c = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb);
+    if (c > 1.0f) c = 1.0f;
+    if (c < -1.0f) c = -1.0f;
+    return std::acos(c) * 180.0f / 3.14159265f;
 }
 
 // Built v12: the off-screen emulation's steps, in Elite's order (decomp_431AFE0.txt lines 99 to 102; bytes 0x431B221..0x431B240). Kind 1: the byte
@@ -768,6 +777,12 @@ inline RigVerdict rigVerdict(bool bounded, const float c[3], float r, bool hasCe
     if (!outside) return RigVerdict::kMixed;
     if (vetoedRun >= kRigRefreshN) return RigVerdict::kRefresh;
     return RigVerdict::kOutside;
+}
+
+// Built v12.1: the precomputed verdict's code, one byte per rig (the frame tick writes it, the decision reads it): 2 outside, 1 mixed, 0 unknown or
+// a refresh (the decision decides the refresh from its own run count).
+inline uint8_t verdictCode(RigVerdict v) noexcept {
+    return v == RigVerdict::kOutside ? uint8_t{2} : (v == RigVerdict::kMixed ? uint8_t{1} : uint8_t{0});
 }
 
 // Built v11 (addendum): with a capsule, the explicit picks are the nearest instance of each part node to the capsule's AXIS, and only within
@@ -999,6 +1014,7 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          "world_sphere_unreadable=%llu producer_mode=%s world_centre producer=%llu pose=%llu store=%llu raw=%llu none=%llu "
                          "cell_frozen=%s frozen_frames=%llu frozen_skipped=%llu "
                          "rigs_seen=%llu rigs_vetoed=%llu rigs_mixed=%llu rigs_unknown=%llu rigs_refresh=%llu early_ms=%.3f early_mode=%s "
+                         "assoc_sync=%llu assoc_job=%llu assoc_none=%llu frames=%llu early_ms_per_frame=%.4f "
                          "rig_records_matched=%llu rig_records_unevaluated=%llu rig_emulate_faults=%llu "
                          "box=%s half_length_m=%.1f half_width_m=%.1f height_m=%.1f margin_m=%.1f view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
@@ -1022,7 +1038,9 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          static_cast<unsigned long long>(w.rigsSeen),
                          static_cast<unsigned long long>(w.rigsVetoed), static_cast<unsigned long long>(w.rigsMixed),
                          static_cast<unsigned long long>(w.rigsUnknown), static_cast<unsigned long long>(w.rigsRefresh), w.earlyMs,
-                         w.earlyMode, static_cast<unsigned long long>(w.rigRecMatched), static_cast<unsigned long long>(w.rigRecUnevaluated),
+                         w.earlyMode, static_cast<unsigned long long>(w.assocSync), static_cast<unsigned long long>(w.assocJob),
+                         static_cast<unsigned long long>(w.assocNone), static_cast<unsigned long long>(w.frames),
+                         w.frames ? w.earlyMs / static_cast<double>(w.frames) : 0.0, static_cast<unsigned long long>(w.rigRecMatched), static_cast<unsigned long long>(w.rigRecUnevaluated),
                          static_cast<unsigned long long>(w.rigEmuFaults), w.boxOn ? "on" : "off", static_cast<double>(w.boxHalf[0]),
                          static_cast<double>(w.boxHalf[1]), static_cast<double>(w.boxHalf[2]), static_cast<double>(w.boxMargin),
                          viewSource);

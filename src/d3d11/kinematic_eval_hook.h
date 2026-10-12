@@ -158,6 +158,8 @@ void kinematicEvalSetRigVeto(RigVetoFn fn) noexcept;
 const char* kinematicEvalRigVetoAttach() noexcept;
 void kinematicEvalRigVetoDetach() noexcept;
 uint64_t kinematicEvalRigEmulateFaults() noexcept;
+// Built v12.1: the rig whose evaluation forward is running on this thread (0 outside one); the store's synchronous association reads it.
+uintptr_t kinematicEvalCurrentRig() noexcept;
 // FUN_1442B3FC0's hook: "hooked", or why it stood down ("not requested",
 // "not build 332841 (PE timestamp/size)", "prologue mismatch at RVA 0x42B3FC0",
 // "builder frame/call-site mismatch at RVA 0x...", "CodeHook refused the patch").
