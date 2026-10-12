@@ -182,16 +182,18 @@ int main(int argc, char** argv) {
         now.ownerCount = 0;
         now.ownerB2F = 1;
         char line[512];
-        hp::formatChange(line, sizeof(line), 0x1000, 5, 99, a, now, true, 7, 3);
-        check(contains(line, "hatch probe: object 1000 frame 5 t=99 ms:"), "the change line names the object, frame and time");
+        hp::formatChange(line, sizeof(line), 0x1000, 5, 99, a, now, true, 7, 3, 0x05);
+        check(contains(line, "hatch probe: object 1000 (readers r0,r2) frame 5 t=99 ms:"),
+              "the change line names the object, the readers that supplied it (r0,r2), the frame and the time");
         check(contains(line, "3C8 2->1"), "the change line gives the state byte old -> new");
         check(contains(line, "owner_10 1->0"), "the change line gives the occupancy count old -> new");
         check(contains(line, "owner_2F 0->1"), "the change line gives owner+0x2F old -> new");
         check(contains(line, "owner 2000->2000"), "an unchanged field still shows old -> new");
         check(contains(line, "status flags=7 flags2=3"), "the change line carries the journal's Status words");
-        hp::formatChange(line, sizeof(line), 0x1000, 5, 99, hp::State{}, now, false, 0, 0);
+        hp::formatChange(line, sizeof(line), 0x1000, 5, 99, hp::State{}, now, false, 0, 0, 0x00);
         check(contains(line, "3C8 ?->1") && contains(line, "status flags unknown"),
               "an unreadable side is written as ? and unknown status says so");
+        check(contains(line, "(readers none)"), "a line with no reader bit says so");
 
         hp::LineBudget budget;
         budget.cap = 3;
@@ -206,7 +208,53 @@ int main(int argc, char** argv) {
         check(contains(table, "image+0x5E78C40") && contains(table, "[0]=0x1") && contains(table, "[1]=0x0") &&
                   contains(table, "[7]=0x7"),
               "the table line gives the eight qwords at 0x5E78C40 in order");
-        check(hp::kRemember == 8 && hp::kLineCap == 400, "eight remembered objects and 400 lines a session");
+        check(hp::kRemember == 32 && hp::kLineCap == 400, "thirty-two remembered objects and 400 lines a session");
+        char who[32];
+        hp::formatReaders(who, sizeof(who), 0x05);
+        check(std::string(who) == "r0,r2", "a reader mask names the readers that supplied the object: r0,r2");
+        hp::formatReaders(who, sizeof(who), 0x00);
+        check(std::string(who) == "none", "no reader bit reads as none");
+        hp::formatReaders(who, sizeof(who), 0x0F);
+        check(std::string(who) == "r0,r1,r2,r3", "all four readers read as r0,r1,r2,r3");
+    }
+    {
+        // The remember table (Built v8 fix 1 to 3): note, the readers' bits, clear on toggle-on, the cap once, refusals counted and named.
+        hp::RememberTable t;
+        check(t.note(0, 1) == hp::RememberTable::Outcome::kIgnored && t.count == 0, "a null object is ignored");
+        check(t.note(0x1000, 1) == hp::RememberTable::Outcome::kNew, "a new object is remembered");
+        check(t.note(0x1000, 4) == hp::RememberTable::Outcome::kKnown && t.readers[0] == 0x05,
+              "a known object gets the second reader's bit: r0 and r2");
+        check(t.count == 1, "a known object is not remembered twice");
+        check(!t.takeCapLine(), "no cap line before the cap is hit");
+        check(t.clear() == 1 && t.count == 0 && t.readers[0] == 0, "clear forgets the remembered objects and reports how many");
+        check(t.note(0x1000, 1) == hp::RememberTable::Outcome::kNew, "after a clear the same object is new again");
+
+        hp::RememberTable c;
+        for (uint32_t i = 0; i < hp::kRemember; ++i) c.note(0x10000u + i * 0x100u, 2);
+        check(c.count == hp::kRemember && !c.capHit, "thirty-two distinct objects fill the table with no refusal");
+        check(c.note(0x90000, 1) == hp::RememberTable::Outcome::kRefused && c.capHit,
+              "the thirty-third object is refused and the cap is hit");
+        check(c.count == hp::kRemember, "the table does not grow past the cap");
+        check(c.note(0x90000, 1) == hp::RememberTable::Outcome::kRefused && c.refusedDistinct == 1,
+              "the same refused object again is not named twice");
+        check(c.note(0x91000, 1) == hp::RememberTable::Outcome::kRefused && c.refusedDistinct == 2,
+              "a second distinct refused object is named");
+        check(c.takeCapLine() && !c.takeCapLine(), "the cap line is due once");
+        for (uint32_t i = 0; i < hp::kRefusedCap - 2; ++i) c.note(0x200000u + i * 0x100u, 1);
+        check(c.refusedDistinct == hp::kRefusedCap, "the named refusals stop at the tracked limit");
+        check(c.note(0xA00000, 1) == hp::RememberTable::Outcome::kRefused && c.refusedOverflow == 1 && c.refusedDistinct == hp::kRefusedCap,
+              "past the tracked limit a refusal is counted, not named");
+        char cap[320];
+        hp::formatCapLine(cap, sizeof(cap), 99, c);
+        check(contains(cap, "cap (32) reached at frame 99: 32 distinct objects refused so far (1 more refusals not named)"),
+              "the cap line says the cap, the frame, the refused count and the unnamed count");
+        check(c.clear() == hp::kRemember && !c.capHit && c.refusedDistinct == 0 && !c.capLogged,
+              "a toggle-on clear forgets the objects and re-arms the cap line");
+        check(c.note(0x90000, 1) == hp::RememberTable::Outcome::kNew, "after the clear the table takes objects again");
+        char clr[200];
+        hp::formatClearLine(clr, sizeof(clr), 5, 12, "hotkey.hatch_probe");
+        check(std::string(clr) == "hatch probe: on, cleared 5 remembered objects (frame 12, trigger hotkey.hatch_probe)",
+              "the toggle-on line says how many objects were cleared");
     }
 
     std::printf("builder_probe_test: %d checks, %d failures\n", g_checks, g_failures);

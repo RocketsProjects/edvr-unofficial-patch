@@ -28,6 +28,7 @@
 #include "state_dump_core.h"
 
 #include <algorithm>
+#include <mutex>
 
 namespace sd = edvr::statedump;
 
@@ -154,25 +155,16 @@ std::atomic<bool> g_armed{false};
 std::atomic<bool> g_censusArmed{false};
 std::atomic<uint32_t> g_stamp{0};      // the frame the work now running belongs to
 // TEMPORARY (Built v8, the hatch probe): the observers stay armed while it is on. Every distinct object the readers are called with is
-// remembered, up to hatch::kRemember; the calls past the cap are counted, not remembered.
+// remembered, up to hatch::kRemember (32), with the readers that supplied it; the calls past the cap are refused and named once.
 std::atomic<bool> g_hatchOn{false};
-std::atomic<uintptr_t> g_remembered[hatch::kRemember] = {};
-std::atomic<uint32_t> g_rememberCount{0};
-std::atomic<uint32_t> g_rememberDropped{0};
+// The remembered objects and the readers that supplied them (hatch_probe_core.h). Guarded by g_rememberMutex: the observers write it on the
+// game's thread that calls the readers, the probe and the census read it on the render thread. Cleared on every hatch toggle-on (fix 1).
+std::mutex g_rememberMutex;
+hatch::RememberTable g_remember;
 
-// Remembers the object if it is new and there is room. A race can remember one object twice; the reader of the list tolerates that.
-void rememberObject(uintptr_t self) noexcept {
-    const uint32_t n = g_rememberCount.load(std::memory_order_acquire);
-    for (uint32_t i = 0; i < n && i < hatch::kRemember; ++i)
-        if (g_remembered[i].load(std::memory_order_acquire) == self) return;
-    uint32_t k = n;
-    while (k < hatch::kRemember) {
-        if (g_rememberCount.compare_exchange_weak(k, k + 1, std::memory_order_acq_rel)) {
-            g_remembered[k].store(self, std::memory_order_release);
-            return;
-        }
-    }
-    g_rememberDropped.fetch_add(1, std::memory_order_relaxed);
+void noteRemembered(uintptr_t self, int reader) noexcept {
+    std::lock_guard<std::mutex> lock(g_rememberMutex);
+    g_remember.note(self, static_cast<uint8_t>(1u << reader));
 }
 
 uintptr_t observeReader(int i, uintptr_t self) noexcept {
@@ -186,7 +178,7 @@ uintptr_t observeReader(int i, uintptr_t self) noexcept {
         s.code.store(static_cast<uint32_t>(result & 0xFFu), std::memory_order_relaxed);
         s.stamp.store(g_stamp.load(std::memory_order_relaxed), std::memory_order_relaxed);
         s.calls.fetch_add(1, std::memory_order_relaxed);
-        if (self) rememberObject(self);
+        if (self) noteRemembered(self, i);
     }
     return result;
 }
@@ -467,12 +459,26 @@ bool readHatchState(uintptr_t obj, hatch::State* s) noexcept {
     return true;
 }
 
-// The render thread's frame work for the probe: reads each remembered object and logs the changes (within the session's line cap).
+// A copy of the remember table, taken under its mutex on the render thread. capDue is set once, the first frame after the cap was hit.
+hatch::RememberTable snapshotRemember(bool* capDue) {
+    std::lock_guard<std::mutex> lock(g_rememberMutex);
+    *capDue = g_remember.takeCapLine();
+    return g_remember;
+}
+
+// The render thread's frame work for the probe: writes the cap line once when the cap has been hit, then reads each remembered object and
+// logs its changes (within the session's line cap). Each change line names the readers that supplied the object (fix 3).
 void hatchProbeFrame(uint32_t frame) {
+    bool capDue = false;
+    const hatch::RememberTable table = snapshotRemember(&capDue);
+    if (capDue) {
+        char line[320];
+        hatch::formatCapLine(line, sizeof(line), frame, table);
+        Log::get().note("%s", line);
+    }
     if (!g_hatchOn.load(std::memory_order_acquire)) return;
-    const uint32_t n = std::min(g_rememberCount.load(std::memory_order_acquire), hatch::kRemember);
-    for (uint32_t i = 0; i < n; ++i) {
-        const uintptr_t obj = g_remembered[i].load(std::memory_order_acquire);
+    for (uint32_t i = 0; i < table.count; ++i) {
+        const uintptr_t obj = table.obj[i];
         if (!obj) continue;
         HatchSlot& slot = g_hatchSlots[i];
         if (slot.obj != obj) {
@@ -486,7 +492,7 @@ void hatchProbeFrame(uint32_t frame) {
             char line[512];
             hatch::formatChange(line, sizeof(line), static_cast<uint64_t>(obj), frame,
                                 static_cast<uint64_t>(GetTickCount64()), slot.prev, now, raw.flagsKnown,
-                                static_cast<uint32_t>(raw.flags), static_cast<uint32_t>(raw.flags2));
+                                static_cast<uint32_t>(raw.flags), static_cast<uint32_t>(raw.flags2), table.readers[i]);
             Log::get().note("%s", line);
         }
         slot.prev = now;
@@ -656,6 +662,7 @@ void stateDumpFrame(uint32_t frame) {
 }
 
 static_assert(sd::kReaders == 4, "StateReaderSnapshot holds four readers.");
+static_assert(StateReaderSnapshot::kRememberedMax == hatch::kRemember, "The snapshot holds every remembered object the probe can name.");
 
 std::string stateDumpCensusArm(bool on) {
     if (!on) {
@@ -680,22 +687,32 @@ void stateDumpCensusSnapshot(StateReaderSnapshot* out) {
         out->objects[i] = s.object.load(std::memory_order_relaxed);
         if (!g_readers[i].ready.load(std::memory_order_acquire)) out->installed = false;
     }
-    const uint32_t n = std::min(g_rememberCount.load(std::memory_order_acquire), hatch::kRemember);
-    out->rememberedCount = n;
-    for (uint32_t i = 0; i < 8; ++i) out->remembered[i] = i < n ? g_remembered[i].load(std::memory_order_acquire) : 0;
+    hatch::RememberTable table;
+    {
+        std::lock_guard<std::mutex> lock(g_rememberMutex);
+        table = g_remember;
+    }
+    out->rememberedCount = table.count;
+    for (uint32_t i = 0; i < StateReaderSnapshot::kRememberedMax; ++i)
+        out->remembered[i] = i < table.count ? table.obj[i] : 0;
 }
 
 void hatchProbeToggle(const char* trigger, uint32_t frame) {
     if (g_hatchOn.load(std::memory_order_acquire)) {
         g_hatchOn.store(false, std::memory_order_release);
         updateGate();
-        const uint32_t n = std::min(g_rememberCount.load(std::memory_order_acquire), hatch::kRemember);
-        char line[320];
+        uint32_t n = 0, refused = 0, overflow = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_rememberMutex);
+            n = g_remember.count;
+            refused = g_remember.refusedDistinct;
+            overflow = g_remember.refusedOverflow;
+        }
+        char line[360];
         std::snprintf(line, sizeof(line),
                       "hatch probe: off at frame %u (trigger %s): change lines written %u, suppressed %u (cap %u); %u objects "
-                      "remembered; %u reader calls named an object past the cap.",
-                      frame, trigger, g_hatchBudget.used, g_hatchBudget.suppressed, g_hatchBudget.cap, n,
-                      g_rememberDropped.load(std::memory_order_relaxed));
+                      "remembered; %u distinct objects refused past the cap (%u more refusals not named).",
+                      frame, trigger, g_hatchBudget.used, g_hatchBudget.suppressed, g_hatchBudget.cap, n, refused, overflow);
         Log::get().note("%s", line);
         return;
     }
@@ -707,6 +724,14 @@ void hatchProbeToggle(const char* trigger, uint32_t frame) {
     const std::string status = ensureDetours(base);
     g_hatchBudget = hatch::LineBudget{};
     for (HatchSlot& s : g_hatchSlots) s = HatchSlot{};
+    uint32_t cleared = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_rememberMutex);
+        cleared = g_remember.clear();   // fix 1: every toggle-on starts with no remembered objects, and the cap line is re-armed
+    }
+    char clearLine[160];
+    hatch::formatClearLine(clearLine, sizeof(clearLine), cleared, frame, trigger);
+    Log::get().note("%s", clearLine);
     g_hatchOn.store(true, std::memory_order_release);
     updateGate();
     // The state-name table's pointers, once, so the +0x340 bytes can be compared with them offline.
@@ -720,10 +745,9 @@ void hatchProbeToggle(const char* trigger, uint32_t frame) {
     Log::get().note("%s", table);
     char line[320];
     std::snprintf(line, sizeof(line),
-                  "hatch probe: on at frame %u (trigger %s): reader detours %s; %u objects remembered so far (cap %u); a line is "
-                  "written when a value changes (cap %u per session).",
-                  frame, trigger, status.c_str(), std::min(g_rememberCount.load(std::memory_order_acquire), hatch::kRemember),
-                  hatch::kRemember, hatch::kLineCap);
+                  "hatch probe: on at frame %u (trigger %s): reader detours %s; objects are remembered as the readers name them "
+                  "(cap %u); a line is written when a value changes (cap %u per session), with the readers that supplied the object.",
+                  frame, trigger, status.c_str(), hatch::kRemember, hatch::kLineCap);
     Log::get().note("%s", line);
 }
 

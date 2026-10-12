@@ -32,9 +32,10 @@ struct StateReaderSnapshot {
     uint32_t calls[4] = {};        // cumulative calls while observed (a capture start resets them)
     uint32_t codes[4] = {};        // the AL code the last call returned
     uintptr_t objects[4] = {};     // the object the last call named
-    // TEMPORARY (Built v8): every distinct object the readers were called with, up to eight, remembered while the observers are armed (the
-    // hatch probe, the census or a capture). Replaces the AAB8 suffix pin, which never matched.
-    uintptr_t remembered[8] = {};
+    // TEMPORARY (Built v8): every distinct object the readers were called with, up to kRememberedMax, remembered while the observers are armed
+    // (the hatch probe, the census or a capture). Replaces the AAB8 suffix pin, which never matched. Equal to hatch::kRemember (checked in the cpp).
+    static constexpr uint32_t kRememberedMax = 32;
+    uintptr_t remembered[kRememberedMax] = {};
     uint32_t rememberedCount = 0;
 };
 std::string stateDumpCensusArm(bool on);
