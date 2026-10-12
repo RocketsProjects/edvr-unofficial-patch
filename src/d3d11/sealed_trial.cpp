@@ -15,6 +15,8 @@
 
 #include "../common/config.h"
 #include "../common/log.h"
+#include "asset_census_core.h"
+#include "builder_probe.h"
 #include "kept_report_core.h"
 #include "sealed_trial_core.h"
 #include "store_hook.h"
@@ -42,7 +44,12 @@ std::atomic<bool> g_on{false};
 // The live radius: the configured start, then the ladder's rungs while the trial is on. Changed on the render thread (the step keys);
 // the store's observer reads it through the atomic.
 std::atomic<float> g_radius{sealed::kDefaultRadiusM};
+// TEMPORARY (named mode): the record rule. Changed on the render thread (the mode key); the store's observer reads it through the atomic.
+std::atomic<sealed::Mode> g_mode{sealed::Mode::kSphere};
+// TEMPORARY (diag.sealed_trial_builder): read at install. skip is refused in builder_probe.cpp (not proven safe), so it counts only.
+sealed::BuilderPolicy g_builderPolicy = sealed::BuilderPolicy::kCount;
 std::atomic<uint64_t> g_culled{0}, g_kept{0}, g_keptUnknown{0}, g_sunSkipped{0}, g_evalNs{0}, g_faults{0}, g_torn{0};
+std::atomic<uint64_t> g_builderAfterCull{0}, g_builderUnvisited{0};
 std::atomic<uint32_t> g_frameStamp{0};       // advanced at every Present tick: the observer resolves the view once per frame
 std::atomic<bool> g_cameraKnown{false};
 uint64_t g_windowStartMs = 0;                // render thread only
@@ -102,6 +109,8 @@ void resetWindow() noexcept {
     g_evalNs.store(0);
     g_faults.store(0);
     g_torn.store(0);
+    g_builderAfterCull.store(0);
+    g_builderUnvisited.store(0);
 }
 
 sealed::Window takeWindow() noexcept {
@@ -113,8 +122,21 @@ sealed::Window takeWindow() noexcept {
     w.evalNs = g_evalNs.load();
     w.faults = g_faults.load();
     w.torn = g_torn.load();
+    w.builderAfterCull = g_builderAfterCull.load();
+    w.builderUnvisited = g_builderUnvisited.load();
     return w;
 }
+
+// TEMPORARY (record names). A small direct-mapped cache per node pointer, valid for one frame: the store, the builder probe and the kept
+// report ask for the same node many times in a frame. The text is read with the census's accept rules (asset_census_core.h textName).
+struct NameSlot {
+    uintptr_t node = 0;
+    uint32_t stamp = 0;
+    bool ok = false;
+    char name[64] = {};
+};
+constexpr size_t kNameSlots = 512;
+NameSlot g_nameCache[kNameSlots];
 
 // The camera position the rule centres on: the pose from the view's rows, else the view 0 origin. False when neither is known.
 // The centre the rule uses. In the explorer cam it is the free camera's rows (the view 0 origin may not be the free camera there). Seated and
@@ -135,7 +157,8 @@ const char* viewLabel(const view::Resolved& v) noexcept {
 // Writes the window's line at the current radius and the view it ran against, then starts a new window.
 void noteWindow() {
     char line[480];
-    sealed::formatWindow(line, sizeof(line), takeWindow(), g_radius.load(std::memory_order_relaxed), viewLabel(g_view));
+    sealed::formatWindow(line, sizeof(line), takeWindow(), g_radius.load(std::memory_order_relaxed), viewLabel(g_view),
+                         g_mode.load(std::memory_order_relaxed));
     Log::get().note("%s", line);
     resetWindow();
 }
@@ -208,6 +231,10 @@ void writeKeptReport() {
         const bool readOk = readMem(centre, w.rec + kRecCentre, sizeof(centre)) && readVal(&radius, w.rec + kRecRadius) &&
                             readVal(&mask, w.rec + kRecMask) && readVal(&children, w.rec + kRecChildCount);
         readVal(&vt, w.rec);
+        {
+            std::string name;
+            if (sealedTrialRecordName(w.rec, &name)) e.name = name;   // the census's rules; empty when unreadable
+        }
         e.radius = readOk ? radius : 0.0f;
         e.childCount = readOk ? children : 0;
         e.vtableRva = vt >= imageBase ? static_cast<uint64_t>(vt - imageBase) : static_cast<uint64_t>(vt);
@@ -305,6 +332,30 @@ void writeKeptReport() {
     if (!f) Log::get().note("sealed trial report: could not open edvr_logs\\%s; the line above is complete.", csvName);
 }
 
+// The cached name of a record: a pointer into the cache slot (valid until the slot is reused), or null when no name can be read. Allocation-free,
+// for the store's hot path (named mode).
+const char* cachedName(uintptr_t record) noexcept {
+    uintptr_t node = 0;
+    if (!record || !readVal(&node, record + 0x18) || !node) return nullptr;
+    const uint32_t stamp = g_frameStamp.load(std::memory_order_relaxed);
+    NameSlot& slot = g_nameCache[(node >> 4) % kNameSlots];
+    if (slot.node != node || slot.stamp != stamp) {
+        slot.node = node;
+        slot.stamp = stamp;
+        slot.ok = false;
+        slot.name[0] = '\0';
+        uintptr_t text = 0;
+        uint8_t bytes[census::kNameBytes] = {};
+        std::string name;
+        if (readVal(&text, node) && text && readMem(bytes, text, sizeof(bytes)) &&
+            (census::textName(bytes, sizeof(bytes), false, &name) || census::textName(bytes, sizeof(bytes), true, &name))) {
+            std::snprintf(slot.name, sizeof(slot.name), "%s", name.c_str());
+            slot.ok = true;
+        }
+    }
+    return slot.ok ? slot.name : nullptr;
+}
+
 }  // namespace
 
 void sealedTrialInstall(bool flatProfile) {
@@ -315,10 +366,36 @@ void sealedTrialInstall(bool flatProfile) {
         Log::get().note("sealed trial: diag.sealed_trial_radius_m = '%s' is not a number of metres; the radius is %.1f m.",
                         r.c_str(), static_cast<double>(start));
     g_radius.store(start, std::memory_order_relaxed);
-    Log::get().note("sealed trial: off. hotkey.sealed_trial toggles it; the sphere starts at %.1f m (diag.sealed_trial_radius_m). "
-                    "While on, hotkey.sealed_trial_smaller and hotkey.sealed_trial_larger step it through 80, 60, 40, 30, 20, 15 "
-                    "and 10 m, and hotkey.sealed_trial_report writes the kept-records report for one frame. Records outside the sphere "
-                    "lose their views in the admission store, and the sun pair is skipped.", static_cast<double>(start));
+    const std::string modeText = Config::get().getString("diag.sealed_trial_mode", "");
+    sealed::Mode mode = sealed::Mode::kSphere;
+    if (!sealed::parseMode(modeText.c_str(), &mode))
+        Log::get().note("sealed trial: diag.sealed_trial_mode = '%s' is not sphere or named; the mode is sphere.", modeText.c_str());
+    g_mode.store(mode, std::memory_order_relaxed);
+    const std::string policyText = Config::get().getString("diag.sealed_trial_builder", "");
+    sealed::BuilderPolicy policy = sealed::BuilderPolicy::kCount;
+    if (!sealed::parseBuilderPolicy(policyText.c_str(), &policy))
+        Log::get().note("sealed trial: diag.sealed_trial_builder = '%s' is not count or skip; the builder is counted only.",
+                        policyText.c_str());
+    g_builderPolicy = policy;
+    // skip is refused: the builder's effects (draw-command appends, the counter at pipeline+0x2A4, the bucket lookup) are not proven absent,
+    // so a skipped record could change the frame. The count runs either way (docs Built v8, the builder's disassembly).
+    if (policy == sealed::BuilderPolicy::kSkip)
+        Log::get().note("sealed trial: diag.sealed_trial_builder = skip is REFUSED: the builder's side effects are not proven absent "
+                        "(draw-command appends, the counter at pipeline+0x2A4, the bucket lookup); the builder is counted only.");
+    Log::get().note("sealed trial: off. hotkey.sealed_trial toggles it; the sphere starts at %.1f m (diag.sealed_trial_radius_m); the "
+                    "record rule is %s (diag.sealed_trial_mode; hotkey.sealed_trial_mode cycles it while on). While on, "
+                    "hotkey.sealed_trial_smaller and hotkey.sealed_trial_larger step it through 80, 60, 40, 30, 20, 15 and 10 m, and "
+                    "hotkey.sealed_trial_report writes the kept-records report for one frame. Records outside the rule lose their views in "
+                    "the admission store, and the sun pair is skipped.", static_cast<double>(start), sealed::modeName(mode));
+}
+
+// The record's name, cached per node for the frame. Needed only by named mode, the builder probe and the kept report; the store does not
+// ask for it otherwise.
+bool sealedTrialRecordName(uintptr_t record, std::string* out) noexcept {
+    const char* name = cachedName(record);
+    if (!name) return false;
+    *out = name;
+    return true;
 }
 
 void sealedTrialToggle(const char* trigger, uint32_t frame) {
@@ -352,6 +429,25 @@ void sealedTrialToggle(const char* trigger, uint32_t frame) {
     if (g_view.originGapM >= 0.0f)
         Log::get().note("sealed trial: view source = %s; its rows are %.3f m from the view 0 origin (the frames agree when this is small).",
                         view::sourceName(g_view.source), static_cast<double>(g_view.originGapM));
+    char modeLine[400];
+    sealed::formatModeLine(modeLine, sizeof(modeLine), g_mode.load(std::memory_order_relaxed), frame, trigger);
+    Log::get().note("%s", modeLine);
+}
+
+// TEMPORARY (named mode): cycles the record rule while the trial is on. The window of the old rule closes first, so each rule has its own line.
+void sealedTrialModeStep(const char* trigger, uint32_t frame) {
+    char line[400];
+    if (!g_on.load(std::memory_order_acquire)) {
+        Log::get().note("sealed trial: the mode key acts only while the trial is on (mode %s at frame %u); nothing changed (trigger %s).",
+                        sealed::modeName(g_mode.load(std::memory_order_relaxed)), frame, trigger);
+        return;
+    }
+    noteWindow();   // the old rule's window closes here
+    const sealed::Mode next = sealed::nextMode(g_mode.load(std::memory_order_relaxed));
+    g_mode.store(next, std::memory_order_release);
+    g_windowStartMs = GetTickCount64();
+    sealed::formatModeLine(line, sizeof(line), next, frame, trigger);
+    Log::get().note("%s", line);
 }
 
 // One rung while the trial is on. A rung that moves closes the window of the old radius first, so the new radius starts a window of its
@@ -426,6 +522,11 @@ bool sealedTrialSkipsSunPair() noexcept { return g_on.load(std::memory_order_acq
 
 void sealedTrialNoteSunSkip() noexcept { g_sunSkipped.fetch_add(1, std::memory_order_relaxed); }
 
+void sealedTrialNoteBuilderCalls(uint64_t afterCull, uint64_t unvisited) noexcept {
+    if (afterCull) g_builderAfterCull.fetch_add(afterCull, std::memory_order_relaxed);
+    if (unvisited) g_builderUnvisited.fetch_add(unvisited, std::memory_order_relaxed);
+}
+
 // The record's view mask and admitted flag through the guarded reads and writes, for the fault-safe cull (sealed_trial_core.h).
 namespace {
 struct RecordFields {
@@ -435,6 +536,15 @@ struct RecordFields {
     bool writeMask(uint64_t v) noexcept { return writeMem(rec + kRecMask, &v, sizeof(v)); }
     bool writeAdmitted(uint8_t v) noexcept { return writeMem(rec + kRecAdmitted, &v, sizeof(v)); }
 };
+// The keep decision for one record, for the mode on (sphere: the sphere rule; named: the name rule over the same sphere). Named mode reads
+// the cached name without allocating.
+bool keepByRule(uintptr_t record, const float centre[3], float radius, const float cam[3], float R) noexcept {
+    const sealed::Mode m = g_mode.load(std::memory_order_relaxed);
+    if (m == sealed::Mode::kSphere) return sealed::keepRecord(centre, radius, cam, R);
+    const char* name = cachedName(record);
+    return sealed::keepRecordNamed(name != nullptr, name, centre, radius, cam, R);
+}
+
 }  // namespace
 
 // The rule for one record the store has written. Every read and write is validated; a failure leaves the record as the store wrote it and
@@ -480,7 +590,7 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
         !std::isfinite(radius) || !(radius > 0.0f) || !std::isfinite(centre[0]) || !std::isfinite(centre[1]) ||
         !std::isfinite(centre[2])) {
         g_keptUnknown.fetch_add(1, std::memory_order_relaxed);
-    } else if (sealed::keepRecord(centre, radius, cam, trialR)) {
+    } else if (keepByRule(record, centre, radius, cam, trialR)) {
         g_kept.fetch_add(1, std::memory_order_relaxed);
     } else {
         RecordFields fields{record};
@@ -489,6 +599,7 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
         switch (sealed::cullRecordFaultSafe(fields, &failed, &value)) {
             case sealed::Cull::kCulled:
                 g_culled.fetch_add(1, std::memory_order_relaxed);
+                builderProbeNoteCulled(record);   // the builder probe's frame counts (builder_probe.cpp)
                 break;
             case sealed::Cull::kUntouched:
             case sealed::Cull::kRestored:

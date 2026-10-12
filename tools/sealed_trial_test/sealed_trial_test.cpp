@@ -280,6 +280,68 @@ int main(int argc, char** argv) {
         }
     }
 
+    // --- Built v8: the trial's mode and builder policy parse, the name rule (named mode), the window line's new fields.
+    {
+        se::Mode m = se::Mode::kNamed;
+        check(se::parseMode("", &m) && m == se::Mode::kSphere, "an empty diag.sealed_trial_mode is sphere");
+        check(se::parseMode("sphere", &m) && m == se::Mode::kSphere, "sphere parses");
+        check(se::parseMode("named", &m) && m == se::Mode::kNamed, "named parses");
+        check(!se::parseMode("Named", &m) && m == se::Mode::kSphere, "an unknown mode word is refused and the mode is sphere");
+        check(se::nextMode(se::Mode::kSphere) == se::Mode::kNamed && se::nextMode(se::Mode::kNamed) == se::Mode::kSphere,
+              "hotkey.sealed_trial_mode cycles sphere and named");
+        check(std::strcmp(se::modeName(se::Mode::kNamed), "named") == 0 && std::strcmp(se::modeName(se::Mode::kSphere), "sphere") == 0,
+              "the mode names are sphere and named");
+
+        se::BuilderPolicy p = se::BuilderPolicy::kSkip;
+        check(se::parseBuilderPolicy("", &p) && p == se::BuilderPolicy::kCount, "an empty diag.sealed_trial_builder is count");
+        check(se::parseBuilderPolicy("skip", &p) && p == se::BuilderPolicy::kSkip, "skip parses (the caller refuses it)");
+        check(!se::parseBuilderPolicy("drop", &p) && p == se::BuilderPolicy::kCount, "an unknown builder word is refused and is count");
+
+        check(se::containsNoCase("HangerSmall", "hanger") && se::containsNoCase("BlastShield_A", "BLASTSHIELD"),
+              "the keyword test ignores case");
+        check(!se::containsNoCase("DockingHub", "Hangar") && !se::containsNoCase("", "Lift"), "a name without the word does not match");
+        check(se::nameKeptByWord("Agricultural_SmallHangar") && se::nameKeptByWord("LandingPadSmall") &&
+                  se::nameKeptByWord("HangarLiftDoors__") && se::nameKeptByWord("SmallHangerSkirt"),
+              "Hangar, Hanger, LandingPad, Lift and Skirt are keep words");
+        check(!se::nameKeptByWord("DockingHub") && !se::nameKeptByWord("HabitatRingA") && !se::nameKeptByWord(nullptr),
+              "DockingHub and HabitatRingA are not keep words, and a null name is none");
+
+        const float near100[3] = {150.0f, 0.0f, 0.0f};    // 150 m away
+        const float big[3] = {0.0f, 0.0f, 0.0f};          // centred on the camera
+        check(se::keepRecordNamed(false, nullptr, big, 2000.0f, cam, 80.0f), "named: a record with no readable name is kept");
+        check(!se::keepRecordNamed(true, "DockingHub", big, 2000.0f, cam, 80.0f),
+              "named: a giant record that contains the camera is culled when its name is not a keep word");
+        check(se::keepRecordNamed(true, "HangerSmall", near100, 2000.0f, cam, 80.0f),
+              "named: a keep word keeps the record whatever its sphere");
+        check(se::keepRecordNamed(true, "Panel", near100, 90.0f, cam, 80.0f),
+              "named: a 90 m record meeting the trial sphere (150 <= 90 + 80) is kept");
+        check(!se::keepRecordNamed(true, "Panel", near100, 120.0f, cam, 80.0f),
+              "named: a record over 100 m across is culled even when its sphere meets the trial sphere");
+        const float far200[3] = {200.0f, 0.0f, 0.0f};
+        check(!se::keepRecordNamed(true, "Panel", far200, 50.0f, cam, 80.0f),
+              "named: a 50 m record 200 m out, past 50 + 80, is culled");
+        check(se::keepRecordForMode(se::Mode::kSphere, true, "DockingHub", big, 2000.0f, cam, 80.0f),
+              "sphere mode ignores the name: the same giant record is kept");
+        check(!se::keepRecordForMode(se::Mode::kNamed, true, "DockingHub", big, 2000.0f, cam, 80.0f),
+              "named mode on the same record culls it");
+
+        se::Window w;
+        w.builderAfterCull = 3;
+        w.builderUnvisited = 5;
+        char line[640];
+        se::formatWindow(line, sizeof(line), w, 80.0f, "eye rows", se::Mode::kNamed);
+        check(contains(line, "radius_m=80.0 builder_after_cull=3 builder_unvisited=5 mode=named view source = eye rows"),
+              "the window line appends builder_after_cull, builder_unvisited and the mode before the view source");
+        se::formatWindow(line, sizeof(line), w, 80.0f, "eye rows");
+        check(contains(line, "builder_unvisited=5 mode=sphere"), "the window line defaults to mode sphere");
+
+        se::formatModeLine(line, sizeof(line), se::Mode::kNamed, 12, "hotkey.sealed_trial_mode");
+        check(contains(line, "mode = named at frame 12 (trigger hotkey.sealed_trial_mode)") && contains(line, "Hangar"),
+              "the named mode line names the rule and its keep words");
+        se::formatModeLine(line, sizeof(line), se::Mode::kSphere, 13, "hotkey.sealed_trial_mode");
+        check(contains(line, "mode = sphere at frame 13"), "the sphere mode line says sphere");
+    }
+
     std::printf("sealed_trial_test: %d checks, %d failures\n", g_checks, g_failures);
     if (g_failures) return 1;
     std::printf("sealed trial self-test passed\n");

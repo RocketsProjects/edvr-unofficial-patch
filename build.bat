@@ -557,6 +557,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\state_dump_probe.cpp" ^
     "src\d3d11\store_hook.cpp" ^
     "src\d3d11\sealed_trial.cpp" ^
+    "src\d3d11\builder_probe.cpp" ^
     "src\d3d11\look_probe.cpp" ^
     "src\d3d11\asset_census.cpp" ^
     "src\d3d11\view_source.cpp" ^
@@ -1612,6 +1613,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: sealed trial test build failed & exit /b 1 )
 "%BUILD%\sealed_trial_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_builder_probe_test
+echo [edvr] === builder_probe_test.exe ===
+REM The builder probe's and the hatch-state probe's pure halves (src\d3d11\builder_probe_core.h, src\d3d11\hatch_probe_core.h, TEMPORARY,
+REM Built v8): the entry agreement (rcx against the memory at r9-0x210+0x290, both ways), the two caller sites, the grouping, the summary
+REM and names lines, the CSV rows, the hatch change line, the line budget and the table line. No DLL and no game.
+if not exist "%OBJ%\builderprobe" mkdir "%OBJ%\builderprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\builderprobe\\" ^
+    /Fe"%BUILD%\builder_probe_test.exe" "tools\builder_probe_test\builder_probe_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: builder probe test build failed & exit /b 1 )
+"%BUILD%\builder_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_look_probe_test

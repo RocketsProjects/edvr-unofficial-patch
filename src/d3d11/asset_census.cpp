@@ -32,7 +32,11 @@ constexpr int kViewTries = 64;           // resolutions while the view has no po
 constexpr uintptr_t kView0 = 0x40;       // the render context's view 0 (the views are 0x6A0 apart)
 constexpr uintptr_t kViewBit = 0x570;    // view+0x570: the view's bit in a record's mask
 constexpr size_t kNameGroups = 400;      // groups that get a name scan at the write (the largest first)
-constexpr uintptr_t kAab8Quad = 0x3C8;   // the AAB8 object's quad, read beside the docking readers
+// The docking object's fields the hatch line reads (docs Hangar door state; the same offsets as state_dump_probe.cpp's hatch probe).
+constexpr uintptr_t kObjState = 0x3C8;   // this+0x3C8: the state byte (read as a dword)
+constexpr uintptr_t kOwnerCount = 0x10;  // owner+0x10: the occupancy count
+constexpr uintptr_t kOwnerB2C = 0x2C;    // owner+0x2C
+constexpr uintptr_t kOwnerB2F = 0x2F;    // owner+0x2F
 
 std::atomic<int> g_phase{kIdle};
 // Guards the collection. The observers append under it; the write takes the observations under it.
@@ -74,7 +78,7 @@ void loadImage() {
     else g_image = census::Image{};
 }
 
-// The hatch state: the four readers, the AAB8 quad and the journal's Status words, read now. A reader's code is -1 when it was not
+// The hatch state: the four readers, the remembered docking objects (state_dump_probe.cpp) and the journal's Status words, read now. A reader's code is -1 when it was not
 // called in the frame collected (the calls did not move).
 // Appends one formatted piece (each piece is short; the buffer is local to the call).
 void addf(std::string& out, const char* fmt, ...) {
@@ -94,22 +98,26 @@ std::string hatchStateLine(const StateReaderSnapshot& was, const StateReaderSnap
         const int code = delta > 0 ? static_cast<int>(now.codes[i]) : -1;
         addf(text, " r%d(calls=%u code=%d)", i, delta, code);
     }
-    if (now.lastAab8) {
-        uint8_t quad[16] = {};
-        const bool ok = engineReader().bytes(now.lastAab8 + kAab8Quad, quad, sizeof(quad));
-        uint32_t words[4] = {};
-        float floats[4] = {};
-        if (ok) {
-            std::memcpy(words, quad, sizeof(words));
-            std::memcpy(floats, quad, sizeof(floats));
-        }
-        addf(text, " aab8=0x%llX quad+0x3C8=%s[%08X %08X %08X %08X] (%g %g %g %g)",
-             static_cast<unsigned long long>(now.lastAab8), ok ? "" : "unreadable ", words[0], words[1], words[2], words[3],
-             static_cast<double>(floats[0]), static_cast<double>(floats[1]), static_cast<double>(floats[2]),
-             static_cast<double>(floats[3]));
-    } else {
-        addf(text, " aab8=none");
+    // Built v8: the objects the readers were called with (remembered, not the AAB8 suffix pin), four at most so the line fits the log.
+    addf(text, " remembered=%u", now.rememberedCount);
+    for (uint32_t i = 0; i < now.rememberedCount && i < 4 && i < 8; ++i) {
+        const uintptr_t obj = now.remembered[i];
+        if (!obj) continue;
+        uint32_t state = 0;
+        const bool okState = engineReader().u32(obj + kObjState, &state);
+        uint64_t owner = 0;
+        uint32_t count = 0;
+        uint8_t b2C = 0, b2F = 0;
+        const bool okOwner = obj >= 8 && engineReader().u64(obj - 8, &owner) && owner != 0 &&
+                             engineReader().u32(static_cast<uintptr_t>(owner) + kOwnerCount, &count) &&
+                             engineReader().bytes(static_cast<uintptr_t>(owner) + kOwnerB2C, &b2C, 1) &&
+                             engineReader().bytes(static_cast<uintptr_t>(owner) + kOwnerB2F, &b2F, 1);
+        addf(text, " obj%u=0x%llX state3C8=%s%u owner=%s0x%llX count=%s%u 2C=%u 2F=%u", i,
+             static_cast<unsigned long long>(obj), okState ? "" : "?", okState ? state : 0u, okOwner ? "" : "?",
+             static_cast<unsigned long long>(owner), okOwner ? "" : "?", okOwner ? count : 0u, okOwner ? b2C : 0u,
+             okOwner ? b2F : 0u);
     }
+    if (now.rememberedCount > 4) addf(text, " (+%u more)", now.rememberedCount - 4);
     const JournalRawStatus raw = journalRawStatus();
     bool locDocked = false;
     const bool locKnown = journalLocationDocked(&locDocked);

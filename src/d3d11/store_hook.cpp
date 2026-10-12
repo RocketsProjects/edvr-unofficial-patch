@@ -13,6 +13,7 @@
 #include "../common/code_hook.h"
 #include "../common/log.h"
 #include "asset_census.h"
+#include "builder_probe.h"
 #include "look_probe.h"
 #include "sealed_trial.h"
 
@@ -111,6 +112,7 @@ __declspec(noinline) uintptr_t __fastcall storeObserved(uintptr_t bucket, uintpt
     if (sealedTrialOn()) sealedTrialAfterStore(bucket, record);
     if (lookProbeCollecting()) lookProbeAfterStore(bucket, record);
     if (assetCensusCollecting()) assetCensusAfterStore(bucket, record);
+    if (builderProbeWanted()) builderProbeAfterStore(bucket, record);
     return result;
 }
 
@@ -158,9 +160,10 @@ void installOnce() noexcept {
 }  // namespace
 
 void storeHookRecompute() noexcept {
-    const bool want = sealedTrialOn() || lookProbeCollecting() || assetCensusWanted();
+    const bool want = sealedTrialOn() || lookProbeCollecting() || assetCensusWanted() || builderProbeWanted();
     if (want) installOnce();
     g_storeGate.store(want && g_store.ready.load(std::memory_order_acquire) ? 1u : 0u, std::memory_order_release);
+    builderProbeRecompute();   // the builder's gate follows the same toggles (builder_probe.cpp)
 }
 
 const char* storeHookStatus() noexcept { return g_store.status.load(std::memory_order_acquire); }

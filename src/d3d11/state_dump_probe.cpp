@@ -23,8 +23,11 @@
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
+#include "hatch_probe_core.h"
 #include "journal_watch.h"
 #include "state_dump_core.h"
+
+#include <algorithm>
 
 namespace sd = edvr::statedump;
 
@@ -149,20 +152,41 @@ Slot g_slot[sd::kReaders];
 std::atomic<bool> g_armed{false};
 // The asset census (asset_census.cpp) arms the same observers for its own frame: the slots fill, and no capture starts.
 std::atomic<bool> g_censusArmed{false};
-std::atomic<uintptr_t> g_lastAab8{0};  // the last object a reader named whose address ends in 0xAAB8 (the census's quad)
 std::atomic<uint32_t> g_stamp{0};      // the frame the work now running belongs to
+// TEMPORARY (Built v8, the hatch probe): the observers stay armed while it is on. Every distinct object the readers are called with is
+// remembered, up to hatch::kRemember; the calls past the cap are counted, not remembered.
+std::atomic<bool> g_hatchOn{false};
+std::atomic<uintptr_t> g_remembered[hatch::kRemember] = {};
+std::atomic<uint32_t> g_rememberCount{0};
+std::atomic<uint32_t> g_rememberDropped{0};
+
+// Remembers the object if it is new and there is room. A race can remember one object twice; the reader of the list tolerates that.
+void rememberObject(uintptr_t self) noexcept {
+    const uint32_t n = g_rememberCount.load(std::memory_order_acquire);
+    for (uint32_t i = 0; i < n && i < hatch::kRemember; ++i)
+        if (g_remembered[i].load(std::memory_order_acquire) == self) return;
+    uint32_t k = n;
+    while (k < hatch::kRemember) {
+        if (g_rememberCount.compare_exchange_weak(k, k + 1, std::memory_order_acq_rel)) {
+            g_remembered[k].store(self, std::memory_order_release);
+            return;
+        }
+    }
+    g_rememberDropped.fetch_add(1, std::memory_order_relaxed);
+}
 
 uintptr_t observeReader(int i, uintptr_t self) noexcept {
     const auto forward = reinterpret_cast<ReaderFn>(g_readers[i].forward.load(std::memory_order_acquire));
     if (!forward) return 0;
     const uintptr_t result = forward(self);
-    if (g_armed.load(std::memory_order_acquire) || g_censusArmed.load(std::memory_order_acquire)) {
+    if (g_armed.load(std::memory_order_acquire) || g_censusArmed.load(std::memory_order_acquire) ||
+        g_hatchOn.load(std::memory_order_acquire)) {
         Slot& s = g_slot[i];
         s.object.store(self, std::memory_order_relaxed);
         s.code.store(static_cast<uint32_t>(result & 0xFFu), std::memory_order_relaxed);
         s.stamp.store(g_stamp.load(std::memory_order_relaxed), std::memory_order_relaxed);
         s.calls.fetch_add(1, std::memory_order_relaxed);
-        if ((self & 0xFFFFu) == 0xAAB8u) g_lastAab8.store(self, std::memory_order_release);
+        if (self) rememberObject(self);
     }
     return result;
 }
@@ -231,14 +255,8 @@ bool g_countersSeen = false;
 int g_locLast = -2;           // the last Location Docked value written to the log (-2: none yet)
 int g_statusLast = -2;        // the last Status docked value written to the log
 Track g_tracks[sd::kTracks];
-// The AAB8 object: the first object the readers name whose address ends in 0xAAB8 is pinned for the capture and tracked on every
-// frame, named or not (a general track is freed when the readers stop naming its object). Its key bytes at +0x3C0..+0x3D0 are
-// written on every row, as "AAB8.key3C0=<32 hex>".
-constexpr uintptr_t kPinTag = 0xAAB8u;
-constexpr uintptr_t kPinKeyOff = 0x3C0;
-constexpr size_t kPinKeyBytes = 0x10;
-Track g_pinned;
-uintptr_t g_pinnedAddr = 0;
+// Built v8: the AAB8 suffix pin is removed. It matched by address suffix and never fired ("aab8=none" in the census). The tracks above cover
+// every object the readers name, +0x3C0 included, so its key bytes are in the general tracks.
 std::vector<Row> g_rows;
 int g_linesLeft = kLogLineCap;
 uint32_t g_faults = 0;
@@ -330,11 +348,10 @@ void collectRow(uint32_t frame) {
         f.object[i] = s.object.load(std::memory_order_relaxed);   // the last object it named, for tracking
     }
 
-    // The distinct objects the readers have named: each gets a track (a fresh one when none is free). The pinned AAB8 object is
-    // left to the pin below, so it is tracked once a frame.
+    // The distinct objects the readers have named: each gets a track (a fresh one when none is free).
     for (int i = 0; i < sd::kReaders; ++i) {
         const uintptr_t obj = f.object[i];
-        if (!obj || obj == g_pinnedAddr) continue;
+        if (!obj) continue;
         Track* t = nullptr;
         for (Track& k : g_tracks)
             if (k.addr == obj) t = &k;
@@ -345,30 +362,6 @@ void collectRow(uint32_t frame) {
         if (!t) continue;
         if (t->addr != obj) *t = Track{};
         trackObject(*t, obj, row.changes, row.changedBytes, g_faults);
-    }
-    if (!g_pinnedAddr) {
-        for (int i = 0; i < sd::kReaders; ++i) {
-            const uintptr_t obj = f.object[i];
-            if (obj && (obj & 0xFFFFu) == kPinTag) {
-                g_pinnedAddr = obj;
-                break;
-            }
-        }
-    }
-    if (g_pinnedAddr) {
-        trackObject(g_pinned, g_pinnedAddr, row.changes, row.changedBytes, g_faults);
-        uint8_t key[kPinKeyBytes] = {};
-        char text[96];
-        if (readMem(key, g_pinnedAddr + kPinKeyOff, sizeof(key))) {
-            int at = std::snprintf(text, sizeof(text), "AAB8.key3C0=");
-            for (size_t k = 0; k < sizeof(key) && at > 0 && static_cast<size_t>(at) + 3 < sizeof(text); ++k)
-                at += std::snprintf(text + at, sizeof(text) - static_cast<size_t>(at), "%02X", key[k]);
-        } else {
-            std::snprintf(text, sizeof(text), "AAB8.key3C0=unreadable");
-            ++g_faults;
-        }
-        row.changes += (row.changes.empty() ? "" : " ");
-        row.changes += text;
     }
     if (row.changes.empty()) row.changes = "-";
     g_rows.push_back(std::move(row));
@@ -442,8 +435,63 @@ void logEvents(const Row& r) {
 
 // The reader gate is open while a capture or the asset census wants the readers' observations.
 void updateGate() noexcept {
-    const bool want = g_armed.load(std::memory_order_acquire) || g_censusArmed.load(std::memory_order_acquire);
+    const bool want = g_armed.load(std::memory_order_acquire) || g_censusArmed.load(std::memory_order_acquire) ||
+                      g_hatchOn.load(std::memory_order_acquire);
     g_stateGate.store(want ? 1u : 0u, std::memory_order_release);
+}
+
+// ---------------------------------------------------------------------------
+// The hatch-state probe (TEMPORARY, Built v8). Each remembered object's state is read once a frame; a line is written only when a value changes.
+struct HatchSlot {
+    uintptr_t obj = 0;
+    bool seen = false;          // a first read is the baseline: no line for it
+    hatch::State prev;
+};
+HatchSlot g_hatchSlots[hatch::kRemember];
+hatch::LineBudget g_hatchBudget;
+
+// The fields the hatch probe reads from one object (SEH-guarded reads; an unreadable field makes the state invalid).
+bool readHatchState(uintptr_t obj, hatch::State* s) noexcept {
+    *s = hatch::State{};
+    if (!obj || obj < 8) return false;
+    uint32_t state = 0;
+    if (!readVal(&state, obj + 0x3C8)) return false;
+    s->state3C8 = state;
+    if (!readMem(s->name340, obj + 0x340, sizeof(s->name340))) return false;
+    uint64_t owner = 0;
+    if (!readVal(&owner, obj - 8) || !owner) return false;
+    s->owner = owner;
+    if (!readVal(&s->ownerCount, owner + 0x10)) return false;
+    if (!readVal(&s->ownerB2C, owner + 0x2C) || !readVal(&s->ownerB2F, owner + 0x2F)) return false;
+    s->valid = true;
+    return true;
+}
+
+// The render thread's frame work for the probe: reads each remembered object and logs the changes (within the session's line cap).
+void hatchProbeFrame(uint32_t frame) {
+    if (!g_hatchOn.load(std::memory_order_acquire)) return;
+    const uint32_t n = std::min(g_rememberCount.load(std::memory_order_acquire), hatch::kRemember);
+    for (uint32_t i = 0; i < n; ++i) {
+        const uintptr_t obj = g_remembered[i].load(std::memory_order_acquire);
+        if (!obj) continue;
+        HatchSlot& slot = g_hatchSlots[i];
+        if (slot.obj != obj) {
+            slot = HatchSlot{};
+            slot.obj = obj;
+        }
+        hatch::State now;
+        readHatchState(obj, &now);
+        if (slot.seen && hatch::differs(slot.prev, now) && g_hatchBudget.take()) {
+            const JournalRawStatus raw = journalRawStatus();
+            char line[512];
+            hatch::formatChange(line, sizeof(line), static_cast<uint64_t>(obj), frame,
+                                static_cast<uint64_t>(GetTickCount64()), slot.prev, now, raw.flagsKnown,
+                                static_cast<uint32_t>(raw.flags), static_cast<uint32_t>(raw.flags2));
+            Log::get().note("%s", line);
+        }
+        slot.prev = now;
+        slot.seen = true;
+    }
 }
 
 void finishCapture(uint32_t frame) {
@@ -522,8 +570,6 @@ void startCapture(uint32_t firstFrame, const char* trigger) {
     g_faults = 0;
     g_linesLeft = kLogLineCap;
     for (Track& t : g_tracks) t = Track{};
-    g_pinned = Track{};
-    g_pinnedAddr = 0;
     g_firstFrame = firstFrame;
     g_trigger = trigger;
     g_capturing = true;
@@ -581,6 +627,7 @@ void stateDumpRequest(const char* trigger) {
 }
 
 void stateDumpFrame(uint32_t frame) {
+    hatchProbeFrame(frame);   // TEMPORARY (Built v8): the hatch probe's change lines, when it is on
     // The work that just finished is stamped `frame`: collect its row first.
     if (g_capturing) {
         collectRow(frame);
@@ -633,7 +680,51 @@ void stateDumpCensusSnapshot(StateReaderSnapshot* out) {
         out->objects[i] = s.object.load(std::memory_order_relaxed);
         if (!g_readers[i].ready.load(std::memory_order_acquire)) out->installed = false;
     }
-    out->lastAab8 = g_lastAab8.load(std::memory_order_acquire);
+    const uint32_t n = std::min(g_rememberCount.load(std::memory_order_acquire), hatch::kRemember);
+    out->rememberedCount = n;
+    for (uint32_t i = 0; i < 8; ++i) out->remembered[i] = i < n ? g_remembered[i].load(std::memory_order_acquire) : 0;
+}
+
+void hatchProbeToggle(const char* trigger, uint32_t frame) {
+    if (g_hatchOn.load(std::memory_order_acquire)) {
+        g_hatchOn.store(false, std::memory_order_release);
+        updateGate();
+        const uint32_t n = std::min(g_rememberCount.load(std::memory_order_acquire), hatch::kRemember);
+        char line[320];
+        std::snprintf(line, sizeof(line),
+                      "hatch probe: off at frame %u (trigger %s): change lines written %u, suppressed %u (cap %u); %u objects "
+                      "remembered; %u reader calls named an object past the cap.",
+                      frame, trigger, g_hatchBudget.used, g_hatchBudget.suppressed, g_hatchBudget.cap, n,
+                      g_rememberDropped.load(std::memory_order_relaxed));
+        Log::get().note("%s", line);
+        return;
+    }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if (!base) {
+        Log::get().note("hatch probe: refused (trigger %s): the module base is unknown.", trigger);
+        return;
+    }
+    const std::string status = ensureDetours(base);
+    g_hatchBudget = hatch::LineBudget{};
+    for (HatchSlot& s : g_hatchSlots) s = HatchSlot{};
+    g_hatchOn.store(true, std::memory_order_release);
+    updateGate();
+    // The state-name table's pointers, once, so the +0x340 bytes can be compared with them offline.
+    uint64_t ptrs[hatch::kTableCount] = {};
+    for (uint32_t i = 0; i < hatch::kTableCount; ++i) {
+        uint64_t v = 0;
+        if (readVal(&v, base + static_cast<uintptr_t>(hatch::kTableRva) + 8u * i)) ptrs[i] = v;
+    }
+    char table[512];
+    hatch::formatTable(table, sizeof(table), base, ptrs, hatch::kTableCount);
+    Log::get().note("%s", table);
+    char line[320];
+    std::snprintf(line, sizeof(line),
+                  "hatch probe: on at frame %u (trigger %s): reader detours %s; %u objects remembered so far (cap %u); a line is "
+                  "written when a value changes (cap %u per session).",
+                  frame, trigger, status.c_str(), std::min(g_rememberCount.load(std::memory_order_acquire), hatch::kRemember),
+                  hatch::kRemember, hatch::kLineCap);
+    Log::get().note("%s", line);
 }
 
 }  // namespace edvr

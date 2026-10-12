@@ -131,6 +131,13 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         std::strcmp(key, "hotkey.sealed_trial_larger") == 0 ||
         std::strcmp(key, "hotkey.sealed_trial_report") == 0 ||
         std::strcmp(key, "diag.sealed_trial_radius_m") == 0 ||
+        // TEMPORARY, Built v8 (builder probe, hatch probe, the trial's record rule): their keys and the two diag values, so the flat profile reads
+        // them. Each is listed in docs\concourse-culling-2026-10-11.md's Status block (the temporary keys).
+        std::strcmp(key, "hotkey.builder_probe") == 0 ||
+        std::strcmp(key, "hotkey.hatch_probe") == 0 ||
+        std::strcmp(key, "hotkey.sealed_trial_mode") == 0 ||
+        std::strcmp(key, "diag.sealed_trial_mode") == 0 ||
+        std::strcmp(key, "diag.sealed_trial_builder") == 0 ||
         std::strcmp(key, "hotkey.look_probe") == 0 ||
         // TEMPORARY, the asset census (asset_census.h): its key, so the flat profile reads it (the census itself is profile-blind).
         std::strcmp(key, "hotkey.asset_census") == 0 ||

@@ -2,7 +2,7 @@
 // The asset census (asset_census.cpp; TEMPORARY, hotkey.asset_census, docs\concourse-culling-2026-10-11.md, Built v7). A press arms one
 // frame. The next frame's records, as the admission store observes them, are grouped by their identity chain (asset_census_core.h),
 // and the CSV is written at the Present after that frame: edvr_logs\asset_census_<stamp>.csv, one row per identity. The docking-state
-// readers, the AAB8 quad and the Status words are logged with it, so the capture records the hatch state. Read-only: no record is culled
+// readers, the remembered docking objects and the Status words are logged with it, so the capture records the hatch state. Read-only: no record is culled
 // and nothing is written into the engine's memory.
 #include <cstdint>
 

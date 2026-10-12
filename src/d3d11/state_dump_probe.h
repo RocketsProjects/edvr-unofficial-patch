@@ -32,9 +32,17 @@ struct StateReaderSnapshot {
     uint32_t calls[4] = {};        // cumulative calls while observed (a capture start resets them)
     uint32_t codes[4] = {};        // the AL code the last call returned
     uintptr_t objects[4] = {};     // the object the last call named
-    uintptr_t lastAab8 = 0;        // the last object a reader named whose address ends in 0xAAB8
+    // TEMPORARY (Built v8): every distinct object the readers were called with, up to eight, remembered while the observers are armed (the
+    // hatch probe, the census or a capture). Replaces the AAB8 suffix pin, which never matched.
+    uintptr_t remembered[8] = {};
+    uint32_t rememberedCount = 0;
 };
 std::string stateDumpCensusArm(bool on);
 void stateDumpCensusSnapshot(StateReaderSnapshot* out);
+
+// TEMPORARY (Built v8, hotkey.hatch_probe): a press toggles the hatch-state probe. On: the four reader detours are installed if they are not,
+// the observers stay armed, the state-name table's pointers are logged once, and every frame each remembered object's state is read; a
+// "hatch probe:" line is written only when a value changes (capped at 400 per session). Off: the last line count is logged.
+void hatchProbeToggle(const char* trigger, uint32_t frame);
 
 }  // namespace edvr

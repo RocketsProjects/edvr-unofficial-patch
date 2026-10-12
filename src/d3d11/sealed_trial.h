@@ -14,10 +14,11 @@
 //     step closes the window of the old radius first, so each rung has its own line.
 // While off, nothing is observed, nothing is written, the sun pair is drawn as it was, and the step keys only log a refusal.
 #include <cstdint>
+#include <string>
 
 namespace edvr {
 
-// Once, at install: reads diag.sealed_trial_radius_m and says what is armed.
+// Once, at install: reads diag.sealed_trial_radius_m, diag.sealed_trial_mode and diag.sealed_trial_builder, and says what is armed.
 void sealedTrialInstall(bool flatProfile);
 // A press of hotkey.sealed_trial: turns the trial on or off, and logs the change.
 void sealedTrialToggle(const char* trigger, uint32_t frame);
@@ -36,5 +37,15 @@ bool sealedTrialSkipsSunPair() noexcept;
 void sealedTrialNoteSunSkip() noexcept;
 // The admission store calls this after it has written a record (bucket = the collection, record = its record).
 void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept;
+
+// TEMPORARY (named mode, hotkey.sealed_trial_mode): a press cycles the record rule (sphere, named) while the trial is on; each change is
+// logged, and the window of the old rule closes first. Off, the key only logs a refusal.
+void sealedTrialModeStep(const char* trigger, uint32_t frame);
+// TEMPORARY (builder probe, builder_probe.cpp): the builder calls of one frame, classed by the trial's cull and by the store's visit. Added
+// to the trial's window line (builder_after_cull=, builder_unvisited=) at the probe's frame tick, before sealedTrialFrame.
+void sealedTrialNoteBuilderCalls(uint64_t afterCull, uint64_t unvisited) noexcept;
+// TEMPORARY, shared by the trial, the builder probe and the kept report: a record's name (rec+0x18 -> node, node+0 -> text, the census's accept
+// rules), cached per node for the frame. False when no name can be read.
+bool sealedTrialRecordName(uintptr_t record, std::string* out) noexcept;
 
 }  // namespace edvr

@@ -86,6 +86,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "shadow_gate_probe.h"    // the shadow gate probe (TEMPORARY, D0): install, per-frame, the key
 #include "state_dump_probe.h"     // the state dump (TEMPORARY, M2): install, per-frame, the key
 #include "sealed_trial.h"         // the sealed-hangar trial (TEMPORARY): install, per-frame, the key
+#include "builder_probe.h"        // the builder probe (TEMPORARY, Built v8): install, per-frame, the key
 #include "look_probe.h"           // the look probe (TEMPORARY): install, per-frame, the key
 #include "asset_census.h"         // the asset census (TEMPORARY): the key, the one-frame collection and its write
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
@@ -300,6 +301,13 @@ struct State {
     // The kept-records report of the sealed-hangar trial (TEMPORARY; sealed_trial.h): one frame, while the trial is on. Unbound by default.
     Hotkey sealedTrialReportKey;
     std::string sealedTrialReportKeyText;
+    // TEMPORARY, Built v8: the builder probe's key (one frame of builder calls), the hatch-state probe's toggle, and the trial's record-rule cycle.
+    Hotkey builderProbeKey;
+    std::string builderProbeKeyText;
+    Hotkey hatchProbeKey;
+    std::string hatchProbeKeyText;
+    Hotkey sealedTrialModeKey;
+    std::string sealedTrialModeKeyText;
     // The look probe's key (TEMPORARY; look_probe.h). Unbound by default.
     Hotkey lookProbeKey;
     std::string lookProbeKeyText;
@@ -1261,6 +1269,9 @@ EDVR_BOUNDARY_TICK(tkShadowGateProbe, "shadow_gate_probe");
 EDVR_BOUNDARY_TICK(tkStateDumpProbe, "state_dump_probe");
 // The sealed-hangar trial's frame tick (TEMPORARY; sealed_trial.cpp): under its own fault budget.
 EDVR_BOUNDARY_TICK(tkSealedTrial, "sealed_trial");
+// The builder probe's frame tick (TEMPORARY, Built v8; builder_probe.cpp): classes the frame's builder calls for the trial's window line, and writes a
+// collected frame. Runs before the trial's own tick, so the window line sees this frame's counts.
+EDVR_BOUNDARY_TICK(tkBuilderProbe, "builder_probe");
 // The look probe's frame tick (TEMPORARY; look_probe.cpp): under its own fault budget.
 EDVR_BOUNDARY_TICK(tkLookProbe, "look_probe");
 // The asset census's frame tick (TEMPORARY; asset_census.cpp): under its own fault budget.
@@ -1392,6 +1403,11 @@ void tickHotkeys() {
     // The kept-records report (TEMPORARY; sealed_trial.h): a press captures one frame while the trial is on.
     if (g_state->sealedTrialReportKey.pressed())
         sealedTrialReportRequest("hotkey.sealed_trial_report", static_cast<uint32_t>(g_state->frameCounter));
+    // TEMPORARY, Built v8: the builder probe arms one frame; the hatch probe toggles; the trial's record rule cycles while it is on.
+    if (g_state->builderProbeKey.pressed()) builderProbeRequest("hotkey.builder_probe", static_cast<uint32_t>(g_state->frameCounter));
+    if (g_state->hatchProbeKey.pressed()) hatchProbeToggle("hotkey.hatch_probe", static_cast<uint32_t>(g_state->frameCounter));
+    if (g_state->sealedTrialModeKey.pressed())
+        sealedTrialModeStep("hotkey.sealed_trial_mode", static_cast<uint32_t>(g_state->frameCounter));
     // The look probe (TEMPORARY; look_probe.h): a press arms one capture of the next frame.
     if (g_state->lookProbeKey.pressed()) lookProbeRequest("hotkey.look_probe");
     // The asset census (TEMPORARY; asset_census.h): a press arms one frame of records, grouped by identity.
@@ -1622,6 +1638,10 @@ void presentFrameBoundary() {
     });
     tkStateDumpProbe.run([] {
         stateDumpFrame(static_cast<uint32_t>(g_state->frameCounter));
+    });
+    // The builder probe's frame tick (TEMPORARY, Built v8): before the trial's tick, so the window line sees this frame's counts.
+    tkBuilderProbe.run([] {
+        builderProbeFrame(static_cast<uint32_t>(g_state->frameCounter));
     });
     // The sealed-hangar trial's frame tick (TEMPORARY): the 10-second line while the trial is on; a branch when off.
     tkSealedTrial.run([] {
@@ -2160,6 +2180,21 @@ void configureDiagnosticHotkeys() {
          "hotkey.sealed_trial_report", "sealed trial report",
          "hotkey: sealed_trial_report is set but bound nothing, so the kept-records report cannot be started by key this session.",
          " Writes the kept-records report for one frame of the sealed-hangar trial (temporary probe): edvr_logs\\sealed_kept_<stamp>.csv."},
+        // TEMPORARY, Built v8: the builder probe (builder_probe.h): a press arms one frame of builder calls. Empty is off.
+        {&s.builderProbeKey, &s.builderProbeKeyText, Config::get().getString("hotkey.builder_probe", ""),
+         "hotkey.builder_probe", "builder probe",
+         "hotkey: builder_probe is set but bound nothing, so the builder probe cannot be armed by key this session.",
+         " Arms one frame of the record builder's calls (temporary probe); the summary follows in the graphics log and the CSV is in edvr_logs."},
+        // TEMPORARY, Built v8: the hatch-state probe (state_dump_probe.h): a press toggles it. Empty is off.
+        {&s.hatchProbeKey, &s.hatchProbeKeyText, Config::get().getString("hotkey.hatch_probe", ""),
+         "hotkey.hatch_probe", "hatch probe",
+         "hotkey: hatch_probe is set but bound nothing, so the hatch-state probe cannot be toggled by key this session.",
+         " Toggles the hatch-state probe (temporary): a line each time the docking object's state changes."},
+        // TEMPORARY, Built v8: the trial's record-rule cycle (sealed_trial.h): sphere or named, while the trial is on. Empty is off.
+        {&s.sealedTrialModeKey, &s.sealedTrialModeKeyText, Config::get().getString("hotkey.sealed_trial_mode", ""),
+         "hotkey.sealed_trial_mode", "sealed trial mode",
+         "hotkey: sealed_trial_mode is set but bound nothing, so the trial's record rule cannot be cycled by key this session.",
+         " Cycles the sealed-hangar trial's record rule, sphere or named, while the trial is on (temporary probe)."},
         // TEMPORARY, the look probe (look_probe.h): a press arms one capture. Empty is off.
         {&s.lookProbeKey, &s.lookProbeKeyText, Config::get().getString("hotkey.look_probe", ""),
          "hotkey.look_probe", "look probe",
@@ -3035,6 +3070,8 @@ void hookDevice(ID3D11Device* device) {
             stateDumpInstall(runtimeFlatProfile());
             // The sealed-hangar trial (TEMPORARY, sealed_trial.cpp): reads diag.sealed_trial_radius_m; off until its key is pressed.
             sealedTrialInstall(runtimeFlatProfile());
+            // The builder probe (TEMPORARY, Built v8): armed by key only; the builder detour goes in on the first want.
+            builderProbeInstall(runtimeFlatProfile());
             // The look probe (TEMPORARY, look_probe.cpp): armed by key only; nothing is observed until then.
             lookProbeInstall(runtimeFlatProfile());
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on, VR only (a flat session says

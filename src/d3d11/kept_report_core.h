@@ -1,7 +1,7 @@
 #pragma once
 // The kept-records report's pure half (sealed_trial.cpp; TEMPORARY, the diagnosis behind hotkey.sealed_trial_report). No Windows, no
 // engine memory: why a record is kept, the two lists the report writes (the top kept records by radius, and the top kept base records
-// by child count), the counts, and the CSV rows (one header; every row has the header's 17 fields). The rig tools\view_source_test
+// by child count), the counts, and the CSV rows (one header; every row has the header's 18 fields, the last being the record's name). The rig tools\view_source_test
 // compiles this header alone.
 //
 // The rule the report explains: the store keeps a record when its own sphere contains the camera or meets the cell (the sphere of radius R
@@ -10,11 +10,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <string>
 
 namespace edvr::kept {
 
 constexpr uint32_t kTop = 40;     // records listed per list
-constexpr int kColumns = 17;      // fields in every CSV row, the header included
+constexpr int kColumns = 18;      // fields in every CSV row, the header included (the name column was added in Built v8)
 
 // own: the record's own sphere contains the camera or meets the cell. base: an ancestor's sphere does (levelsUp generations up).
 // unjudged: no sphere on the way up meets the cell (the record was kept without a sphere that qualifies, or its sphere did not read).
@@ -50,6 +51,7 @@ struct Entry {
     uint32_t levelsUp = 0;         // generations up to the ancestor whose test met the cell (0 when none did, or own did)
     uint64_t childCount = 0;
     uint64_t vtableRva = 0;
+    std::string name;              // the record's name (rec+0x18 -> node, node+0 -> text); empty when unreadable (written as "(none)")
 };
 
 // Radius first (largest), then address (smallest): equal radii list in a fixed order.
@@ -128,18 +130,18 @@ inline Stats countKept(const Entry* e, uint32_t n) noexcept {
 
 inline const char* csvHeader() noexcept {
     return "list,rank,address,radius_m,dx_m,dy_m,dz_m,dist_m,contains_camera,why_kept,levels_up,judged,parent_address,"
-           "base_address,child_count,bucket,vtable_rva";
+           "base_address,child_count,bucket,vtable_rva,name";
 }
 
-// One row: list is "radius" or "base"; rank counts from 1.
+// One row: list is "radius" or "base"; rank counts from 1. The name is last; the census's name rules keep it free of commas.
 inline int formatRow(char* out, size_t cap, const char* list, uint32_t rank, const Entry& e) noexcept {
-    return std::snprintf(out, cap, "%s,%u,0x%llX,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%s,%u,%d,0x%llX,0x%llX,%llu,0x%llX,0x%llX", list, rank,
+    return std::snprintf(out, cap, "%s,%u,0x%llX,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%s,%u,%d,0x%llX,0x%llX,%llu,0x%llX,0x%llX,%s", list, rank,
                          static_cast<unsigned long long>(e.address), static_cast<double>(e.radius),
                          static_cast<double>(e.rel[0]), static_cast<double>(e.rel[1]), static_cast<double>(e.rel[2]),
                          static_cast<double>(e.dist), e.contains ? 1 : 0, whyName(e.why), e.levelsUp, e.judged ? 1 : 0,
                          static_cast<unsigned long long>(e.parent), static_cast<unsigned long long>(e.base),
                          static_cast<unsigned long long>(e.childCount), static_cast<unsigned long long>(e.bucket),
-                         static_cast<unsigned long long>(e.vtableRva));
+                         static_cast<unsigned long long>(e.vtableRva), e.name.empty() ? "(none)" : e.name.c_str());
 }
 
 }  // namespace edvr::kept
