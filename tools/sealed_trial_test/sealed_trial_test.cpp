@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
         w.sunSkipped = 40;
         w.evalNs = 2500000;   // 2.5 ms
         w.faults = 0;
-        char line[400];
+        char line[960];
         se::formatWindow(line, sizeof(line), w, 80.0f, "eye rows");
         const std::string s = line;
         check(s.find("window 5 s culled=12 kept=3 kept_unjudged=1 sun_pairs_skipped=40") != std::string::npos,
@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
 
     // --- The toggle line, on and off, with and without a camera.
     {
-        char line[400];
+        char line[960];
         const float c[3] = {1.0f, 2.0f, 3.0f};
         se::formatToggle(line, sizeof(line), true, 4242, 80.0f, c, true, "vscreen");
         check(std::string(line).find("on at frame 4242 (radius 80.0 m; view source = vscreen; camera (1.0,2.0,3.0)") !=
@@ -287,10 +287,35 @@ int main(int argc, char** argv) {
         check(se::parseMode("sphere", &m) && m == se::Mode::kSphere, "sphere parses");
         check(se::parseMode("named", &m) && m == se::Mode::kNamed, "named parses");
         check(!se::parseMode("Named", &m) && m == se::Mode::kSphere, "an unknown mode word is refused and the mode is sphere");
-        check(se::nextMode(se::Mode::kSphere) == se::Mode::kNamed && se::nextMode(se::Mode::kNamed) == se::Mode::kSphere,
-              "hotkey.sealed_trial_mode cycles sphere and named");
-        check(std::strcmp(se::modeName(se::Mode::kNamed), "named") == 0 && std::strcmp(se::modeName(se::Mode::kSphere), "sphere") == 0,
-              "the mode names are sphere and named");
+        check(se::nextMode(se::Mode::kSphere) == se::Mode::kNamed && se::nextMode(se::Mode::kNamed) == se::Mode::kAll &&
+                  se::nextMode(se::Mode::kAll) == se::Mode::kSphere,
+              "hotkey.sealed_trial_mode cycles sphere, named, all, sphere");
+        check(std::strcmp(se::modeName(se::Mode::kNamed), "named") == 0 && std::strcmp(se::modeName(se::Mode::kSphere), "sphere") == 0 &&
+                  std::strcmp(se::modeName(se::Mode::kAll), "all") == 0,
+              "the mode names are sphere, named and all");
+        // Built v8.5: the all mode parses; the pointer kind at rec+0x290 classes null, image, other and unreadable.
+        se::Mode am = se::Mode::kSphere;
+        check(se::parseMode("all", &am) && am == se::Mode::kAll, "all parses (diag.sealed_trial_mode = all)");
+        check(se::ptrKindOf(true, 0, 0x1000, 0x2000) == se::PtrKind::kNull, "a zero pointer is null");
+        check(se::ptrKindOf(true, 0x1800, 0x1000, 0x2000) == se::PtrKind::kImage, "a pointer inside the image is image");
+        check(se::ptrKindOf(true, 0x2000, 0x1000, 0x2000) == se::PtrKind::kOther, "the image end is exclusive: a pointer there is other");
+        check(se::ptrKindOf(true, 0x9000, 0x1000, 0x2000) == se::PtrKind::kOther, "a pointer outside the image is other");
+        check(se::ptrKindOf(false, 0x1800, 0x1000, 0x2000) == se::PtrKind::kUnread, "a failed read is unreadable, whatever the value");
+        check(std::strcmp(se::ptrKindName(se::PtrKind::kOther), "other") == 0, "the pointer kind name is other");
+        {
+            char buf[1200] = {};
+            se::Window w;
+            w.ptrNull = 3;
+            w.ptrImage = 5;
+            w.ptrOther = 7;
+            w.ptrUnread = 11;
+            se::formatWindow(buf, sizeof(buf), w, 80.0f, "view", se::Mode::kAll);
+            check(std::strstr(buf, "mode=all ") != nullptr, "the window line names the all mode");
+            check(std::strstr(buf, "ptr290 null=3 image=5 other=7 unread=11") != nullptr, "the window line carries the rec+0x290 kinds");
+            char mode[400] = {};
+            se::formatModeLine(mode, sizeof(mode), se::Mode::kAll, 42, "hotkey.sealed_trial_mode");
+            check(std::strstr(mode, "mode = all at frame 42") != nullptr, "the mode line for all says every record loses its flags");
+        }
 
         se::BuilderPolicy p = se::BuilderPolicy::kSkip;
         check(se::parseBuilderPolicy("", &p) && p == se::BuilderPolicy::kCount, "an empty diag.sealed_trial_builder is count");

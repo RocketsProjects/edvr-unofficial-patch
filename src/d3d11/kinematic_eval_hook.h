@@ -137,6 +137,8 @@ using BuilderObserverFn = void (*)(uintptr_t a, uintptr_t b, uintptr_t c, uintpt
 void kinematicEvalSetBuilderObserver(BuilderObserverFn fn) noexcept;
 const char* kinematicEvalBuilderObserverAttach() noexcept;
 void kinematicEvalBuilderObserverDetach() noexcept;
+// Built v8.5: whether the bracket's relay gate (evalGate) is open right now: the builder observer is called only while it is. Read-only.
+bool kinematicEvalBuilderGateOpen() noexcept;
 // FUN_1442B3FC0's hook: "hooked", or why it stood down ("not requested",
 // "not build 332841 (PE timestamp/size)", "prologue mismatch at RVA 0x42B3FC0",
 // "builder frame/call-site mismatch at RVA 0x...", "CodeHook refused the patch").

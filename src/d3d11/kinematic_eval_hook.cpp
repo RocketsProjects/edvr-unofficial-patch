@@ -1273,6 +1273,10 @@ void kinematicEvalBuilderObserverDetach() noexcept {
     } catch(...) {}
 }
 
+bool kinematicEvalBuilderGateOpen() noexcept {
+    return evalGate.load(std::memory_order_acquire)!=0;
+}
+
 const char* kinematicEvalPartTestStatus() noexcept {
     return g_partStatus.load(std::memory_order_acquire);
 }

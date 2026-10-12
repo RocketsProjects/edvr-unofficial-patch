@@ -190,12 +190,20 @@ struct Window {
     float distP50 = 0.0f;
     float distP95 = 0.0f;
     float distMax = 0.0f;
+    // Built v8.5: the kind of the pointer at rec+0x290 for every record the store visited in the window: null, inside the game image, any other
+    // non-null value, or unreadable. (The pose it points at is what the centre reads; decomp_4312040.txt places records from rec+0x190 instead.)
+    uint64_t ptrNull = 0;
+    uint64_t ptrImage = 0;
+    uint64_t ptrOther = 0;
+    uint64_t ptrUnread = 0;
 };
 
 // The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named is the own-pad cell rule.
-enum class Mode : uint8_t { kSphere = 0, kNamed = 1 };
+// Built v8.5: all clears the view mask and admitted flag of EVERY record the store visits, with no sphere, name or pose test (the discriminator:
+// it separates "the flags do not control the draws" from "our write does not land").
+enum class Mode : uint8_t { kSphere = 0, kNamed = 1, kAll = 2 };
 
-// Parses diag.sealed_trial_mode: "sphere" or "named" (empty is sphere). False for any other text: the caller says so and keeps sphere.
+// Parses diag.sealed_trial_mode: "sphere", "named" or "all" (empty is sphere). False for any other text: the caller says so and keeps sphere.
 inline bool parseMode(const char* text, Mode* out) noexcept {
     if (!text || !*text || std::strcmp(text, "sphere") == 0) {
         *out = Mode::kSphere;
@@ -205,14 +213,26 @@ inline bool parseMode(const char* text, Mode* out) noexcept {
         *out = Mode::kNamed;
         return true;
     }
+    if (std::strcmp(text, "all") == 0) {
+        *out = Mode::kAll;
+        return true;
+    }
     *out = Mode::kSphere;
     return false;
 }
 
-inline const char* modeName(Mode m) noexcept { return m == Mode::kNamed ? "named" : "sphere"; }
+inline const char* modeName(Mode m) noexcept {
+    if (m == Mode::kNamed) return "named";
+    if (m == Mode::kAll) return "all";
+    return "sphere";
+}
 
-// The other mode: hotkey.sealed_trial_mode cycles sphere, named, sphere.
-inline Mode nextMode(Mode m) noexcept { return m == Mode::kNamed ? Mode::kSphere : Mode::kNamed; }
+// The next mode: hotkey.sealed_trial_mode cycles sphere, named, all, sphere.
+inline Mode nextMode(Mode m) noexcept {
+    if (m == Mode::kSphere) return Mode::kNamed;
+    if (m == Mode::kNamed) return Mode::kAll;
+    return Mode::kSphere;
+}
 
 // TEMPORARY (diag.sealed_trial_builder): count leaves the builder calls alone and counts them; skip is refused (builder_probe.cpp).
 enum class BuilderPolicy : uint8_t { kCount = 0, kSkip = 1 };
@@ -512,8 +532,32 @@ inline bool unpackSlot(uint64_t v, uintptr_t node, uint32_t stamp, NameClass* ou
     return true;
 }
 
+// Built v8.5: the kind of a pointer read from a record (rec+0x290): null, inside the game image [imageBase, imageEnd), any other non-null
+// value, or unreadable. Pure; the caller supplies the read result and the image bounds.
+enum class PtrKind : uint8_t { kNull = 0, kImage = 1, kOther = 2, kUnread = 3 };
+
+inline PtrKind ptrKindOf(bool readOk, uintptr_t value, uintptr_t imageBase, uintptr_t imageEnd) noexcept {
+    if (!readOk) return PtrKind::kUnread;
+    if (value == 0) return PtrKind::kNull;
+    if (value >= imageBase && value < imageEnd) return PtrKind::kImage;
+    return PtrKind::kOther;
+}
+
+inline const char* ptrKindName(PtrKind k) noexcept {
+    switch (k) {
+        case PtrKind::kNull: return "null";
+        case PtrKind::kImage: return "image";
+        case PtrKind::kOther: return "other";
+        default: return "unreadable";
+    }
+}
+
 // "sealed trial: mode = named at frame N (...)" and the sphere equivalent, when hotkey.sealed_trial_mode changes the rule while on.
 inline int formatModeLine(char* out, size_t cap, Mode m, uint32_t frame, const char* trigger) noexcept {
+    if (m == Mode::kAll)
+        return std::snprintf(out, cap, "sealed trial: mode = all at frame %u (trigger %s): EVERY record the store visits loses its view mask and "
+                                       "admitted flag, with no sphere, name or pose test (the discriminator; the screen and the census should "
+                                       "collapse if the flags control the draws)", frame, trigger);
     if (m == Mode::kNamed)
         return std::snprintf(out, cap, "sealed trial: mode = named at frame %u (trigger %s): the own pad's cell (LandingPad small, medium or large; "
                                        "radius per size, diag.sealed_cell_*_m) keeps records whose centre lies within it, plus the nearest instance of "
@@ -536,7 +580,8 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          "sealed trial: window %llu s culled=%llu kept=%llu kept_unjudged=%llu sun_pairs_skipped=%llu "
                          "eval_ms=%.3f faults=%llu torn=%llu radius_m=%.1f builder_after_cull=%llu mode=%s %s "
                          "kept_explicit=%llu kept_by_cell=%llu culled_containing=%llu zero_centre=%llu pose_fallback=%llu "
-                         "centre_dist_m p50=%.2f p95=%.2f max=%.2f n=%llu view source = %s",
+                         "centre_dist_m p50=%.2f p95=%.2f max=%.2f n=%llu ptr290 null=%llu image=%llu other=%llu unread=%llu "
+                         "view source = %s",
                          static_cast<unsigned long long>(kWindowMs / 1000), static_cast<unsigned long long>(w.culled),
                          static_cast<unsigned long long>(w.kept), static_cast<unsigned long long>(w.keptUnknown),
                          static_cast<unsigned long long>(w.sunSkipped), static_cast<double>(w.evalNs) / 1.0e6,
@@ -546,7 +591,8 @@ inline int formatWindow(char* out, size_t cap, const Window& w, float radiusM, c
                          static_cast<unsigned long long>(w.culledContaining), static_cast<unsigned long long>(w.zeroCentre),
                          static_cast<unsigned long long>(w.poseFallback), static_cast<double>(w.distP50),
                          static_cast<double>(w.distP95), static_cast<double>(w.distMax), static_cast<unsigned long long>(w.distN),
-                         viewSource);
+                         static_cast<unsigned long long>(w.ptrNull), static_cast<unsigned long long>(w.ptrImage),
+                         static_cast<unsigned long long>(w.ptrOther), static_cast<unsigned long long>(w.ptrUnread), viewSource);
 }
 
 // "sealed trial: on at frame F (radius R m; camera (x,y,z) or unknown; the sun pair is skipped; records outside the sphere

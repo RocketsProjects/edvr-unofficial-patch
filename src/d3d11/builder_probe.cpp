@@ -265,6 +265,17 @@ void installBuilderOnce() noexcept {
 enum class Path : uint8_t { kNone = 0, kBracket = 1, kOwn = 2, kRefused = 3 };
 Path g_path = Path::kNone;      // render thread only (attach and detach run from the tick)
 bool g_wantPrev = false;        // the want at the last recompute (render thread only)
+// Built v8.5: what the bracket said at the last attach; the bracket's relay gate when the collected frame began (render thread only).
+const char* g_bracketSaid = "not asked yet";
+bool g_gateAtStart = false;
+const char* pathName(Path p) noexcept {
+    switch (p) {
+        case Path::kBracket: return "bracket";
+        case Path::kOwn: return "own detour";
+        case Path::kRefused: return "refused";
+        default: return "none";
+    }
+}
 
 // The bracket's observer: the builder's entry, with the bracket's own arguments (a = rcx, d = r9, the return address is the caller's).
 void builderObservedByBracket(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f,
@@ -281,6 +292,7 @@ void attachPath() noexcept {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     g_imageBase.store(base, std::memory_order_release);
     const char* bracket = kinematicEvalBuilderObserverAttach();
+    g_bracketSaid = bracket;
     if (std::strcmp(bracket, "installed") == 0) {
         kinematicEvalSetBuilderObserver(&builderObservedByBracket);
         g_path = Path::kBracket;
@@ -336,8 +348,12 @@ void writeFrame(uint32_t frame, bp::Storage& st) {
         Log::get().note("%s", line);
         from += written;
     }
-    Log::get().note("builder probe: frame %u: builder hook %s; store hook %s; camera %s%s.", frame,
-                    g_builder.status.load(std::memory_order_acquire), storeHookStatus(), camSource,
+    // Built v8.5: the live path and the bracket's relay gate at the frame's start and at the write. The own detour's status is printed too, but it
+    // says nothing when the bracket is the path (v8.4's "not wanted yet" was the own detour's status, not the probe's).
+    Log::get().note("builder probe: frame %u: path %s (bracket said: %s; own detour: %s); bracket relay gate open at the frame's start %s, "
+                    "at the write %s; store hook %s; camera %s%s.", frame, pathName(g_path), g_bracketSaid,
+                    g_builder.status.load(std::memory_order_acquire), g_gateAtStart ? "yes" : "no",
+                    kinematicEvalBuilderGateOpen() ? "yes" : "no", storeHookStatus(), camSource,
                     camOk ? "" : " (no camera: distances are -1)");
     // Built v8.1: the threads that reached each detour this frame, and what the bounded storage dropped.
     Log::get().note("builder probe: frame %u threads: store detour %u distinct%s, builder detour %u distinct%s; dropped: calls %llu "
@@ -419,6 +435,9 @@ void builderProbeRequest(const char* trigger, uint32_t frame) {
     Log::get().note("builder probe: armed (trigger %s) at frame %u; the next frame's builder calls are collected, and written at the "
                     "frame after.", trigger, frame);
     storeHookRecompute();   // the store is wanted too: the probe's visit set comes from it
+    // Built v8.5: the bracket may have been installed since the last attach (its consumers come and go), so an arm asks again unless the bracket is
+    // already the path. The rising edge of the want does not cover a want that was already true (a trial on, with the path refused).
+    if (g_path != Path::kBracket) attachPath();
 }
 
 void builderProbeAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
@@ -443,8 +462,10 @@ void builderProbeFrame(uint32_t frame) {
         next.reserve(kCallReserve, kRecordReserve);   // every allocation happens here, before the lock
         (void)g_collector.exchange(std::move(next));  // the previous storage (empty after the write) is dropped
         g_collectFrame = frame + 1;
+        g_gateAtStart = kinematicEvalBuilderGateOpen();   // the bracket's relay gate, sampled as the frame begins (the want holds it open)
         g_phase.store(kCollecting, std::memory_order_release);
-        Log::get().note("builder probe: collecting frame %u.", g_collectFrame);
+        Log::get().note("builder probe: collecting frame %u (path %s; bracket relay gate open %s).", g_collectFrame, pathName(g_path),
+                        g_gateAtStart ? "yes" : "no");
     }
     storeHookRecompute();   // the gates follow the phase (the store's recompute also sets the builder's)
 }

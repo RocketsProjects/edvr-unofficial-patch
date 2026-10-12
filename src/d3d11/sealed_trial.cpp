@@ -61,6 +61,8 @@ std::atomic<uint64_t> g_keptByCell{0}, g_keptExplicit{0}, g_culledContaining{0};
 constexpr size_t kCentreDistCap = 8192;
 uint64_t g_zeroCentre = 0, g_poseFallback = 0;
 std::vector<float> g_centreDist;
+// Built v8.5: the kind of the pointer at rec+0x290 for each record the store visits in the window (under the lock).
+uint64_t g_ptrNull = 0, g_ptrImage = 0, g_ptrOther = 0, g_ptrUnread = 0;
 std::atomic<uint32_t> g_frameStamp{0};       // advanced at every Present tick: the observer resolves the view once per frame
 std::atomic<bool> g_cameraKnown{false};
 
@@ -154,6 +156,7 @@ void resetWindow() noexcept {
     g_culledContaining.store(0);
     g_zeroCentre = 0;
     g_poseFallback = 0;
+    g_ptrNull = g_ptrImage = g_ptrOther = g_ptrUnread = 0;
     g_centreDist.clear();
     if (g_centreDist.capacity() < kCentreDistCap) g_centreDist.reserve(kCentreDistCap);   // at a window's end, not on the store's hot path
 }
@@ -174,6 +177,10 @@ sealed::Window takeWindow() noexcept {
     w.culledContaining = g_culledContaining.load();
     w.zeroCentre = g_zeroCentre;
     w.poseFallback = g_poseFallback;
+    w.ptrNull = g_ptrNull;
+    w.ptrImage = g_ptrImage;
+    w.ptrOther = g_ptrOther;
+    w.ptrUnread = g_ptrUnread;
     w.distN = g_centreDist.size();
     if (!g_centreDist.empty()) {
         w.distP50 = sealed::percentileOf(g_centreDist, 0.50);
@@ -208,7 +215,7 @@ const char* viewLabel(const view::Resolved& v) noexcept {
 
 // Writes the window's line at the current radius and the view it ran against, then starts a new window. Called under the lock.
 void noteWindow() {
-    char line[700];
+    char line[960];
     sealed::formatWindow(line, sizeof(line), takeWindow(), g_radius.load(std::memory_order_relaxed), viewLabel(g_view),
                          g_mode.load(std::memory_order_relaxed));
     Log::get().note("%s", line);
@@ -299,6 +306,38 @@ CentreRead recordCentreRead(uintptr_t rec) noexcept {
     r.source = sealed::chooseCentre(r.poseOk, r.pose, r.rawOk, r.raw, r.world);
     if (r.poseOk && r.rawOk && !r.rawZero) r.dist = sealed::distance(r.pose, r.raw);
     return r;
+}
+
+// Built v8.5: the game image's end (its base plus SizeOfImage from the PE header), read once and cached. A failed read caches the base (every
+// non-null pointer is then "other"), which the window line would show.
+std::atomic<uintptr_t> g_imageEnd{0};
+uintptr_t gameImageEnd() noexcept {
+    const uintptr_t cached = g_imageEnd.load(std::memory_order_acquire);
+    if (cached) return cached;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    uint32_t lfanew = 0, size = 0;
+    const uintptr_t end = (base && readVal(&lfanew, base + 0x3C) && readVal(&size, base + lfanew + 0x50)) ? base + size : base;
+    g_imageEnd.store(end, std::memory_order_release);
+    return end;
+}
+
+// Built v8.5: the pointer at rec+0x290 read raw, and its kind (sealed_trial_core.h PtrKind).
+sealed::PtrKind ptr290Of(uintptr_t rec, uint64_t* raw) noexcept {
+    uintptr_t p = 0;
+    const bool ok = readVal(&p, rec + kRecPose);
+    if (raw) *raw = static_cast<uint64_t>(p);
+    static const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));   // the module does not move
+    return sealed::ptrKindOf(ok, p, base, gameImageEnd());
+}
+
+// Built v8.5: counts one record's pointer kind in the window (under the lock).
+static void notePtr(sealed::PtrKind k) noexcept {
+    switch (k) {
+        case sealed::PtrKind::kNull: ++g_ptrNull; break;
+        case sealed::PtrKind::kImage: ++g_ptrImage; break;
+        case sealed::PtrKind::kOther: ++g_ptrOther; break;
+        default: ++g_ptrUnread; break;
+    }
 }
 
 // The class of a node's name, read from game memory with no lock (the census's accept rules). The miss path of the class cache.
@@ -430,6 +469,11 @@ void writeKeptReport() {
         e.rawZero = cr.rawZero;
         e.centreSource = static_cast<uint8_t>(cr.source);
         e.centreDist = cr.dist;
+        {
+            uint64_t raw = 0;
+            e.ptr290Kind = static_cast<uint8_t>(ptr290Of(w.rec, &raw));
+            e.ptr290 = raw;
+        }
         float radius = 0.0f;
         uint64_t mask = 0;
         uint64_t children = 0;
@@ -608,7 +652,7 @@ void sealedTrialInstall(bool flatProfile) {
     const std::string modeText = Config::get().getString("diag.sealed_trial_mode", "");
     sealed::Mode mode = sealed::Mode::kSphere;
     if (!sealed::parseMode(modeText.c_str(), &mode))
-        Log::get().note("sealed trial: diag.sealed_trial_mode = '%s' is not sphere or named; the mode is sphere.", modeText.c_str());
+        Log::get().note("sealed trial: diag.sealed_trial_mode = '%s' is not sphere, named or all; the mode is sphere.", modeText.c_str());
     g_mode.store(mode, std::memory_order_relaxed);
     // Named mode's cell radii (Built v8.3b). The defaults are GUESSES, not measurements.
     const std::string smallText = Config::get().getString("diag.sealed_cell_small_m", "");
@@ -669,6 +713,9 @@ void sealedTrialToggle(const char* trigger, uint32_t frame) {
         storeHookRecompute();
         sealed::formatToggle(line, sizeof(line), false, frame, radius, nullptr, false, view::sourceName(g_view.source));
         Log::get().note("%s (trigger %s)", line, trigger);
+        // Built v8.5: the toggle never changes the record rule; the mode is the last one set (install, or the mode key).
+        Log::get().note("sealed trial: off; the record rule stays %s across the toggle (trigger %s)",
+                        sealed::modeName(g_mode.load(std::memory_order_relaxed)), trigger);
         return;
     }
     g_on.store(true, std::memory_order_release);
@@ -708,9 +755,9 @@ void sealedTrialModeStep(const char* trigger, uint32_t frame) {
     noteWindow();   // the old rule's window closes here
     const sealed::Mode next = sealed::nextMode(g_mode.load(std::memory_order_relaxed));
     g_mode.store(next, std::memory_order_release);
-    if (next == sealed::Mode::kSphere) {
+    if (next != sealed::Mode::kNamed) {   // the own pad's cell belongs to named mode only
         g_cellPrev = sealed::OwnCell{};
-        std::snprintf(g_cellPrev.reason, sizeof(g_cellPrev.reason), "sphere mode");
+        std::snprintf(g_cellPrev.reason, sizeof(g_cellPrev.reason), "%s mode", sealed::modeName(next));
     }
     g_windowStartMs = GetTickCount64();
     sealed::formatModeLine(line, sizeof(line), next, frame, trigger);
@@ -829,6 +876,27 @@ struct RecordFields {
 };
 }  // namespace
 
+// The fault-safe cull of one record, with its counters (called under the lock). containing: the record's sphere contains the camera (named mode).
+static void cullCounted(uintptr_t record, bool containing) noexcept {
+    RecordFields fields{record};
+    sealed::CullField failed = sealed::CullField::kMaskRead;
+    uint64_t value = 0;
+    switch (sealed::cullRecordFaultSafe(fields, &failed, &value)) {
+        case sealed::Cull::kCulled:
+            g_culled.fetch_add(1, std::memory_order_relaxed);
+            if (containing) g_culledContaining.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case sealed::Cull::kUntouched:
+        case sealed::Cull::kRestored:
+            g_faults.fetch_add(1, std::memory_order_relaxed);   // the record is as the store wrote it: kept, not judged
+            break;
+        case sealed::Cull::kTorn:
+            g_faults.fetch_add(1, std::memory_order_relaxed);
+            g_torn.fetch_add(1, std::memory_order_relaxed);     // the one case the record may be left half culled
+            break;
+    }
+}
+
 // The rule for one record the store has written. Every read and write is validated; a failure leaves the record as the store wrote it and counts
 // a fault. The view the sphere is centred on is resolved once per frame (the first record of the frame).
 void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
@@ -841,6 +909,18 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
     uint32_t count = 0;
     if (!bucket || !record || !readVal(&ctx, bucket) || !ctx || !readVal(&count, ctx + kCtxCount) || count == 0) {
         g_faults.fetch_add(1, std::memory_order_relaxed);
+        QueryPerformanceCounter(&t1);
+        g_evalNs.fetch_add(static_cast<uint64_t>(nanoseconds(t0, t1)), std::memory_order_relaxed);
+        return;
+    }
+    // Built v8.5, mode all: every record the store visits is culled, with no view, sphere, name or pose test: the discriminator. The pointer kind at
+    // rec+0x290 is still counted, so the window line shows what the visits look like.
+    if (g_mode.load(std::memory_order_relaxed) == sealed::Mode::kAll) {
+        uint64_t raw = 0;
+        notePtr(ptr290Of(record, &raw));
+        cullCounted(record, false);
+        if (g_repPhase.load(std::memory_order_relaxed) == kRepCollecting && g_observed.size() < g_observed.capacity())
+            g_observed.push_back(Observed{bucket, record});
         QueryPerformanceCounter(&t1);
         g_evalNs.fetch_add(static_cast<uint64_t>(nanoseconds(t0, t1)), std::memory_order_relaxed);
         return;
@@ -876,6 +956,10 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
 
     // Built v8.4: the record's world centre is the builder's (from the pose), with rec+0x240 as the counted fallback; the radius is rec+0x280.
     const CentreRead cr = recordCentreRead(record);
+    {
+        uint64_t raw = 0;
+        notePtr(ptr290Of(record, &raw));
+    }
     if (cr.rawZero) ++g_zeroCentre;
     if (cr.source == sealed::CentreSource::kRaw) ++g_poseFallback;
     if (cr.dist >= 0.0f && g_centreDist.size() < kCentreDistCap) g_centreDist.push_back(cr.dist);
@@ -928,23 +1012,7 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
             if (why == sealed::KeepWhy::kCell && !sphereJudged) g_keptByCell.fetch_add(1, std::memory_order_relaxed);
             if (why == sealed::KeepWhy::kExplicit) g_keptExplicit.fetch_add(1, std::memory_order_relaxed);
         } else {
-            RecordFields fields{record};
-            sealed::CullField failed = sealed::CullField::kMaskRead;
-            uint64_t value = 0;
-            switch (sealed::cullRecordFaultSafe(fields, &failed, &value)) {
-                case sealed::Cull::kCulled:
-                    g_culled.fetch_add(1, std::memory_order_relaxed);
-                    if (named && g_cellPrev.has && containing) g_culledContaining.fetch_add(1, std::memory_order_relaxed);
-                    break;
-                case sealed::Cull::kUntouched:
-                case sealed::Cull::kRestored:
-                    g_faults.fetch_add(1, std::memory_order_relaxed);   // the record is as the store wrote it: kept, not judged
-                    break;
-                case sealed::Cull::kTorn:
-                    g_faults.fetch_add(1, std::memory_order_relaxed);
-                    g_torn.fetch_add(1, std::memory_order_relaxed);     // the one case the record may be left half culled
-                    break;
-            }
+            cullCounted(record, named && g_cellPrev.has && containing);
         }
     }
     if (g_repPhase.load(std::memory_order_relaxed) == kRepCollecting && g_observed.size() < g_observed.capacity())

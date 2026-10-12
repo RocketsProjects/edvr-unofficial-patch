@@ -289,7 +289,7 @@ int main(int argc, char** argv) {
     // ---- The CSV: the header and every row have the same seventeen fields; the columns sit where the report says.
     {
         const std::string header = csvHeader();
-        check(fieldCount(header) == kColumns, "the header has eighteen columns (the name column was added in Built v8)");
+        check(fieldCount(header) == kColumns, "the header has kColumns columns (26 since Built v8.5; the name is the 18th, the centre columns follow)");
         Entry e;
         e.address = 0x1234;
         e.radius = 12.5f;
@@ -309,7 +309,7 @@ int main(int argc, char** argv) {
         char buf[400];
         const int n = formatRow(buf, sizeof(buf), "base", 3, e);
         const std::string row(buf, n > 0 ? static_cast<size_t>(n) : 0);
-        check(n > 0 && fieldCount(row) == kColumns, "a row has eighteen fields");
+        check(n > 0 && fieldCount(row) == kColumns, "a row has kColumns fields");
         check(fieldOf(row, 1) == "base" && fieldOf(row, 2) == "3" && fieldOf(row, 3) == "0x1234", "list, rank and address");
         check(fieldOf(row, 10) == "base" && fieldOf(row, 11) == "1" && fieldOf(row, 12) == "0", "why kept, levels up and judged");
         check(fieldOf(row, 13) == "0x5678" && fieldOf(row, 14) == "0x9ABC" && fieldOf(row, 15) == "7" &&
