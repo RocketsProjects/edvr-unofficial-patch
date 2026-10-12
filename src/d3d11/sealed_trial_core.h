@@ -538,9 +538,17 @@ inline bool buildCapsule(const float p[3], const float q[3], float extend, float
 // the target's distance plus kBayPastM. Built v13.2: the below distance is the box's (one key), 60 m.
 constexpr float kBayLateralM = 60.0f;
 constexpr float kBayPastM = 20.0f;
-// Built v13.2 (a): the default below distance: the box bottom and the bay's lower bound, measured from the pad record's centre along the shaft.
-// Built v13.3 (a): 85 m, measured: the small hangar's elevator doors sit at -63 to -72 m along the shaft (the v13.2 flight), so 60 m cut them.
-constexpr float kBelowDefaultM = 85.0f;
+// Built v13.2 (a): the below distance: the box bottom and the bay's lower bound, measured from the pad record's centre along the shaft.
+// Built v13.4 (a): one default per pad size (small, medium, large), from the measured lift doors (small -72, medium -104, large -126 m) plus a
+// margin: 85, 120, 145 m. Index is sizeIndex(size). diag.sealed_cell_below_<size>_m; diag.sealed_cell_below_m, when set, overrides all three.
+constexpr float kBelowDefaultsM[3] = {85.0f, 120.0f, 145.0f};
+
+// Built v13.4 (a): the below distance for a size: the override when one is set, else that size's table entry (small for no size).
+inline float belowForSize(PadSize size, const float table[3], bool hasOverride, float overrideM) noexcept {
+    if (hasOverride) return overrideM;
+    const int i = sizeIndex(size);
+    return table[i < 0 ? 0 : i];
+}
 
 // Built v13.3 (c): a raw centre is usable only when it is finite, not the origin (rec+0x240 zero is an unreadable centre, not a place) and its
 // radius is positive and finite. A zero raw centre with a radius would be a fake sphere at the origin, judged as far away and culled.

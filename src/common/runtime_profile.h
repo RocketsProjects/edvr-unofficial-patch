@@ -143,6 +143,9 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         std::strcmp(key, "diag.sealed_cell_double") == 0 ||      // TEMPORARY, Built v11 (the box's doubled axis)
         std::strcmp(key, "diag.sealed_cell_margin_m") == 0 ||    // TEMPORARY, Built v11 (the box's margin)
         std::strcmp(key, "diag.sealed_cell_below_m") == 0 ||     // TEMPORARY, Built v13.2 (the box's bottom and the bay's lower bound, under the pad)
+        std::strcmp(key, "diag.sealed_cell_below_small_m") == 0 ||   // TEMPORARY, Built v13.4 (the floor for a small pad)
+        std::strcmp(key, "diag.sealed_cell_below_medium_m") == 0 ||  // TEMPORARY, Built v13.4 (the floor for a medium pad)
+        std::strcmp(key, "diag.sealed_cell_below_large_m") == 0 ||   // TEMPORARY, Built v13.4 (the floor for a large pad)
         std::strcmp(key, "hotkey.sealed_trial_early") == 0 ||    // TEMPORARY, Built v12 (the early rig veto's toggle key)
         std::strcmp(key, "diag.sealed_trial_early") == 0 ||      // TEMPORARY, Built v12 (the early rig veto's mode)
         // TEMPORARY, Built v8.3b (the named mode's cell): the three cell radii and the two step keys, so the flat profile reads them.

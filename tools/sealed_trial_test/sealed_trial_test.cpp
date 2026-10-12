@@ -811,8 +811,21 @@ int main(int argc, char** argv) {
 
         // Built v13.2 (a): the below distance parses (empty is the default; a number in [0, 200]; other text refused).
         float bl = -1.0f;
-        check(se::parseBelowM("", se::kBelowDefaultM, &bl) && bl == 85.0f && se::kBelowDefaultM == 85.0f,
-              "diag.sealed_cell_below_m: empty is the 85 m default (v13.3; the small hangar's lift doors sit at -72 m)");
+        check(se::parseBelowM("", se::kBelowDefaultsM[0], &bl) && bl == 85.0f && se::kBelowDefaultsM[0] == 85.0f,
+              "diag.sealed_cell_below_small_m: empty is the 85 m default (the small hangar's lift doors sit at -72 m)");
+
+        // Built v13.4 (a): one floor per size (85, 120, 145 m); the override, when set, is every size's floor; the table is indexed by size.
+        const float belowTable[3] = {85.0f, 120.0f, 145.0f};
+        check(se::belowForSize(se::PadSize::kSmall, belowTable, false, 0.0f) == 85.0f &&
+                  se::belowForSize(se::PadSize::kMedium, belowTable, false, 0.0f) == 120.0f &&
+                  se::belowForSize(se::PadSize::kLarge, belowTable, false, 0.0f) == 145.0f,
+              "the per-size floors: small 85, medium 120, large 145 m");
+        check(se::belowForSize(se::PadSize::kMedium, belowTable, true, 60.0f) == 60.0f &&
+                  se::belowForSize(se::PadSize::kLarge, belowTable, true, 60.0f) == 60.0f,
+              "the override (diag.sealed_cell_below_m) is every size's floor when it is set");
+        check(se::belowForSize(se::PadSize::kNone, belowTable, false, 0.0f) == 85.0f,
+              "no size: the small floor (no pad is held, so none is used)");
+        check(se::kBelowDefaultsM[1] == 120.0f && se::kBelowDefaultsM[2] == 145.0f, "the built-in defaults are 120 and 145 m for medium and large");
 
         // Built v13.3 (c): a raw centre is usable only when finite, not the origin, with a positive finite radius.
         const float rawOk[3] = {10.0f, 2.0f, -3.0f}, rawZero[3] = {0.0f, 0.0f, 0.0f}, rawNan[3] = {NAN, 0.0f, 0.0f};

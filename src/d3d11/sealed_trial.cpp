@@ -151,8 +151,14 @@ uint64_t g_camFrames = 0;
 uint64_t g_camOnFootFrames = 0;
 double g_camOnFootMovedM = 0.0;
 
-// Built v13.2 (a): the distance under the pad: the box's bottom and the bay's lower bound (diag.sealed_cell_below_m).
-float g_belowM = sealed::kBelowDefaultM;
+// Built v13.2 (a), v13.4 (a): the distance under the pad: the box's bottom and the bay's lower bound. One value per pad size
+// (diag.sealed_cell_below_small_m, _medium_m, _large_m); diag.sealed_cell_below_m, when set, overrides all three.
+float g_belowBySize[3] = {sealed::kBelowDefaultsM[0], sealed::kBelowDefaultsM[1], sealed::kBelowDefaultsM[2]};
+bool g_belowOverrideSet = false;
+float g_belowOverride = 0.0f;
+float belowFor(sealed::PadSize size) noexcept {
+    return sealed::belowForSize(size, g_belowBySize, g_belowOverrideSet, g_belowOverride);
+}
 // Built v13.2 (a): the running minima of the position along the shaft (from the pad's centre) since the last engage: the own ship's records and
 // the Door* records, each within the bay's lateral distance of the shaft.
 float g_minOwnAlong = 0.0f, g_minOwnLat = 0.0f, g_minDoorAlong = 0.0f, g_minDoorLat = 0.0f;
@@ -190,6 +196,17 @@ bool g_refreezeWatch = false;
 uintptr_t g_lowestPad = 0;
 char g_droppedName[64] = {};
 sealed::PadSize g_droppedSize = sealed::PadSize::kNone;
+
+// Built v13.4 (b): the deepest lift or door record (name contains Door or Lift) within the bay's lateral distance of the pick's shaft, per frame.
+// The current frame's is collected by the observer; the engage reads the previous frame's (rolled over at each promote).
+struct DeepRec {
+    bool set = false;
+    float along = 0.0f;
+    float lat = 0.0f;
+    char name[48] = {};
+};
+DeepRec g_deepCur, g_deepPrev;
+sealed::OwnCell g_pickCell;   // the frame's pick before the freeze (the shaft the deepest record is measured on, held or not)
 
 // The class cache (lock-free): a slot per node, a word per slot (sealed_trial_core.h packs it). Written by any thread that runs the store.
 std::atomic<uint64_t> g_classSlots[kClassSlots] = {};
@@ -350,8 +367,8 @@ void beginBay(const sealed::OwnCell& c, uint32_t frame) {
                           static_cast<double>(best), others);
     }
     Log::get().note("sealed bay (engage frame %u): keeps records named Hanger, Hangar, Lobby, BlastShield, Skirt, LandingPad, Lift or Gate within %.0f m "
-                    "lateral of the shaft, from %.0f m below the pad to %.0f m past the target (target %.1f m from the pad; diag.sealed_cell_below_m). "
-                    "Nearest other pad: %s.", frame, static_cast<double>(sealed::kBayLateralM), static_cast<double>(g_belowM),
+                    "lateral of the shaft, from %.0f m below the pad to %.0f m past the target (target %.1f m from the pad; diag.sealed_cell_below_{small,medium,large}_m). "
+                    "Nearest other pad: %s.", frame, static_cast<double>(sealed::kBayLateralM), static_cast<double>(belowFor(c.size)),
                     static_cast<double>(sealed::kBayPastM), static_cast<double>(c.capLen), g_bayNeighbour);
     // Built v13.2 (a): the minima over the frames since the previous engage, so the next flight can size the below distance. Own ship: the records
     // with the type prefix; doors: the Door* records. Both within the bay's lateral distance of the shaft.
@@ -362,6 +379,17 @@ void beginBay(const sealed::OwnCell& c, uint32_t frame) {
                         static_cast<double>(g_minOwnSet ? g_minOwnAlong : 0.0f), static_cast<double>(g_minOwnSet ? g_minOwnLat : 0.0f),
                         g_minDoorSet ? g_minDoorName : "none", static_cast<double>(g_minDoorSet ? g_minDoorAlong : 0.0f),
                         static_cast<double>(g_minDoorSet ? g_minDoorLat : 0.0f));
+    // Built v13.4 (b): the deepest lift or door record within the bay's lateral distance, from the PREVIOUS frame's records, so one engage shows
+    // the depth. Against the floor the engage uses for this size.
+    if (g_deepPrev.set)
+        Log::get().note("sealed bay deepest lift or door (engage frame %u, the previous frame's records within %.0f m lateral): %s at along %.1f m "
+                        "(lateral %.1f m); the floor for this size is %.0f m under the pad.", frame, static_cast<double>(sealed::kBayLateralM),
+                        g_deepPrev.name, static_cast<double>(g_deepPrev.along), static_cast<double>(g_deepPrev.lat),
+                        static_cast<double>(belowFor(c.size)));
+    else
+        Log::get().note("sealed bay deepest lift or door (engage frame %u): none in the previous frame's records within %.0f m lateral; the floor "
+                        "for this size is %.0f m under the pad.", frame, static_cast<double>(sealed::kBayLateralM),
+                        static_cast<double>(belowFor(c.size)));
     g_minOwnSet = g_minDoorSet = false;
     g_minFrames = 0;
 }
@@ -860,7 +888,7 @@ void buildBoxFor(sealed::OwnCell& cell, const float target[3]) {
             const float* wiki = sealed::kPadWikiM[sealed::sizeIndex(cell.size)];
             const float halfLen = wiki[0] * 0.5f * (g_doubleLength ? 2.0f : 1.0f);
             const float halfWid = wiki[1] * 0.5f * (g_doubleLength ? 1.0f : 2.0f);
-            if (!sealed::buildBox(cell.centre, target, axes[li], halfLen, halfWid, g_margin, g_belowM, &cell)) {
+            if (!sealed::buildBox(cell.centre, target, axes[li], halfLen, halfWid, g_margin, belowFor(cell.size), &cell)) {
                 std::snprintf(why, sizeof(why), "the box could not be built");
             } else {
                 // v12.1: the axis is pad->target; the angle between it and the pad's own e2 is logged (the v12 flight's question).
@@ -1056,6 +1084,33 @@ void pickOwnRecord(uint32_t frame) {
                     static_cast<double>(kOwnSphereMarginM), g_ownLiveValid ? "live sphere read" : "the live read failed; the rule stands down");
 }
 
+// Built v13.4 (c): at each engage (and so each re-freeze), every pad record of the held pad's size the store saw last frame: its record address,
+// name, centre, distance from the camera and its axes (e2 up, e0 and e1 across), so two records of one pad (a second platform) can be told
+// from two bays' pads. No behaviour: a log only.
+void logPadAxes(const sealed::OwnCell& c, uint32_t frame) {
+    int logged = 0;
+    for (size_t i = 0; i < g_padCount && logged < 6; ++i) {
+        const sealed::PadObs& p = g_pads[i];
+        if (p.size != c.size) continue;
+        float axes[3][3] = {};
+        float ext[3] = {};
+        bool extOk = false;
+        uint8_t src = 4;
+        const bool haveAxes = poseOrientOf(p.addr, axes, ext, &extOk, &src);
+        const float dCam = g_frameCamValid ? sealed::distance(p.centre, g_frameCam) : -1.0f;
+        Log::get().note("sealed pad (engage frame %u): %s record 0x%llx %s (size %c) centre (%.2f, %.2f, %.2f), %.1f m from the camera; axes: "
+                        "e2 up (%.3f, %.3f, %.3f), e0 (%.3f, %.3f, %.3f), e1 (%.3f, %.3f, %.3f)%s.", frame, p.addr == c.pad ? "held" : "other",
+                        static_cast<unsigned long long>(p.addr), p.name, sealed::padSizeLetter(p.size), static_cast<double>(p.centre[0]),
+                        static_cast<double>(p.centre[1]), static_cast<double>(p.centre[2]), static_cast<double>(dCam),
+                        static_cast<double>(axes[2][0]), static_cast<double>(axes[2][1]), static_cast<double>(axes[2][2]),
+                        static_cast<double>(axes[0][0]), static_cast<double>(axes[0][1]), static_cast<double>(axes[0][2]),
+                        static_cast<double>(axes[1][0]), static_cast<double>(axes[1][1]), static_cast<double>(axes[1][2]),
+                        haveAxes ? "" : " (no pose: the axes are zero)");
+        ++logged;
+    }
+    if (logged == 0) Log::get().note("sealed pad (engage frame %u): no pad of size %c in the last frame's records.", frame, sealed::padSizeLetter(c.size));
+}
+
 void promoteFrame(uint32_t stamp, uint32_t frame) {
     sealed::OwnCell next;
     g_ownCandidateDist = -1.0f;   // Built v13: the own-ship candidate is re-chosen from this frame's records
@@ -1068,6 +1123,8 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
     g_ownSphereKeptFrame = 0;
     readOwnLive();
     if (g_cellPrev.capsule) ++g_minFrames;
+    g_deepPrev = g_deepCur;   // Built v13.4 (b): the previous frame's deepest lift or door record (the engage reads it)
+    g_deepCur = DeepRec{};
     if (g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed) {
         if (g_frameCamValid) {
             const float radii[3] = {g_cellRadius[0], g_cellRadius[1], g_cellRadius[2]};
@@ -1121,6 +1178,7 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
     } else {
         std::snprintf(next.reason, sizeof(next.reason), "sphere mode");
     }
+    g_pickCell = next;   // Built v13.4 (b): the pick before the freeze, the shaft the deepest lift or door record is measured on
     // Built v13.3 (b): the held cell is dropped when its pad record is absent from the store for kHeldLostFrames frames, or when another own pad
     // candidate (a pad containing the camera or within kOwnPadNearM of it, any size) is the nearest one for that many frames while the held pad is
     // not the one picked. Each drop is logged with the old and the new pad. The sphere rule holds until a pad is lowered; then the cell re-freezes.
@@ -1199,6 +1257,7 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
                     g_droppedName[0] = '\0';
                 }
                 beginBay(g_heldCell, frame);   // Built v13.1 (b, a): the bay rule and its neighbour measurement; the automatic report due 2 s on
+                logPadAxes(g_heldCell, frame); // Built v13.4 (c): the pads of the held size, with their axes, at each engage (and re-freeze)
             }
         } else if (g_engageTries >= kEngageTries) {
             g_engagePending = false;
@@ -1579,12 +1638,34 @@ void sealedTrialInstall(bool flatProfile) {
         if (!doubleText.empty() && doubleText != "length")
             Log::get().note("sealed box: diag.sealed_cell_double = '%s' is not length or width; the length axis is doubled.", doubleText.c_str());
     }
+    // Built v13.4 (a): the override (all sizes) when set; else one value per size.
     const std::string belowText = Config::get().getString("diag.sealed_cell_below_m", "");
-    if (!sealed::parseBelowM(belowText.c_str(), sealed::kBelowDefaultM, &g_belowM))
-        Log::get().note("sealed box: diag.sealed_cell_below_m = '%s' is not a number of metres from 0 to 200; the distance is %.0f m.",
-                        belowText.c_str(), static_cast<double>(sealed::kBelowDefaultM));
-    Log::get().note("sealed box: the bottom is %.0f m under the pad's centre along the shaft (diag.sealed_cell_below_m; the bay keeps from the same "
-                    "distance). Built v13.3: 85 m, measured from the small hangar's lift doors at -72 m.", static_cast<double>(g_belowM));
+    g_belowOverrideSet = false;
+    if (!belowText.empty()) {
+        if (sealed::parseBelowM(belowText.c_str(), 0.0f, &g_belowOverride)) {
+            g_belowOverrideSet = true;
+            Log::get().note("sealed box: diag.sealed_cell_below_m = %.0f m overrides the per-size floors for every pad size.",
+                            static_cast<double>(g_belowOverride));
+        } else {
+            Log::get().note("sealed box: diag.sealed_cell_below_m = '%s' is not a number of metres from 0 to 200; the per-size floors apply.",
+                            belowText.c_str());
+        }
+    }
+    const std::string belowSmallText = Config::get().getString("diag.sealed_cell_below_small_m", "");
+    const std::string belowMediumText = Config::get().getString("diag.sealed_cell_below_medium_m", "");
+    const std::string belowLargeText = Config::get().getString("diag.sealed_cell_below_large_m", "");
+    const std::string belowTexts[3] = {belowSmallText, belowMediumText, belowLargeText};
+    const char* const kBelowKeys[3] = {"diag.sealed_cell_below_small_m", "diag.sealed_cell_below_medium_m", "diag.sealed_cell_below_large_m"};
+    const char* const kBelowNames[3] = {"small", "medium", "large"};
+    for (int i = 0; i < 3; ++i) {
+        if (!sealed::parseBelowM(belowTexts[i].c_str(), sealed::kBelowDefaultsM[i], &g_belowBySize[i]))
+            Log::get().note("sealed box: %s = '%s' is not a number of metres from 0 to 200; the %s floor is %.0f m.", kBelowKeys[i],
+                            belowTexts[i].c_str(), kBelowNames[i], static_cast<double>(sealed::kBelowDefaultsM[i]));
+    }
+    Log::get().note("sealed box: the floor under the pad's centre along the shaft: small %.0f m, medium %.0f m, large %.0f m (diag.sealed_cell_below_"
+                    "{small,medium,large}_m; %s). The box bottom and the bay's lower bound use the held pad's size.",
+                    static_cast<double>(g_belowBySize[0]), static_cast<double>(g_belowBySize[1]), static_cast<double>(g_belowBySize[2]),
+                    g_belowOverrideSet ? "diag.sealed_cell_below_m overrides them" : "no override set");
     const std::string marginText = Config::get().getString("diag.sealed_cell_margin_m", "");
     if (!sealed::parseMarginM(marginText.c_str(), sealed::kMarginDefaultM, &g_margin))
         Log::get().note("sealed box: diag.sealed_cell_margin_m = '%s' is not a number of metres; the margin is %.0f m.", marginText.c_str(),
@@ -2367,10 +2448,28 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
                     }
                 }
             }
+            // Built v13.4 (b): the deepest lift or door record within the bay's lateral distance of the pick's shaft (this frame; the engage reads the
+            // previous frame's).
+            if (g_pickCell.capsule) {
+                float du[3] = {};
+                float da = 0.0f;
+                if (sealed::unitBetween(g_pickCell.capA, g_pickCell.capB, du)) {
+                    const float dlat = sealed::lateralToAxis(centre, g_pickCell.capA, du, &da);
+                    if (std::isfinite(dlat) && dlat <= sealed::kBayLateralM && (!g_deepCur.set || da < g_deepCur.along)) {
+                        char dn[48] = {};
+                        if (cachedName(record, dn, sizeof(dn)) && (std::strstr(dn, "Door") != nullptr || std::strstr(dn, "Lift") != nullptr)) {
+                            g_deepCur.set = true;
+                            g_deepCur.along = da;
+                            g_deepCur.lat = dlat;
+                            std::snprintf(g_deepCur.name, sizeof(g_deepCur.name), "%s", dn);
+                        }
+                    }
+                }
+            }
             if (!keep && g_cellPrev.capsule) {
                 float u[3] = {};
                 if (sealed::unitBetween(g_cellPrev.capA, g_cellPrev.capB, u) &&
-                    sealed::inBayVolume(centre, g_cellPrev.capA, u, g_cellPrev.capLen, g_belowM)) {
+                    sealed::inBayVolume(centre, g_cellPrev.capA, u, g_cellPrev.capLen, belowFor(g_cellPrev.size))) {
                     char bn[48] = {};
                     if (cachedName(record, bn, sizeof(bn)) && sealed::bayPartName(bn)) {
                         keep = true;   // why stays as the box rule's (kNone): the bay is counted in bay_kept, not in kept_by_cell
