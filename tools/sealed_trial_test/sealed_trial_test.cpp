@@ -811,7 +811,21 @@ int main(int argc, char** argv) {
 
         // Built v13.2 (a): the below distance parses (empty is the default; a number in [0, 200]; other text refused).
         float bl = -1.0f;
-        check(se::parseBelowM("", 60.0f, &bl) && bl == 60.0f, "diag.sealed_cell_below_m: empty is the 60 m default");
+        check(se::parseBelowM("", se::kBelowDefaultM, &bl) && bl == 85.0f && se::kBelowDefaultM == 85.0f,
+              "diag.sealed_cell_below_m: empty is the 85 m default (v13.3; the small hangar's lift doors sit at -72 m)");
+
+        // Built v13.3 (c): a raw centre is usable only when finite, not the origin, with a positive finite radius.
+        const float rawOk[3] = {10.0f, 2.0f, -3.0f}, rawZero[3] = {0.0f, 0.0f, 0.0f}, rawNan[3] = {NAN, 0.0f, 0.0f};
+        check(se::rawCentreUsable(rawOk, 5.0f) && !se::rawCentreUsable(rawZero, 5.0f) && !se::rawCentreUsable(rawNan, 5.0f) &&
+                  !se::rawCentreUsable(rawOk, 0.0f) && !se::rawCentreUsable(rawOk, NAN),
+              "a raw centre at the origin (rec+0x240 zero) is unreadable, as is a non-finite centre or radius");
+
+        // Built v13.3 (b): the own pad candidates (containing, or within 40 m of the camera, any size), and the held cell's drop limit.
+        check(se::ownPadCandidate(50.0f, 60.0f) && se::ownPadCandidate(39.0f, 0.0f) && !se::ownPadCandidate(41.0f, 0.0f),
+              "a pad is a candidate when the camera is inside its sphere or its centre is within 40 m; not at 41 m with no sphere");
+        check(!se::heldCellDrops(29, 29, se::kHeldLostFrames) && se::heldCellDrops(30, 0, se::kHeldLostFrames) &&
+                  se::heldCellDrops(0, 30, se::kHeldLostFrames) && se::kHeldLostFrames == 30u,
+              "the held cell drops at 30 consecutive frames of absence or of another own pad, not at 29");
         check(se::parseBelowM("45", 60.0f, &bl) && bl == 45.0f && se::parseBelowM(" 0 ", 60.0f, &bl) && bl == 0.0f,
               "diag.sealed_cell_below_m: 45 and 0 (with spaces) are read");
         check(!se::parseBelowM("sixty", 60.0f, &bl) && !se::parseBelowM("-1", 60.0f, &bl) && !se::parseBelowM("201", 60.0f, &bl),

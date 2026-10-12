@@ -42,7 +42,7 @@ constexpr uintptr_t kRecName = 0x18;        // pointer: the record's node (node+
 constexpr size_t kObservedCap = 32768;       // records the observer keeps for the report in one frame
 constexpr uint32_t kReportNodeCap = 40000;   // records the report walks at most
 constexpr size_t kKeptNamedRows = 4000;
-constexpr float kCulledNearAxisM = 60.0f;    // Built v12.1: the culled named records listed are within this of the box axis
+constexpr float kCulledNearAxisM = 90.0f;    // Built v12.1 (60 m); v13.3: 90 m, so the elevators 63 to 72 m off the shaft are listed
 constexpr size_t kCulledNearRows = 2000;      // Built v11: kept named records the report lists (nearest the capsule's axis first)
 constexpr uint32_t kReportDepth = 6;         // child-list generations the report walks below an observed record
 constexpr uint32_t kReportChildCap = 4096;   // children read from one child list
@@ -181,6 +181,15 @@ bool g_ownLiveValid = false;
 float g_ownLiveCentre[3] = {};
 float g_ownLiveRadius = 0.0f;
 uint64_t g_ownSphereKeptFrame = 0, g_ownSphereKeptLast = 0, g_ownSphereKeptWin = 0;
+
+// Built v13.3 (b): the held cell's validity. Frames the held pad record was absent from the store; frames another own pad candidate was the
+// nearest while the held one was not picked. A drop clears the cell and the own record; the cell re-freezes from the next pad once it is lowered
+// (the lowest-height tracking restarts when the picked pad record changes).
+uint32_t g_heldAbsent = 0, g_otherPicked = 0;
+bool g_refreezeWatch = false;
+uintptr_t g_lowestPad = 0;
+char g_droppedName[64] = {};
+sealed::PadSize g_droppedSize = sealed::PadSize::kNone;
 
 // The class cache (lock-free): a slot per node, a word per slot (sealed_trial_core.h packs it). Written by any thread that runs the store.
 std::atomic<uint64_t> g_classSlots[kClassSlots] = {};
@@ -475,9 +484,11 @@ sealed::Window takeWindow() noexcept {
     std::snprintf(camText, sizeof(camText), "camera_source=%s camera_to_pad_m=%.2f camera_frames=%llu origin_moved_m=%.2f on_foot_frames=%llu "
                   "on_foot_origin_moved_m=%.2f", view::sourceName(g_view.source), static_cast<double>(camToPad),
                   static_cast<unsigned long long>(g_camFrames), g_camMovedM, static_cast<unsigned long long>(g_camOnFootFrames), g_camOnFootMovedM);
-    std::string extra = "top_culled_containing=" + tallyText(g_tallyContain, g_tallyContainUsed, g_tallyContainOver) +
-                        " top_culled_near_box=" + tallyText(g_tallyNear, g_tallyNearUsed, g_tallyNearOver) +
-                        " bay_kept=" + std::to_string(g_bayKept) + " " + camText +
+    // Built v13.3 (d): the culled tops are their own line (noteWindow), not part of this one.
+    const std::string tops = "containing " + tallyText(g_tallyContain, g_tallyContainUsed, g_tallyContainOver) + "; near_box " +
+                             tallyText(g_tallyNear, g_tallyNearUsed, g_tallyNearOver);
+    std::snprintf(w.culledTop, sizeof(w.culledTop), "%s", tops.c_str());
+    std::string extra = "kept_unreadable=" + std::to_string(g_keptUnknown.load()) + " bay_kept=" + std::to_string(g_bayKept) + " " + camText +
                         " early_ms_scope=frame_tick_refresh_only (decisions untimed in v13.1) own_record=" +
                         (g_ownRecAddr && g_ownRecName[0] ? std::string(g_ownRecName) : std::string("none")) +
                         " own_record_live=" + (g_ownLiveValid ? "yes" : "no") + " own_record_radius_m=" +
@@ -504,9 +515,11 @@ const char* viewLabel(const view::Resolved& v) noexcept {
 // Writes the window's line at the current radius and the view it ran against, then starts a new window. Called under the lock.
 void noteWindow() {
     char line[2600];
-    sealed::formatWindow(line, sizeof(line), takeWindow(), g_radius.load(std::memory_order_relaxed), viewLabel(g_view),
+    const sealed::Window win = takeWindow();
+    sealed::formatWindow(line, sizeof(line), win, g_radius.load(std::memory_order_relaxed), viewLabel(g_view),
                          g_mode.load(std::memory_order_relaxed));
     Log::get().note("%s", line);
+    Log::get().note("sealed culled top: %s", win.culledTop);   // Built v13.3 (d): the names in full, on their own line
     resetWindow();
 }
 
@@ -762,7 +775,8 @@ WorldRead worldOfRecord(uintptr_t rec) noexcept {
     }
     float raw[3] = {};
     float r = 0.0f;
-    if (readMem(raw, rec + kRecCentre, sizeof(raw)) && sealed::finite3(raw) && readVal(&r, rec + kRecRadius) && std::isfinite(r) && r > 0.0f) {
+    // Built v13.3 (c): a zero raw centre is unreadable, not the origin: no sphere (the record is kept as unknown in named mode).
+    if (readMem(raw, rec + kRecCentre, sizeof(raw)) && readVal(&r, rec + kRecRadius) && sealed::rawCentreUsable(raw, r)) {
         for (int k = 0; k < 3; ++k) w.world[k] = raw[k];
         w.radius = r;
         w.source = 3;
@@ -1074,9 +1088,13 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
                     // The pad's height along its up axis, tracked for the lowered-pad check at engage (fix 2).
                     g_padAlong = next.centre[0] * e2[0] + next.centre[1] * e2[1] + next.centre[2] * e2[2];
                     g_padAlongValid = true;
-                    if (!g_padLowestSet || g_padAlong < g_padLowest) {
+                    // Built v13.3 (b): the lowest height is tracked per picked pad record; it restarts when the pick changes to another record.
+                    if (!g_padLowestSet || g_lowestPad != next.pad) {
                         g_padLowest = g_padAlong;
                         g_padLowestSet = true;
+                        g_lowestPad = next.pad;
+                    } else if (g_padAlong < g_padLowest) {
+                        g_padLowest = g_padAlong;
                     }
                 }
                 float q[3] = {};
@@ -1103,11 +1121,56 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
     } else {
         std::snprintf(next.reason, sizeof(next.reason), "sphere mode");
     }
+    // Built v13.3 (b): the held cell is dropped when its pad record is absent from the store for kHeldLostFrames frames, or when another own pad
+    // candidate (a pad containing the camera or within kOwnPadNearM of it, any size) is the nearest one for that many frames while the held pad is
+    // not the one picked. Each drop is logged with the old and the new pad. The sphere rule holds until a pad is lowered; then the cell re-freezes.
+    if (g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed && g_heldValid) {
+        bool heldSeen = false;
+        const sealed::PadObs* best = nullptr;
+        float bestD = 0.0f;
+        for (size_t i = 0; i < g_padCount; ++i) {
+            const sealed::PadObs& p = g_pads[i];
+            if (p.addr == g_heldCell.pad) heldSeen = true;
+            if (!g_frameCamValid) continue;
+            const float d = sealed::distance(p.centre, g_frameCam);
+            if (!sealed::ownPadCandidate(d, p.radius)) continue;
+            if (!best || d < bestD) {
+                best = &p;
+                bestD = d;
+            }
+        }
+        g_heldAbsent = heldSeen ? 0 : g_heldAbsent + 1;
+        const bool otherPick = best != nullptr && best->addr != g_heldCell.pad;
+        g_otherPicked = otherPick ? g_otherPicked + 1 : 0;
+        if (sealed::heldCellDrops(g_heldAbsent, g_otherPicked, sealed::kHeldLostFrames)) {
+            const bool absent = g_heldAbsent >= sealed::kHeldLostFrames;
+            std::snprintf(g_droppedName, sizeof(g_droppedName), "%s", g_heldCell.padName);
+            g_droppedSize = g_heldCell.size;
+            Log::get().note("sealed cell: DROPPED (frame %u): held pad %s (size %c) %s for %u frames; the nearest own pad is now %s. Named mode is the "
+                            "sphere rule until a pad is lowered; the cell re-freezes from it.", frame, g_heldCell.padName,
+                            sealed::padSizeLetter(g_heldCell.size), absent ? "is not seen by the store" : "is not the nearest own pad",
+                            absent ? g_heldAbsent : g_otherPicked, otherPick ? best->name : "none");
+            g_heldValid = false;
+            g_heldCell = sealed::OwnCell{};
+            g_heldAbsent = 0;
+            g_otherPicked = 0;
+            g_refreezeWatch = true;
+            g_ownRecAddr = 0;   // the own record belongs to the dropped ship; the next engage names the new one
+            g_ownLiveValid = false;
+        }
+    }
+    if (g_refreezeWatch && g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed && next.has && next.radius > 0.0f && g_padAlongValid &&
+        sealed::padLowered(g_padAlong, g_padLowest, kLoweredToleranceM)) {
+        g_refreezeWatch = false;   // the new pad is lowered: the engage path below freezes the cell from it
+        g_engagePending = true;
+        g_engageTries = 0;
+    }
     // Built v12 (flight fix b): the freeze. Named mode uses the cell held from its engage; a fresh pick never changes it. Pending (no cell yet) and
     // not-held named frames are the sphere rule. Outside named mode nothing is held.
     if (g_mode.load(std::memory_order_relaxed) != sealed::Mode::kNamed) {
         g_engagePending = false;
         g_heldValid = false;
+        g_refreezeWatch = false;
     } else if (g_engagePending) {
         ++g_engageTries;
         if (next.has && next.radius > 0.0f) {
@@ -1130,6 +1193,11 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
                 g_heldValid = true;
                 g_engagePending = false;
                 logEngage(g_heldCell, frame);
+                if (g_droppedName[0] != '\0') {   // Built v13.3 (b): the re-freeze after a drop, named both ways
+                    Log::get().note("sealed cell: RE-FROZEN (frame %u) on pad %s (size %c), after the drop of %s (size %c).", frame, g_heldCell.padName,
+                                    sealed::padSizeLetter(g_heldCell.size), g_droppedName, sealed::padSizeLetter(g_droppedSize));
+                    g_droppedName[0] = '\0';
+                }
                 beginBay(g_heldCell, frame);   // Built v13.1 (b, a): the bay rule and its neighbour measurement; the automatic report due 2 s on
             }
         } else if (g_engageTries >= kEngageTries) {
@@ -1516,7 +1584,7 @@ void sealedTrialInstall(bool flatProfile) {
         Log::get().note("sealed box: diag.sealed_cell_below_m = '%s' is not a number of metres from 0 to 200; the distance is %.0f m.",
                         belowText.c_str(), static_cast<double>(sealed::kBelowDefaultM));
     Log::get().note("sealed box: the bottom is %.0f m under the pad's centre along the shaft (diag.sealed_cell_below_m; the bay keeps from the same "
-                    "distance). Built v13.2: a guess from a doorway at -45 m; the flight's minima log sizes it.", static_cast<double>(g_belowM));
+                    "distance). Built v13.3: 85 m, measured from the small hangar's lift doors at -72 m.", static_cast<double>(g_belowM));
     const std::string marginText = Config::get().getString("diag.sealed_cell_margin_m", "");
     if (!sealed::parseMarginM(marginText.c_str(), sealed::kMarginDefaultM, &g_margin))
         Log::get().note("sealed box: diag.sealed_cell_margin_m = '%s' is not a number of metres; the margin is %.0f m.", marginText.c_str(),

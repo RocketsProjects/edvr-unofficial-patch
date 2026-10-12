@@ -244,6 +244,8 @@ struct Window {
     // Built v13.1: the window's extra fields, built by takeWindow: the top culled names (containing the camera; within the held box expanded
     // 20 m), the bay's kept records, the camera's source and its live distance to the held pad, and the origin's motion (on foot and in all).
     char extraText[1100] = {};
+    // Built v13.3 (d): the culled-name tops, on their own log line ("sealed culled top:"), so the names are not cut by the window line's length.
+    char culledTop[900] = {};
 };
 
 // The trial's record rule (TEMPORARY, diag.sealed_trial_mode): sphere is the sphere rule alone; named is the own-pad cell rule.
@@ -537,7 +539,27 @@ inline bool buildCapsule(const float p[3], const float q[3], float extend, float
 constexpr float kBayLateralM = 60.0f;
 constexpr float kBayPastM = 20.0f;
 // Built v13.2 (a): the default below distance: the box bottom and the bay's lower bound, measured from the pad record's centre along the shaft.
-constexpr float kBelowDefaultM = 60.0f;
+// Built v13.3 (a): 85 m, measured: the small hangar's elevator doors sit at -63 to -72 m along the shaft (the v13.2 flight), so 60 m cut them.
+constexpr float kBelowDefaultM = 85.0f;
+
+// Built v13.3 (c): a raw centre is usable only when it is finite, not the origin (rec+0x240 zero is an unreadable centre, not a place) and its
+// radius is positive and finite. A zero raw centre with a radius would be a fake sphere at the origin, judged as far away and culled.
+inline bool rawCentreUsable(const float raw[3], float radius) noexcept {
+    return finite3(raw) && !isZeroCentre(raw) && std::isfinite(radius) && radius > 0.0f;
+}
+
+// Built v13.3 (b): the own pad candidates: a pad record containing the camera, or with its centre within kOwnPadNearM of it, of any size.
+constexpr float kOwnPadNearM = 40.0f;
+inline bool ownPadCandidate(float centreDist, float radius) noexcept {
+    return centreDist <= radius || centreDist <= kOwnPadNearM;
+}
+
+// Built v13.3 (b): the held cell is dropped when its pad record is absent for limit consecutive frames, or another own pad candidate is the
+// nearest one for limit consecutive frames.
+constexpr uint32_t kHeldLostFrames = 30;
+inline bool heldCellDrops(uint32_t absentFrames, uint32_t otherFrames, uint32_t limit) noexcept {
+    return absentFrames >= limit || otherFrames >= limit;
+}
 // Built v13.1 (a): the footprint margin for the culled-name tallies (the records just outside a face of the box).
 constexpr float kTallyMarginM = 20.0f;
 
