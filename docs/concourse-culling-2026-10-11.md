@@ -422,6 +422,8 @@ Decision rule for the sealed cull (not yet decided): this+0x3C8 == 2, owner coun
 
 Commit `7a466ee3` (source; the branch also holds the merges of `claude/dynamic-actor-path` and `claude/hangar-door-state`). Full `build.bat` green (every gate, including `sealed_trial_test` at 80 checks and the new `builder_probe_test` at 48), then `build.bat --dll-only` green for the version stamp `v0.19.1-67-g7a466ee3`. Nothing installed, nothing flown. Every new key is TEMPORARY and default off; with no key pressed and the trial off, nothing is hooked.
 
+Fix before the flight, commit `7a7f7e67` (DLL `v0.19.1-69-g7a7f7e67`, full build and dll-only green): the hatch probe clears its remembered objects on every toggle-on, the cap is 32 (was 8; the first refusal past it is logged once, with the distinct refused objects named), and each change line names the readers r0 to r3 that supplied the object.
+
 ### Part 1: the builder 0x42B4420, arguments and return (PROVEN from the exe bytes, capstone 5.0.7)
 
 - **Prologue** `4C 8B DC 55 56 41 54 41 57 49 8D AB 08 FC FF FF` matches. Both call sites 0x43204F3 and 0x4321ADB are `call 1442b4420`. The return addresses are 0x43204F8 and 0x4321AE0; `builder_probe_core.h` classes a call by them.
@@ -443,7 +445,7 @@ Commit `7a466ee3` (source; the branch also holds the merges of `claude/dynamic-a
 
 ### Part 2: the hatch-state probe (`hotkey.hatch_probe`, `state_dump_probe.cpp`, `hatch_probe_core.h`)
 
-- **The AAB8 pin is removed.** It matched by address suffix and never fired. The reader detours now remember every distinct `this` they are called with (up to eight), while the observers are armed (the hatch probe on, the census, or a dump). The state dump's general tracks already cover +0x3C0, so the key bytes are still in its CSV. The census's `# hatch state` line lists the remembered objects (four at most), not the pin.
+- **The AAB8 pin is removed.** It matched by address suffix and never fired. The reader detours now remember every distinct `this` they are called with (up to 32, see the fix line above), while the observers are armed (the hatch probe on, the census, or a dump). The state dump's general tracks already cover +0x3C0, so the key bytes are still in its CSV. The census's `# hatch state` line lists the remembered objects (four at most), not the pin.
 - **On.** The four reader detours are installed if not yet in (their status is logged). The eight state-name table pointers at 0x5E78C40 are logged once (`hatch probe: state-name table at image+0x5E78C40`), so the +0x340 bytes can be compared with them offline.
 - **Each frame.** For each remembered object: the dword at +0x3C8, the 16 bytes at +0x340, the owner (`[this-8]`), owner+0x10 (dword), and owner+0x2C and +0x2F (bytes). A line is written only when one of these changes: `hatch probe: object O frame F t=T ms: 3C8 a->b; 340 <hex>-><hex>; owner ..; owner_10 ..; owner_2C ..; owner_2F ..; status flags=.. flags2=..`. The first read of an object is the baseline. Lines are capped at 400 per session; the off line gives the count written and the count suppressed.
 - **Off.** `hatch probe: off at frame F`, with the lines written and suppressed.
