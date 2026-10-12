@@ -1,7 +1,7 @@
 ## Status
 
 State: BUILT, NOT FLOWN. Branch claude/gpu-pass-profile. A measurement only: no draw, binding or shader changes.
-v13.5 (2026-10-12, claude/hangar-test-9): merged into the sealed-hangar trial's branch (merge commit 9e910077, DLL v0.19.1-107-g9e910077; see the concourse doc's v13.5 section). The merge changes no behaviour. The interaction with the other instruments on the same clock: see "Interaction" below. v13.6 (commit pending): while a capture is armed or running, the application-frame timing and the census timers yield the shared clock, so a profiled frame can open with the default settings: see "The yield (v13.6)".
+v13.5 (2026-10-12, claude/hangar-test-9): merged into the sealed-hangar trial's branch (merge commit 9e910077, DLL v0.19.1-107-g9e910077; see the concourse doc's v13.5 section). The merge changes no behaviour. The interaction with the other instruments on the same clock: see "Interaction" below. v13.6 (commit 101708de, DLL v0.19.1-109-g101708de): while a capture is armed or running, the application-frame timing and the census timers yield the shared clock, so a profiled frame can open with the default settings: see "The yield (v13.6)".
 Key: hotkey.gpu_pass_profile (TEMPORARY, default unbound; flat allow-list in runtime_profile.h; commented in edvr.ini).
 Question: where Elite's own GPU time goes each frame. Sean sees about 9 ms GPU in fpsVR in a station hangar whatever the view
 direction. EDVR's census prices its own share (about 5.5 ms) and estimates the game's (about 5 ms); neither splits Elite's frame.
