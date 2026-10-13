@@ -375,6 +375,8 @@ struct PadObs {
     float radius = 0.0f;       // the pad's own sphere (rec+0x280)
     PadSize size = PadSize::kNone;
     char name[64] = {};
+    float up[3] = {};          // Built v13.9: the pad's up axis (its axes[2]), when hasUp; a near-tie goes to the pad whose up line is nearest the camera
+    bool hasUp = false;
 };
 
 // The own cell of a frame. has false: no own pad this frame (named mode is the sphere rule for it) and reason says why.
@@ -414,50 +416,156 @@ inline int sizeIndex(PadSize s) noexcept { return s == PadSize::kNone ? -1 : sta
 
 // The own pad: among the frame's pad records with a size, the one whose own sphere contains the camera, nearest centre first; else the nearest
 // centre within kPadFallbackM. The cell's radius is radii[size]. With no candidate, has is false and reason says why.
+// Built v13.9: a near-tie. Two candidate centres within kPadTieM metres of the camera (both containing it, or both within the fallback) are decided by
+// the pad whose up line passes nearest the camera laterally (both need an up axis), then by the smaller name ("...A" before "...B").
+constexpr float kPadTieM = 5.0f;
+// Built v13.9: a held own pad is replaced only after it has been unseen for this many frames.
+constexpr uint32_t kPadStickyFrames = 30;
+
+inline float lateralToUp(const float camera[3], const float c[3], const float up[3]) noexcept {
+    const float d[3] = {camera[0] - c[0], camera[1] - c[1], camera[2] - c[2]};
+    const float a = d[0] * up[0] + d[1] * up[1] + d[2] * up[2];
+    const float l[3] = {d[0] - a * up[0], d[1] - a * up[1], d[2] - a * up[2]};
+    return std::sqrt(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]);
+}
+
+// True when candidate b (at distance dB) beats the current best a (at dA).
+inline bool padBeats(const PadObs& b, float dB, const PadObs& a, float dA, const float camera[3]) noexcept {
+    if (std::fabs(dB - dA) > kPadTieM) return dB < dA;
+    if (b.hasUp && a.hasUp) {
+        const float lb = lateralToUp(camera, b.centre, b.up);
+        const float la = lateralToUp(camera, a.centre, a.up);
+        if (std::fabs(lb - la) > 1e-3f) return lb < la;
+    }
+    return std::strcmp(b.name, a.name) < 0;
+}
+
+// The index of the pad the pick chooses (-1 none). Pass one: the pads whose sphere contains the camera; else pass two: the pads within
+// kPadFallbackM of it. contaning says which pass decided.
+inline int choosePadIndex(const PadObs* obs, size_t n, const float camera[3], bool* containing) noexcept {
+    for (int pass = 0; pass < 2; ++pass) {
+        int best = -1;
+        float bestD = 0.0f;
+        for (size_t i = 0; i < n; ++i) {
+            if (obs[i].size == PadSize::kNone) continue;
+            const float d = distance(obs[i].centre, camera);
+            if (pass == 0 ? d > obs[i].radius : d > kPadFallbackM) continue;
+            if (best < 0 || padBeats(obs[i], d, obs[best], bestD, camera)) {
+                best = static_cast<int>(i);
+                bestD = d;
+            }
+        }
+        if (best >= 0) {
+            *containing = pass == 0;
+            return best;
+        }
+    }
+    *containing = false;
+    return -1;
+}
+
+inline void fillOwnCell(const PadObs& p, const float radii[3], const float camera[3], OwnCell* out) noexcept {
+    out->has = true;
+    out->size = p.size;
+    for (int k = 0; k < 3; ++k) out->centre[k] = p.centre[k];
+    out->radius = radii[sizeIndex(p.size)];
+    out->pad = p.addr;
+    out->padDist = distance(p.centre, camera);
+    out->padContains = out->padDist <= p.radius;
+    std::snprintf(out->padName, sizeof(out->padName), "%s", p.name);
+}
+
+// The own pad: among the frame's pad records with a size, the one whose own sphere contains the camera, nearest centre first (a near-tie: padBeats);
+// else the nearest centre within kPadFallbackM. The cell's radius is radii[size]. With no candidate, has is false and reason says why.
 inline void pickOwnPad(const PadObs* obs, size_t n, const float camera[3], const float radii[3], OwnCell* out) noexcept {
     *out = OwnCell{};
     if (n == 0) {
         std::snprintf(out->reason, sizeof(out->reason), "no LandingPad record this frame");
         return;
     }
-    int best = -1;
-    float bestD = 0.0f;
-    bool bestContains = false;
-    for (size_t i = 0; i < n; ++i) {
-        if (obs[i].size == PadSize::kNone) continue;
-        const float d = distance(obs[i].centre, camera);
-        const bool contains = d <= obs[i].radius;
-        if (!contains) continue;
-        if (best < 0 || d < bestD) {
-            best = static_cast<int>(i);
-            bestD = d;
-            bestContains = true;
-        }
-    }
+    bool containing = false;
+    const int best = choosePadIndex(obs, n, camera, &containing);
     if (best < 0) {
+        std::snprintf(out->reason, sizeof(out->reason), "no pad sphere contains the camera and none is within %.0f m", static_cast<double>(kPadFallbackM));
+        return;
+    }
+    fillOwnCell(obs[best], radii, camera, out);
+}
+
+// Built v13.9: the sticky pick. The pad picked last is kept while its record is seen in this frame's pads, whatever the camera does. A held pad that
+// is not seen is replaced only after kPadStickyFrames frames unseen; until then there is no pick (has false, reason says so). st is the state the
+// caller keeps between frames (pad 0 when nothing is held).
+struct PadSticky {
+    uintptr_t pad = 0;
+    uint32_t unseen = 0;
+};
+
+inline void pickOwnPadSticky(const PadObs* obs, size_t n, const float camera[3], const float radii[3], PadSticky* st, OwnCell* out) noexcept {
+    *out = OwnCell{};
+    int held = -1;
+    if (st->pad)
+        for (size_t i = 0; i < n; ++i)
+            if (obs[i].addr == st->pad && obs[i].size != PadSize::kNone) {
+                held = static_cast<int>(i);
+                break;
+            }
+    if (held >= 0) {
+        st->unseen = 0;
+        fillOwnCell(obs[held], radii, camera, out);
+        return;
+    }
+    if (st->pad) {
+        if (++st->unseen < kPadStickyFrames) {
+            std::snprintf(out->reason, sizeof(out->reason), "the held own pad (rec 0x%llX) is unseen for %u of %u frames; no other pad replaces it before then",
+                          static_cast<unsigned long long>(st->pad), st->unseen, static_cast<unsigned>(kPadStickyFrames));
+            return;
+        }
+        st->pad = 0;
+        st->unseen = 0;
+    }
+    pickOwnPad(obs, n, camera, radii, out);
+    if (out->has) st->pad = out->pad;
+}
+
+// Built v13.9: the reference shell for the pad-motion release, chosen once at the freeze. A candidate is a named part that begins Hanger or Hangar
+// and contains none of Gate, Ramp or Skirt, with a size word (Small, Medium, Large). The candidates whose size word matches the pad's size come
+// first; else any candidate with a size word. The nearest within limitM of the pad's centre wins. Returns the index into s, or -1.
+struct ShellObs {
+    uintptr_t addr = 0;
+    char name[64] = {};
+    float centre[3] = {};
+};
+
+inline PadSize shellSizeOf(const char* name) noexcept {
+    if (containsNoCase(name, "Small")) return PadSize::kSmall;
+    if (containsNoCase(name, "Medium")) return PadSize::kMedium;
+    if (containsNoCase(name, "Large")) return PadSize::kLarge;
+    return PadSize::kNone;
+}
+
+inline bool isShellName(const char* name) noexcept {
+    if (!name || !(hasPrefixNoCase(name, "Hanger") || hasPrefixNoCase(name, "Hangar"))) return false;
+    return !containsNoCase(name, "Gate") && !containsNoCase(name, "Ramp") && !containsNoCase(name, "Skirt");
+}
+
+inline int chooseShell(const ShellObs* s, size_t n, const float pad[3], PadSize size, float limitM) noexcept {
+    for (int pass = 0; pass < 2; ++pass) {
+        int best = -1;
+        float bestD = 0.0f;
         for (size_t i = 0; i < n; ++i) {
-            if (obs[i].size == PadSize::kNone) continue;
-            const float d = distance(obs[i].centre, camera);
-            if (d > kPadFallbackM) continue;
+            if (!isShellName(s[i].name)) continue;
+            const PadSize ss = shellSizeOf(s[i].name);
+            if (ss == PadSize::kNone || (pass == 0 && ss != size)) continue;
+            const float d = distance(s[i].centre, pad);
+            if (d > limitM) continue;
             if (best < 0 || d < bestD) {
                 best = static_cast<int>(i);
                 bestD = d;
             }
         }
+        if (best >= 0) return best;
     }
-    if (best < 0) {
-        std::snprintf(out->reason, sizeof(out->reason), "no pad sphere contains the camera and none is within %.0f m", static_cast<double>(kPadFallbackM));
-        return;
-    }
-    const PadObs& p = obs[best];
-    out->has = true;
-    out->size = p.size;
-    for (int k = 0; k < 3; ++k) out->centre[k] = p.centre[k];
-    out->radius = radii[sizeIndex(p.size)];
-    out->pad = p.addr;
-    out->padDist = bestD;
-    out->padContains = bestContains;
-    std::snprintf(out->padName, sizeof(out->padName), "%s", p.name);
+    return -1;
 }
 
 // One explicit-part record of a frame: its node identifies the part name (records of one part share it).

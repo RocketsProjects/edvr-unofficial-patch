@@ -77,5 +77,8 @@ bool sealedTrialRecordWorld(uintptr_t record, float centre[3], float* radius, fl
 // with no cell); held says which cell. Returns true when the cell has a capsule (capA to capB is the shaft). False while the trial is off, whatever the
 // cell holds (the cell is stale then).
 bool sealedTrialShaft(uintptr_t* pad, float capA[3], float capB[3], bool* held) noexcept;
+// Built v13.9: the box of the same cell (world coordinates): its centre, the length, width and shaft axes, and the half extents (length, width,
+// height). False while the trial is off or the cell has no box.
+bool sealedTrialBox(float centre[3], float u[3], float v[3], float w[3], float half[3]) noexcept;
 
 }  // namespace edvr

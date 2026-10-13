@@ -156,7 +156,15 @@ struct Sample {
     bool axesOk = false;
     float along = 0.0f;               // along the shaft (frame coordinates, from the frame's origin)
     float lateral = 0.0f;             // from the shaft line
+    uint8_t bay = 0;                  // Built v13.9: 0 no box (no named cell), 1 outside the held cell's box, 2 inside it (the held pad's bay)
 };
+
+// Built v13.9: whether point p (frame coordinates) lies inside the box with centre c, unit axes u (length), v (width), w (height) in the frame, and
+// half extents half (along u, v, w).
+inline bool inBox(const float p[3], const float c[3], const float u[3], const float v[3], const float w[3], const float half[3]) noexcept {
+    const float d[3] = {p[0] - c[0], p[1] - c[1], p[2] - c[2]};
+    return std::fabs(dot3(d, u)) <= half[0] && std::fabs(dot3(d, v)) <= half[1] && std::fabs(dot3(d, w)) <= half[2];
+}
 
 inline const char* centreSourceName(uint8_t s) noexcept {
     switch (s) {
@@ -187,25 +195,22 @@ inline void localize(const Frame& f, const float u[3], Sample* s) noexcept {
     s->lateral = norm3(across);
 }
 
-// The index of the nearest Hanger*/Hangar* sample to the point c (world), within limitM, skipping skipAddr. -1 when none.
-inline int nearestHangerIndex(const float c[3], const Sample* s, size_t n, uintptr_t skipAddr, float limitM) noexcept {
-    int best = -1;
-    float bestD = 0.0f;
+// Built v13.9: the reference shell's index into s (world centres), by the trial's rule (sealed::chooseShell): a HangerSmall, Medium or Large record
+// (never Gate, Ramp or Skirt) of the pad's size first, else any size, nearest the pad within limitM. -1 when none.
+inline int shellIndex(const Sample* s, size_t n, const float pad[3], sealed::PadSize padSize, float limitM) {
+    std::vector<sealed::ShellObs> obs(n);
     for (size_t i = 0; i < n; ++i) {
-        if (s[i].addr == skipAddr || !isHangerName(s[i].name)) continue;
-        const float d = distance3(c, s[i].world);
-        if (d > limitM) continue;
-        if (best < 0 || d < bestD) {
-            best = static_cast<int>(i);
-            bestD = d;
-        }
+        obs[i].addr = s[i].addr;
+        std::snprintf(obs[i].name, sizeof(obs[i].name), "%s", s[i].name);
+        for (int k = 0; k < 3; ++k) obs[i].centre[k] = s[i].world[k];
     }
-    return best;
+    return sealed::chooseShell(obs.data(), obs.size(), pad, padSize, limitM);
 }
 
-// The own pad by the trial's rule (sealed::pickOwnPad over the sample's pads): the pad whose sphere holds the camera, else the nearest within 150 m.
-// 0 when no pad qualifies.
-inline uintptr_t pickOwnPad(const Sample* s, size_t n, const float camera[3]) {
+// Built v13.9: the own pad by the trial's rule, sticky. The candidates are the sample's pads (with their world centres, spheres and up axes); the
+// state st is kept by the caller between sampled frames (sealed::pickOwnPadSticky: a held pad stays while seen; a near-tie goes to the pad whose up
+// line is nearest the camera laterally, then to the smaller name). 0 when no pad is picked this frame.
+inline uintptr_t ownPadSticky(const Sample* s, size_t n, const float camera[3], sealed::PadSticky* st) {
     std::vector<sealed::PadObs> obs;
     obs.reserve(n);
     for (size_t i = 0; i < n; ++i) {
@@ -216,12 +221,14 @@ inline uintptr_t pickOwnPad(const Sample* s, size_t n, const float camera[3]) {
         p.radius = s[i].radius;
         p.size = sealed::padSizeOf(s[i].name);
         std::snprintf(p.name, sizeof(p.name), "%s", s[i].name);
+        p.hasUp = s[i].axesSrc != 4;
+        if (p.hasUp)
+            for (int k = 0; k < 3; ++k) p.up[k] = s[i].worldAxes[2][k];
         obs.push_back(p);
     }
-    if (obs.empty()) return 0;
     const float radii[3] = {1.0f, 1.0f, 1.0f};   // the cell's radius is not used here
     sealed::OwnCell cell;
-    sealed::pickOwnPad(obs.data(), obs.size(), camera, radii, &cell);
+    sealed::pickOwnPadSticky(obs.data(), obs.size(), camera, radii, st, &cell);
     return cell.has ? cell.pad : 0;
 }
 
@@ -821,11 +828,12 @@ inline int formatEvent(char* out, size_t cap, const Event& e, const LineContext&
     char status[64];
     if (ctx.statusKnown) std::snprintf(status, sizeof(status), "flags=%u flags2=%u", ctx.flags, ctx.flags2);
     else std::snprintf(status, sizeof(status), "flags unknown");
+    const char* bayText = s.bay == 2 ? "in the held bay" : (s.bay == 1 ? "outside the held bay" : "no box");
     return std::snprintf(out, cap,
-                         "hatch geometry: %s frame %u t=%llu ms: rec 0x%llX name=%s%s; %s; local centre (%.3f,%.3f,%.3f) along %.3f m "
+                         "hatch geometry: %s frame %u t=%llu ms: rec 0x%llX name=%s%s; %s; %s; local centre (%.3f,%.3f,%.3f) along %.3f m "
                          "lateral %.3f m; local axes %s; world centre (%.3f,%.3f,%.3f) from %s; %s; %s; detail: %s; status %s",
                          kindName(e.kind), frame, static_cast<unsigned long long>(ctx.ms), static_cast<unsigned long long>(s.addr), s.name,
-                         (ctx.ownAddr && s.addr == ctx.ownAddr) ? " [own pad]" : "", frameText, static_cast<double>(s.centre[0]),
+                         (ctx.ownAddr && s.addr == ctx.ownAddr) ? " [own pad]" : "", frameText, bayText, static_cast<double>(s.centre[0]),
                          static_cast<double>(s.centre[1]), static_cast<double>(s.centre[2]), static_cast<double>(s.along),
                          static_cast<double>(s.lateral), axes, static_cast<double>(s.world[0]), static_cast<double>(s.world[1]),
                          static_cast<double>(s.world[2]), centreSourceName(s.centreSrc), pose, camera, detail, status);

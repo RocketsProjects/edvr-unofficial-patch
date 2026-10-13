@@ -44,6 +44,10 @@ uintptr_t g_frameKey = 0;                 // the own pad the samples are express
 bool g_firstHSet = false;                 // the first shell reading of this frame key (render thread)
 float g_firstH = 0.0f;
 uint64_t g_lastPadLineMs = 0;
+sealed::PadSticky g_padSticky;            // Built v13.9 (a): the own pad picked last, kept while seen (render thread; reset at On)
+uintptr_t g_shellAddr = 0;                // Built v13.9 (b): the reference shell, chosen once per own pad (render thread)
+char g_shellName[hg::kNameLen] = "";
+bool g_shellLostLogged = false;
 
 bool readMem(void* dst, uintptr_t src, size_t n) noexcept {
     if (!src) return false;
@@ -139,7 +143,7 @@ void processSample(std::vector<hg::Sample>& samples, uint64_t drops, uintptr_t c
     float capA[3] = {}, capB[3] = {};
     bool held = false;
     const bool trialShaft = sealedTrialShaft(&trialPad, capA, capB, &held);
-    uintptr_t ownAddr = trialPad ? trialPad : hg::pickOwnPad(samples.data(), samples.size(), cam);
+    uintptr_t ownAddr = trialPad ? trialPad : hg::ownPadSticky(samples.data(), samples.size(), cam, &g_padSticky);
     hg::Frame fr;
     float padAx[3][3] = {};
     uint8_t padCs = 4, padAs = 4;
@@ -175,19 +179,54 @@ void processSample(std::vector<hg::Sample>& samples, uint64_t drops, uintptr_t c
 
     // The shell: the nearest Hanger*/Hangar* sample to the pad within 150 m, measured in world coordinates; its height above the shell is along the
     // pad's up axis (the frame's z). Read from this sample's world values, so a frame shift moves pad and shell alike and cancels.
+    // Built v13.9 (b): the reference shell is chosen once per own pad (the frame key) and re-read by address in every sample. A sample without it
+    // stands the heights down (logged once); it never switches to another part.
+    const uintptr_t key = fr.padFrame ? ownAddr : 0;
+    const bool keyChanged = !g_keySet || key != g_frameKey;
+    if (keyChanged) {
+        g_shellAddr = 0;
+        g_shellLostLogged = false;
+    }
+    if (fr.padFrame && g_shellAddr == 0) {
+        const int ci = hg::shellIndex(samples.data(), samples.size(), fr.origin, sealed::padSizeOf(frameName), hg::kShellM);
+        if (ci >= 0) {
+            const hg::Sample& sh = samples[static_cast<size_t>(ci)];
+            g_shellAddr = sh.addr;
+            std::snprintf(g_shellName, sizeof(g_shellName), "%s", sh.name);
+            Log::get().note("hatch geometry: frame %u: the reference shell is %s (rec 0x%llX), chosen once for the own pad %s.", frame, g_shellName,
+                            static_cast<unsigned long long>(g_shellAddr), frameName);
+        }
+    }
     bool shellOk = false;
     float relH = 0.0f;
-    char shellName[hg::kNameLen] = "";
     float shellDistM = 0.0f;
-    if (fr.padFrame) {
-        const int si = hg::nearestHangerIndex(fr.origin, samples.data(), samples.size(), ownAddr, hg::kShellM);
-        if (si >= 0) {
-            const hg::Sample& sh = samples[static_cast<size_t>(si)];
-            relH = sealed::shellRelative(fr.origin, sh.world, padAx[2]);
+    if (fr.padFrame && g_shellAddr != 0) {
+        const hg::Sample* sh = nullptr;
+        for (const hg::Sample& x : samples)
+            if (x.addr == g_shellAddr) {
+                sh = &x;
+                break;
+            }
+        if (sh) {
+            relH = sealed::shellRelative(fr.origin, sh->world, padAx[2]);
             shellOk = std::isfinite(relH);
-            std::snprintf(shellName, sizeof(shellName), "%s", sh.name);
-            shellDistM = hg::distance3(fr.origin, sh.world);
+            shellDistM = hg::distance3(fr.origin, sh->world);
+        } else if (!g_shellLostLogged) {
+            g_shellLostLogged = true;
+            Log::get().note("hatch geometry: sampled frame %u: the reference shell %s (rec 0x%llX) is not in the sample; the heights stand down until the "
+                            "own pad changes.", frame, g_shellName, static_cast<unsigned long long>(g_shellAddr));
         }
+    }
+
+    // Built v13.9 (c): the held cell's box in the frame, for the bay of each record (in the held pad's bay, or not).
+    float boxC[3] = {}, boxU[3] = {}, boxV[3] = {}, boxW[3] = {}, boxH[3] = {};
+    float boxCf[3] = {}, boxUf[3] = {}, boxVf[3] = {}, boxWf[3] = {};
+    const bool haveBox = sealedTrialBox(boxC, boxU, boxV, boxW, boxH);
+    if (haveBox) {
+        hg::toFrame(fr, boxC, boxCf);
+        hg::dirToFrame(fr, boxU, boxUf);
+        hg::dirToFrame(fr, boxV, boxVf);
+        hg::dirToFrame(fr, boxW, boxWf);
     }
 
     // Express every sample in the frame, and keep the ones the probe follows: the own pad, and the records on the shaft (or within 300 m of the
@@ -196,6 +235,7 @@ void processSample(std::vector<hg::Sample>& samples, uint64_t drops, uintptr_t c
     for (size_t i = 0; i < samples.size(); ++i) {
         hg::Sample& s = samples[i];
         hg::localize(fr, shaft, &s);
+        s.bay = haveBox ? (hg::inBox(s.centre, boxCf, boxUf, boxVf, boxWf, boxH) ? 2 : 1) : 0;
         const bool own = ownAddr != 0 && s.addr == ownAddr;
         bool keep = own;
         if (!keep && !s.isPad) keep = hasShaft ? s.lateral <= hg::kLateralM : hg::distance3(s.world, cam) <= hg::kRangeM;
@@ -223,8 +263,7 @@ void processSample(std::vector<hg::Sample>& samples, uint64_t drops, uintptr_t c
     }
 
     // A new own pad (or the world after the pad): the records are followed afresh, and the lower cycle restarts from it.
-    const uintptr_t key = fr.padFrame ? ownAddr : 0;
-    if (!g_keySet || key != g_frameKey) {
+    if (keyChanged) {
         if (g_keySet && takeRecordLine(frame)) {
             Log::get().note("hatch geometry: the frame changed at sampled frame %u (own pad 0x%llX -> 0x%llX): the records are followed afresh in the new "
                             "frame; an open lower cycle is closed.", frame, static_cast<unsigned long long>(g_frameKey),
@@ -291,7 +330,7 @@ void processSample(std::vector<hg::Sample>& samples, uint64_t drops, uintptr_t c
         std::snprintf(p.padName, sizeof(p.padName), "%s", frameName);
         p.padAddr = ownAddr;
         p.shellOk = shellOk;
-        std::snprintf(p.shellName, sizeof(p.shellName), "%s", shellName);
+        std::snprintf(p.shellName, sizeof(p.shellName), "%s", g_shellName);
         p.shellDistM = shellDistM;
         p.relH = relH;
         p.firstH = g_firstH;
@@ -327,6 +366,9 @@ void hatchGeometryOn(uint32_t frame) {
     g_keySet = false;
     g_firstHSet = false;
     g_lastPadLineMs = 0;
+    g_padSticky = sealed::PadSticky{};
+    g_shellAddr = 0;
+    g_shellLostLogged = false;
     g_countPending = true;
     {
         hg::SampleStorage prepared;

@@ -322,33 +322,67 @@ int main(int argc, char** argv) {
         check(full.present() == hg::kTrackCap && full.refused() == 1, "the tracker follows kTrackCap records; the next is refused and counted");
     }
 
-    // --- The nearest hangar, and the own pad by the trial's rule.
+    // --- The reference shell (v13.9): the Medium part of a Medium pad though a Small one is nearer; never a Gate, Ramp or Skirt; the limit.
     {
         std::vector<hg::Sample> s;
-        s.push_back(frameSample(0x1, "Hangar_b", 5.0f, 0.0f, 0.0f));
-        s.push_back(frameSample(0x2, "HangerSmall", 10.0f, 0.0f, 0.0f));
-        s.push_back(frameSample(0x3, "BlastShield", 1.0f, 0.0f, 0.0f));
+        s.push_back(frameSample(0x1, "HangarGate_Ramp1_1", 1.0f, 0.0f, 0.0f));
+        s.push_back(frameSample(0x2, "HangerSmall", 5.0f, 0.0f, 0.0f));
+        s.push_back(frameSample(0x3, "HangerMedium", 9.0f, 0.0f, 0.0f));
+        s.push_back(frameSample(0x4, "MediumHangerSkirt", 2.0f, 0.0f, 0.0f));
         const float origin[3] = {0.0f, 0.0f, 0.0f};
-        check(hg::nearestHangerIndex(origin, s.data(), s.size(), 0, 150.0f) == 0, "the nearest Hanger*/Hangar* is Hangar_b");
-        check(hg::nearestHangerIndex(origin, s.data(), s.size(), 0x1, 150.0f) == 1, "the record itself is skipped");
-        check(hg::nearestHangerIndex(origin, s.data(), s.size(), 0, 4.0f) == -1, "a Hanger beyond the limit is not named");
+        check(hg::shellIndex(s.data(), s.size(), origin, edvr::sealed::PadSize::kMedium, 150.0f) == 2,
+              "a Medium pad's shell is HangerMedium, though HangerSmall is nearer");
+        check(hg::shellIndex(s.data(), s.size(), origin, edvr::sealed::PadSize::kLarge, 150.0f) == 1,
+              "no Large part: the nearest other size (HangerSmall); never a Gate, Ramp or Skirt");
+        check(hg::shellIndex(s.data(), s.size(), origin, edvr::sealed::PadSize::kMedium, 4.0f) == -1, "beyond the limit: none");
+    }
 
-        std::vector<hg::Sample> pads;
-        hg::Sample p1 = frameSample(0x100, "LandingPadSmall_A", 0.0f, 0.0f, 0.0f);
-        p1.isPad = true;
-        p1.radius = 40.0f;
-        hg::Sample p2 = frameSample(0x200, "LandingPadLarge", 100.0f, 0.0f, 0.0f);
-        p2.isPad = true;
-        p2.radius = 150.0f;
-        pads.push_back(p1);
-        pads.push_back(p2);
-        const float cam[3] = {10.0f, 0.0f, 0.0f};
-        check(hg::pickOwnPad(pads.data(), pads.size(), cam) == 0x100, "the pad whose sphere holds the camera, nearest first");
-        pads[0].radius = 1.0f;
-        pads[1].radius = 1.0f;
-        check(hg::pickOwnPad(pads.data(), pads.size(), cam) == 0x100, "no sphere holds the camera: the nearest pad within 150 m");
+    // --- The own pad (v13.9): a near-tie goes to the pad whose up line is nearest the camera laterally; without up axes, to the smaller name; a held
+    // pad stays while it is seen, and another replaces it only after kPadStickyFrames frames unseen.
+    {
+        // Two Medium platforms 40 m apart (A at the origin, B at (0,40,0)), both spheres holding the camera at (0,21,0): distances 21 and 19 m.
+        hg::Sample pa = frameSample(0x100, "LandingPadMediumA", 0.0f, 0.0f, 0.0f);
+        pa.isPad = true;
+        pa.radius = 50.0f;
+        hg::Sample pb = frameSample(0x200, "LandingPadMediumB", 0.0f, 40.0f, 0.0f);
+        pb.isPad = true;
+        pb.radius = 50.0f;
+        const float cam[3] = {0.0f, 21.0f, 0.0f};
+        std::vector<hg::Sample> both = {pa, pb};
+        edvr::sealed::PadSticky st;
+        check(hg::ownPadSticky(both.data(), both.size(), cam, &st) == 0x200,
+              "a near-tie with up axes: the pad whose up line is nearer the camera laterally (B, 19 m, over A's 21 m)");
+        std::vector<hg::Sample> noUp = both;
+        for (hg::Sample& x : noUp) x.axesSrc = 4;
+        edvr::sealed::PadSticky st0;
+        check(hg::ownPadSticky(noUp.data(), noUp.size(), cam, &st0) == 0x100,
+              "a near-tie without up axes: the smaller name (A)");
+
+        // B is held. Now A is nearer by 4 m, both still hold the camera at (0,18,0): the held B stays while it is seen.
+        const float cam2[3] = {0.0f, 18.0f, 0.0f};
+        check(hg::ownPadSticky(both.data(), both.size(), cam2, &st) == 0x200,
+              "a held pad stays while its record is seen, though the other is now nearer");
+
+        // B is not seen: it is held for 29 unseen frames (no pick, no replacement), and the other pad may replace it at the 30th.
+        std::vector<hg::Sample> onlyA = {pa};
+        uintptr_t got = 1;
+        for (uint32_t k = 1; k < edvr::sealed::kPadStickyFrames; ++k) got = hg::ownPadSticky(onlyA.data(), onlyA.size(), cam2, &st);
+        check(got == 0, "the held pad unseen for 29 frames: no pick, no replacement yet");
+        check(hg::ownPadSticky(onlyA.data(), onlyA.size(), cam2, &st) == 0x100, "unseen for 30 frames: the other pad may replace it");
+
         std::vector<hg::Sample> none;
-        check(hg::pickOwnPad(none.data(), 0, cam) == 0, "no pad: none");
+        edvr::sealed::PadSticky st2;
+        check(hg::ownPadSticky(none.data(), 0, cam, &st2) == 0, "no pad: none");
+    }
+
+    // --- The bay: a point inside the held cell's box (centre, unit axes, half extents), and points outside it (v13.9).
+    {
+        const float bc[3] = {0.0f, 0.0f, 0.0f};
+        const float bu[3] = {1.0f, 0.0f, 0.0f}, bv[3] = {0.0f, 1.0f, 0.0f}, bw[3] = {0.0f, 0.0f, 1.0f};
+        const float bh[3] = {5.0f, 2.0f, 10.0f};
+        const float pin[3] = {4.0f, 1.0f, 9.0f}, pout1[3] = {6.0f, 0.0f, 0.0f}, pout2[3] = {0.0f, 0.0f, 11.0f};
+        check(hg::inBox(pin, bc, bu, bv, bw, bh) && !hg::inBox(pout1, bc, bu, bv, bw, bh) && !hg::inBox(pout2, bc, bu, bv, bw, bh),
+              "the bay: inside the box's half extents only");
     }
 
     // --- The lower-cycle watch.

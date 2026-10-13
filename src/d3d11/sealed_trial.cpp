@@ -227,6 +227,7 @@ std::atomic<uint64_t> g_classSlots[kClassSlots] = {};
 
 // The frame's pad and explicit-part records (collected under the lock while named mode runs), and the frame's camera.
 sealed::PadObs g_pads[sealed::kPadSlots];
+sealed::PadSticky g_padSticky;   // Built v13.9: the own pad picked last, kept while its record is seen (reset at each toggle-on)
 size_t g_padCount = 0;
 sealed::ExplicitObs g_explicits[sealed::kExplicitSlots];
 size_t g_explicitCount = 0;
@@ -1150,29 +1151,32 @@ void setHeldFrame(const sealed::OwnCell& cell, uint32_t frame) {
     std::memcpy(g_engageCentre, cell.centre, sizeof(g_engageCentre));
     sealed::localizeCell(cell, cell.centre, axes, &g_heldLocal);
     g_heldLocalValid = true;
-    float best = -1.0f;
-    size_t bestI = g_explicitCount;
-    for (size_t i = 0; i < g_explicitCount; ++i) {
+    // Built v13.9 (b): the reference shell is chosen ONCE here, at the freeze: a HangerSmall, Medium or Large part whose size matches the pad (else any
+    // size), never a Gate, Ramp or Skirt part. refreshHeldWorld re-reads it by address; it does not switch to another part while the cell is held.
+    static sealed::ShellObs shells[sealed::kExplicitSlots];
+    size_t shellN = 0;
+    for (size_t i = 0; i < g_explicitCount && shellN < sealed::kExplicitSlots; ++i) {
         const sealed::ExplicitObs& x = g_explicits[i];
-        if (std::strstr(x.name, "Hanger") == nullptr && std::strstr(x.name, "Hangar") == nullptr) continue;
-        const float d = sealed::distance(x.centre, cell.centre);
-        if (d <= 150.0f && (best < 0.0f || d < best)) {
-            best = d;
-            bestI = i;
-        }
+        sealed::ShellObs& s = shells[shellN++];
+        s.addr = x.addr;
+        std::snprintf(s.name, sizeof(s.name), "%s", x.name);
+        for (int k = 0; k < 3; ++k) s.centre[k] = x.centre[k];
     }
-    if (bestI < g_explicitCount) {
-        const sealed::ExplicitObs& x = g_explicits[bestI];
+    const int si = sealed::chooseShell(shells, shellN, cell.centre, cell.size, 150.0f);
+    if (si >= 0) {
+        const sealed::ShellObs& x = shells[si];
+        const float best = sealed::distance(x.centre, cell.centre);
         g_shellAddr = x.addr;
         std::snprintf(g_shellName, sizeof(g_shellName), "%s", x.name);
         g_shellValid = true;
         g_shellRelEngage = sealed::shellRelative(cell.centre, x.centre, axes[2]);
-        Log::get().note("sealed shell (engage frame %u): %s at %.1f m from the pad; the pad stands %.2f m up the shaft from it. The pad moving more than "
-                        "%.0f m along the shaft against it releases the cell.", frame, g_shellName, static_cast<double>(best),
-                        static_cast<double>(g_shellRelEngage), static_cast<double>(sealed::kPadMoveReleaseM));
+        Log::get().note("sealed shell (engage frame %u): %s at %.1f m from the pad, chosen once at the freeze (size %c); the pad stands %.2f m up the "
+                        "shaft from it. The pad moving more than %.0f m along the shaft against it releases the cell.", frame, g_shellName,
+                        static_cast<double>(best), sealed::padSizeLetter(cell.size), static_cast<double>(g_shellRelEngage),
+                        static_cast<double>(sealed::kPadMoveReleaseM));
     } else {
-        Log::get().note("sealed shell (engage frame %u): no Hanger or Hangar part within 150 m of the pad in the last frame's records; the pad's motion "
-                        "along the shaft is not checked.", frame);
+        Log::get().note("sealed shell (engage frame %u): no HangerSmall, HangerMedium or HangerLarge part (not Gate, Ramp or Skirt) within 150 m of the pad "
+                        "in the last frame's records; the pad's motion along the shaft is not checked.", frame);
     }
     Log::get().note("sealed cell (engage frame %u): pad-local box of %s (size %c), in the pad's own frame (centre (0,0,0), up = axis 2): target at (%.2f, "
                     "%.2f, %.2f), %.1f m from the pad's centre; box centre (%.2f, %.2f, %.2f); length axis (%.3f, %.3f, %.3f), width axis (%.3f, %.3f, "
@@ -1208,6 +1212,10 @@ void refreshHeldWorld() {
     char nm[48] = {};
     const WorldRead sw = worldOfRecord(g_shellAddr);
     if (sw.source == 4 || !cachedName(g_shellAddr, nm, sizeof(nm)) || std::strcmp(nm, g_shellName) != 0) {
+        // Built v13.9 (b): the reference is not read this frame; the release check stands down (logged once) rather than switching to another part.
+        if (g_shellValid)
+            Log::get().note("sealed shell: the reference %s is not read this frame (gone from the store, or renamed); the pad-motion release stands down "
+                            "until the next freeze.", g_shellName);
         g_shellValid = false;
         return;
     }
@@ -1235,7 +1243,7 @@ void promoteFrame(uint32_t stamp, uint32_t frame) {
     if (g_mode.load(std::memory_order_relaxed) == sealed::Mode::kNamed) {
         if (g_frameCamValid) {
             const float radii[3] = {g_cellRadius[0], g_cellRadius[1], g_cellRadius[2]};
-            sealed::pickOwnPad(g_pads, g_padCount, g_frameCam, radii, &next);
+            sealed::pickOwnPadSticky(g_pads, g_padCount, g_frameCam, radii, &g_padSticky, &next);   // Built v13.9: sticky while seen
             // Built v11: the capsule. The axis runs from the pad's centre to the target, on 20 m past it. Built v13 (fix 3): the target is the
             // BlastShieldBase nearest the line through the pad's centre along its own up axis e2 (perpendicular distance, ties by the distance along
             // the axis), else the same for the own hangar parts, else (no pose to give an up axis) the nearest to the pad.
@@ -1869,6 +1877,23 @@ bool sealedTrialShaft(uintptr_t* pad, float capA[3], float capB[3], bool* held) 
     return true;
 }
 
+// Built v13.9 (hatch probe, bay membership): the box of the cell the shaft comes from (the held cell, else the named pick), world coordinates: its
+// centre, the length, width and shaft axes, and the half extents (length, width, height). False while the trial is off or the cell has no box.
+bool sealedTrialBox(float centre[3], float u[3], float v[3], float w[3], float half[3]) noexcept {
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
+    if (!g_on.load(std::memory_order_acquire)) return false;
+    const sealed::OwnCell& c = g_heldValid ? g_heldCell : g_pickCell;
+    if (!c.has || !c.box) return false;
+    for (int k = 0; k < 3; ++k) {
+        centre[k] = c.boxCentre[k];
+        u[k] = c.boxU[k];
+        v[k] = c.boxV[k];
+        w[k] = c.boxW[k];
+        half[k] = c.boxHalf[k];
+    }
+    return true;
+}
+
 void sealedTrialToggle(const char* trigger, uint32_t frame) {
     std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     char line[480];
@@ -1894,6 +1919,7 @@ void sealedTrialToggle(const char* trigger, uint32_t frame) {
         return;
     }
     g_on.store(true, std::memory_order_release);
+    g_padSticky = sealed::PadSticky{};   // Built v13.9: a new trial picks its own pad afresh
     storeHookRecompute();
     if (std::strcmp(storeHookStatus(), "installed") != 0) {
         g_on.store(false, std::memory_order_release);
@@ -2570,6 +2596,14 @@ void sealedTrialAfterStore(uintptr_t bucket, uintptr_t record) noexcept {
                     p.radius = radius;
                     p.size = sealed::padSizeOf(name);
                     std::snprintf(p.name, sizeof(p.name), "%s", name);
+                    // Built v13.9: the pad's up axis (axes[2]) for the near-tie rule; without a pose the tie goes to the name.
+                    float padAxes[3][3] = {};
+                    float padExt[3] = {};
+                    bool padExtOk = false;
+                    uint8_t padSrc = 4;
+                    p.hasUp = poseOrientOf(record, padAxes, padExt, &padExtOk, &padSrc) && padSrc != 4;
+                    if (p.hasUp)
+                        for (int k = 0; k < 3; ++k) p.up[k] = padAxes[2][k];
                     if (p.size != sealed::PadSize::kNone) ++g_padCount;
                 }
             } else if (cls == sealed::NameClass::kExplicit && g_explicitCount < sealed::kExplicitSlots) {
