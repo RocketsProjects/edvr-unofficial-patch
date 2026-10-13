@@ -50,7 +50,7 @@ changes.*
   setting (1.62x the pixels of 1.0).
 - **Next: the runtime A/B** (2026-10-13 entry): stock OpenVR against EDVR's
   runtime, both through SteamVR, graphics suspended in both. Leg B needs a
-  recorded stock original, which the Frontier install lacks (see that entry).
+  one-time --record-stock-runtime on the Frontier install (see that entry).
   Then the carrier (GPU 10.7-11.3 ms, EDVR about 4.8): the HUD depth seed's
   census section, UI quality 100 against 125, stock glare's extra 2.5 ms.
   The landing-pad rule stays REVERTED (162819). Any Quest flight: the
@@ -1728,17 +1728,20 @@ EDVR. The logs of leg A must name the EDVR build:
 `python tools\edvr_log.py --target frontier --expect-build HEAD` exits 2
 when they do not.
 
-Blocker found while building the A/B: leg B needs a stock original recorded
-by hash. `--stock-runtime` takes it from a receipt that records a runtime
-(or preserved original) hash with the bytes still on disk and no EDVR
-marker, and refuses otherwise. The Frontier install has none. Its receipts
-record a runtime hash whose backup is gone (the 9/14 native-only install,
-F8C70ECA...), or backups that are EDVR builds (the five 10/13 installs).
-`openvr_api_orig.dll` (243A818D..., 311104 bytes, 9/3) is Valve-signed and
-carries no EDVR marker, but no receipt records its hash. The dry run refuses:
-`python tools\install_edvr.py --target frontier --stock-runtime --suspend --dry-run`.
-Needed before leg B: confirm that file is Elite's stock, then record it by
-hash through an explicit step (not built yet).
+Setup before leg B, once: record Elite's stock runtime on the Frontier install.
+`--stock-runtime` takes its original only from a recorded hash, and the
+Frontier install had none. Its receipts record a runtime hash whose backup is
+gone (the 9/14 native-only install, F8C70ECA...), or backups that are EDVR
+builds (the five 10/13 installs). `openvr_api_orig.dll` (243A818D..., 311104
+bytes, 9/3) is Valve-signed (Authenticode Valid, CN=Valve), carries no EDVR
+marker, and is byte-identical to the Epic install's pre-EDVR backup, so it is
+Elite's shipped openvr_api.dll. Record it:
+`python tools\install_edvr.py --target frontier --record-stock-runtime "C:\Users\seanm\AppData\Local\Frontier_Developments\Products\elite-dangerous-odyssey-64\Openvr\win64\openvr_api_orig.dll"`
+It copies the file to openvr_api.dll.pre-stock-record-<stamp>.bak beside the
+runtime and writes edvr_stock_runtime_receipt.json in the game directory. The
+source is never moved. Recording the same hash again is a no-op; a different
+recorded hash is refused unless --force, which keeps the old backup. Dry run:
+`python tools\install_edvr.py --target frontier --record-stock-runtime PATH --dry-run`.
 
 - ruled out: the openvr_api.dll.pre-*.bak files as the stock original,
   because each carries EDVR's marker (checked on the Frontier install).

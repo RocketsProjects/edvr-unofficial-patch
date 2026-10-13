@@ -14,7 +14,10 @@
     python tools/install_edvr.py --target frontier --suspend
     python tools/install_edvr.py --target frontier --stock-runtime --suspend
     python tools/install_edvr.py --target frontier --resume
+    python tools/install_edvr.py --target frontier --record-stock-runtime PATH
 
+--record-stock-runtime is the one-time setup for --stock-runtime: it records a
+Valve-signed openvr_api.dll as Elite's stock original (it copies, never moves).
 --suspend parks EDVR's d3d11.dll; --stock-runtime parks EDVR's openvr_api.dll
 and puts Elite's recorded stock original in its place (the runtime A/B, see
 docs/openxr-performance-review-2026-09-14.md). Both are renames and copies,
@@ -102,7 +105,11 @@ PROFILE_FILE = "edvr_profile.ini"
 # scheme, with the ".N" a same-second collision gets (_native_backup_name).
 KEEP_BACKUPS = 5
 BACKUP_FILE = re.compile(r"^(?P<file>.+?)\.pre-(?P<tag>[^\\/]+)-(?P<stamp>\d{8}-\d{6})\.bak(?:\.(?P<n>\d+))?$")
-RECEIPT_NAMES = ("edvr_native_receipt.json", "edvr_flat_receipt.json")
+# The stock-original record (--record-stock-runtime) is a receipt too: its
+# files name the recorded backup, so pruning keeps that backup.
+STOCK_RECORD_NAME = "edvr_stock_runtime_receipt.json"
+STOCK_RECORD_KIND = "edvr-stock-runtime-record"
+RECEIPT_NAMES = ("edvr_native_receipt.json", "edvr_flat_receipt.json", STOCK_RECORD_NAME)
 
 
 SCOPES = ("both", "vr", "flat")
@@ -1658,7 +1665,7 @@ def _stock_candidates(target):
     paths = _runtime_paths(target)
     found, notes = [], []
     for name in sorted(os.listdir(target)):
-        if not (name.startswith("edvr_native_receipt") and ".json" in name):
+        if not ((name.startswith("edvr_native_receipt") and ".json" in name) or name == STOCK_RECORD_NAME):
             continue
         try:
             with open(os.path.join(target, name), "r", encoding="utf-8") as f:
@@ -1669,7 +1676,9 @@ def _stock_candidates(target):
         if not isinstance(receipt, dict):
             continue
         for rec in receipt.get("files") or []:
-            if not isinstance(rec, dict) or rec.get("key") not in ("runtime", "native"):
+            # "stock" is the current recorded original; "stock-superseded" is
+            # an older one kept only so pruning spares its backup.
+            if not isinstance(rec, dict) or rec.get("key") not in ("runtime", "native", "stock"):
                 continue
             if not _record_names(rec.get("target", ""), RUNTIME_DLL):
                 continue
@@ -1918,6 +1927,133 @@ def park_resume(target, dry_run=False):
             return rc
     if os.path.isfile(graphics_parked):
         return suspend_resume(target, resume=True, dry_run=dry_run)
+    return 0
+
+
+def _authenticode_signer(path):
+    """(status, subject) for the file's Authenticode signature, from Windows'
+    own check: Get-AuthenticodeSignature, run by Windows PowerShell 5.1. The
+    path travels in an environment variable, not in the command line. Tests
+    replace this name with a stub (see _record_stock_self_test)."""
+    script = ("$s = Get-AuthenticodeSignature -LiteralPath $env:EDVR_SIGN_PATH; "
+              "$subject = ''; if ($s.SignerCertificate) { $subject = [string]$s.SignerCertificate.Subject }; "
+              "[pscustomobject]@{ Status = [string]$s.Status; Subject = $subject } | ConvertTo-Json -Compress")
+    env = dict(os.environ, EDVR_SIGN_PATH=os.path.abspath(path))
+    out = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                         capture_output=True, text=True, env=env, timeout=120)
+    lines = [line for line in out.stdout.splitlines() if line.strip()]
+    if out.returncode != 0 or not lines:
+        raise ValueError("Get-AuthenticodeSignature failed (exit %d): %s" % (out.returncode, out.stderr.strip()[:300]))
+    data = json.loads(lines[-1])
+    return str(data.get("Status", "")), str(data.get("Subject", ""))
+
+
+def _signed_by_valve(status, subject):
+    parts = [part.strip() for part in str(subject).split(",")]
+    return status == "Valid" and "CN=Valve" in parts
+
+
+def _read_stock_record(path):
+    """The record's entries; [] when there is no record. ValueError for a file
+    that is there but is not one."""
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            record = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise ValueError("cannot read %s: %s" % (path, exc))
+    if not isinstance(record, dict) or record.get("kind") != STOCK_RECORD_KIND or \
+            not isinstance(record.get("files"), list):
+        raise ValueError("%s is not a stock-original record" % path)
+    return [entry for entry in record["files"] if isinstance(entry, dict)]
+
+
+def record_stock_runtime(target, source, dry_run=False, force=False, signer=None):
+    """--record-stock-runtime: record a file as Elite's stock openvr_api.dll.
+    It must be a Valve-signed file (Authenticode status Valid, signer CN=Valve),
+    carry no EDVR marker, and not be EDVR's live runtime. Copies only: the source
+    is never moved or deleted. Recording the same hash again is a no-op; a
+    different recorded hash is refused unless force, which replaces the record
+    and keeps the old backup."""
+    signer = signer or _authenticode_signer
+    p = _runtime_paths(target)
+    record_path = os.path.join(target, STOCK_RECORD_NAME)
+
+    def refuse(why):
+        print("[edvr] record-stock-runtime refused: %s. Nothing changed." % why)
+        return 1
+
+    if not os.path.isfile(source):
+        return refuse("no file at %s" % source)
+    data = _read_or_none(source)
+    if data is None:
+        return refuse("cannot read %s" % source)
+    live = _read_or_none(p["live"])
+    if live is not None and _has_edvr_marker(live) and \
+            os.path.normcase(os.path.abspath(source)) == os.path.normcase(os.path.abspath(p["live"])):
+        return refuse("%s is EDVR's live runtime" % source)
+    if _has_edvr_marker(data):
+        return refuse("%s is an EDVR build; only Elite's stock runtime can be recorded" % source)
+    try:
+        status, subject = signer(source)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return refuse("the signature check could not run on %s: %s" % (source, exc))
+    if not _signed_by_valve(status, subject):
+        return refuse("%s is not validly signed by Valve (status %s, signer %r)" % (source, status, subject))
+    try:
+        entries = _read_stock_record(record_path)
+    except ValueError as exc:
+        return refuse(str(exc))
+    sha = _sha_of(data)
+    current = [e for e in entries if e.get("key") == "stock"]
+    others = [e for e in current if str(e.get("before_sha256", "")).upper() != sha]
+    same = [e for e in current if str(e.get("before_sha256", "")).upper() == sha]
+    if others and not force:
+        old = others[0]
+        return refuse("a different stock original is already recorded (sha256 %s, backup %s); "
+                      "pass --force to replace the record (the old backup is kept)"
+                      % (old.get("before_sha256"), old.get("backup")))
+    if same and not others and same[0].get("backup") and os.path.isfile(same[0]["backup"]) and \
+            _sha_of(_read_or_none(same[0]["backup"]) or b"") == sha:
+        print("[edvr] record-stock-runtime: %s is already recorded (sha256 %s, backup %s); nothing to do."
+              % (source, sha, same[0]["backup"]))
+        return 0
+    backup = _native_backup_name(p["live"], "stock-record", datetime.datetime.now())
+    print("[edvr] record-stock-runtime%s: %s" % (
+        " (DRY RUN -- nothing will be written)" if dry_run else "", source))
+    print("       signer %s (status %s), sha256 %s, %d bytes" % (subject, status, sha, len(data)))
+    print("       copy    %s" % backup)
+    print("       record  %s" % record_path)
+    if others:
+        print("       replaces %d recorded stock original(s); their backups are kept" % len(others))
+    if dry_run:
+        print("[edvr] dry run: wrote nothing.")
+        return 0
+    try:
+        os.makedirs(p["xr"], exist_ok=True)
+        _reserve_backup(backup)
+        shutil.copy2(source, backup)
+        if _sha_of(_read_or_none(backup) or b"") != sha:
+            raise OSError("the backup copy does not match the source")
+        entry = {"key": "stock", "source": os.path.abspath(source), "target": os.path.abspath(p["live"]),
+                 "backup": os.path.abspath(backup), "before_sha256": sha, "installed_sha256": sha,
+                 "signer": subject, "signature": status,
+                 "recorded_utc": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+        retired = [dict(e, key="stock-superseded") for e in current]
+        kept = [e for e in entries if e.get("key") != "stock"]
+        record = {"version": 1, "kind": STOCK_RECORD_KIND, "target": os.path.abspath(target),
+                  "files": [entry] + retired + kept}
+        _write_json_atomic(record_path, record)
+    except (OSError, ValueError) as exc:
+        try:
+            os.remove(backup)
+        except OSError:
+            pass
+        print("[edvr] ERROR: record-stock-runtime failed: %s" % exc)
+        return 1
+    print("[edvr] record-stock-runtime done: Elite's stock runtime recorded (sha256 %s); backup %s. "
+          "--stock-runtime can use it now." % (sha, backup))
     return 0
 
 
@@ -2237,6 +2373,11 @@ def main(argv=None):
                          "stock original in its place (hash-checked; refused if no "
                          "stock original is recorded). Combine with --suspend to run "
                          "fully stock; undo with --resume")
+    ap.add_argument("--record-stock-runtime", default=None, metavar="PATH",
+                    help="one-time setup for --stock-runtime: record PATH as Elite's "
+                         "stock openvr_api.dll. It must be Valve-signed (Authenticode "
+                         "Valid, CN=Valve) and carry no EDVR marker. A backup is copied "
+                         "beside the runtime and a record is written; PATH is not moved")
     ap.add_argument("--resume", action="store_true",
                     help="put back what --suspend and --stock-runtime parked (EDVR's "
                          "d3d11.dll and openvr_api.dll); with nothing parked, a no-op")
@@ -2246,7 +2387,9 @@ def main(argv=None):
     ap.add_argument("--no-backup", action="store_true",
                     help="replace without keeping the previous file")
     ap.add_argument("--force", action="store_true",
-                    help="install even though the game appears to be running")
+                    help="install even though the game appears to be running; with "
+                         "--record-stock-runtime, replace a different recorded stock "
+                         "original (its backup is kept)")
     ap.add_argument("--keep-backups", type=int, default=KEEP_BACKUPS, metavar="N",
                     help="after a good install, keep the newest N backups of each "
                          "file and delete the older ones (default %d; at least 1)" % KEEP_BACKUPS)
@@ -2261,6 +2404,15 @@ def main(argv=None):
 
     if args.self_test:
         return self_test()
+
+    if args.record_stock_runtime is not None:
+        if any((args.suspend, args.resume, args.stock_runtime, args.native_openxr,
+                args.native_receipt, args.dll, args.openvr, args.dlss, args.xess, args.ini,
+                args.all, args.verify_only, args.no_backup, args.tag, args.restore_native)) \
+                or args.scope is not None or args.profile is not None:
+            ap.error("--record-stock-runtime takes only --target, --dry-run and --force")
+        return record_stock_runtime(resolve_target(args.target), os.path.abspath(args.record_stock_runtime),
+                                    args.dry_run, args.force)
 
     if args.profile is not None and args.scope is not None:
         ap.error("--profile is a deprecated alias for --scope; pass one or the other")
@@ -2872,6 +3024,151 @@ def _stock_runtime_self_test():
     finally:
         globals().update(saved)
         _loader.verify, _pe.validate_native_pair = saved_loader, saved_pair
+        shutil.rmtree(tmp, ignore_errors=True)
+    return not fails
+
+
+def _record_stock_self_test():
+    """--record-stock-runtime on a temp game: refusals (unsigned, not Valve,
+    EDVR-marked, EDVR's live runtime, signer failure), dry run, success, the
+    record then working with --stock-runtime and --resume, idempotence, the
+    ambiguity refusal, --force keeping the old backup, pruning protection, and
+    the argparse exclusions. The signature check is a stub here; the real
+    Get-AuthenticodeSignature path is exercised on an unsigned file at the end."""
+    import contextlib
+    import io
+    fails = []
+
+    def check(cond, what):
+        if not cond:
+            print("record-stock-runtime self-test: %s" % what)
+            fails.append(what)
+
+    tmp = tempfile.mkdtemp(prefix="edvr_record_stock_test_")
+    saved = {k: globals()[k] for k in ("strict_game_running", "_authenticode_signer")}
+    valve = "CN=Valve, O=Valve, L=Bellevue, S=WA, C=US"
+    edvr_rt = b"EDVR-RUNTIME-BUILD" + bytes(64)
+    stock_a = b"STOCK-VALVE-A" + bytes(64)
+    stock_b = b"STOCK-VALVE-B" + bytes(64)
+    try:
+        game = os.path.join(tmp, "game"); src = os.path.join(tmp, "src")
+        os.makedirs(os.path.join(game, "Openvr", "win64")); os.makedirs(src)
+        Path(game, GAME_EXE).write_bytes(b"GAME")
+        live = Path(game, "Openvr", "win64", RUNTIME_DLL)
+        live.write_bytes(edvr_rt)
+        file_a = Path(src, "openvr_api_orig.dll"); file_a.write_bytes(stock_a)
+        file_b = Path(src, "other.dll"); file_b.write_bytes(stock_b)
+        file_edvr = Path(src, "edvr.dll"); file_edvr.write_bytes(edvr_rt)
+        file_unsigned = Path(src, "unsigned.dll"); file_unsigned.write_bytes(stock_a)
+        record = Path(game, STOCK_RECORD_NAME)
+        sig = {"v": ("Valid", valve)}
+
+        def stub(path):
+            if isinstance(sig["v"], BaseException):
+                raise sig["v"]
+            return sig["v"]
+
+        globals()["_authenticode_signer"] = stub
+        globals()["strict_game_running"] = lambda *args: (True, False)
+
+        def tree():
+            out = []
+            for b, _, ns in os.walk(game):
+                out.append(("dir:" + os.path.relpath(b, game), b""))
+                for n in ns:
+                    out.append((os.path.relpath(os.path.join(b, n), game), Path(b, n).read_bytes()))
+            return sorted(out)
+
+        def run(argv):
+            buf, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                try:
+                    rc = main(argv)
+                except SystemExit as exc:
+                    rc = exc.code
+            return rc, buf.getvalue() + err.getvalue()
+
+        def refused(argv, why, expect=""):
+            before = tree()
+            rc, out = run(argv)
+            check(rc == 1, "%s: not refused (rc %s)" % (why, rc))
+            check(tree() == before, "%s: changed files" % why)
+            check(expect in out, "%s: wrong reason: %s" % (why, out))
+            return out
+
+        def rec(path, *extra):
+            return ["--target", game, "--record-stock-runtime", path] + list(extra)
+
+        sig["v"] = ("NotSigned", "")
+        refused(rec(str(file_a)), "unsigned file", "not validly signed by Valve")
+        sig["v"] = ("Valid", "CN=Someone, O=Someone Else")
+        refused(rec(str(file_a)), "file signed by someone else", "not validly signed by Valve")
+        sig["v"] = ("Valid", valve)
+        refused(rec(str(file_edvr)), "EDVR-marked file", "is an EDVR build")
+        refused(rec(str(live)), "EDVR's live runtime as the source", "EDVR's live runtime")
+        sig["v"] = OSError("powershell missing")
+        refused(rec(str(file_a)), "signature check that cannot run", "could not run")
+        sig["v"] = ("Valid", valve)
+
+        before = tree()
+        rc, out = run(rec(str(file_a), "--dry-run"))
+        check(rc == 0 and tree() == before and "dry run" in out, "dry run wrote files or failed: %s" % out)
+
+        rc, out = run(rec(str(file_a)))
+        check(rc == 0, "record failed: %s" % out)
+        entries = json.loads(record.read_text(encoding="utf-8"))["files"]
+        stock_entry = [e for e in entries if e["key"] == "stock"]
+        check(len(stock_entry) == 1 and stock_entry[0]["before_sha256"] == _sha_of(stock_a),
+              "record does not hold the recorded stock hash")
+        if stock_entry:
+            check(Path(stock_entry[0]["backup"]).read_bytes() == stock_a, "recorded backup is not the stock bytes")
+            check(stock_entry[0]["signer"] == valve, "record lost the signer subject")
+        check(file_a.read_bytes() == stock_a, "recording moved or changed the source")
+        check(live.read_bytes() == edvr_rt, "recording touched the live runtime")
+
+        rc, out = run(["--target", game, "--stock-runtime"])
+        check(rc == 0 and live.read_bytes() == stock_a, "stock-runtime did not use the record: %s" % out)
+        rc, out = run(["--target", game, "--resume"])
+        check(rc == 0 and live.read_bytes() == edvr_rt and record.is_file(),
+              "resume after the record did not put EDVR back, or removed the record: %s" % out)
+
+        before = tree()
+        rc, out = run(rec(str(file_a)))
+        check(rc == 0 and tree() == before and "already recorded" in out, "same hash again was not a no-op: %s" % out)
+
+        refused(rec(str(file_b)), "a different stock hash without --force", "different stock original")
+
+        rc, out = run(rec(str(file_b), "--force"))
+        check(rc == 0, "--force did not replace the record: %s" % out)
+        data = json.loads(record.read_text(encoding="utf-8"))
+        current = [e for e in data["files"] if e["key"] == "stock"]
+        superseded = [e for e in data["files"] if e["key"] == "stock-superseded"]
+        check(len(current) == 1 and current[0]["before_sha256"] == _sha_of(stock_b), "--force kept the old record")
+        check(any(e["before_sha256"] == _sha_of(stock_a) for e in superseded), "--force dropped the old hash")
+        old_backup = [e["backup"] for e in superseded if e["before_sha256"] == _sha_of(stock_a)]
+        check(bool(old_backup) and Path(old_backup[0]).read_bytes() == stock_a,
+              "--force did not keep the old backup")
+
+        from_prot, readable = _protected_by_receipts(_current_receipts(game))
+        check(readable and all(os.path.normcase(os.path.realpath(e["backup"])) in from_prot
+                               for e in data["files"] if e.get("backup")),
+              "pruning would not keep the recorded backups")
+
+        rc, out = run(["--target", game, "--stock-runtime"])
+        check(rc == 0 and live.read_bytes() == stock_b, "after --force, stock-runtime did not use the new hash: %s" % out)
+        rc, out = run(["--target", game, "--resume"])
+        check(rc == 0 and live.read_bytes() == edvr_rt, "resume after --force failed: %s" % out)
+
+        rc, out = run(rec(str(file_a), "--suspend"))
+        check(rc != 0, "--record-stock-runtime accepted --suspend")
+
+        real = saved["_authenticode_signer"](str(file_unsigned))
+        check(real[0] != "Valid" and not _signed_by_valve(*real),
+              "the real Authenticode check called an unsigned file valid: %r" % (real,))
+    except (OSError, ValueError) as exc:
+        check(False, "record self-test raised: %s" % exc)
+    finally:
+        globals().update(saved)
         shutil.rmtree(tmp, ignore_errors=True)
     return not fails
 
@@ -3832,6 +4129,8 @@ def self_test():
     if not _suspend_self_test():
         ok = False
     if not _stock_runtime_self_test():
+        ok = False
+    if not _record_stock_self_test():
         ok = False
     if not _scope_self_test():
         ok = False
