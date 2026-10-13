@@ -48,10 +48,10 @@ changes.*
   Largest left: the HDR HUD's depth seed (about 1 ms a frame at the carrier;
   a census section of its own since, built, not flown) and UI quality 1.25, a
   setting (1.62x the pixels of 1.0).
-- **Next: the runtime A/B** (2026-10-13 entry): stock OpenVR against EDVR's
-  runtime, both through SteamVR, graphics suspended in both. Leg B needs a
-  one-time --record-stock-runtime on the Frontier install. Leg A as written
-  cannot run with d3d11 parked (see that entry).
+- **Next: the runtime A/B** (2026-10-13 entry): two legs through SteamVR,
+  each from a fresh launch at two spots. Stock (after a one-time
+  --record-stock-runtime; openvr and d3d11 parked) against EDVR with
+  fix.temporal_aa off. Leg A as written cannot run with d3d11 parked.
   Then the carrier (GPU 10.7-11.3 ms, EDVR about 4.8): the HUD depth seed's
   census section, UI quality 100 against 125, stock glare's extra 2.5 ms.
   The landing-pad rule stays REVERTED (162819). Any Quest flight: the
@@ -1694,42 +1694,40 @@ realistic.
   and a rig that drives the real draw path (the glare verdict and the
   layer's decision over a recorded frame), not a scan of the wiring.
 
-## 2026-10-13: runtime A/B planned (stock OpenVR against EDVR's OpenXR runtime)
+## 2026-10-13: runtime A/B planned (stock OpenVR against EDVR, two legs)
 
-Question: does EDVR's runtime cost frame time compared with the
-openvr_api.dll Elite shipped? To compare like with like, both legs run
-through SteamVR, so fpsVR measures both the same way, and EDVR's graphics
-half is suspended in both, so only the runtime differs.
+Question: does EDVR's runtime plus graphics half cost frame time against
+stock OpenVR with both EDVR halves parked? Both legs run through SteamVR as
+the active OpenXR runtime (set it in SteamVR or Pimax Play; switch back to
+Pimax after the last leg), so fpsVR measures both the same way. Each leg
+starts from a fresh game launch at the same two spots: 60 s in supercruise
+near a star, then 60 s in normal space near a station, outside its hangar.
 
-Setup: in SteamVR or Pimax Play, set SteamVR as the active OpenXR runtime
-for legs A and B (the user's normal setup is the native Pimax OpenXR
-runtime). Same spot: seated in a docked hangar at the same station, same
-ship, HUD up, 60 s still per leg, then 60 s in supercruise near the same
-star.
+- Leg S (stock): `python tools\install_edvr.py --target frontier --stock-runtime --suspend`
+  after the one-time record step below. Fully stock: EDVR's openvr_api.dll
+  and d3d11.dll are both parked. Fly the two spots. Then
+  `python tools\install_edvr.py --target frontier --resume`, then
+  `python tools\install_edvr.py --target frontier --verify-only`.
+  Leg S should write no EDVR log; if one appears, the leg is not stock.
+- Leg E (EDVR, temporal AA off): the normal install, with no --suspend and no
+  --stock-runtime. In the F8 menu before the launch, set
+  `fix.temporal_aa = off`. Fly the same two spots.
 
-- Leg A (EDVR runtime): `python tools\install_edvr.py --target frontier --suspend`.
-  Record fpsVR app CPU and GPU frame times (median and 99th percentile),
-  dropped and reprojected frames.
-- Leg B (stock runtime): `python tools\install_edvr.py --target frontier --stock-runtime`
-  (d3d11 stays suspended). Record the same. Leg B should write no EDVR log;
-  if one appears, the leg is not stock.
-- Restore: `python tools\install_edvr.py --target frontier --resume`, then
-  `python tools\install_edvr.py --target frontier --verify-only`, and switch
-  the active OpenXR runtime back to Pimax.
-- Optional leg C (normal EDVR, Pimax native OpenXR): EDVR's own logs (EDVR
-  GPU census, native_frame_cycle_phase) give the full-feature cost, not
-  comparable to fpsVR.
+Readings: fpsVR app CPU and GPU frame time (median and 99th percentile),
+dropped and reprojected frames, per leg and per spot. From leg E's logs
+(`python tools\edvr_log.py --target frontier --expect-build HEAD`), split the
+gap: the runtime Submit round trips (native_frame_cycle_phase) against the
+graphics half (the draw-hook CPU line and the Present tick-sum line).
 
-Reading: A minus B on CPU and GPU is EDVR's runtime overhead through
-SteamVR. The audit measured about 0.2 ms CPU and about 0.15 ms GPU on
-EDVR's side, and stock OpenVR's own Submit cost has never been measured.
+Pre-check before reading leg E: its gfx log must show no "engine-record
+velocity live" and no "ui depth: ON". If either appears, leg E is not the
+AA-off build and does not count.
+
 Caveats: under SteamVR, EDVR's runtime adds the SteamVR OpenXR layer, which
-the user's native Pimax path does not have, so leg A is a worst case for
-EDVR. The logs of leg A must name the EDVR build:
-`python tools\edvr_log.py --target frontier --expect-build HEAD` exits 2
-when they do not.
+the user's native Pimax path does not have. The logs of leg E must name the
+EDVR build; the edvr_log.py check above exits 2 when they do not.
 
-Setup before leg B, once: record Elite's stock runtime on the Frontier install.
+Setup, once, before leg S: record Elite's stock runtime on the Frontier install.
 `--stock-runtime` takes its original only from a recorded hash, and the
 Frontier install had none. Its receipts record a runtime hash whose backup is
 gone (the 9/14 native-only install, F8C70ECA...), or backups that are EDVR
