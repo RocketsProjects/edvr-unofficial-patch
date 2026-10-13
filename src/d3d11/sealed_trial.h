@@ -69,4 +69,13 @@ bool sealedTrialRecordNameInto(uintptr_t record, char* out, size_t cap) noexcept
 // Lock-free: reads only.
 unsigned char sealedTrialRecordCentre(uintptr_t record, float out[3], bool* rawZero) noexcept;
 
+// Built v13.8 (the hatch geometry probe): a record's world centre, sphere radius and axes, read the way the trial reads them (worldOfRecord for the
+// centre, poseOrientOf for the axes). centreSrc: 0 producer B, 1 pose (builder), 2 store-style, 3 raw, 4 none. axesSrc: 1 builder, 2 store-style, 4
+// none. Under the trial's lock (recursive), reads only. Returns true when the centre is read.
+bool sealedTrialRecordWorld(uintptr_t record, float centre[3], float* radius, float axes[3][3], uint8_t* centreSrc, uint8_t* axesSrc) noexcept;
+// Built v13.8: the shaft the trial judges, in world coordinates: the held cell when one is held, else the named pick. pad is the cell's pad record (0
+// with no cell); held says which cell. Returns true when the cell has a capsule (capA to capB is the shaft). False while the trial is off, whatever the
+// cell holds (the cell is stale then).
+bool sealedTrialShaft(uintptr_t* pad, float capA[3], float capB[3], bool* held) noexcept;
+
 }  // namespace edvr

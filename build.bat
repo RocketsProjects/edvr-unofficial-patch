@@ -1647,9 +1647,10 @@ exit /b 0
 
 :rig_hatch_geometry_test
 echo [edvr] === hatch_geometry_test.exe ===
-REM The hatch geometry probe's pure half (src\d3d11\hatch_geometry_core.h, TEMPORARY, Built v8.2, revised v8.3): the name rules, the 400 m camera
-REM filter, the tracker's change and settled lines on a caller's clock, the disappearance after 30 samples, the track cap, the nearest Hanger
-REM vector, the line text, and the sample box. No DLL and no game.
+REM The hatch geometry probe's pure half (src\d3d11\hatch_geometry_core.h, TEMPORARY, Built v8.2, v8.3, v13.8): the name rules, the pad-local frame
+REM (a rigid motion of the station leaves a record's pad-local centre unchanged), the tracker's change and settled lines on a caller's clock,
+REM the disappearance after 30 samples, the track cap, the nearest shell and the own-pad pick, the lower-cycle watch (the bottom, the records that
+REM move after the settle, the close reasons), the line text, and the sample box. No DLL and no game.
 if not exist "%OBJ%\hatchgeometry" mkdir "%OBJ%\hatchgeometry"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\hatchgeometry\\" ^
     /Fe"%BUILD%\hatch_geometry_test.exe" "tools\hatch_geometry_test\hatch_geometry_test.cpp" ^

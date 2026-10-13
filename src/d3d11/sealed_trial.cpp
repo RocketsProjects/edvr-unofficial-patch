@@ -1832,6 +1832,43 @@ unsigned char sealedTrialRecordCentre(uintptr_t record, float out[3], bool* rawZ
     return static_cast<unsigned char>(r.source);
 }
 
+// Built v13.8 (hatch geometry probe): the record's world centre, radius and axes, the way the trial reads them (worldOfRecord, poseOrientOf). Under
+// the trial's lock (recursive); reads only.
+bool sealedTrialRecordWorld(uintptr_t record, float centre[3], float* radius, float axes[3][3], uint8_t* centreSrc, uint8_t* axesSrc) noexcept {
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
+    const WorldRead wr = worldOfRecord(record);
+    *centreSrc = wr.source;
+    *radius = wr.radius;
+    for (int k = 0; k < 3; ++k) centre[k] = wr.world[k];
+    *axesSrc = 4;
+    for (int k = 0; k < 3; ++k)
+        for (int j = 0; j < 3; ++j) axes[k][j] = 0.0f;
+    if (wr.source == 4) return false;
+    float ext[3] = {};
+    bool extOk = false;
+    uint8_t src = 4;
+    if (poseOrientOf(record, axes, ext, &extOk, &src)) *axesSrc = src;
+    return true;
+}
+
+// Built v13.8: the shaft the trial judges (the held cell, else the named pick), world coordinates. False while the trial is off (the cells are stale).
+bool sealedTrialShaft(uintptr_t* pad, float capA[3], float capB[3], bool* held) noexcept {
+    std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
+    *pad = 0;
+    *held = false;
+    if (!g_on.load(std::memory_order_acquire)) return false;
+    *held = g_heldValid;
+    const sealed::OwnCell& c = g_heldValid ? g_heldCell : g_pickCell;
+    if (!c.has) return false;
+    *pad = c.pad;
+    if (!c.capsule) return false;
+    for (int k = 0; k < 3; ++k) {
+        capA[k] = c.capA[k];
+        capB[k] = c.capB[k];
+    }
+    return true;
+}
+
 void sealedTrialToggle(const char* trigger, uint32_t frame) {
     std::lock_guard<std::recursive_mutex> lock(g_sealedMutex);
     char line[480];
