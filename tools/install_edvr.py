@@ -11,6 +11,15 @@
     python tools/install_edvr.py --target frontier --native-openxr --dll \
         --native-receipt C:\\temp\\edvr-native.json
     python tools/install_edvr.py --restore-native C:\\temp\\edvr-native.json
+    python tools/install_edvr.py --target frontier --suspend
+    python tools/install_edvr.py --target frontier --stock-runtime --suspend
+    python tools/install_edvr.py --target frontier --resume
+
+--suspend parks EDVR's d3d11.dll; --stock-runtime parks EDVR's openvr_api.dll
+and puts Elite's recorded stock original in its place (the runtime A/B, see
+docs/openxr-performance-review-2026-09-14.md). Both are renames and copies,
+hash-checked, and --resume undoes whatever is parked. Neither deletes a DLL
+except the stock copy --resume removes, whose original is verified present.
 
 This is the sanctioned replacement for the copy-and-hope one-liner. That
 one-liner is why both game directories on this rig carry dozens of backups
@@ -1365,8 +1374,18 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                              "\n       ".join(leftovers))
     if verify_only:
         ok = True
+        parked_status, parked_why = _runtime_parked(target)
         for key in payload:
             dst = p[key + "_target"]
+            if key == "runtime" and parked_status == "parked":
+                print("[edvr] EDVR runtime parked: stock openvr_api.dll in place (--resume puts EDVR's back)")
+                continue
+            if key == "runtime" and parked_status == "bad":
+                print("[edvr] stock-runtime state mismatch: %s" % parked_why); ok = False
+                continue
+            if key == "graphics" and not os.path.isfile(dst) and os.path.isfile(dst + SUSPENDED_SUFFIX):
+                print("[edvr] EDVR graphics parked: d3d11.dll suspended (--resume puts it back)")
+                continue
             if not os.path.isfile(dst) or sha256(dst) != sha256(p[key]):
                 print("[edvr] %s verify mismatch: %s" % (scope, dst)); ok = False
         if native and (not os.path.isfile(p["config"]) or
@@ -1589,6 +1608,319 @@ def suspend_resume(target, resume=False, dry_run=False):
     return 0
 
 
+# --stock-runtime: EDVR's Openvr\win64\openvr_api.dll is parked as
+# openvr_api.dll.edvr-suspended and Elite's recorded stock original is copied
+# into its place. STOCK_RUNTIME_STATE sits beside the parked file and records
+# both hashes, so --resume undoes exactly this and nothing else.
+STOCK_RUNTIME_STATE = "edvr-stock-runtime.json"
+STOCK_RUNTIME_KIND = "edvr-stock-runtime"
+RUNTIME_DLL = "openvr_api.dll"
+PRESERVED_ORIGINAL_DLL = "openvr_api_orig.dll"
+
+
+def _runtime_paths(target):
+    xr = os.path.join(target, "Openvr", "win64")
+    live = os.path.join(xr, RUNTIME_DLL)
+    return {"xr": xr, "live": live, "parked": live + SUSPENDED_SUFFIX,
+            "state": os.path.join(xr, STOCK_RUNTIME_STATE)}
+
+
+def _has_edvr_marker(data):
+    """True when a DLL carries EDVR's name. Every EDVR build stamps a
+    VERSIONINFO with CompanyName "EDVR (unofficial)" (gen_installer_rc.py),
+    stored as ASCII or UTF-16; Valve's OpenVR carries neither."""
+    return b"EDVR" in data or "EDVR".encode("utf-16-le") in data
+
+
+def _read_or_none(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _sha_of(data):
+    return hashlib.sha256(data).hexdigest().upper()
+
+
+def _record_names(path, tail):
+    """True when a receipt's recorded path ends in the given Openvr\\win64 file."""
+    norm = os.path.normcase(os.path.normpath(str(path)))
+    want = os.path.normcase(os.path.join("openvr", "win64", tail))
+    return norm == want or norm.endswith(os.sep + want)
+
+
+def _stock_candidates(target):
+    """Every stock original the receipts record: (path, sha256, source) with
+    the bytes still on disk hashing to the recorded value and carrying no EDVR
+    marker. `notes` says what was looked at and why it was not used."""
+    paths = _runtime_paths(target)
+    found, notes = [], []
+    for name in sorted(os.listdir(target)):
+        if not (name.startswith("edvr_native_receipt") and ".json" in name):
+            continue
+        try:
+            with open(os.path.join(target, name), "r", encoding="utf-8") as f:
+                receipt = json.load(f)
+        except (OSError, ValueError):
+            notes.append("%s: unreadable receipt, not used" % name)
+            continue
+        if not isinstance(receipt, dict):
+            continue
+        for rec in receipt.get("files") or []:
+            if not isinstance(rec, dict) or rec.get("key") not in ("runtime", "native"):
+                continue
+            if not _record_names(rec.get("target", ""), RUNTIME_DLL):
+                continue
+            before, backup = rec.get("before_sha256"), rec.get("backup")
+            if not before or not backup:
+                notes.append("%s: that install found no openvr_api.dll to back up, so records no stock" % name)
+                continue
+            where = backup if os.path.isfile(backup) else os.path.join(paths["xr"], os.path.basename(backup))
+            data = _read_or_none(where)
+            if data is None:
+                notes.append("%s: backup %s is missing" % (name, backup))
+            elif not _valid_hash(before) or _sha_of(data) != before.upper():
+                notes.append("%s: backup %s does not match the hash its receipt records" % (name, where))
+            elif _has_edvr_marker(data):
+                notes.append("%s: backup %s is an EDVR build, not stock" % (name, where))
+            else:
+                found.append((where, before.upper(), "receipt %s" % name))
+        original = receipt.get("original")
+        if isinstance(original, dict) and _record_names(original.get("path", ""), PRESERVED_ORIGINAL_DLL):
+            where = os.path.join(paths["xr"], PRESERVED_ORIGINAL_DLL)
+            data = _read_or_none(where)
+            recorded = original.get("sha256")
+            if data is None:
+                notes.append("%s: preserved original %s is missing" % (name, where))
+            elif not _valid_hash(recorded) or _sha_of(data) != recorded.upper():
+                notes.append("%s: preserved original does not match the hash its receipt records" % name)
+            elif _has_edvr_marker(data):
+                notes.append("%s: preserved original is an EDVR build, not stock" % name)
+            else:
+                found.append((where, recorded.upper(), "receipt %s (preserved original)" % name))
+    return found, notes
+
+
+def _find_stock_runtime(target):
+    """(source, sha256, notes) for the one stock original the receipts record,
+    or (None, None, notes). Two different recorded stock hashes are refused:
+    which one is Elite's stock cannot be told apart from the receipts alone."""
+    found, notes = _stock_candidates(target)
+    if not found:
+        return None, None, notes
+    hashes = sorted(set(sha for _, sha, _ in found))
+    if len(hashes) > 1:
+        return None, None, notes + ["receipts record %d different stock hashes; refusing to guess" % len(hashes)]
+    source, sha, where = found[0]
+    return source, sha, notes + ["stock original: %s (%s)" % (source, where)]
+
+
+def _write_json_atomic(path, obj):
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temp = tempfile.mkstemp(prefix="edvr-stock-runtime-", suffix=".tmp", dir=directory)
+    os.close(fd)
+    try:
+        with open(temp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(obj, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.remove(temp)
+
+
+def _load_stock_state(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise ValueError("cannot read %s: %s" % (path, exc))
+    ok = (isinstance(state, dict) and state.get("version") == 1 and
+          state.get("kind") == STOCK_RUNTIME_KIND and
+          all(isinstance(state.get(k), dict) for k in ("edvr", "stock")) and
+          _valid_hash(state["edvr"].get("sha256")) and
+          _valid_hash(state["stock"].get("sha256")) and
+          isinstance(state["stock"].get("source"), str))
+    if not ok:
+        raise ValueError("%s is not a stock-runtime state file" % path)
+    return state
+
+
+def _runtime_parked(target):
+    """(status, message). status is None when no runtime is parked, "parked"
+    when the stock original is in place exactly as the state file records,
+    and "bad" for anything else that a --resume would have to refuse."""
+    p = _runtime_paths(target)
+    if not os.path.exists(p["state"]) and not os.path.exists(p["parked"]):
+        return None, ""
+    if not os.path.exists(p["state"]):
+        return "bad", "%s exists without its stock-runtime state file" % p["parked"]
+    try:
+        state = _load_stock_state(p["state"])
+    except ValueError as exc:
+        return "bad", str(exc)
+    parked, live = _read_or_none(p["parked"]), _read_or_none(p["live"])
+    if parked is None or _sha_of(parked) != state["edvr"]["sha256"].upper():
+        return "bad", "the parked EDVR runtime %s is missing or changed" % p["parked"]
+    if live is None or _sha_of(live) != state["stock"]["sha256"].upper():
+        return "bad", "%s is not the stock copy the state file records" % p["live"]
+    return "parked", ""
+
+
+def stock_runtime(target, dry_run=False):
+    """--stock-runtime: park EDVR's openvr_api.dll and put Elite's recorded
+    stock original in its place. Renames and copies only; nothing is deleted.
+    Refused, with nothing changed, unless the live file is EDVR's, a stock
+    original is recorded with its bytes still matching, and the game is
+    stopped. A failure part-way puts EDVR's runtime back."""
+    p = _runtime_paths(target)
+    if os.path.exists(p["state"]):
+        print("[edvr] stock-runtime refused: %s already holds a stock runtime; --resume first" % p["state"])
+        return 1
+    if os.path.exists(p["parked"]):
+        print("[edvr] stock-runtime refused: %s already exists" % p["parked"])
+        return 1
+    live = _read_or_none(p["live"])
+    if live is None:
+        print("[edvr] stock-runtime refused: no %s to park" % p["live"])
+        return 1
+    if not _has_edvr_marker(live):
+        print("[edvr] stock-runtime refused: %s is not an EDVR runtime, so there is nothing to park" % p["live"])
+        return 1
+    source, stock_sha, notes = _find_stock_runtime(target)
+    if source is None:
+        print("[edvr] stock-runtime refused: no recorded stock original is available. Nothing changed.")
+        for note in notes:
+            print("       " + note)
+        return 1
+    edvr_sha = _sha_of(live)
+    print("[edvr] stock-runtime%s: park %s (sha256 %s) as %s" % (
+        " (DRY RUN -- nothing will be written)" if dry_run else "", p["live"], edvr_sha, p["parked"]))
+    print("       place %s (sha256 %s) from %s" % (p["live"], stock_sha, source))
+    if dry_run:
+        for note in notes:
+            print("       " + note)
+        print("[edvr] dry run: wrote nothing.")
+        return 0
+    known, running = strict_game_running(target)
+    if not known or running:
+        print("[edvr] ERROR: stock-runtime requires a proven stopped game")
+        return 1
+
+    def rollback(reason):
+        print("[edvr] ERROR: stock-runtime failed: %s" % reason)
+        try:
+            copied = _read_or_none(p["live"])
+            if copied is not None and not _has_edvr_marker(copied):
+                os.remove(p["live"])  # our own partial or complete stock copy
+            os.rename(p["parked"], p["live"])
+            print("[edvr] EDVR's openvr_api.dll is back in place.")
+        except OSError as exc:
+            print("[edvr] ROLLBACK FAILED (%s): EDVR's runtime is at %s; rename it back by hand" % (exc, p["parked"]))
+        return 1
+
+    try:
+        os.rename(p["live"], p["parked"])
+    except OSError as exc:
+        print("[edvr] ERROR: stock-runtime could not park the runtime: %s" % exc)
+        return 1
+    if _sha_of(_read_or_none(p["parked"]) or b"") != edvr_sha:
+        return rollback("the parked runtime does not match its hash")
+    try:
+        shutil.copy2(source, p["live"])
+    except OSError as exc:
+        return rollback("copying the stock original failed: %s" % exc)
+    if _sha_of(_read_or_none(p["live"]) or b"") != stock_sha:
+        return rollback("the stock copy does not match its recorded hash")
+    state = {"version": 1, "kind": STOCK_RUNTIME_KIND, "target": os.path.abspath(target),
+             "edvr": {"parked": os.path.abspath(p["parked"]), "sha256": edvr_sha},
+             "stock": {"placed": os.path.abspath(p["live"]), "sha256": stock_sha,
+                       "source": os.path.abspath(source)}}
+    try:
+        _write_json_atomic(p["state"], state)
+    except (OSError, ValueError) as exc:
+        return rollback("writing %s failed: %s" % (p["state"], exc))
+    print("[edvr] stock-runtime done and verified. EDVR runtime parked: stock openvr_api.dll in place. "
+          "Run --resume afterwards.")
+    return 0
+
+
+def stock_runtime_undo(target, dry_run=False):
+    """Undo stock_runtime: remove the stock copy it placed (only if it is still
+    that file, and only while the recorded source still holds the same bytes),
+    then rename EDVR's runtime back and delete the state file."""
+    p = _runtime_paths(target)
+    try:
+        state = _load_stock_state(p["state"])
+    except ValueError as exc:
+        print("[edvr] resume refused: %s" % exc)
+        return 1
+    edvr_sha, stock_sha = state["edvr"]["sha256"].upper(), state["stock"]["sha256"].upper()
+    parked = _read_or_none(p["parked"])
+    if parked is None or _sha_of(parked) != edvr_sha:
+        print("[edvr] resume refused: the parked EDVR runtime %s is missing or changed" % p["parked"])
+        return 1
+    live = _read_or_none(p["live"])
+    if live is None or _sha_of(live) != stock_sha:
+        print("[edvr] resume refused: %s is not the stock copy EDVR placed; left alone" % p["live"])
+        return 1
+    source = _read_or_none(state["stock"]["source"])
+    if source is None or _sha_of(source) != stock_sha:
+        print("[edvr] resume refused: the recorded stock original %s is gone or changed; "
+              "the copy is the only stock copy, so it is left in place" % state["stock"]["source"])
+        return 1
+    print("[edvr] resume%s: remove the stock copy %s; rename %s back to %s (sha256 %s)" % (
+        " (DRY RUN -- nothing will be written)" if dry_run else "", p["live"], p["parked"], p["live"], edvr_sha))
+    if dry_run:
+        print("[edvr] dry run: wrote nothing.")
+        return 0
+    known, running = strict_game_running(target)
+    if not known or running:
+        print("[edvr] ERROR: resume of the stock runtime requires a proven stopped game")
+        return 1
+    try:
+        os.remove(p["live"])
+        os.rename(p["parked"], p["live"])
+    except OSError as exc:
+        print("[edvr] ERROR: resume failed: %s" % exc)
+        try:
+            if not os.path.exists(p["live"]):
+                shutil.copy2(state["stock"]["source"], p["live"])
+        except OSError:
+            pass
+        return 1
+    if _sha_of(_read_or_none(p["live"]) or b"") != edvr_sha:
+        print("[edvr] ERROR: resume verification failed for %s" % p["live"])
+        return 1
+    try:
+        os.remove(p["state"])
+    except OSError as exc:
+        print("[edvr] WARNING: EDVR's runtime is back, but %s could not be removed (%s)" % (p["state"], exc))
+        return 1
+    print("[edvr] stock-runtime undone and verified. EDVR's openvr_api.dll is back in place.")
+    return 0
+
+
+def park_resume(target, dry_run=False):
+    """--resume: put back whatever --suspend and --stock-runtime parked. With
+    nothing parked it is a no-op."""
+    p = _runtime_paths(target)
+    graphics_parked = os.path.join(target, "d3d11.dll") + SUSPENDED_SUFFIX
+    runtime_parked = os.path.exists(p["state"]) or os.path.exists(p["parked"])
+    if not runtime_parked and not os.path.isfile(graphics_parked):
+        print("[edvr] resume: nothing is parked (no EDVR runtime or graphics to put back); nothing to do.")
+        return 0
+    if runtime_parked:
+        rc = stock_runtime_undo(target, dry_run)
+        if rc:
+            return rc
+    if os.path.isfile(graphics_parked):
+        return suspend_resume(target, resume=True, dry_run=dry_run)
+    return 0
+
+
 def _suspend_self_test():
     ok = True
     tmp = tempfile.mkdtemp(prefix="edvr_suspend_test_")
@@ -1609,7 +1941,8 @@ def _suspend_self_test():
         before = snap()
         check(main(["--target", game, "--suspend", "--dry-run"]) == 0, "dry-run suspend failed")
         check(snap() == before, "suspend --dry-run wrote files")
-        check(main(["--target", game, "--resume"]) == 1, "resume with nothing parked succeeded")
+        check(main(["--target", game, "--resume"]) == 0, "resume with nothing parked was not a no-op")
+        check(snap() == before, "resume with nothing parked changed files")
         check(main(["--target", game, "--suspend"]) == 0, "suspend failed")
         check(not live.exists() and parked.read_bytes() == b"EDVR-GRAPHICS", "suspend left the wrong files")
         check(Path(game, "edvr-flat.ini").read_bytes() == b"[x]\n", "suspend touched the ini")
@@ -1898,8 +2231,15 @@ def main(argv=None):
                     help="no-EDVR baseline: park the game directory's EDVR "
                          "d3d11.dll as d3d11.dll.edvr-suspended (one rename, "
                          "hash-checked); undo with --resume")
+    ap.add_argument("--stock-runtime", action="store_true",
+                    help="runtime A/B: park the game directory's EDVR openvr_api.dll "
+                         "as openvr_api.dll.edvr-suspended and put Elite's recorded "
+                         "stock original in its place (hash-checked; refused if no "
+                         "stock original is recorded). Combine with --suspend to run "
+                         "fully stock; undo with --resume")
     ap.add_argument("--resume", action="store_true",
-                    help="put the suspended d3d11.dll back")
+                    help="put back what --suspend and --stock-runtime parked (EDVR's "
+                         "d3d11.dll and openvr_api.dll); with nothing parked, a no-op")
     ap.add_argument("--tag", default=None,
                     help="word for the backup name; defaults to the short "
                          "git hash of this tree")
@@ -1943,15 +2283,30 @@ def main(argv=None):
             ap.error("--restore-native requires an absolute receipt path")
         return restore_native(args.restore_native, args.dry_run)
 
-    if args.suspend or args.resume:
+    if args.suspend or args.resume or args.stock_runtime:
         if args.suspend and args.resume:
             ap.error("--suspend and --resume are exclusive")
+        if args.stock_runtime and args.resume:
+            ap.error("--stock-runtime and --resume are exclusive; --resume undoes both")
         if any((args.native_openxr, args.native_receipt, args.dll, args.openvr,
                 args.dlss, args.xess, args.ini, args.all, args.verify_only, args.force,
                 args.no_backup, args.tag)):
-            ap.error("--suspend/--resume take only --target and --dry-run")
-        return suspend_resume(resolve_target(args.target), resume=args.resume,
-                              dry_run=args.dry_run)
+            ap.error("--suspend, --stock-runtime and --resume take only --target and --dry-run")
+        target = resolve_target(args.target)
+        if args.resume:
+            return park_resume(target, args.dry_run)
+        if not args.stock_runtime:
+            return suspend_resume(target, dry_run=args.dry_run)
+        rc = stock_runtime(target, args.dry_run)
+        if rc or not args.suspend:
+            return rc
+        # Fully stock: the runtime step is in; now the graphics half. If that
+        # refuses, the runtime step is undone so one call changes nothing.
+        rc = suspend_resume(target, dry_run=args.dry_run)
+        if rc and not args.dry_run:
+            print("[edvr] --suspend failed; putting EDVR's runtime back")
+            stock_runtime_undo(target)
+        return rc
 
     if args.native_receipt and not args.native_openxr:
         ap.error("--native-receipt requires --native-openxr")
@@ -2351,6 +2706,174 @@ def _xess_opt_in_self_test():
         globals()["validate_elite_game"] = old_profile_validate
         globals()["strict_game_running"] = old_probe
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _stock_runtime_self_test():
+    """The runtime A/B on a temp game: a real EDVR install over a stock runtime
+    (so the receipt records the stock hash and backup), then stock-runtime,
+    verify, resume, the combined --suspend path, dry runs and refusals."""
+    import contextlib
+    import io
+    import openxr_pe as _pe
+    import fetch_openxr_loader as _loader
+    fails = []
+
+    def check(cond, what):
+        if not cond:
+            print("stock-runtime self-test: %s" % what)
+            fails.append(what)
+
+    tmp = tempfile.mkdtemp(prefix="edvr_stock_runtime_test_")
+    names = ("_is_edvr_graphics", "strict_game_running", "validate_elite_game")
+    saved = {k: globals()[k] for k in names}
+    saved_loader, saved_pair = _loader.verify, _pe.validate_native_pair
+    stock = b"STOCK-VALVE-OPENVR" + bytes(64)
+    edvr_rt = b"EDVR-RUNTIME-BUILD" + bytes(64)
+    edvr_gfx = b"EDVR-GRAPHICS-BUILD"
+    try:
+        root = os.path.join(tmp, "repo"); game = os.path.join(tmp, "game")
+        os.makedirs(os.path.join(root, "build")); os.makedirs(os.path.join(game, "Openvr", "win64"))
+        for rel, data in (("edvr_openxr_runtime.dll", edvr_rt), ("edvr_openxr_graphics.dll", edvr_gfx),
+                          ("openxr_loader.dll", b"LOADER"), ("OPENXR-LOADER-LICENSE.txt", b"LICENSE")):
+            Path(root, "build", rel).write_bytes(data)
+        Path(game, GAME_EXE).write_bytes(b"GAME")
+        xr = Path(game, "Openvr", "win64")
+        live = xr / RUNTIME_DLL
+        parked = xr / (RUNTIME_DLL + SUSPENDED_SUFFIX)
+        d3d = Path(game, "d3d11.dll"); d3d_parked = Path(game, "d3d11.dll" + SUSPENDED_SUFFIX)
+        receipt = Path(game, "edvr_native_receipt.json")
+        live.write_bytes(stock)
+        _loader.verify = lambda path: None
+        _pe.validate_native_pair = lambda *args: None
+        globals()["validate_elite_game"] = lambda path: None
+        globals()["_is_edvr_graphics"] = lambda path: Path(path).read_bytes().startswith(b"EDVR")
+        globals()["strict_game_running"] = lambda *args: (True, False)
+
+        def tree():
+            out = []
+            for b, _, ns in os.walk(game):
+                out.append(("dir:" + os.path.relpath(b, game), b""))
+                for n in ns:
+                    out.append((os.path.relpath(os.path.join(b, n), game), Path(b, n).read_bytes()))
+            return sorted(out)
+
+        def run(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        def refused(argv, why):
+            before = tree()
+            rc, out = run(argv)
+            check(rc == 1, "%s: not refused (rc %s)" % (why, rc))
+            check(tree() == before, "%s: changed files" % why)
+            return out
+
+        def verify():
+            return run(["--root", root, "--target", game, "--verify-only", "--scope", "vr"])
+
+        scope = ["--root", root, "--target", game, "--scope", "vr"]
+        rc, out = run(scope)
+        check(rc == 0, "test install failed: %s" % out)
+        check(live.read_bytes() == edvr_rt, "test install did not put EDVR's runtime in place")
+        rc, out = verify()
+        check(rc == 0 and "parked" not in out, "fresh install did not verify clean: %s" % out)
+        base = tree()
+        backups = [n for n in os.listdir(xr) if n.startswith(RUNTIME_DLL + ".pre-")]
+        check(len(backups) == 1 and (xr / backups[0]).read_bytes() == stock,
+              "install did not keep the stock runtime as its backup")
+        bak = xr / backups[0] if backups else xr / "missing.bak"
+        receipt_bytes = receipt.read_bytes()
+
+        # Refusals, each with nothing changed.
+        bak.write_bytes(b"TAMPERED")
+        out = refused(["--target", game, "--stock-runtime"], "tampered stock backup")
+        check("does not match the hash" in out, "tampered backup gave the wrong reason: %s" % out)
+        bak.write_bytes(stock)
+
+        receipt.unlink()
+        out = refused(["--target", game, "--stock-runtime"], "no receipt recording a stock")
+        check("no recorded stock original" in out, "no receipt gave the wrong reason: %s" % out)
+        receipt.write_bytes(receipt_bytes)
+
+        recorded = json.loads(receipt_bytes.decode("utf-8"))
+        for entry in recorded["files"]:
+            if entry["key"] == "runtime":
+                entry["before_sha256"] = _sha_of(edvr_rt)
+        receipt.write_text(json.dumps(recorded), encoding="utf-8")
+        bak.write_bytes(edvr_rt)
+        out = refused(["--target", game, "--stock-runtime"], "an EDVR build recorded as stock")
+        check("is an EDVR build" in out, "EDVR-as-stock gave the wrong reason: %s" % out)
+        bak.write_bytes(stock); receipt.write_bytes(receipt_bytes)
+
+        live.write_bytes(stock)
+        out = refused(["--target", game, "--stock-runtime"], "live runtime already stock")
+        check("is not an EDVR runtime" in out, "stock-in-place gave the wrong reason: %s" % out)
+        live.write_bytes(edvr_rt)
+
+        for argv in (["--target", game, "--stock-runtime", "--dry-run"],
+                     ["--target", game, "--stock-runtime", "--suspend", "--dry-run"]):
+            before = tree()
+            rc, _ = run(argv)
+            check(rc == 0 and tree() == before, "dry run %s wrote files or failed" % argv[-2])
+
+        globals()["strict_game_running"] = lambda *args: (True, True)
+        refused(["--target", game, "--stock-runtime"], "stock-runtime with the game running")
+        globals()["strict_game_running"] = lambda *args: (True, False)
+
+        # Stock runtime, verify, then a changed stock copy is reported and refused.
+        rc, out = run(["--target", game, "--stock-runtime"])
+        check(rc == 0, "stock-runtime failed: %s" % out)
+        check(live.read_bytes() == stock and parked.read_bytes() == edvr_rt,
+              "stock-runtime did not park EDVR's runtime byte-identical")
+        check((xr / STOCK_RUNTIME_STATE).is_file(), "stock-runtime wrote no state file")
+        check(bak.read_bytes() == stock, "stock-runtime disturbed the backup it copied from")
+        rc, out = verify()
+        check(rc == 0 and "EDVR runtime parked: stock openvr_api.dll in place" in out
+              and "verify mismatch" not in out and "EDVR graphics" not in out,
+              "verify-only did not report the parked runtime: %s" % out)
+        refused(["--target", game, "--stock-runtime"], "second stock-runtime")
+        live.write_bytes(b"CHANGED")
+        rc, out = verify()
+        check(rc == 1 and "stock-runtime state mismatch" in out, "verify missed a changed stock copy")
+        refused(["--target", game, "--resume"], "resume over a changed stock copy")
+        live.write_bytes(stock)
+
+        # Resume is exact, twice over (the second is a no-op).
+        rc, out = run(["--target", game, "--resume"])
+        check(rc == 0 and tree() == base, "resume did not restore byte-identical files: %s" % out)
+        check(not (xr / STOCK_RUNTIME_STATE).exists(), "resume left the state file")
+        rc, out = run(["--target", game, "--resume"])
+        check(rc == 0 and tree() == base and "nothing to do" in out, "second resume was not a no-op")
+
+        # The combined path: fully stock, then undone exactly.
+        rc, out = run(["--target", game, "--stock-runtime", "--suspend"])
+        check(rc == 0, "stock-runtime --suspend failed: %s" % out)
+        check(live.read_bytes() == stock and not d3d.exists() and d3d_parked.read_bytes() == edvr_gfx,
+              "stock-runtime --suspend left the wrong files")
+        rc, out = verify()
+        check(rc == 0 and "EDVR runtime parked" in out and "EDVR graphics parked" in out,
+              "verify-only did not report both parked halves: %s" % out)
+        before = tree()
+        rc, _ = run(["--target", game, "--resume", "--dry-run"])
+        check(rc == 0 and tree() == before, "resume --dry-run wrote files")
+        rc, out = run(["--target", game, "--resume"])
+        check(rc == 0 and tree() == base, "resume did not undo stock-runtime --suspend: %s" % out)
+
+        # A failed --suspend puts the runtime back, so one call changes nothing.
+        d3d.write_bytes(b"FOREIGN-MOD")
+        before = tree()
+        rc, out = run(["--target", game, "--stock-runtime", "--suspend"])
+        check(rc == 1 and tree() == before and "putting EDVR's runtime back" in out,
+              "failed --suspend did not roll back the stock runtime: %s" % out)
+        d3d.write_bytes(edvr_gfx)
+        check(tree() == base, "restoring the graphics DLL did not return to the install")
+    finally:
+        globals().update(saved)
+        _loader.verify, _pe.validate_native_pair = saved_loader, saved_pair
+        shutil.rmtree(tmp, ignore_errors=True)
+    return not fails
 
 
 def self_test():
@@ -3307,6 +3830,8 @@ def self_test():
     if not _prune_self_test():
         ok = False
     if not _suspend_self_test():
+        ok = False
+    if not _stock_runtime_self_test():
         ok = False
     if not _scope_self_test():
         ok = False

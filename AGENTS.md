@@ -81,6 +81,7 @@ python tools\install_edvr.py --target steam --dry-run
 python tools\install_edvr.py --target steam
 python tools\install_edvr.py --target steam --scope flat --xess
 python tools\install_edvr.py --target steam --scope flat --verify-only
+python tools\install_edvr.py --target steam --stock-runtime --suspend --dry-run
 python tools\edvr_log.py --target steam --expect-build HEAD --version
 ```
 

@@ -48,13 +48,13 @@ changes.*
   Largest left: the HDR HUD's depth seed (about 1 ms a frame at the carrier;
   a census section of its own since, built, not flown) and UI quality 1.25, a
   setting (1.62x the pixels of 1.0).
-- **Next** (flight 132352 entry): the carrier sits at the budget (GPU
-  10.7-11.3 ms, EDVR about 4.8 of it). Open: fly the HUD depth seed's census
-  section (on main; then UI quality 100 against 125 in one flight) and stock
-  glare's extra 2.5 ms. The landing-pad rule was merged, flown and REVERTED
-  (flight 162819 entry): it unpinned the sun glare. Any Quest flight with
-  the default build: check the Application-render GPU invalid count stays
-  near zero and `native_frame_end_overlap_summary` reads failures=0.
+- **Next: the runtime A/B** (2026-10-13 entry): stock OpenVR against EDVR's
+  runtime, both through SteamVR, graphics suspended in both. Leg B needs a
+  recorded stock original, which the Frontier install lacks (see that entry).
+  Then the carrier (GPU 10.7-11.3 ms, EDVR about 4.8): the HUD depth seed's
+  census section, UI quality 100 against 125, stock glare's extra 2.5 ms.
+  The landing-pad rule stays REVERTED (162819). Any Quest flight: the
+  Application-render GPU invalid count near zero, failures=0.
 - **Environment:** the numbers in the entry are Pimax Crystal Super, 90 Hz,
   separate device: Pimax OpenXR at 2600x2514, SteamVR OpenXR (`aapvr`) at
   4100x4050 and 2665x2087.
@@ -1692,3 +1692,53 @@ realistic.
 - For any later attempt: a census with the sun in view and the radar up,
   and a rig that drives the real draw path (the glare verdict and the
   layer's decision over a recorded frame), not a scan of the wiring.
+
+## 2026-10-13: runtime A/B planned (stock OpenVR against EDVR's OpenXR runtime)
+
+Question: does EDVR's runtime cost frame time compared with the
+openvr_api.dll Elite shipped? To compare like with like, both legs run
+through SteamVR, so fpsVR measures both the same way, and EDVR's graphics
+half is suspended in both, so only the runtime differs.
+
+Setup: in SteamVR or Pimax Play, set SteamVR as the active OpenXR runtime
+for legs A and B (the user's normal setup is the native Pimax OpenXR
+runtime). Same spot: seated in a docked hangar at the same station, same
+ship, HUD up, 60 s still per leg, then 60 s in supercruise near the same
+star.
+
+- Leg A (EDVR runtime): `python tools\install_edvr.py --target frontier --suspend`.
+  Record fpsVR app CPU and GPU frame times (median and 99th percentile),
+  dropped and reprojected frames.
+- Leg B (stock runtime): `python tools\install_edvr.py --target frontier --stock-runtime`
+  (d3d11 stays suspended). Record the same. Leg B should write no EDVR log;
+  if one appears, the leg is not stock.
+- Restore: `python tools\install_edvr.py --target frontier --resume`, then
+  `python tools\install_edvr.py --target frontier --verify-only`, and switch
+  the active OpenXR runtime back to Pimax.
+- Optional leg C (normal EDVR, Pimax native OpenXR): EDVR's own logs (EDVR
+  GPU census, native_frame_cycle_phase) give the full-feature cost, not
+  comparable to fpsVR.
+
+Reading: A minus B on CPU and GPU is EDVR's runtime overhead through
+SteamVR. The audit measured about 0.2 ms CPU and about 0.15 ms GPU on
+EDVR's side, and stock OpenVR's own Submit cost has never been measured.
+Caveats: under SteamVR, EDVR's runtime adds the SteamVR OpenXR layer, which
+the user's native Pimax path does not have, so leg A is a worst case for
+EDVR. The logs of leg A must name the EDVR build:
+`python tools\edvr_log.py --target frontier --expect-build HEAD` exits 2
+when they do not.
+
+Blocker found while building the A/B: leg B needs a stock original recorded
+by hash. `--stock-runtime` takes it from a receipt that records a runtime
+(or preserved original) hash with the bytes still on disk and no EDVR
+marker, and refuses otherwise. The Frontier install has none. Its receipts
+record a runtime hash whose backup is gone (the 9/14 native-only install,
+F8C70ECA...), or backups that are EDVR builds (the five 10/13 installs).
+`openvr_api_orig.dll` (243A818D..., 311104 bytes, 9/3) is Valve-signed and
+carries no EDVR marker, but no receipt records its hash. The dry run refuses:
+`python tools\install_edvr.py --target frontier --stock-runtime --suspend --dry-run`.
+Needed before leg B: confirm that file is Elite's stock, then record it by
+hash through an explicit step (not built yet).
+
+- ruled out: the openvr_api.dll.pre-*.bak files as the stock original,
+  because each carries EDVR's marker (checked on the Frontier install).
