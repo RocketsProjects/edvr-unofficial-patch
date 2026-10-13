@@ -50,7 +50,8 @@ changes.*
   setting (1.62x the pixels of 1.0).
 - **Next: the runtime A/B** (2026-10-13 entry): stock OpenVR against EDVR's
   runtime, both through SteamVR, graphics suspended in both. Leg B needs a
-  one-time --record-stock-runtime on the Frontier install (see that entry).
+  one-time --record-stock-runtime on the Frontier install. Leg A as written
+  cannot run with d3d11 parked (see that entry).
   Then the carrier (GPU 10.7-11.3 ms, EDVR about 4.8): the HUD depth seed's
   census section, UI quality 100 against 125, stock glare's extra 2.5 ms.
   The landing-pad rule stays REVERTED (162819). Any Quest flight: the
@@ -1745,3 +1746,17 @@ recorded hash is refused unless --force, which keeps the old backup. Dry run:
 
 - ruled out: the openvr_api.dll.pre-*.bak files as the stock original,
   because each carries EDVR's marker (checked on the Frontier install).
+- ruled out: leg A as written (`--suspend`, EDVR's runtime with d3d11.dll
+  parked), because the runtime does not start without its graphics half.
+  edvr_openxr.ini's `graphics=` is required by the parser
+  (native_local_config.h:83). The local-config branch needs that file readable
+  (native_module.cpp:364-365), and when it is not, VR_InitInternal returns
+  InstallationCorrupt at native_module.cpp:387-389, before any frame. The
+  graphics DLL is also the paired proxy the runtime binds and checks
+  (native_graphics_client.h:21-25, native_runtime_host.h:2921-2933) and it
+  supplies the render sizing (native_runtime_host.h:626-640). Read-only trace,
+  not flown.
+- not built: a runtime-only leg needs a runtime change (`graphics` optional, the
+  binding at native_module.cpp:40 skipped, the gates at native_module.cpp:294-296
+  and 364-365 relaxed, native_local_config.h:83 relaxed), then a flight. The
+  "transport-only" mode in vscreen.cpp keeps the graphics half and does not help.
