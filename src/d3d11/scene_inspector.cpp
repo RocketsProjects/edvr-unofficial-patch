@@ -112,8 +112,8 @@ struct BoxFix {
 };
 
 struct Staged {
-    ID3D11Texture2D* tex[6] = {};   // colour, motion, depth, decision, coverage, bias
-    bool have[6] = {};
+    ID3D11Texture2D* tex[7] = {};   // colour, motion, depth, decision, coverage, bias, engine slots
+    bool have[7] = {};
     Rect crop;
     bool offered = false, staged = false, read = false;
     uint32_t w = 0, h = 0, sceneFrame = 0;
@@ -124,6 +124,14 @@ struct Staged {
     std::vector<float> mv, depth, dec;
     std::vector<uint8_t> cov, bias;
     bool haveCov = false, haveBias = false;
+    // The engine records under the box: the slot target's x channel over the crop, and the pool as the pass indexes it (read whole: it is
+    // 3 MB, and the slots in the box are not known until the crop is read).
+    uint32_t slotFmt = 0;
+    std::vector<float> slotX;
+    ID3D11Buffer* poolStaging = nullptr;
+    uint32_t poolFirst = 0, poolCount = 0, poolStride = 0;
+    std::vector<uint32_t> poolWords;
+    bool poolRead = false;
 };
 
 struct StagedOut {
@@ -148,6 +156,7 @@ StagedOut g_out;
 uint32_t g_readTicks = 0;
 uint32_t g_startFrame = 0;
 std::string g_trigger, g_inputsWhy;
+ProducerTotals g_prodAtStart, g_prodAtEnd;   // the kinematic producers' totals when the capture frame began and when it ended
 ID3D11DeviceContext* g_ctx = nullptr;   // AddRef'd while a query or a staging copy is outstanding
 bool g_queryFailed = false;
 HRESULT g_queryFailHr = S_OK;
@@ -656,6 +665,21 @@ void drawImpl(ID3D11DeviceContext* ctx, const SceneDrawInfo& info, SceneReplayFn
 
 // ---- answers --------------------------------------------------------------------------------------------------------------------------------
 
+// The kinematic producers' totals (the environment's); have = false when the module has no such source.
+ProducerTotals readProducers() {
+    ProducerTotals t;
+    uint64_t v[5] = {};
+    if (g_env.producerTotals && g_env.producerTotals(v)) {
+        t.have = true;
+        t.emitCalls = v[0];
+        t.emitItems = v[1];
+        t.secondCalls = v[2];
+        t.secondItems = v[3];
+        t.primaryCalls = v[4];
+    }
+    return t;
+}
+
 void pollQueries() {
     if (!g_ctx) return;
     for (Cand& c : g_cands) {
@@ -711,13 +735,19 @@ bool stageOne(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* src,
 // Maps every staged texture of the inputs (all or none), decodes the crop into plain arrays, and unmaps. false while any copy is unfinished.
 bool tryReadInputs(Staged& s) {
     if (!g_ctx) return false;
-    D3D11_MAPPED_SUBRESOURCE m[6] = {};
-    bool mapped[6] = {};
+    D3D11_MAPPED_SUBRESOURCE m[7] = {};
+    bool mapped[7] = {};
+    D3D11_MAPPED_SUBRESOURCE mp{};
+    bool poolMapped = false;
     bool pending = false;
-    for (int k = 0; k < 6 && !pending; ++k) {
+    for (int k = 0; k < 7 && !pending; ++k) {
         if (!s.have[k]) continue;
         const HRESULT hr = g_ctx->Map(s.tex[k], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m[k]);
         if (hr == S_OK) mapped[k] = true;
+        else pending = true;
+    }
+    if (!pending && s.poolStaging) {
+        if (g_ctx->Map(s.poolStaging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mp) == S_OK) poolMapped = true;
         else pending = true;
     }
     if (!pending) {
@@ -765,8 +795,22 @@ bool tryReadInputs(Staged& s) {
         }
         s.haveCov = s.have[4];
         s.haveBias = s.have[5];
+        if (s.have[6] && (s.slotFmt == 16 || s.slotFmt == 2)) {   // DXGI R32G32_FLOAT, R32G32B32A32_FLOAT: x is the first float of each texel
+            const uint32_t bpp = s.slotFmt == 16 ? 8u : 16u;
+            s.slotX.assign(n, -1.0f);
+            for (uint32_t y = 0; y < ch; ++y)
+                for (uint32_t x = 0; x < cw; ++x)
+                    std::memcpy(&s.slotX[static_cast<size_t>(y) * cw + x], static_cast<const uint8_t*>(m[6].pData) + static_cast<size_t>(y) * m[6].RowPitch + static_cast<size_t>(x) * bpp, 4);
+        }
+        if (poolMapped && s.poolStride >= kEngineRecordWords * 4u) {
+            const size_t words = static_cast<size_t>(s.poolCount) * (s.poolStride / 4u);
+            s.poolWords.resize(words);
+            std::memcpy(s.poolWords.data(), static_cast<const uint8_t*>(mp.pData) + static_cast<size_t>(s.poolFirst) * s.poolStride, words * 4u);
+            s.poolRead = true;
+        }
     }
-    for (int k = 0; k < 6; ++k)
+    if (poolMapped) g_ctx->Unmap(s.poolStaging, 0);
+    for (int k = 0; k < 7; ++k)
         if (mapped[k]) g_ctx->Unmap(s.tex[k], 0);
     if (!pending) s.read = true;
     return !pending;
@@ -827,6 +871,10 @@ void releaseAll() {
             t->Release();
             t = nullptr;
         }
+    if (g_in.poolStaging) {
+        g_in.poolStaging->Release();
+        g_in.poolStaging = nullptr;
+    }
     g_in = Staged{};
     g_out = StagedOut{};
     g_box = BoxFix{};
@@ -880,6 +928,7 @@ PixelFacts pixelAt(int x, int y) {
     }
     if (s.haveCov) p.coverage = s.cov[i];
     if (s.haveBias) p.bias = s.bias[i];
+    if (!s.slotX.empty()) p.slot = slotFromCode(s.slotX[i]);
     p.far = true;
     if (std::isfinite(p.depth)) {
         float m = 0.0f;
@@ -1169,6 +1218,55 @@ void writeReport() {
         // The box corners that bound the range are summarised; the CSV has every pixel.
         formatBoxStatsLine(line, sizeof(line), stats);
         say(line);
+        // The engine records under the box: one line per slot (the most pixels first), what the pool holds for it.
+        if (!g_in.slotX.empty()) {
+            std::vector<SlotInfo> slots;
+            for (const BoxSample& bs : samples) {
+                if (!bs.valid || bs.px.slot < 0) continue;
+                SlotInfo* si = nullptr;
+                for (SlotInfo& x : slots)
+                    if (x.slot == bs.px.slot) si = &x;
+                if (!si) {
+                    slots.emplace_back();
+                    si = &slots.back();
+                    si->slot = bs.px.slot;
+                }
+                ++si->pixels;
+                ++si->kinds[bs.px.flags.engineKind & 7u];
+            }
+            std::sort(slots.begin(), slots.end(), [](const SlotInfo& a, const SlotInfo& b) { return a.pixels > b.pixels; });
+            const uint32_t recWords = g_in.poolStride / 4u;
+            say(engineSlotsLegend());
+            std::snprintf(line, sizeof(line), "scene inspect engine: %zu distinct slots under the box; pool %s (%u records of %u bytes)", slots.size(),
+                          g_in.poolRead ? "read" : "NOT read", g_in.poolCount, g_in.poolStride);
+            say(line);
+            size_t shown = 0;
+            for (SlotInfo& x : slots) {
+                if (shown++ >= 12) break;
+                x.poolRecords = g_in.poolCount;
+                if (g_in.poolRead && recWords >= kEngineRecordWords && static_cast<uint32_t>(x.slot) < g_in.poolCount) {
+                    x.haveRecord = true;
+                    x.rec = decodeEngineRecord(&g_in.poolWords[static_cast<size_t>(x.slot) * recWords]);
+                }
+                formatEngineSlotLine(line, sizeof(line), x);
+                say(line);
+            }
+        } else {
+            say("scene inspect engine: the slot target was not staged (engine-record velocity is not bound this frame, or its slot target is not a format the reader decodes)");
+        }
+        {
+            ProducerTotals frame;
+            frame.have = g_prodAtStart.have && g_prodAtEnd.have;
+            if (frame.have) {
+                frame.emitCalls = g_prodAtEnd.emitCalls - g_prodAtStart.emitCalls;
+                frame.emitItems = g_prodAtEnd.emitItems - g_prodAtStart.emitItems;
+                frame.secondCalls = g_prodAtEnd.secondCalls - g_prodAtStart.secondCalls;
+                frame.secondItems = g_prodAtEnd.secondItems - g_prodAtStart.secondItems;
+                frame.primaryCalls = g_prodAtEnd.primaryCalls - g_prodAtStart.primaryCalls;
+            }
+            formatProducersLine(line, sizeof(line), g_prodAtEnd, frame);
+            say(line);
+        }
     }
     DlssFacts df;
     if (g_out.offered) {
@@ -1344,11 +1442,14 @@ void sceneInspectFrameBoundary(uint32_t gameFrame) noexcept {
             g_queryFailHr = S_OK;
             g_faults = 0;
             g_inputsWhy.clear();
+            g_prodAtStart = readProducers();
+            g_prodAtEnd = ProducerTotals{};
             g_phase.store(kCollecting, std::memory_order_release);
             char line[kLineBuf];
             formatCollectingLine(line, sizeof(line), g_capId, g_startFrame);
             say(line);
         } else if (p == kCollecting) {
+            g_prodAtEnd = readProducers();
             g_phase.store(kReading, std::memory_order_release);
             g_readTicks = 0;
             if (g_ctx) g_ctx->Flush();
@@ -1439,10 +1540,37 @@ void sceneInspectInputsOffer(ID3D11DeviceContext* ctx, const SceneInputsIn& in) 
         }
         const float icx = g_box.u * static_cast<float>(in.w), icy = g_box.v * static_cast<float>(in.h);
         if (!cropAround(icx, icy, kCrop, in.w, in.h, &s.crop)) return;
-        ID3D11Texture2D* srcs[6] = {in.colour, in.motion, in.depth, in.decision, in.coverage, in.bias};
-        const DXGI_FORMAT want[6] = {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT,
-                                     DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM};
-        for (int k = 0; k < 6; ++k) s.have[k] = stageOne(dev.get(), ctx, srcs[k], want[k], s.crop, &s.tex[k]);
+        ID3D11Texture2D* srcs[7] = {in.colour, in.motion, in.depth, in.decision, in.coverage, in.bias, in.engineSlots};
+        const DXGI_FORMAT want[7] = {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                                     DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_UNKNOWN};
+        for (int k = 0; k < 7; ++k) s.have[k] = stageOne(dev.get(), ctx, srcs[k], want[k], s.crop, &s.tex[k], k == 6 ? &s.slotFmt : nullptr);
+        if (s.have[6] && s.slotFmt != 16 && s.slotFmt != 2) {   // not a format the reader decodes: drop it, say nothing is read
+            s.tex[6]->Release();
+            s.tex[6] = nullptr;
+            s.have[6] = false;
+        }
+        // The pool, whole, as the pass indexes it (the slots under the box are known only after the crop is read).
+        if (in.enginePool && in.poolStride >= kEngineRecordWords * 4u && in.poolCount) {
+            D3D11_BUFFER_DESC bd{};
+            in.enginePool->GetDesc(&bd);
+            const uint64_t need = (static_cast<uint64_t>(in.poolFirst) + in.poolCount) * in.poolStride;
+            if (need <= bd.ByteWidth && bd.ByteWidth <= (16u << 20)) {
+                D3D11_BUFFER_DESC sd = bd;
+                sd.Usage = D3D11_USAGE_STAGING;
+                sd.BindFlags = 0;
+                sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                sd.MiscFlags = 0;
+                sd.StructureByteStride = 0;
+                if (SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &s.poolStaging)) && s.poolStaging) {
+                    ctx->CopyResource(s.poolStaging, in.enginePool);
+                    s.poolFirst = in.poolFirst;
+                    s.poolCount = in.poolCount;
+                    s.poolStride = in.poolStride;
+                } else {
+                    s.poolStaging = nullptr;
+                }
+            }
+        }
         if (!s.have[3]) {
             if (g_inputsWhy.empty()) g_inputsWhy = "the decision texture could not be staged (format or allocation)";
             for (int k = 0; k < 6; ++k)
@@ -1459,6 +1587,8 @@ void sceneInspectInputsOffer(ID3D11DeviceContext* ctx, const SceneInputsIn& in) 
         s.sceneFrame = in.sceneFrame;
         s.meta = in;
         s.meta.colour = s.meta.motion = s.meta.depth = s.meta.decision = s.meta.coverage = s.meta.bias = nullptr;
+        s.meta.engineSlots = nullptr;
+        s.meta.enginePool = nullptr;
         holdCtx(ctx);
     } catch (...) {
         ++g_faults;

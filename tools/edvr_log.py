@@ -5645,7 +5645,7 @@ def parse_inspect(text):
         if cm:
             n = int(cm.group(1))
             cur = {"n": n, "armed": True, "collecting": False, "report": False, "complete": False, "trigger": cm.group(2), "ts": ts, "lines": {},
-                   "targets": [], "stacks": [], "draws": {}, "occluded": [], "unmeasured": [], "refusals": [], "images": [], "legend": False}
+                   "targets": [], "stacks": [], "draws": {}, "occluded": [], "unmeasured": [], "refusals": [], "images": [], "legend": False, "engine": []}
             out["caps"][n] = cur
             out["order"].append(n)
             continue
@@ -5685,6 +5685,12 @@ def parse_inspect(text):
             cur["lines"]["files"] = msg
         elif msg.startswith("scene inspect image:"):
             cur["images"].append(msg)
+        elif msg.startswith("scene inspect engine legend:"):
+            pass
+        elif msg.startswith("scene inspect engine"):
+            cur["engine"].append(msg)
+        elif msg.startswith("scene inspect producers:"):
+            cur["lines"]["producers"] = msg
         else:
             dm = INSPECT_DRAW_RE.match(msg)
             if not dm:
@@ -5785,6 +5791,10 @@ def print_inspect(text, log_path=None, full=False):
     for key, label in (("input", "input"), ("centre", "centre"), ("stats", "box"), ("dlss", "dlss")):
         if key in cap["lines"]:
             print("  %s: %s" % (label, _inspect_short(re.sub(r"^scene inspect (pixel centre|box stats|input|dlss): ", "", cap["lines"][key]), 900)))
+    for e in cap["engine"]:
+        print("  %s" % _inspect_short(e.replace("scene inspect ", "", 1), 700))
+    if "producers" in cap["lines"]:
+        print("  %s" % _inspect_short(cap["lines"]["producers"].replace("scene inspect ", "", 1), 700))
     if "files" in cap["lines"]:
         files = cap["lines"]["files"]
         print("  %s" % _inspect_short(files.replace("scene inspect ", "", 1), 700))
@@ -5825,10 +5835,10 @@ def self_test_inspect():
              ["scene inspect draw: #%u", "scene inspect route: #%u", "scene inspect verdict: #%u %s: %s", "scene inspect occluded: #%u", "scene inspect box: cap=%u",
               "scene inspect frame: cap=%u", "scene inspect target: rt=#%u", "scene inspect pixel %s: input px", "scene inspect box stats:", "scene inspect dlss:",
               "scene inspect files: cap=%u", "scene inspect: complete cap=%u", "scene inspect: armed cap=%u (trigger %s)", "scene inspect: collecting cap=%u",
-              "scene inspect empty: cap=%u", "NOT bound", "no eye pass seen"]),
+              "scene inspect empty: cap=%u", "NOT bound", "no eye pass seen", "scene inspect engine slot: slot=%d", "scene inspect producers:"]),
             (os.path.join("src", "d3d11", "scene_inspector.cpp"),
              ["scene inspect stack: rt=#%zu", "scene inspect: report cap=%u begin", "scene inspect unmeasured: #%u", "scene inspect input: DLSS input",
-              "scene inspect image: %s", "scene inspect: refused ("])):
+              "scene inspect image: %s", "scene inspect: refused (", "scene inspect engine: %zu distinct slots"])):
         path = os.path.join(root, rel)
         try:
             src = read_text(path)
@@ -5858,6 +5868,10 @@ def self_test_inspect():
         "scene inspect pixel centre: input px 1100,1084 depth=0.250000 (2.000 m) mv_pass=(1.600,0.000) mv_dlss=(1.600,0.000) expect_world=(1.600,0.000) expect_ship=(0.000,0.000) mismatch=0.000 px vs the world camera term path=2(camera-world) engine_kind=0(none) coverage_mask=0 bias_mask=0",
         "scene inspect box stats: 256 pixels read; depth min=0.250000 max=0.250000",
         "scene inspect dlss: preset=K(11) input 2016x2016 -> output 4032x4032 jitter=(0.2500,-0.1250) px history_reset=0 exposure=pre 1.000 scale 1.000 texture=none hdr=0",
+        "scene inspect engine legend: a pixel's engine kind is 1 when ...",
+        "scene inspect engine: 1 distinct slots under the box; pool read (9216 records of 336 bytes)",
+        "scene inspect engine slot: slot=5 pixels=153 kinds=[other=153] record: rigid (base word 0) scale=1.0000 pos=(10.000,20.000,30.000) previous scale=1.0000 previous pos=(10.000,19.500,30.000) MOVED (the two pose blocks differ) marker=DEADBEEF",
+        "scene inspect producers: records appended to the pool -- in the captured frame: emit FUN_144312E00 calls 40 items 41, second producer FUN_14369C9C0 calls 3 items 7 (never stamped), primary FUN_1442B4130 calls 9; since launch: emit calls 100 items 1000, second producer calls 10 items 77, primary calls 500",
         "scene inspect image: depth 128x128: grey = raw reversed-Z depth",
         "scene inspect files: cap=1 draws_csv=scene_inspect_20261014-102214_cap1.csv box_csv=scene_inspect_20261014-102214_cap1_box.csv images=scene_inspect_20261014-102214_cap1_colour_in.png",
         "scene inspect: complete cap=1: 5 draws wrote in the box (2 occluded), DLSS inputs read, DLSS outputs read.",
@@ -5871,7 +5885,7 @@ def self_test_inspect():
     if rc != 0 or "scene inspect: COMPLETE" not in out:
         fail("a good capture did not report COMPLETE (rc=%d):\n%s" % (rc, out))
     for need in ("#3  B75A6FF2CA9FA5D6/D56F859BE4781431  additive top", "-> TRANSLUCENT_NO_MASK", "occluded (1)", "#0 rt=#0", "centre: input px 1100,1084",
-                 "dlss: preset=K(11)", "complete cap=1", "box: cap=1 centre=head-forward", "stack: rt=#0"):
+                 "dlss: preset=K(11)", "complete cap=1", "box: cap=1 centre=head-forward", "stack: rt=#0", "engine slot: slot=5 pixels=153", "MOVED", "producers: records appended"):
         if need not in out:
             fail("the COMPLETE report lacks %r:\n%s" % (need, out))
     # Files beside the log are checked when the log's path is given.

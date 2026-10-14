@@ -4236,6 +4236,27 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         std::memcpy(si.tvCam, p.tvCam, sizeof(si.tvCam));
                         std::memcpy(si.tvUsed, p.tvUsed, sizeof(si.tvUsed));
                         std::memcpy(si.knobs, p.knobs, sizeof(si.knobs));
+                        // Engine-record velocity's slot target and pool, so the inspector can read the record each pixel under the box took its motion from.
+                        Microsoft::WRL::ComPtr<ID3D11Texture2D> slotsTex;
+                        Microsoft::WRL::ComPtr<ID3D11Buffer> poolBuf;
+                        if (engineBound && engineViews.slots && engineViews.pool) {
+                            Microsoft::WRL::ComPtr<ID3D11Resource> slotsRes, poolRes;
+                            engineViews.slots->GetResource(&slotsRes);
+                            engineViews.pool->GetResource(&poolRes);
+                            if (slotsRes) slotsRes.As(&slotsTex);
+                            if (poolRes) poolRes.As(&poolBuf);
+                            D3D11_SHADER_RESOURCE_VIEW_DESC pvd{};
+                            engineViews.pool->GetDesc(&pvd);
+                            D3D11_BUFFER_DESC pbd{};
+                            if (poolBuf) poolBuf->GetDesc(&pbd);
+                            if (slotsTex && poolBuf && pvd.ViewDimension == D3D11_SRV_DIMENSION_BUFFER) {
+                                si.engineSlots = slotsTex.Get();
+                                si.enginePool = poolBuf.Get();
+                                si.poolStride = pbd.StructureByteStride;
+                                si.poolFirst = pvd.Buffer.FirstElement;
+                                si.poolCount = pvd.Buffer.NumElements;
+                            }
+                        }
                         sceneInspectInputsOffer(ctx, si);
                         inspectOffered = true;
                     }

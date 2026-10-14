@@ -72,6 +72,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "exposure_fix.h"
 #include "menu.h"
 #include "kinematic_eval_probe.h"
+#include "kinematic_eval_hook.h"   // kinematicEvalProducerTotals, for the scene inspector's environment
 #include "engine_velocity.h"
 #include "scheduler_stack_probe.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
@@ -2022,6 +2023,7 @@ bool sceneInspectEyeGeometry(uint32_t eye, float frustum[4], float eyeToHead[9])
     return true;
 }
 std::wstring sceneInspectLogDir() { return Config::get().logDir(); }
+bool sceneInspectProducerTotals(uint64_t v[5]) { return kinematicEvalProducerTotals(v); }
 const char* sceneInspectIniName() { return Config::get().iniName(); }
 SceneInspectEnv sceneInspectEnv() {
     SceneInspectEnv e;
@@ -2029,6 +2031,7 @@ SceneInspectEnv sceneInspectEnv() {
     e.eyeGeometry = &sceneInspectEyeGeometry;
     e.setBlendRaw = &vScreenOMSetBlendStateRaw;
     e.logDir = &sceneInspectLogDir;
+    e.producerTotals = &sceneInspectProducerTotals;
     e.iniName = &sceneInspectIniName;
     return e;
 }

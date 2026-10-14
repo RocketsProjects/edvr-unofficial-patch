@@ -15,6 +15,7 @@
 #include <string>
 
 struct ID3D11BlendState;
+struct ID3D11Buffer;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
 
@@ -29,6 +30,8 @@ struct SceneInspectEnv {
     // The blend state past the binding shadow (vScreenOMSetBlendStateRaw): the duplicate is not the game's bind.
     void (*setBlendRaw)(ID3D11DeviceContext* ctx, ID3D11BlendState* state, const float blendFactor[4], uint32_t sampleMask) = nullptr;
     std::wstring (*logDir)() = nullptr;
+    // Cumulative pool-record totals per producer (v[0..1] emit calls/items, v[2..3] second producer, v[4] primary calls); null or false: not available.
+    bool (*producerTotals)(uint64_t v[5]) = nullptr;
     const char* (*iniName)() = nullptr;
 };
 
@@ -85,6 +88,12 @@ struct SceneInputsIn {
     // depth texture the pass reads. Compared by address only. Both null: not known, and no target is called an intermediate pass.
     const void* colourSource = nullptr;
     const void* sceneDepth = nullptr;
+    // Engine-record velocity's inputs, when bound this frame: the slot target (x = 2*slot+1 per marked pixel, y = depth) and the pool of 0x150-byte records
+    // as the pass indexes it (the view's first element and count, and the stride). The inspector stages them to say what record each pixel under the box
+    // took its motion from. Valid for the call only.
+    ID3D11Texture2D* engineSlots = nullptr;
+    ID3D11Buffer* enginePool = nullptr;
+    uint32_t poolFirst = 0, poolCount = 0, poolStride = 0;
     // The pass's camera term (the constant buffer's rows): tanNow/tanPrev {l r down up}, the world path's rotation rows and translation
     // (tvCam.w 1 = on), the head's, and the depth encoding (knobs.x, knobs.z). The jitter is the output's (SceneOutputsIn).
     float tanNow[4] = {}, tanPrev[4] = {};

@@ -411,6 +411,7 @@ struct PixelFacts {
     float expHx = 0.0f, expHy = 0.0f;
     DecisionFlags flags;
     int coverage = -1, bias = -1;
+    int slot = -1;                // the engine-record slot the pass's slot target holds here (-1: none, or the target was not staged)
 };
 
 // The motion the camera term predicts for the path the pixel took, else the nearer of the two. The decision texture's path 2 is the WORLD
@@ -1035,7 +1036,7 @@ inline std::string drawsCsvRow(uint32_t capId, const DrawRow& r, int32_t by, con
 }
 inline const char* boxCsvHeader() noexcept {
     return "cap,x,y,depth,metres,mv_pass_x,mv_pass_y,mv_dlss_x,mv_dlss_y,expect_world_x,expect_world_y,expect_ship_x,expect_ship_y,path,hidden,ui,"
-           "engine_kind,coverage_mask,bias_mask\n";
+           "engine_kind,coverage_mask,bias_mask,engine_slot\n";
 }
 inline void csvFloat(std::string* line, float v) {
     char b[40];
@@ -1065,8 +1066,97 @@ inline std::string boxCsvRow(uint32_t capId, const BoxSample& s) {
     csvNumber(&l, p.flags.engineKind);
     csvNumber(&l, p.coverage);
     csvNumber(&l, p.bias);
+    csvNumber(&l, p.slot);
     l += '\n';
     return l;
+}
+
+// ---- the engine records under the box ------------------------------------------------------------------------------------------------------
+// The pass reads each keyed-draw pixel's pool record by the slot the draw wrote (temporal_shader_source.h enginePixelZ: es.x is 2*slot + 1). A pixel
+// whose record carries neither this frame's joined marker nor a masked one, nor a stamp from the last 64 frames, is engine kind 3: it takes the camera
+// term. What the record IS then decides the fix: a record that never moved is static and the camera term is right for it; one whose two pose blocks
+// differ is a mover EDVR never stamped; a nonzero base word is a skinned record (a palette), which the rigid path cannot follow. The words below are
+// the 0x150-byte record's, exactly as the shader indexes them (data[0] = words 0..3, data[1] = 4..7, data[18] = 72..75, data[19] = 76..79).
+constexpr uint32_t kEngineRecordWords = 84;
+inline float bitsToFloat(uint32_t u) noexcept {
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+}
+struct EngineRecord {
+    uint32_t base = 0, marker = 0;   // the palette base (0 = rigid) and the marker word at byte 288
+    float scale = 0.0f, prevScale = 0.0f;
+    float pos[3] = {}, prevPos[3] = {};
+    bool moved = false;              // the two pose blocks differ (engineRecordMoved)
+};
+inline EngineRecord decodeEngineRecord(const uint32_t* w) noexcept {
+    EngineRecord r;
+    if (!w) return r;
+    r.base = w[0];
+    r.scale = bitsToFloat(w[1]);
+    for (int i = 0; i < 3; ++i) r.pos[i] = bitsToFloat(w[4 + i]);
+    r.marker = w[72];
+    for (int i = 0; i < 3; ++i) r.prevPos[i] = bitsToFloat(w[73 + i]);
+    r.prevScale = bitsToFloat(w[77]);
+    const bool same = w[1] == w[77] && w[2] == w[78] && w[3] == w[79] && w[4] == w[73] && w[5] == w[74] && w[6] == w[75];
+    r.moved = !same;
+    return r;
+}
+// The slot the pass indexes from a slot-target texel's x: a marked pixel has x >= 1 holding 2*slot + 1 (an odd integer); anything else is none.
+inline int slotFromCode(float x) noexcept {
+    if (!(x >= 1.0f) || !std::isfinite(x) || x > 2147483000.0f) return -1;
+    const uint32_t code = static_cast<uint32_t>(x);
+    if (static_cast<float>(code) != x || (code & 1u) == 0u) return -1;
+    return static_cast<int>(code >> 1);
+}
+struct SlotInfo {
+    int slot = -1;
+    uint32_t pixels = 0;
+    uint32_t kinds[8] = {};
+    bool haveRecord = false;
+    EngineRecord rec;
+    uint32_t poolRecords = 0;
+};
+inline int formatEngineSlotLine(char* out, size_t cap, const SlotInfo& s) noexcept {
+    char kinds[96] = {};
+    size_t n = 0;
+    for (uint32_t k = 0; k < 8; ++k)
+        if (s.kinds[k] && n + 20 < sizeof(kinds)) n += static_cast<size_t>(std::snprintf(kinds + n, sizeof(kinds) - n, "%s%s=%u", n ? " " : "", blend::engineKindName(k), s.kinds[k]));
+    if (!n) std::snprintf(kinds, sizeof(kinds), "none read");
+    if (!s.haveRecord)
+        return std::snprintf(out, cap, "scene inspect engine slot: slot=%d pixels=%u kinds=[%s] record not read (slot beyond the pool's %u records, or the pool was not staged)", s.slot,
+                             s.pixels, kinds, s.poolRecords);
+    const EngineRecord& r = s.rec;
+    return std::snprintf(out, cap,
+        "scene inspect engine slot: slot=%d pixels=%u kinds=[%s] record: %s (base word %u) scale=%.4f pos=(%.3f,%.3f,%.3f) previous scale=%.4f previous pos=(%.3f,%.3f,%.3f) %s "
+        "marker=%08X",
+        s.slot, s.pixels, kinds, r.base ? "SKINNED, palette base" : "rigid", r.base, static_cast<double>(r.scale), static_cast<double>(r.pos[0]),
+        static_cast<double>(r.pos[1]), static_cast<double>(r.pos[2]), static_cast<double>(r.prevScale), static_cast<double>(r.prevPos[0]),
+        static_cast<double>(r.prevPos[1]), static_cast<double>(r.prevPos[2]), r.moved ? "MOVED (the two pose blocks differ)" : "STATIC (the two pose blocks are equal)", r.marker);
+}
+inline const char* engineSlotsLegend() noexcept {
+    return "scene inspect engine legend: a pixel's engine kind is 1 when its pool record carries this frame's joined marker (exact per-object motion), 2 masked, 3 when the "
+           "marker is neither and no stamp from the last 64 frames matches (the camera term is used), 6 a stale stamp. For each slot under the box the record is read "
+           "back from the pool as the pass indexes it: STATIC with kind 3 means the camera term is right and the record is simply not re-emitted; MOVED with kind 3 is a "
+           "mover EDVR never stamped (no producer hook reaches it); a nonzero base word is a skinned record";
+}
+
+// The producers that append the pool's records (kinematic_eval_hook.cpp): totals since the hooks were installed and the change over the captured
+// frame, for the emit (FUN_144312E00, producer 0, the only one that stamps previous poses), the second direct producer (FUN_14369C9C0, producer 1,
+// counted and never stamped) and the primary (FUN_1442B4130, certified in the private pool).
+struct ProducerTotals {
+    bool have = false;
+    uint64_t emitCalls = 0, emitItems = 0, secondCalls = 0, secondItems = 0, primaryCalls = 0;
+};
+inline int formatProducersLine(char* out, size_t cap, const ProducerTotals& total, const ProducerTotals& frame) noexcept {
+    if (!total.have) return std::snprintf(out, cap, "scene inspect producers: not available (the kinematic hooks are not installed in this session)");
+    return std::snprintf(out, cap,
+        "scene inspect producers: records appended to the pool -- in the captured frame: emit FUN_144312E00 calls %llu items %llu, second producer FUN_14369C9C0 calls %llu "
+        "items %llu (never stamped), primary FUN_1442B4130 calls %llu; since launch: emit calls %llu items %llu, second producer calls %llu items %llu, primary calls %llu",
+        static_cast<unsigned long long>(frame.emitCalls), static_cast<unsigned long long>(frame.emitItems), static_cast<unsigned long long>(frame.secondCalls),
+        static_cast<unsigned long long>(frame.secondItems), static_cast<unsigned long long>(frame.primaryCalls), static_cast<unsigned long long>(total.emitCalls),
+        static_cast<unsigned long long>(total.emitItems), static_cast<unsigned long long>(total.secondCalls), static_cast<unsigned long long>(total.secondItems),
+        static_cast<unsigned long long>(total.primaryCalls));
 }
 
 // ---- images --------------------------------------------------------------------------------------------------------------------------------

@@ -443,6 +443,61 @@ void testRolesAndOutline() {
     check(true, "a null image is tolerated");
 }
 
+uint32_t fbits(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    return u;
+}
+
+void testEngineRecords() {
+    check(slotFromCode(11.0f) == 5 && slotFromCode(1.0f) == 0 && slotFromCode(2049.0f) == 1024, "a marked pixel's x is 2*slot+1");
+    check(slotFromCode(10.0f) == -1 && slotFromCode(0.0f) == -1 && slotFromCode(-1.0f) == -1 && slotFromCode(3.5f) == -1 && slotFromCode(NAN) == -1 &&
+              slotFromCode(INFINITY) == -1, "an even code, none, a fraction, NaN and infinity are no slot");
+    uint32_t w[kEngineRecordWords] = {};
+    w[0] = 0;                       // base: rigid
+    w[1] = fbits(1.0f);             // scale
+    w[2] = 0x11111111u; w[3] = 0x22222222u;   // quaternion
+    w[4] = fbits(10.0f); w[5] = fbits(20.0f); w[6] = fbits(30.0f);   // position
+    w[72] = 0xAABBCCDDu;            // marker
+    w[73] = fbits(10.0f); w[74] = fbits(20.0f); w[75] = fbits(30.0f);   // previous position
+    w[77] = fbits(1.0f); w[78] = 0x11111111u; w[79] = 0x22222222u;     // previous scale, quaternion
+    EngineRecord r = decodeEngineRecord(w);
+    check(!r.moved && r.base == 0 && r.scale == 1.0f && r.pos[1] == 20.0f && r.prevPos[2] == 30.0f && r.marker == 0xAABBCCDDu, "equal pose blocks: a static rigid record, read word for word");
+    w[74] = fbits(20.5f);
+    check(decodeEngineRecord(w).moved, "a different previous position: moved");
+    w[74] = fbits(20.0f);
+    w[79] = 0x22222223u;
+    check(decodeEngineRecord(w).moved, "a different previous quaternion: moved");
+    w[79] = 0x22222222u;
+    w[77] = fbits(0.5f);
+    check(decodeEngineRecord(w).moved, "a different previous scale: moved");
+    w[77] = fbits(1.0f);
+    w[0] = 4;
+    check(decodeEngineRecord(w).base == 4, "the base word is the palette base");
+    check(!decodeEngineRecord(nullptr).moved, "a null record decodes to nothing");
+    SlotInfo si;
+    si.slot = 5; si.pixels = 140; si.kinds[3] = 140; si.kinds[1] = 12; si.haveRecord = true; si.rec = decodeEngineRecord(w); si.poolRecords = 9216;
+    char b[kLineBuf];
+    int n = formatEngineSlotLine(b, sizeof(b), si);
+    check(n > 0 && static_cast<size_t>(n) < kLineMax && has(b, "slot=5 pixels=140") && has(b, "exact=12") && has(b, "other=140") && has(b, "SKINNED, palette base") &&
+              has(b, "STATIC") && has(b, "marker=AABBCCDD"), "the slot line: pixels, kinds, record class, motion state, marker");
+    w[0] = 0; w[74] = fbits(99.0f);
+    si.rec = decodeEngineRecord(w);
+    formatEngineSlotLine(b, sizeof(b), si);
+    check(has(b, "rigid") && has(b, "MOVED"), "a rigid mover is named so");
+    si.haveRecord = false;
+    formatEngineSlotLine(b, sizeof(b), si);
+    check(has(b, "record not read") && has(b, "9216"), "a slot beyond the pool says so");
+    check(std::strlen(engineSlotsLegend()) < kLineMax, "the legend fits a line");
+    ProducerTotals t, f;
+    formatProducersLine(b, sizeof(b), t, f);
+    check(has(b, "not available"), "no producer source: said");
+    t.have = f.have = true; t.emitCalls = 9; t.emitItems = 10; t.secondCalls = 2; t.secondItems = 3; t.primaryCalls = 4; f.secondCalls = 1; f.secondItems = 6;
+    n = formatProducersLine(b, sizeof(b), t, f);
+    check(n > 0 && static_cast<size_t>(n) < kLineMax && has(b, "second producer FUN_14369C9C0 calls 1 items 6 (never stamped)") && has(b, "since launch: emit calls 9 items 10"),
+          "the producers line: the captured frame and the totals");
+}
+
 void testText() {
     char b[kLineBuf];
     check(formatInstallLine(b, sizeof(b), false, true, "F4", "edvr.ini") > 0 && std::strcmp(b, "scene inspect: off; hotkey.scene_inspect is bound to F4") == 0, "install line, bound");
@@ -639,14 +694,14 @@ void testCsv() {
     BoxSample bs;
     bs.valid = true; bs.x = 12; bs.y = 34;
     bs.px.valid = true; bs.px.depth = 0.25f; bs.px.metres = 2.0f; bs.px.far = false; bs.px.mvx = 1.5f; bs.px.mvy = -0.5f; bs.px.coverage = 3; bs.px.bias = -1;
-    bs.px.flags.path = 11; bs.px.flags.engineKind = 1;
+    bs.px.flags.path = 11; bs.px.flags.engineKind = 1; bs.px.slot = 17;
     const std::string bh = boxCsvHeader(), br = boxCsvRow(4, bs);
     hp = rp = 0;
     const std::vector<std::string> bhf = csvParse(bh, &hp), brf = csvParse(br, &rp);
     checkf(bhf.size() == brf.size(), "box csv: header %zu, row %zu columns", bhf.size(), brf.size());
     check(brf[1] == "12" && brf[2] == "34" && brf[3] == "0.25" && brf[4] == "2" && brf[5] == "1.5" && brf[6] == "-0.5", "box csv: position, depth, metres, motion");
     check(brf[7].empty() && brf[9].empty(), "box csv: values that were not staged are empty, not zero");
-    check(brf[13] == "11" && brf[16] == "1" && brf[17] == "3" && brf[18] == "-1", "box csv: path, engine kind, masks");
+    check(brf[13] == "11" && brf[16] == "1" && brf[17] == "3" && brf[18] == "-1" && brf[19] == "17" && bhf[19] == "engine_slot", "box csv: path, engine kind, masks, slot");
     csvField(nullptr, "x");
     check(true, "a null line is tolerated");
 }
@@ -781,6 +836,7 @@ void runPure() {
     testMotion();
     testVerdicts();
     testRolesAndOutline();
+    testEngineRecords();
     testText();
     testCsv();
     testImages();
@@ -1037,6 +1093,11 @@ bool envGeometry(uint32_t, float f[4], float rot[9]) {
 }
 void envBlend(ID3D11DeviceContext* c, ID3D11BlendState* s, const float bf[4], uint32_t m) { c->OMSetBlendState(s, bf, m); }
 std::wstring envLogDir() { return g_logDir; }
+uint64_t g_fakeProd[5] = {100, 1000, 7, 70, 500};   // the kinematic producers' cumulative totals; drawRun bumps the second producer inside the captured frame
+bool envProducers(uint64_t v[5]) {
+    std::memcpy(v, g_fakeProd, sizeof(g_fakeProd));
+    return true;
+}
 const char* envIni() { return "edvr.ini"; }
 edvr::SceneInspectEnv makeEnv() {
     edvr::SceneInspectEnv e;
@@ -1044,6 +1105,7 @@ edvr::SceneInspectEnv makeEnv() {
     e.eyeGeometry = &envGeometry;
     e.setBlendRaw = &envBlend;
     e.logDir = &envLogDir;
+    e.producerTotals = &envProducers;
     e.iniName = &envIni;
     return e;
 }
@@ -1117,6 +1179,10 @@ std::string drawRun(Rig& r, bool offer, unsigned* snapshotsTaken, int scissor = 
             Snapshot before, after;
             takeSnapshot(r.g.ctx.Get(), &before);
             ReplayArgs a{r.g.ctx.Get(), 0};
+            if (i == 0) {
+                g_fakeProd[2] += 3;   // the second producer appends inside the captured frame
+                g_fakeProd[3] += 7;
+            }
             edvr::sceneInspectDraw(r.g.ctx.Get(), infoFor(static_cast<unsigned>(i), 0x1000 + i, 0x2000 + i), &replay, &a);
             takeSnapshot(r.g.ctx.Get(), &after);
             const std::string d = diffSnapshots(before, after);
@@ -1178,7 +1244,8 @@ uint16_t floatToHalf(float f) {
 
 // The temporal pass's inputs as synthetic textures: colour a gradient, the pass's mv (mvx, 0) on the camera-world path, depth 2 m, masks clear.
 struct Synth {
-    ComPtr<ID3D11Texture2D> colour, motion, depth, decision, coverage, bias, dlss, final;
+    ComPtr<ID3D11Texture2D> colour, motion, depth, decision, coverage, bias, dlss, final, slots;
+    ComPtr<ID3D11Buffer> pool;
     edvr::SceneInputsIn in;
     edvr::SceneOutputsIn out;
 };
@@ -1214,6 +1281,32 @@ void makeSynth(Rig& r, Synth& s, float mvx, float dlx, int roles = 1) {
     s.final = makeTex(r, 128, 128, DXGI_FORMAT_R8G8B8A8_UNORM, big2.data(), 128 * 4);
     s.in.colour = s.colour.Get(); s.in.motion = s.motion.Get(); s.in.depth = s.depth.Get(); s.in.decision = s.decision.Get();
     s.in.coverage = s.coverage.Get(); s.in.bias = s.bias.Get();
+    // Engine-record velocity's inputs: every pixel marked with slot 5 (x = 2*5+1) and a pool of 16 records whose record 5 is a rigid MOVER with a marker no
+    // frame ever stamped (the railing's suspected state).
+    std::vector<float> slotTexels(static_cast<size_t>(kSize) * kSize * 2);
+    for (size_t i = 0; i < static_cast<size_t>(kSize) * kSize; ++i) {
+        slotTexels[i * 2] = 11.0f;
+        slotTexels[i * 2 + 1] = 0.25f;
+    }
+    s.slots = makeTex(r, kSize, kSize, DXGI_FORMAT_R32G32_FLOAT, slotTexels.data(), kSize * 8);
+    std::vector<uint32_t> recs(16 * 84, 0);
+    {
+        uint32_t* q = &recs[5 * 84];
+        auto fb = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+        q[1] = fb(1.0f); q[4] = fb(10.0f); q[5] = fb(20.0f); q[6] = fb(30.0f);
+        q[72] = 0xDEADBEEFu; q[73] = fb(10.0f); q[74] = fb(19.5f); q[75] = fb(30.0f); q[77] = fb(1.0f);
+    }
+    D3D11_BUFFER_DESC pbd{};
+    pbd.ByteWidth = static_cast<UINT>(recs.size() * 4);
+    pbd.Usage = D3D11_USAGE_DEFAULT;
+    pbd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    pbd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    pbd.StructureByteStride = 336;
+    D3D11_SUBRESOURCE_DATA pinit{recs.data(), 0, 0};
+    hr(r.g.dev->CreateBuffer(&pbd, &pinit, s.pool.GetAddressOf()));
+    s.in.engineSlots = roles == 3 ? nullptr : s.slots.Get();
+    s.in.enginePool = roles == 3 ? nullptr : s.pool.Get();
+    s.in.poolFirst = 0; s.in.poolCount = 16; s.in.poolStride = 336;
     s.in.w = s.in.h = kSize;
     s.in.sceneFrame = 4242;
     s.in.colourSource = roles == 1 ? static_cast<const void*>(r.rt.Get()) : roles == 2 ? static_cast<const void*>(s.colour.Get()) : nullptr;
@@ -1334,6 +1427,15 @@ void runDevice() {
     check(has(dl, "preset=K(11)") && has(dl, "jitter=(0.2500,-0.1250)") && has(dl, "64x64 -> output 128x128") && has(dl, "transparency/T&C mask=none supplied"), "S6: the DLSS line");
     check(!has(v2, "MV_MISMATCH"), "agreeing motion: no mismatch verdict");
     const std::string files = lineWith(c1.logFrom, "scene inspect files:");
+    check(has(lineWith(c1.logFrom, "scene inspect engine:"), "1 distinct slots under the box") && has(lineWith(c1.logFrom, "scene inspect engine:"), "pool read (16 records of 336 bytes)"),
+          "the engine section names one slot under the box and says the pool was read");
+    const std::string slotLine = lineWith(c1.logFrom, "scene inspect engine slot:");
+    check(has(slotLine, "slot=5 pixels=256") && has(slotLine, "none=256") && has(slotLine, "rigid (base word 0)") && has(slotLine, "MOVED") && has(slotLine, "marker=DEADBEEF") &&
+              has(slotLine, "pos=(10.000,20.000,30.000)") && has(slotLine, "previous pos=(10.000,19.500,30.000)"),
+          "the slot line reads the pool's record 5 back: a rigid mover with an unstamped marker, its pose and its previous pose");
+    const std::string prodLine = lineWith(c1.logFrom, "scene inspect producers:");
+    check(has(prodLine, "in the captured frame: emit FUN_144312E00 calls 0 items 0, second producer FUN_14369C9C0 calls 3 items 7") && has(prodLine, "since launch: emit calls 100 items 1000, second producer calls 10 items 77"),
+          "the producers line: the second producer's 3 calls and 7 items inside the captured frame, and the totals since launch");
     check(has(files, "draws_csv=scene_inspect_") && has(files, "_cap1.csv") && has(files, "_box.csv") && has(files, "colour_in.png") && has(files, "depth.png") && has(files, "motion.png") &&
               has(files, "path.png") && has(files, "dlss_out.png") && has(files, "final.png"), "S6: the files are named");
     // Read the files back.

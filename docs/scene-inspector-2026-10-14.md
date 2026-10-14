@@ -48,6 +48,9 @@
 - **Path numbers, corrected:** in the decision texture path 2 is the WORLD camera term (pixels beyond the ship split, and the far plane) and path 1 the
   head's delta (temporal_shader_source.h: `decisionPath = count15 ? 2 : 1`, count15 set only in the world branch). The first build had them the other
   way round, which made every distant camera-path pixel read as a 2 px mismatch against the ship term. `blend_probe_core.h`'s legend has the same error.
+- **Engine records and producers:** the capture also reads the pool record behind each slot under the box (`engine slot:` lines: rigid or skinned, STATIC or
+  MOVED, marker, pose and previous pose; the box CSV gains `engine_slot`) and the records the emit, the second producer and the primary appended
+  (`producers:`). Kind 3 + MOVED is a mover no stamping hook reaches.
 - **Limits:** VR only (flat: refused, said; the flat runtime would need its own capture, not cheap). Left eye only. Depth-only draws (no colour
   target) are not seen. NVIDIA DLSS only for the pixel inputs (FSR/XeSS: refused with the reason; the draw half still reports). A draw on a UAV or
   stream-output target, and indirect draws, are `unmeasured`/counted, never duplicated. Clears of a target between draws are honoured
@@ -56,7 +59,6 @@
 - **Next:** one flight, the five captures below, then `--inspect`. Each capture names the draw(s) and the rule; the fix is then written from
   that, no second diagnostic flight. `hotkey.blend_probe` and its rig stay until this one has flown (the inspector is its successor and does
   not touch it).
-- **Ruled out / not proposed:** a global transparent mask (K ignores it), sharpening or contrast tweaks (see the blur doc).
 
 ## Flight checklist
 
