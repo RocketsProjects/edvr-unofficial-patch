@@ -6,7 +6,8 @@
 #include "gpu_frame_timing.h"
 #include "vscreen.h"   // vScreenAaOffForDraws, vScreenEyeDrawsThisFrame: the draw hook CPU line
 #include "gpu_census.h"      // gpuCensusFrameSpan: the overlay's GPU time with the application clock off (2026-10-14)
-#include "frame_span_tile.h" // gpuTimeTileText: which GPU number the GPU TIME tile shows
+#include "frame_span_tile.h" // chooseGpuFigures, gpuBusyTileText: the GPU BUSY tile and the fps line
+#include "gpu_busy_sampler.h" // gpuBusyReading: the OS GPU busy figure
 
 #include <windows.h>
 #include <algorithm>
@@ -1429,20 +1430,20 @@ int perfMonitorTiles(PerfTile* out, int max) {
         tile("FRAME RATE", "--", "measuring");
         tile("1% LOW", "--", "");
     }
-    // GPU TIME (2026-10-14): the application-render mean when that clock is on; with it off, the census's frame GPU span
-    // (boundary to boundary, one pair a frame). "--" only before the first pair has completed.
+    // GPU BUSY (2026-10-14): the OS's count of the time the GPU ran this process's work, per frame (gpu_busy_sampler.cpp), as the value;
+    // the elapsed figure beside it in the sub-line: the application-render mean when that clock is on, else the census's frame GPU work
+    // span. Both elapsed figures include GPU idle inside the frame, so neither is the busy figure. The same chooseGpuFigures the fps
+    // overlay line calls, so the two cannot drift apart. "--" for the value only when the OS has no figure.
     if (native) {
         // With the application clock off the series holds the frame GPU work span (noteFrameWork), so its mean is the span's, not the application's.
         const bool clockOn = gpuFrameSnapshot().enabled;
         double spanLast = 0.0;
         const bool spanDone = gpuCensusFrameSpan(&spanLast, nullptr);
         const bool historyHas = nativeApplicationGpu.count != 0;
-        // The same choice the fps overlay line makes (frame_span_tile.h chooseGpuTime): the tile's application test is the clock alone.
-        const GpuTimeChoice pick = chooseGpuTime(clockOn, clockOn, historyHas, nativeApplicationGpu.meanMs, spanDone, spanLast);
-        const char* reason = clockOn ? noTiming : "frame GPU work span: no sample yet";
-        gpuTimeTileText(pick.source == GpuTimeSource::ApplicationRender, pick.ms, pick.source == GpuTimeSource::WorkSpan, pick.ms,
-                        reason, v, sizeof(v), sub, sizeof(sub));
-        tile("GPU TIME", v, sub);
+        // The tile's application test is the clock alone.
+        const GpuFigures figures = chooseGpuFigures(gpuBusyReading(), clockOn, clockOn, historyHas, nativeApplicationGpu.meanMs, spanDone, spanLast);
+        gpuBusyTileText(figures, v, sizeof(v), sub, sizeof(sub));
+        tile("GPU BUSY", v, sub);
     }
     if (native && nativeApplicationCpu.count) {
         // The caller work per cycle: the game's thread from one pose wait's
@@ -1787,15 +1788,15 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen) {
         const auto render = s.nativeHistory.applicationGpu(now, 200);
         const auto submit = s.nativeHistory.applicationCpu(now, 200);
         const bool haveCpu = nativeApplicationCpuReady(timing) && submit.count;
-        // The GPU figure is the tile's choice (frame_span_tile.h chooseGpuTime): with the application clock off it is the frame
-        // GPU work span, which this line did not read before 2026-10-14 and so showed "gpu -- ms" for any such flight.
+        // The GPU figures are the tile's choice (frame_span_tile.h chooseGpuFigures): the OS busy time first, then the elapsed span or
+        // the application-render mean beside it, each labelled.
         double spanLast = 0.0;
         const bool spanDone = gpuCensusFrameSpan(&spanLast, nullptr);
-        const GpuTimeChoice pick = chooseGpuTime(gpu.enabled, nativeApplicationGpuReady(timing, gpu), render.count != 0, render.meanMs,
-                                                 spanDone, spanLast);
+        const GpuFigures figures = chooseGpuFigures(gpuBusyReading(), gpu.enabled, nativeApplicationGpuReady(timing, gpu), render.count != 0,
+                                                    render.meanMs, spanDone, spanLast);
         // "cpu" is the caller work per cycle, the line's width unchanged; an
         // older runtime's stand-in says what it is.
-        overlayLineText(buf, bufLen, perfFpsOf(ps.avgMs), pick, nativeCpuPreSubmit(s.nativeHistory) ? "cpu (pre-submit)" : "cpu",
+        overlayLineText(buf, bufLen, perfFpsOf(ps.avgMs), figures, nativeCpuPreSubmit(s.nativeHistory) ? "cpu (pre-submit)" : "cpu",
                         haveCpu, submit.meanMs);
         return;
     }

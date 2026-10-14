@@ -1,5 +1,18 @@
 # Render-to-submit GPU checkpoint
 
+## Status
+
+- 2026-10-14, claude/overlay-gpu-busy: the overlay's primary GPU figure is GPU BUSY from the OS
+  (D3DKMTQueryStatistics, per-process node running time), with the frame GPU work span as a labelled
+  second figure ("span"). BUILT, NOT FLOWN. The last section of this doc says how it works. The span
+  is an elapsed figure that includes GPU idle, so it is not comparable to fpsVR; busy is.
+- Open: the next flight compares the `gpu busy (os):` log line with the GPU pass profiler's "frame
+  busy" with the delay (about 5.0 ms in the hangar on 2026-10-14). They should agree within about a
+  millisecond. If busy reads far above the pass profiler's figure, suspect the node choice (a copy
+  or compute node counted) or the 100 ns unit.
+- No temporary keys: the sampler has no setting; it is on in the VR profile.
+- The sections below are history (the OpenVR proxy era) up to the 2026-10-14 pair at the end.
+
 This follows the successful `cc3d882` Frontier timer-migration check. It adds
 the local frame measurement to the current OpenVR proxy. It does not add an
 OpenXR renderer or complete Phase 0 qualification.
@@ -311,3 +324,73 @@ and a completed span, and "--" only with no sample; the label; a short buffer; t
 arm gate; the lease check; and a simulated 90 Hz slack frame in which the work
 span is less than the frame period (the arithmetic only).
 Not flown.
+
+## 2026-10-14: the overlay's primary GPU figure is GPU busy, from the OS
+
+**Why.** The work span above is first command to door end, so it includes every wait for the CPU
+to submit. The 2026-10-14 pass profiler delay run (log 162220, Pimax Crystal Super, hangar) put
+one frame at 11.6 ms with the waits and 5.0 ms busy with a 6 ms front-loaded delay. The overlay
+read about 10 ms on a frame that kept the GPU busy about half the time. fpsVR's older comparison
+(dlss-performance-review-2026-09-28.md, "Query median 12.761 ms includes submission gaps, not GPU
+busy time") was the same effect. OpenXR has no GPU timing and D3D11 cannot ask the GPU for busy
+time, so the figure comes from the kernel's books.
+
+**What it reads.** `D3DKMTQueryStatistics` (gdi32.dll, loaded by name so a system without it
+degrades to "--"): the adapter's node count, then per node the process's cumulative `RunningTime`.
+The unit is 100 ns (measured here on an RTX 5090: 20,548,170 units for about 2.0 s of known GPU
+work). Engine types and names come from `D3DKMTQueryAdapterInfo(KMTQAITYPE_NODEMETADATA)`. The
+RTX 5090 reports 17 nodes: node 0 is the 3D engine (graphics and compute), 3/4/12-15 copy, 1/2
+and 6-8 video, 5/9/10/11/16 other (Security, OFA, JPEG, VR).
+
+**The figure.** For each reading pair: utilisation of a node = running time over wall time;
+busy ms per frame = the busiest counted node's running time over the window / frames in the window
+(= utilisation x the window's mean frame time). Counted nodes are the 3D engines only. The
+maximum is used, not the sum: engines run in parallel, so a sum counts the same wall time twice,
+and the maximum over engines is what Task Manager shows as a process's GPU. Copy, video and the
+vendor engines are logged, not counted. Windows under 250 ms, with no frame, with a counter that
+went backwards, or with a node over 150% are dropped; 100-150% is held at 100%.
+
+**Where it runs.** `src\common\gpu_busy_os.h` holds the maths, the board and the text (no
+Windows calls). `src\d3d11\gpu_busy_sampler.cpp` holds the kernel calls and a detached thread
+that samples once a second; `gpuBusyFrame` (device_hook.cpp, beside `vramWatchTick`) costs one
+relaxed add per frame and, once, reads the device's adapter LUID. The kernel is never asked on
+the render thread. VR profile only. Cost: about 17 syscalls a second.
+
+**What it cannot see.** This process's work on the game's adapter. The runtime's compositor work
+(a different process) is not in it, and neither is a second adapter's. Where
+`D3DKMTQueryStatistics` is absent (Wine, DXVK) the overlay shows "--". Pimax OpenXR is not
+SteamVR, so fpsVR's per-app GPU time from the compositor is not available on that runtime;
+this figure is the comparable one.
+
+**Overlay and tile.** `chooseGpuFigures` (frame_span_tile.h) builds both figures once for the
+fps line and the Monitor tile:
+
+    90 fps   gpu busy 5.4 ms   span 9.7 ms   cpu 3.6 ms
+
+With `advanced.app_gpu_timing` on, the second figure is the application-render mean, labelled
+"app render" (also while it has no sample; the span is not read then). The Monitor page's GPU
+TIME tile became GPU BUSY: the value is busy, the sub-line holds the labelled second figure
+("span 9.7 ms (elapsed)"). "--" appears for busy only when the OS has no figure (the sub-line
+says why).
+
+**Log.** One start-up line and one line every 30 s from the sampler thread:
+
+    gpu busy (os): adapter "NVIDIA GeForce RTX 5090" luid=00000000:00013628, nodes=0:3D*,... (* = counted: ...), sampled every 1000 ms, source=d3dkmt
+    gpu busy (os): 5.412 ms/frame (48.7% of the period), span 9.703 ms, source=d3dkmt nodes=0:3D=48.7%*,4:Copy=0.4%(not counted)
+    gpu busy (os): unavailable (<reason>); the overlay shows "--" for GPU busy, source=d3dkmt
+
+"Of the period" is the utilisation of the busiest counted node (busy / the window's mean frame
+time). The span is the mean of the census's work spans over the same 30 s.
+
+**To validate in the next flight.** In a hangar at 90 Hz, compare the 30 s `gpu busy (os)` line
+with the GPU pass profiler's "frame busy" under the delay (about 5.0 ms on 2026-10-14; the delay
+removes the submission waits the span includes). Agreement within about a millisecond confirms
+the node choice and the unit; busy should sit well under the span (the span read about 10 ms
+that day). Also check the percentage against Task Manager's 3D engine for the game process.
+
+**Tests.** `aa_off_test` (Cut E): the maths (utilisation, ms per frame, the 100 ns unit, max not
+sum, short windows, no frames, counter reset, clamp, garbage, no counted node, node count
+change, bad calls), the board (age, failure, saturation), the exact log text, and the tile and
+fps line choices including the failure paths. The kernel path was checked by a throwaway
+harness (a compute load of known length: 4 dispatches of 1.175 ms read 4.80 ms a frame) and
+is otherwise not exercised by the rig.
