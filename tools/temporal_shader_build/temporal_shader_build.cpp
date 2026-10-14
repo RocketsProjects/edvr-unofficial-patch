@@ -579,8 +579,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 14 && coreFixed.size() == 65 && coreLegacy.size() + 16 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader and the UI layer's in-place composite are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 14 && coreFixed.size() == 67 && coreLegacy.size() + 18 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, the two temporary HDR energy shaders, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader and the UI layer's in-place composite are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -620,8 +620,10 @@ static void selfTest() {
         {"kFlatForegroundOwnershipBytecode","flat_foreground_ownership_cs",edvr::kFlatForegroundOwnershipCs},
         {"kFlatForegroundMergeBytecode","flat_foreground_merge_cs",edvr::kFlatForegroundMergeCs},
         {"kWeaponFootprintBytecode","weapon_footprint_cs",edvr::fixed_extra_source::weapon_footprint::kExtractCsHlsl},
+        {"kFlatHdrEnergyBytecode","flat_hdr_energy_cs",edvr::kFlatHdrEnergyCsHlsl},
+        {"kFlatHdrExposureBytecode","flat_hdr_exposure_cs",edvr::kFlatHdrExposureCsHlsl},
     };
-    for(size_t i=0;i<3;++i) {
+    for(size_t i=0;i<5;++i) {
         auto& diagnostic=coreFixed[coreLegacy.size()+i];
         check(!std::strcmp(diagnostic.symbol,diagnostics[i].symbol) &&
               !std::strcmp(diagnostic.sourceName,diagnostics[i].name) &&
@@ -669,7 +671,7 @@ static void selfTest() {
         {"kFlatNullPoolMarkerPsBytecode","flat null pool marker",edvr::kFlatNullPoolMarkerPs,"ps_5_0"},
     };
     for(size_t i=0;i<5;++i) {
-        auto& shader=coreFixed[coreLegacy.size()+3+i];
+        auto& shader=coreFixed[coreLegacy.size()+5+i];
         check(!std::strcmp(shader.symbol,foreground[i].symbol) &&
               !std::strcmp(shader.sourceName,foreground[i].name) &&
               !std::strcmp(shader.entry,"main") && !std::strcmp(shader.profile,foreground[i].profile) &&
@@ -693,7 +695,7 @@ static void selfTest() {
     // DXBC reflects: a Shader Model 5 geometry shader that takes lines, emits at most six vertices as a triangle strip, and reads one
     // 16-byte constant buffer, Strip at b0 (supercruise_bars_binding.h's StripParams). A change to any of them fails here, in the build.
     {
-        auto& shader = coreFixed[coreLegacy.size() + 9];
+        auto& shader = coreFixed[coreLegacy.size() + 11];
         check(!std::strcmp(shader.symbol, "kSupercruiseBarsGsBytecode") && !std::strcmp(shader.sourceName, "supercruise bars strip") &&
               !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "gs_5_0") && shader.alternate == edvr::kSupercruiseBarsGs &&
               shader.macros == nullptr && !shader.flags1 && !shader.flags2,
@@ -733,7 +735,7 @@ static void selfTest() {
             {"kFlatForegroundShadowEvalBytecode", "flat foreground shadow evaluation", edvr::kFlatForegroundShadowEvalCs, 256},
         };
         for (size_t i = 0; i < 4; ++i) {
-            auto& shader = coreFixed[coreLegacy.size() + 10 + i];
+            auto& shader = coreFixed[coreLegacy.size() + 12 + i];
             check(!std::strcmp(shader.symbol, contracts[i].symbol) && !std::strcmp(shader.sourceName, contracts[i].name) &&
                   !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "cs_5_0") && shader.alternate == contracts[i].source &&
                   shader.macros == nullptr && !shader.flags1 && !shader.flags2,
@@ -785,7 +787,7 @@ static void selfTest() {
     // entry, profile and flags, the text it compiles, the one 1024-thread group the module dispatches it with and the bindings the module sets
     // (sky_ring_gpu.h): four textures at t0..t3, the ring as a raw UAV at u0 and the 48-byte parameter block at b0.
     {
-        auto& shader = coreFixed[coreLegacy.size() + 14];
+        auto& shader = coreFixed[coreLegacy.size() + 16];
         check(!std::strcmp(shader.symbol, "kSkyRingBytecode") && !std::strcmp(shader.sourceName, "sky ring") &&
               !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "cs_5_0") && shader.alternate == edvr::kSkyRingCs &&
               shader.macros == nullptr && !shader.flags1 && !shader.flags2,
@@ -824,7 +826,7 @@ static void selfTest() {
     // bindings it reads: the frame as a typed UAV at u0 (and no SRV of it -- a frame bound for read and write at once is the one hazard this shader must never
     // have), the layer at t1, the multiply at t2, the parameters at b0.
     {
-        auto& shader = coreFixed[coreLegacy.size() + 15];
+        auto& shader = coreFixed[coreLegacy.size() + 17];
         check(!std::strcmp(shader.symbol, "kUiLayerCompositeInPlaceBytecode") && !std::strcmp(shader.sourceName, "ui_layer_composite_inplace_cs") &&
               !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "cs_5_0") && shader.alternate == edvr::kUiLayerCompositeInPlaceHlsl &&
               shader.macros == nullptr && !shader.flags1 && !shader.flags2,

@@ -21,6 +21,8 @@
 
 #include <cstdint>
 
+#include "hdr_backend_flags.h"   // FlatDlssExposure (dlaaSetHdrExposure)
+
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
@@ -201,6 +203,10 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
 // Performance mode's default M is at 2.7x K's error at rest on fine detail;
 // on the full frame the models cost the same.
 void dlaaSetPreset(unsigned preset);
+// TEMPORARY A/B (advanced.flat_dlss_exposure, design doc section 107): the exposure the flat HDR route hands NVIDIA. A change
+// that flips AutoExposure (to or from auto) remakes that route's feature on its next evaluation; scene and fixed differ only
+// in the texture the evaluation hands over. The VR world route never reads it.
+void dlaaSetHdrExposure(FlatDlssExposure mode);
 
 // The preset in force and the exposure inputs an evaluation carries (the scene inspector's DLSS line; computed on demand, the hot path
 // stores nothing). `upscaling` is output larger than input: DLAA and the Quality modes never run L or M. preset 0 = none (no NGX in this build).

@@ -628,7 +628,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
-    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" ^
+    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" "src\d3d11\flat_hdr_energy.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
@@ -1069,6 +1069,27 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native sharpen GPU test build failed & exit /b 1 )
 "%BUILD%\native_sharpen_gpu_test.exe" --dry-run || exit /b 1
+exit /b 0
+
+:rig_flat_hdr_energy_test
+echo [edvr] === flat_hdr_energy_test.exe ===
+REM TEMPORARY (design doc section 107): the HDR route's energy instrument and measured exposure, the real module
+REM (src\d3d11\flat_hdr_energy.cpp) on WARP against the CPU reference of both compute passes. Takes Windows' own d3d11
+REM (common\system_d3d11.h), no import library.
+if not exist "%OBJ%\flat_hdr_energy_test" mkdir "%OBJ%\flat_hdr_energy_test"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" ^
+    /Fo"%OBJ%\flat_hdr_energy_test\\" /Fe"%BUILD%\flat_hdr_energy_test.exe" ^
+    "tools\flat_hdr_energy_test\flat_hdr_energy_test.cpp" "src\d3d11\flat_hdr_energy.cpp" ^
+    "src\d3d11\shader_swap.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat hdr energy test build failed & exit /b 1 )
+"%BUILD%\flat_hdr_energy_test.exe" --dry-run || exit /b 1
+"%BUILD%\flat_hdr_energy_test.exe" --self-test || (
+    echo [edvr] ERROR: the HDR route's energy line or measured exposure disagrees with the CPU reference
+    exit /b 1
+)
 exit /b 0
 
 :rig_flat_sharpen_test

@@ -25,8 +25,8 @@
 - **10-10 map arcs (section below):** temporal AA OFF, no jitter, while any map is open (GuiFocus 6, 7, 8; built, not flown). The
   plane-motion and per-pixel star-choice work is REMOVED (the stars' parallax, section below). Kept: the map UI families and their zero cancel.
   Map frames below native run SMAA 1x, then AMD's FSR1 EASU, in place of the bilinear tap (shipped for an A/B flight 2026-10-10; section below).
-- **106 (10-09):** fixed exposure 1.0 SHIPS on the flat HDR route (flown by eye:
-  brighter, stars back); temporary key and luma probe REMOVED. VR keeps auto.
+- **106 (10-09):** fixed exposure 1.0 SHIPS, flat HDR route (flown: brighter, stars back). **107 (10-14), BUILT, NOT FLOWN:**
+  bloom too bright with DLAA; TEMPORARY `advanced.flat_dlss_exposure` (scene|fixed|auto), `flat hdr energy:` line.
 - **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
   corona-smear regression and mod effect ordering. Scene/depth identity, camera
   encoding and handoff have flight evidence; correct motion for every rendered
@@ -14905,3 +14905,87 @@ comparison key ... CLASHES` log line at bind and on every rebind (elite_binds).
 
 Next flight: flat, DLSS on, F7 twice; read the lines above and look for the notice card.
 Then VR: the same, and the `ui quality:` line either side.
+
+## 107. DLAA with the game's Bloom on: stars and bloom too bright (2026-10-14)
+
+Report: flat, DLAA in HDR (the HDR route), a star is a blown-out white disc, the canopy strut crossing it glows orange with a
+thick halo, the target label over it is washed out; several users say bloom is too bright in VR and flat. Sean's A/B on the flat
+profile: AA off with bloom on is normal; DLAA with bloom on is too bright; DLAA with bloom off is normal. The same on 0.19.1, so
+no 0.20.0-rc.1 change made it.
+
+- ruled out: the rc changes, because 0.19.1 shows it. The UI resolve's corona hold (c42c2c46) skips its twelve fetches only
+  when the centre luma is at or above the limit, where the weight was exactly zero (a NaN or infinite centre also leaves the pixel
+  alone in both versions, the test being on luma), and the hold only pulls a faint pixel toward its neighbours' range, so it
+  cannot add energy; it is VR's UI resolve and does not run in flat. The share-exposure engine skip (bb3adb45) is VR and copies
+  the first eye's strip; the HDR HUD seed (e95a4fe6) reads depth in place.
+- ruled out: a size or format mismatch between EDVR's output and the game's bloom, because the route requires R >= D and evaluates
+  at the render size (flat_hdr_route.h, the R >= D gate), finishHdr draws back into H at the render size, and H is R11G11B10F on
+  both sides (flat_mono_resolve.cpp). EDVR never touches bloom's own passes, so there is no second bloom.
+- ruled out: the game's exposure adaptation moving, because its exposure reduction reads H at quarter size before the trigger
+  (section 81), on the image EDVR has not resolved yet.
+
+Why the matrix is the signature of excess energy in H. The tone curve saturates at white, so a star that is too bright in H is a
+white disc either way; bloom is linear in H and spreads whatever energy it is given. AA off hands bloom the game's own H, bloom off
+hides the surplus behind the tone curve, and DLAA with bloom on shows it. The route resolves H before bloom and tone, and since
+section 106 hands NVIDIA's network that radiance with exposure 1.0. Elite's H is not exposed: its own tone pass multiplies it
+later. Disassembly of the tone pair (VS 2D78DC3F, PS 99C21CEB, stock chain): the VS samples the exposure strip's texel 0 at (0,0)
+and passes it as E; the PS computes colour * cb2[2].x * M(E) * cb2[6].y with M = ((1.03 z - f(E)) / E) * 2^-y, f from cb2[7] and
+cb2[8], a Reinhard-like rational curve after. So the strip's value is a luminance E (34-114 in a star scene), the multiplier
+M is about 1/E scaled by constants in the PS's constant buffer, and the bloom-composite tone variant (9270) has another layout.
+A star at 1e3 to 1e4 in H against an exposure of 1.0 is far outside the range the network was trained on.
+
+Hypotheses and their discriminators (one flight):
+- A, DLSS overshoots or rings on highlights far above its expected range at exposure 1.0 (the leading one). Signature: R above
+  1.02 or M above 1.05 in the energy line with `fixed`, falling toward 1.00 with `scene`; saturated out above saturated in
+  (the clamp at 65024 in finishHdr, flat_mono_shader_source.h hdrRepresentable, turns a fp16 blow-up into a finite huge value).
+- B, linear-HDR AA spreads a star's edge energy that the game's aliased H kept as binary pixels. Signature: R near 1.00 and M near
+  1.00 under every exposure, while bloom still looks stronger; EDVR's own TAA (`temporal_aa = on`, bounded, same placement)
+  then looks the same as DLAA.
+- C, AutoExposure (`auto`) differs from both: section 106 found it dimmed the picture and lost stars. Its R and M are read
+  for comparison.
+- D, a preset effect: `temporal_aa_model` k, j, l, m changes R and M if the overshoot is the network's.
+
+What this build adds (TEMPORARY, listed in Status):
+- `flat hdr energy:` every 5 s while the route treats frames, from flat_hdr_energy.cpp: twice a second one compute pass counts H
+  as the backend is handed it and again after finishHdr wrote the result back, read three or more frames later without a stall.
+  Fields: R = the bright-pixel luma sum out over in (bright = luma above T, 64 times the last input geometric mean, 1 to 4096,
+  8 first); M = the largest luma out over in (Mpeak the worst sample); N = pixels over T in/out; saturated = pixels with a channel
+  at or above 60000; gm-in = the input's geometric mean luma; applied-exposure = what NVIDIA was handed (scene only); fallbacks =
+  evaluations that used 1.0 for want of a measurement. `armed` is said once; a window offered frames with no finished sample
+  prints samples=0, and a session that never treats a frame prints neither. The VR world route prints the same line with
+  route=vr-world and exposure=world-auto (it keeps AutoExposure).
+- `advanced.flat_dlss_exposure = scene | fixed | auto`, flat profile, default scene, live (a change to or from auto remakes the
+  feature; the log says so). fixed is section 106; auto is section 81; scene is below.
+
+The scene exposure (what scene hands NVIDIA). It is NOT the game's own exposure: that needs the PS's constant buffer, which differs per
+tone variant and which exposure_fix does not see in flat. It is measured from H on the GPU, before the resolve, each treated frame:
+- luma = 0.2126 R + 0.7152 G + 0.0722 B on a 128x128 grid (pixel ((2 g + 1) size) / 256 per axis), non-finite and negative skipped;
+- 64 half-stop bins from 2^-16, bin = clamp(floor((log2 luma + 16) * 2), 0, 63); the 90th percentile bin b holds the ceil(0.9 n)-th
+  sample; log2 W = (b + 0.5) / 2 - 16;
+- s = log2 W at once on the first measurement and on a reset, else s <- s + 0.08 (log2 W - s); the exposure is 2^-s = 1 / W.
+Units: H is linear scene radiance in the game's units (the game's own exposure histogram spans 2^-9.83 to 2^13.29); the exposure is
+dimensionless, per unit of H, so H * exposure puts the picture's 90th percentile at 1.0, the range a tone-mapped game feeds the
+network. NVIDIA's input is a 1x1 R32_FLOAT texture, "the final exposure scale"; with IsHDR and no AutoExposure the network multiplies
+colour by it internally and returns colour in H's units, so nothing downstream rescales (pre-exposure stays 1). The 90th percentile
+puts the lit surfaces at 1 and leaves a star far above it, which the network handles as HDR; the geometric mean was rejected because a
+mostly black sky pulls it down and over-exposes everything lit. The constants (0.9, 8% a frame, 128x128) are guesses to be judged by
+the energy line, not measured values.
+
+Rigs: flat_temporal_test pins the layout, decode, CPU reference, exposure procedure, smoothing, flags and the 5 s line; the new
+tools\flat_hdr_energy_test runs the real module on WARP against that reference (R, M, N, saturated, bad, the applied exposure, the
+smoothing and reset, the game's compute state put back, the never-ran and samples=0 lines).
+
+### Next flight (checklist)
+1. `python tools\edvr_log.py --target <store> --expect-build HEAD --version` first; flat profile, a star view, Bloom on in Elite's
+   graphics options, DLAA, SS 1.0, the canopy strut across the star.
+2. `advanced.flat_dlss_exposure = scene` (default): read `flat hdr energy:` (`python tools\edvr_log.py --grep "flat hdr energy"`).
+   Pass: R about 1.00, M at most about 1.05, saturated out not above in, fallbacks 0, applied-exposure moving slowly, the star
+   and bloom as stock.
+3. Set `fixed` (live): R and M with section 106's exposure. If A is right, R and M are visibly above scene's and the star is too
+   bright again.
+4. Set `auto`: read R and M for the record, and whether stars are lost as in 106.
+5. `temporal_aa = on` (EDVR TAA): R, M and the look, for hypothesis B. `temporal_aa_model` j or l under scene: R and M, for D.
+6. DLSS at SS 0.5 (the copy route, after the tone): bloom as stock confirms the route is the place.
+7. VR on foot (the world route) only for its `route=vr-world` line; the ship in VR resolves after the game's post and cannot change bloom.
+Decision: if scene brings R to about 1.00 and the star looks right, keep the measured exposure as the behaviour, retire the key and
+the energy line (the key is removed, quoted, as Scope control requires); if R is already 1.00 under fixed, A is ruled out and B is next.

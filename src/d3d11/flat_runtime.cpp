@@ -56,6 +56,7 @@
 #include "device_hook.h"
 #include "journal_watch.h"   // the map's GuiFocus (flatRuntimeMapFocusFrame): temporal AA off on the maps, and the map families' gate
 #include "dlaa.h"
+#include "flat_hdr_energy.h"   // TEMPORARY (design doc section 107): the energy instrument and the measured DLSS exposure
 #include "flat_sharpen.h"
 #include "flat_ui_layer_math.h"   // fix.ui_quality's flat layer: the target class and family rule its decision asks
 #include "../common/config.h"
@@ -310,6 +311,10 @@ struct State {
     // The prep's refusal census in flat: sampled for a bounded window after the census key (NumLock), so the per-class
     // line names what the finish shows raw instead of the backend's result.
     uint32_t refusalCensusFrames = 0;
+    // advanced.flat_dlss_exposure = scene | fixed | auto (TEMPORARY A/B, design doc section 107): the exposure the HDR route hands
+    // NVIDIA. Read at the frame boundary; dlssExposureRead is false until the first read, so the first read is logged too.
+    FlatDlssExposure dlssExposure = FlatDlssExposure::Scene;
+    bool dlssExposureRead = false;
     // The camera term's translation precision (design doc section 104): row 275 is the render origin the camera term subtracts
     // frame to frame (cameraBefore, flat_mono_shader_source.h). One 5 s window over the non-reset frames handed to the resolver.
     struct CameraOriginWindow { uint64_t frames = 0, moved = 0; float maxAbs = 0, maxStep = 0, minStep = 0; float last[3] = {}; };
@@ -3748,6 +3753,28 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         Log::get().note("flat runtime: DLSS model=%s preset=%u; applied at frame boundary%s",
             model.c_str(),preset.full,preset.known?"":" (unknown model; using K)");
     }
+    // TEMPORARY A/B (design doc section 107): advanced.flat_dlss_exposure = scene | fixed | auto, live. scene hands NVIDIA the
+    // exposure EDVR measures from H each frame; fixed hands it 1.0 (section 106); auto makes the feature with AutoExposure
+    // (section 81). Only auto changes the feature's creation flags, so only a change to or from it remakes the feature.
+    {
+        const FlatDlssExposure exposure =
+            flatDlssExposureFromText(Config::get().getString("advanced.flat_dlss_exposure", "scene").c_str());
+        if (exposure != s.dlssExposure || !s.dlssExposureRead) {
+            const bool changed = s.dlssExposureRead;
+            const bool remake = changed && (exposure == FlatDlssExposure::Auto) != (s.dlssExposure == FlatDlssExposure::Auto);
+            s.dlssExposure = exposure; s.dlssExposureRead = true;
+            dlaaSetHdrExposure(exposure);
+            if (remake && temporalEngineFor(mode) == TemporalEngine::Nvidia) {
+                s.haveResolvePlan=false;s.resolvePreflight={};s.resolvePreflightRetryMs=0;
+                reset();s.phase.resetHistory();
+            }
+            Log::get().note("flat runtime: advanced.flat_dlss_exposure=%s at frame=%llu (%s); the HDR route's NVIDIA feature gets %s",
+                flatDlssExposureName(exposure), (unsigned long long)frame, changed ? "changed" : "first read",
+                exposure == FlatDlssExposure::Auto ? "AutoExposure and no exposure texture"
+                : exposure == FlatDlssExposure::Fixed ? "no AutoExposure and an exposure texture of 1.0"
+                : "no AutoExposure and the exposure EDVR measures from the scene each frame (1.0 on a frame it has none)");
+        }
+    }
     if (mode != s.mode) {
         if (s.engine == FlatMonoResolveMode::Xess) xessReleaseFeatures();
         s.haveResolvePlan=false;s.resolvePreflight={};s.resolvePreflightRetryMs=0;
@@ -6588,7 +6615,14 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         }
     }
     reach("resolve");   // the frame is the resolver's from here
+    // TEMPORARY (design doc section 107): the energy instrument counts H as the backend is handed it, and the scene exposure
+    // (advanced.flat_dlss_exposure = scene, DLSS and DLAA only) is measured from the same image, before the resolve.
+    flatHdrEnergyPoll(ctx);
+    if (s.dlssExposure == FlatDlssExposure::Scene && (effectiveMode == FlatMonoResolveMode::Dlss || effectiveMode == FlatMonoResolveMode::Dlaa))
+        flatHdrExposureUpdate(ctx, hdrView.Get(), f.renderWidth, f.renderHeight, f.reset);
+    const bool energySample = flatHdrEnergyBegin(ctx, hdrView.Get(), f.renderWidth, f.renderHeight, "flat");
     if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) {
+        if (energySample) flatHdrEnergyAbandon();
         const char* temporalReason = s.reason;
         // The backend (or the route's own guard) refused before H was written. Recover the jitter into H, or decline.
         if (recoverHdr(temporalReason, f)) { refuse(s); s.reason = "spatial-fallback"; }
@@ -6596,6 +6630,11 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         return;
     }
     s.reason = nonzeroPhase(s) ? "treated-jittered-hdr" : "treated-zero-jitter-hdr";
+    // ... and H again now the resolve has written the backend's output back into it (finishHdr).
+    if (energySample)
+        flatHdrEnergyEnd(ctx, hdrView.Get(), flatMonoResolveModeName(effectiveMode), s.preset,
+                         (effectiveMode == FlatMonoResolveMode::Dlss || effectiveMode == FlatMonoResolveMode::Dlaa)
+                             ? flatDlssExposureName(s.dlssExposure) : "n/a");
     if(protectedOverlay) ++s.overlayIsolatedWindow;
     if(selected.mixedCamera) {
         ++s.untrustedTreated;
