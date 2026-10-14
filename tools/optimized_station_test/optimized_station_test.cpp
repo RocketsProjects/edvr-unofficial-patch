@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -105,6 +106,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -128,6 +130,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -273,6 +276,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -295,6 +299,29 @@ int main(int argc, char** argv) {
         check(se::sunStep(si, &sun, &why) && sun.off, "v14.23 sun: moving again turns it off");
         si.docked = false;
         check(se::sunStep(si, &sun, &why) && !sun.off && std::strcmp(why, "undocked") == 0, "v14.23 sun: undock turns it on");
+    }
+    {
+        // 2026-10-14: the sun skip follows the seat like the seal. Flight log edvr_gfx_20261014_144320.log: the skip went on at 14:56:20 and stayed on, with Status docked and the
+        // pad's r1 still 1, for the whole walk on foot through the lift and the concourse (sun draws skipped in every 30 s window for minutes).
+        se::SunState sun;
+        se::SunInputs si;
+        si.setting = true;
+        si.aboard = true;
+        si.docked = true;
+        si.ownKnown = true;
+        si.r0Fresh = true;
+        si.r0 = 1;
+        si.r1Fresh = true;
+        si.inHangar = true;
+        si.relOk = true;
+        si.rel = -45.0f;
+        const char* why = "";
+        check(se::sunStep(si, &sun, &why) && sun.off, "on foot sun: aboard in the bay, the skip goes on");
+        si.aboard = false;   // the disembark: the pad is still in the bay (r1 1), Status still docked
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "on foot") != nullptr, "on foot sun: the seat leaving turns the sun back on although r1 is 1 and Status is docked");
+        check(!se::sunStep(si, &sun, &why) && !sun.off, "on foot sun: it stays on while on foot, even with the pad moving (r0 1)");
+        si.aboard = true;
+        check(se::sunStep(si, &sun, &why) && sun.off, "on foot sun: boarding again, the pad moving in, turns it off again");
     }
     // The pure helpers that are not about the seal trigger (kept): the latch's identity, the bounded probe, the rig's epoch rule, the view's centre.
     {

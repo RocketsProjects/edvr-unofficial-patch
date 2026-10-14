@@ -2690,6 +2690,7 @@ void optimizedStationFrameBody(uint32_t frame) {
         sealed::SunInputs su;
         su.setting = g_setting.load(std::memory_order_acquire);
         su.docked = g_dockedNow.load(std::memory_order_acquire);
+        su.aboard = g_aboardNow;
         su.ownKnown = g_game.ownKnown;
         su.r0Fresh = g_game.r0Fresh;
         su.r0 = static_cast<uint8_t>(g_game.r0 < 0 ? 0 : g_game.r0);

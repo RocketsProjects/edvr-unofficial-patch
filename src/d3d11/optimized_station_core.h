@@ -1680,6 +1680,7 @@ inline size_t selectMechanism(const LatchCand* cands, size_t n, uintptr_t ownAdd
 struct SunInputs {
     bool setting = false;
     bool docked = false;
+    bool aboard = false;         // the commander is seated in the ship (Status.json); on foot (or unknown) the sun skip is off, as the seal is
     bool ownKnown = false;       // the game has named the own pad this dock
     bool r0Fresh = false;        // the own pad's r0 was called within kPadStateFreshMs
     uint8_t r0 = 0;              // the own pad's latest r0 code (meaningful with r0Fresh)
@@ -1699,7 +1700,7 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
     *why = "";
     const bool moving = in.ownKnown && in.r0Fresh && (in.r0 == kReaderMoving || in.r0 == kReaderDescent);
     if (!st->off) {
-        if (in.setting && in.docked && moving) {
+        if (in.setting && in.docked && in.aboard && moving) {
             st->off = true;
             *why = "pad moving in or locked in (r0)";
             return true;
@@ -1714,6 +1715,11 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
     if (!in.docked) {
         st->off = false;
         *why = "undocked";
+        return true;
+    }
+    if (!in.aboard) {   // 2026-10-14: the skip persisted for minutes on foot (the pad's r1 stays 1 and Status stays docked), through the lift and the concourse
+        st->off = false;
+        *why = "on foot (not seated in the ship)";
         return true;
     }
     if (in.hangarChanged) {
