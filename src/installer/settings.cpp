@@ -33,6 +33,25 @@ bool ensureBackupDir(const std::wstring& path) {
 
 }  // namespace
 
+// What the file says, or -- for a setting the user's ini does not carry at all --
+// `absent`. An un-migrated file is read the way the runtime reads it: through the
+// moved-from map, ignoring an old line that still carries its retired default
+// (that is an un-updated file, not a choice -- the field saw the window claim
+// splash while the runtime honoured a stale menu_backdrop = stock).
+std::string settingValueAsRead(const std::string& text, const std::string& dotted, const std::string& absent) {
+    const char* kAbsent = "\x01";
+    const std::string value = iniValue(text, dotted, kAbsent);
+    if (value != kAbsent) return value;
+    for (const auto& mv : kMovedSettings) {
+        if (!mv[0][0] || dotted != mv[1]) continue;
+        const std::string oldValue = iniValue(text, mv[0], kAbsent);
+        if (oldValue == kAbsent) continue;
+        if (mv[2][0] && oldValue == mv[2]) continue;  // stale default
+        return oldValue;
+    }
+    return absent;
+}
+
 std::vector<Choice> splitChoices(const char* packed) {
     std::vector<Choice> out;
     if (!packed || !*packed) return out;
@@ -197,26 +216,10 @@ void SettingsModel::refreshRows() {
         row.def = &def;
         row.choices = splitChoices(def.choices);
 
-        // What the file says, or -- for a setting the user's ini does not carry
-        // at all -- what this build ships. An un-migrated file is read the way
-        // the runtime reads it: through the moved-from map, ignoring an old
-        // line that still carries its retired default (that is an un-updated
-        // file, not a choice -- the field saw the window claim splash while
-        // the runtime honoured a stale menu_backdrop = stock).
+        // What the file says, as the runtime reads it; what this build ships
+        // for a setting the file does not carry at all.
         const std::string dotted = std::string(def.section) + "." + def.key;
-        const char* kAbsent = "\x01";
-        row.value = iniValue(m_text, dotted, kAbsent);
-        if (row.value == kAbsent) {
-            row.value = def.shipped;
-            for (const auto& mv : kMovedSettings) {
-                if (!mv[0][0] || dotted != mv[1]) continue;
-                const std::string oldValue = iniValue(m_text, mv[0], kAbsent);
-                if (oldValue == kAbsent) continue;
-                if (mv[2][0] && oldValue == mv[2]) continue;  // stale default
-                row.value = oldValue;
-                break;
-            }
-        }
+        row.value = settingValueAsRead(m_text, dotted, def.shipped);
         row.isRecommended = sameValue(def, row.value, def.recommended);
         m_rows.push_back(row);
     }

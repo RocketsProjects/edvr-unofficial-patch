@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -432,6 +433,22 @@ InstallState parseState(const std::string& text) {
     s.nativeOriginalSha = get("native", "original_sha256");
     s.nativeInstalled = !s.nativeRuntimeSha.empty();
 
+    // Pre-flight's undo record. An entry with no file or key names nothing to put back, and a count
+    // that is missing or absurd reads as none: a damaged record must not become a write.
+    s.preflight.appliedUtc = get("preflight", "applied_utc");
+    const int changeCount = std::atoi(get("preflight", "changes").c_str());
+    if (changeCount > 0 && changeCount <= kMaxPreflightChanges) {
+        for (int i = 1; i <= changeCount; ++i) {
+            const std::string prefix = "change" + std::to_string(i) + "_";
+            PreflightChange c;
+            c.file = get("preflight", (prefix + "file").c_str());
+            c.key = get("preflight", (prefix + "key").c_str());
+            c.before = get("preflight", (prefix + "before").c_str());
+            c.after = get("preflight", (prefix + "after").c_str());
+            if (!c.file.empty() && !c.key.empty()) s.preflight.changes.push_back(c);
+        }
+    }
+
     // A record with no version is not a record; it is a file that happens to
     // parse. Everything downstream keys off `present`, so it has to mean
     // "written by this installer", not "the parse did not fail".
@@ -486,6 +503,22 @@ std::string serializeState(const InstallState& state) {
     out += "config_sha256 = " + state.nativeConfigSha + "\r\n";
     out += "original_name = " + toUtf8(state.nativeOriginalName) + "\r\n";
     out += "original_sha256 = " + state.nativeOriginalSha + "\r\n";
+
+    // Only when there is something to undo, so a record Pre-flight never touched reads and writes
+    // exactly as it did before the section existed.
+    if (state.preflight.present()) {
+        out += "\r\n[preflight]\r\n";
+        out += "applied_utc = " + state.preflight.appliedUtc + "\r\n";
+        out += "changes = " + std::to_string(state.preflight.changes.size()) + "\r\n";
+        for (size_t i = 0; i < state.preflight.changes.size(); ++i) {
+            const PreflightChange& c = state.preflight.changes[i];
+            const std::string prefix = "change" + std::to_string(i + 1) + "_";
+            out += prefix + "file = " + c.file + "\r\n";
+            out += prefix + "key = " + c.key + "\r\n";
+            out += prefix + "before = " + c.before + "\r\n";
+            out += prefix + "after = " + c.after + "\r\n";
+        }
+    }
     return out;
 }
 

@@ -127,6 +127,9 @@ struct Survey {
     DllInfo toolOriginal;
 
     InstallState state;
+    // state.ini's hash when the file is there, so a plan that rewrites the record (Pre-flight)
+    // can refuse to if another installer changed it in the meantime.
+    std::string stateSha;
     // Which Elite Dangerous the folder's executable is; the gate refuses
     // everything but OdysseyQualified and says why per case.
     EliteExeKind eliteKind = EliteExeKind::Unreadable;

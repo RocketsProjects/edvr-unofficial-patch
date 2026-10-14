@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,13 +32,16 @@
 #include "../../src/common/iniedit.h"
 #include "../../src/installer/app.h"
 #include "../../src/installer/apply.h"
+#include "../../src/installer/elite_settings.h"
 #include "../../src/installer/plan.h"
+#include "../../src/installer/preflight.h"
 #include "../../src/installer/probe.h"
 #include "../../src/installer/logbundle.h"
 #include "native_contract_cases.h"
 #include "native_apply_cases.h"
 #include "../../src/installer/mirror.h"
 #include "../../src/installer/settings.h"
+#include "../../src/d3d11/terrain_checkerboard_reader.h"   // the runtime's reader, to check the installer's against
 
 using namespace edvr::installer;
 // The ini merge lives in common now (src/common/iniedit.h, shared with the
@@ -6715,6 +6719,1185 @@ static void testScopeArgs() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pre-flight: the rig, the recommendation, and the plan that applies and undoes it
+// ---------------------------------------------------------------------------
+
+static const PreflightRow* pfFind(const std::vector<PreflightRow>& rows, const char* id) {
+    for (const PreflightRow& r : rows)
+        if (r.id == id) return &r;
+    return nullptr;
+}
+
+// A whole folder tree as a string -- every directory, and every file with its hash -- so "wrote nothing at all"
+// is a comparison and not a list of things somebody remembered to look for.
+static void pfSnapshotInto(const std::wstring& dir, const std::wstring& rel, std::vector<std::string>* out) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(joinPath(dir, L"*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        const std::wstring name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+        const std::wstring path = joinPath(dir, name);
+        const std::wstring here = rel.empty() ? name : rel + L"\\" + name;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            out->push_back("D " + toUtf8(here));
+            pfSnapshotInto(path, here, out);
+        } else {
+            out->push_back("F " + toUtf8(here) + " " + sha256File(path));
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static std::string pfSnapshot(const std::wstring& dir) {
+    std::vector<std::string> lines;
+    pfSnapshotInto(dir, std::wstring(), &lines);
+    std::sort(lines.begin(), lines.end());
+    std::string out;
+    for (const std::string& l : lines) out += l + "\n";
+    return out;
+}
+
+// edvr-flat.ini as a flat install leaves it: its own file, a comment, and the key Pre-flight sets.
+static const char* kPfFlatIni =
+    "# EDVR flat settings.\r\n"
+    "\r\n"
+    "[fix]\r\n"
+    "# Which upscaler runs.\r\n"
+    "temporal_aa = off\r\n"
+    "temporal_aa_model = k\r\n"
+    "\r\n"
+    "[advanced]\r\n"
+    "real_dll =\r\n";
+
+// A game folder as an install leaves it: both settings files (the first from the repository's own edvr.ini), the bases
+// they merge against, and the record. `flatIni` empty leaves edvr-flat.ini out.
+static void pfLayOut(const std::wstring& dir, const std::string& vrIni, const std::string& flatIni) {
+    layOutFlatGame(dir);
+    makeTree(stateDirPath(dir));
+    if (!vrIni.empty()) {
+        writeAll(joinPath(dir, L"edvr.ini"), vrIni);
+        writeAll(baseIniPath(dir), vrIni);
+    }
+    if (!flatIni.empty()) {
+        writeAll(joinPath(dir, L"edvr-flat.ini"), flatIni);
+        writeAll(flatBaseIniPath(dir), flatIni);
+    }
+    InstallState st;
+    st.present = true;
+    st.edvrVersion = "v9.9.9-test";
+    st.installedUtc = "2026-10-14T10:00:00Z";
+    st.profile = "vr";
+    st.scope = "both";
+    st.components = "d3d11,ini,flat-ini";
+    st.iniSha = "feedface";
+    writeAll(statePath(dir), serializeState(st));
+}
+
+static Survey pfSurvey(const std::wstring& dir) {
+    Survey s = diskSurvey(dir);
+    s.stateSha = sha256File(statePath(dir));
+    return s;
+}
+
+// What collectPreflightInputs reads from the folder, with the machine's own facts replaced by a made-up rig: an
+// NVIDIA card, a working runtime, no RivaTuner, and no Elite files.
+static PreflightInputs pfRig(const Survey& s, const std::string& shippedIni, const char* scope,
+                             unsigned vendor = kVendorNvidia) {
+    PreflightInputs in = collectPreflightInputs(s, testPayload(shippedIni), scope);
+    in.haveGpu = true;
+    in.gpu.vendorId = vendor;
+    in.gpu.name = L"NVIDIA GeForce RTX 4070 Ti";
+    in.gpu.dedicatedVram = 12ull << 30;
+    in.runtime.state = OpenXrRuntimeState::Ok;
+    in.runtime.name = "Virtual Desktop OpenXR";
+    in.runtime.manifest = L"C:\\Program Files\\Virtual Desktop Streamer\\OpenXR\\vdxr.json";
+    in.rtssRunning = false;
+    in.elite = EliteSettings();
+    in.payloadHasDlss = true;
+    in.payloadHasXess = true;
+    return in;
+}
+
+static EliteSettings pfElite(const char* hmd, const char* ss, const char* aa, const char* terrain) {
+    EliteSettings e;
+    e.folderFound = true;
+    e.presetKnown = true;
+    e.preset = "Custom";
+    e.file = "Custom.4.4.fxcfg";
+    auto put = [&](EliteValue* v, const char* text) {
+        if (!text) return;
+        v->found = true;
+        v->text = text;
+        v->file = e.file;
+    };
+    put(&e.hmdQuality, hmd);
+    put(&e.supersampling, ss);
+    put(&e.aaMode, aa);
+    put(&e.terrainCheckerboard, terrain);
+    return e;
+}
+
+static std::string pfFxcfg(const char* preset, const char* hmd, const char* ss, const char* aa, const char* terrain) {
+    std::string x = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\r\n<RenderOptions PresetName=\"";
+    x += preset;
+    x += "\">\r\n\t<FOV>60.000000</FOV>\r\n";
+    if (aa) x += std::string("\t<AAMode>") + aa + "</AAMode>\r\n";
+    if (hmd) x += std::string("\t<HMDRenderTargetMultiplier>") + hmd + "</HMDRenderTargetMultiplier>\r\n";
+    if (ss) x += std::string("\t<SSAAMultiplier>") + ss + "</SSAAMultiplier>\r\n";
+    if (terrain) x += std::string("\t<TerrainCheckerboardRenderingEnabled>") + terrain + "</TerrainCheckerboardRenderingEnabled>\r\n";
+    x += "</RenderOptions>\r\n";
+    return x;
+}
+
+static void testPreflightDetection(const std::wstring& scratch) {
+    printf("\npre-flight: the rig\n");
+
+    // Which adapters count as graphics cards, and which one is the primary.
+    check(countsAsGraphicsCard(kVendorNvidia, 0), "an NVIDIA adapter is a graphics card");
+    check(countsAsGraphicsCard(kVendorAmd, 0) && countsAsGraphicsCard(kVendorIntel, 0), "so are AMD's and Intel's");
+    check(!countsAsGraphicsCard(kVendorNvidia, 2), "an adapter flagged software (DXGI_ADAPTER_FLAG_SOFTWARE) is not");
+    check(!countsAsGraphicsCard(kVendorMicrosoft, 0), "the Microsoft Basic Render Driver is not, flagged or not");
+    GpuAdapter igpu, dgpu;
+    igpu.vendorId = kVendorIntel;
+    igpu.name = L"Intel UHD Graphics";
+    igpu.dedicatedVram = 128ull << 20;
+    igpu.luid = 0x100;
+    dgpu.vendorId = kVendorNvidia;
+    dgpu.name = L"NVIDIA GeForce RTX 4070";
+    dgpu.dedicatedVram = 12ull << 30;
+    dgpu.luid = 0x200;
+    check(pickPrimaryAdapter({}, false, 0) == -1, "no adapters: no primary");
+    check(pickPrimaryAdapter({igpu, dgpu}, false, 0) == 1, "without Windows' ranking the most memory is the primary");
+    check(pickPrimaryAdapter({dgpu, igpu}, false, 0) == 0, "whatever order DXGI lists them in");
+    check(pickPrimaryAdapter({igpu, dgpu}, true, 0x100) == 0, "Windows' high-performance choice wins over memory");
+    check(pickPrimaryAdapter({igpu, dgpu}, true, 0x999) == 1, "a choice no adapter matches is ignored, not trusted");
+    GpuAdapter same = dgpu;
+    same.luid = 0x300;
+    check(pickPrimaryAdapter({dgpu, same}, false, 0) == 0, "equal memory: the first listed");
+
+    // The machine itself. What it has cannot be assumed, so these are consistency checks: no software adapter,
+    // a primary that is one of the list, and nvidiaAdapterPresent saying exactly what the list says.
+    const GpuList gpus = gpuAdapters();
+    bool allReal = true;
+    bool firstNvidiaSeen = false;
+    std::wstring firstNvidia;
+    for (const GpuAdapter& a : gpus.adapters) {
+        if (a.vendorId == kVendorMicrosoft) allReal = false;
+        if (a.vendorId == kVendorNvidia && !firstNvidiaSeen) {
+            firstNvidiaSeen = true;
+            firstNvidia = a.name;
+        }
+    }
+    check(allReal, "gpuAdapters lists no Basic Render Driver");
+    check(gpus.adapters.empty() ? gpus.primary == -1
+                                : (gpus.primary >= 0 && static_cast<size_t>(gpus.primary) < gpus.adapters.size()),
+          "the primary is -1 for no adapters, else one of them");
+    std::wstring nvName;
+    const bool nvidia = nvidiaAdapterPresent(&nvName);
+    check(nvidia == firstNvidiaSeen && (!nvidia || nvName == firstNvidia),
+          "nvidiaAdapterPresent still says what the adapter list says: the first NVIDIA card");
+    check(nvidiaAdapterPresent(nullptr) == nvidia, "and works without a name to fill");
+
+    // The runtime manifest's name: pure.
+    expectEq(openXrRuntimeNameFromManifest("{\"file_format_version\":\"1.0.0\",\"runtime\":{\"api_version\":\"1.0\","
+                                           "\"name\":\"Virtual Desktop OpenXR\",\"library_path\":\".\\\\vd.dll\"}}"),
+             "Virtual Desktop OpenXR", "runtime.name is read from a manifest");
+    expectEq(openXrRuntimeNameFromManifest("\xEF\xBB\xBF{ \"runtime\" : { \"name\" : \"SteamVR\" } }\n"), "SteamVR",
+             "through a byte order mark, spaces and a final newline");
+    expectEq(openXrRuntimeNameFromManifest("{\"name\":\"Wrong\",\"runtime\":{\"other\":{\"name\":\"Deeper\"},\"name\":\"Right\"}}"),
+             "Right", "only the runtime object's own name counts: not the document's, not a nested one's");
+    expectEq(openXrRuntimeNameFromManifest("{\"runtime\":{\"name\":\"Caf\\u00e9 \\\"XR\\\"\"}}"), "Caf\xC3\xA9 \"XR\"",
+             "escapes are decoded (\\u00e9 and \\\" here)");
+    expectEq(openXrRuntimeNameFromManifest("{\"runtime\":{\"api_version\":\"1.0\"}}"), "", "a runtime with no name has none");
+    expectEq(openXrRuntimeNameFromManifest("{\"runtime\":{\"name\":5}}"), "", "a name that is not a string is none");
+    expectEq(openXrRuntimeNameFromManifest("{\"file_format_version\":\"1.0.0\"}"), "", "no runtime object: none");
+    expectEq(openXrRuntimeNameFromManifest("{\"runtime\":{\"name\":\"X\""), "", "a truncated manifest names nothing");
+    expectEq(openXrRuntimeNameFromManifest("{\"runtime\":{\"name\":\"X\"}} trailing"), "", "text after the document: malformed");
+    expectEq(openXrRuntimeNameFromManifest("{\"runtime\":{\"name\":\"X\",}}"), "", "a trailing comma: malformed");
+    expectEq(openXrRuntimeNameFromManifest("not json at all"), "", "not JSON: none");
+    expectEq(openXrRuntimeNameFromManifest(""), "", "an empty file: none");
+    expectEq(openXrRuntimeNameFromManifest("{\"runtime\":{\"name\":\"" + std::string(200, 'a') + "\"}}"), std::string(80, 'a'),
+             "a very long name is cut to 80");
+    expectEq(openXrRuntimeNameFromPath(L"C:\\Program Files\\Oculus\\Support\\oculus-runtime\\oculus_openxr_64.json"),
+             "oculus_openxr_64", "the file stem, when the manifest names nothing");
+
+    // The friendly names and the hint for each well-known runtime; an unknown one says whose app sets it.
+    auto label = [](const char* name, const wchar_t* path = L"") { return describeOpenXrRuntime(name, path); };
+    check(label("SteamVR").known && label("SteamVR").display == "SteamVR" && label("SteamVR").hint == "change it in SteamVR",
+          "SteamVR is known, with its hint");
+    check(label("Oculus").known && label("Oculus").hint.find("Link") != std::string::npos, "Oculus is known: Meta's Link app");
+    check(label("Virtual Desktop OpenXR").display == "Virtual Desktop" && label("VDXR").display == "Virtual Desktop",
+          "Virtual Desktop by name or as VDXR");
+    check(label("PimaxXR").display == "PimaxXR" && label("PimaxXR").hint == "change it in Pimax Play", "PimaxXR");
+    check(label("Windows Mixed Reality").known && label("Windows Mixed Reality").display == "Windows Mixed Reality",
+          "Windows Mixed Reality");
+    check(label("", L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\SteamVR\\steamxr_win64.json").display == "SteamVR",
+          "a runtime is recognised by its path when its name is empty");
+    const OpenXrRuntimeLabel unknown = label("Some Studio XR");
+    check(!unknown.known && unknown.display == "Some Studio XR" && unknown.hint == "Your headset's own app sets it.",
+          "an unknown runtime keeps its name and says the headset's own app sets it");
+
+    // The active runtime, from a manifest on disk. The registry half cannot be arranged here, but the environment
+    // variable overrides it, so that is how the three states are reached.
+    const std::wstring dir = joinPath(scratch, L"preflight_runtime");
+    removeTree(dir);
+    makeTree(dir);
+    writeAll(joinPath(dir, L"vd.json"), "{\"runtime\":{\"name\":\"Virtual Desktop OpenXR\"}}");
+    writeAll(joinPath(dir, L"nameless.json"), "{\"runtime\":{\"api_version\":\"1.0\"}}");
+    writeAll(joinPath(dir, L"broken.json"), "{\"runtime\":");
+    OpenXrRuntime rt = openXrRuntimeAt(joinPath(dir, L"vd.json"), false);
+    check(rt.state == OpenXrRuntimeState::Ok && rt.name == "Virtual Desktop OpenXR", "a manifest that is there: Ok, with its name");
+    rt = openXrRuntimeAt(joinPath(dir, L"nameless.json"), false);
+    check(rt.state == OpenXrRuntimeState::Ok && rt.name == "nameless", "a manifest with no name falls back to its file stem");
+    rt = openXrRuntimeAt(joinPath(dir, L"broken.json"), false);
+    check(rt.state == OpenXrRuntimeState::Ok && rt.name == "broken", "and so does one that does not parse");
+    rt = openXrRuntimeAt(joinPath(dir, L"gone.json"), true);
+    check(rt.state == OpenXrRuntimeState::ManifestMissing && rt.name == "gone" && rt.fromEnvironment,
+          "a manifest that is named and not there: ManifestMissing, still with a name to show");
+    check(openXrRuntimeAt(std::wstring(), false).state == OpenXrRuntimeState::NotSet, "no manifest named: NotSet");
+
+    wchar_t previous[4096]{};
+    const DWORD had = GetEnvironmentVariableW(L"XR_RUNTIME_JSON", previous, 4096);
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON", joinPath(dir, L"vd.json").c_str());
+    rt = activeOpenXrRuntime();
+    check(rt.fromEnvironment && rt.state == OpenXrRuntimeState::Ok && rt.name == "Virtual Desktop OpenXR",
+          "XR_RUNTIME_JSON is the active runtime when it is set");
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON", joinPath(dir, L"gone.json").c_str());
+    check(activeOpenXrRuntime().state == OpenXrRuntimeState::ManifestMissing, "and a missing file there is ManifestMissing");
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON", had > 0 && had < 4096 ? previous : nullptr);
+
+    // RivaTuner, or any process, by name in any case.
+    wchar_t self[1024]{};
+    const DWORD n = GetModuleFileNameW(nullptr, self, 1024);
+    const std::wstring path(self, n);
+    const std::wstring name = path.substr(path.find_last_of(L"\\/") + 1);
+    std::wstring shouting = name;
+    for (wchar_t& c : shouting) c = static_cast<wchar_t>(towupper(c));
+    check(processRunning(name.c_str()), "processRunning finds a process that is running");
+    check(processRunning(shouting.c_str()), "whatever the case");
+    check(!processRunning(L"RTSS-that-nobody-runs.exe"), "and not one that is not");
+    check(!processRunning(L""), "an empty name is no process");
+}
+
+static void testElementText() {
+    printf("\npre-flight: Elite's XML, one element exactly once\n");
+    auto once = [](const std::string& xml, const char* tag, const char* want, const char* what) {
+        const std::optional<std::string> got = elementText(xml, tag);
+        if (got && *got == want) ok(what);
+        else fail(what, got ? "got \"" + *got + "\"" : std::string("got nothing"));
+    };
+    auto none = [](const std::string& xml, const char* tag, const char* what) {
+        check(!elementText(xml, tag).has_value(), what);
+    };
+    once("<Root><AAMode>4</AAMode></Root>", "AAMode", "4", "an element that occurs once is read");
+    once("<Root>\r\n\t<AAMode>\r\n\t\t4 \r\n\t</AAMode>\r\n</Root>", "AAMode", "4", "its text is trimmed of white space and line breaks");
+    once("<Root><HMDRenderTargetMultiplier>0.750000</HMDRenderTargetMultiplier></Root>", "HMDRenderTargetMultiplier",
+         "0.750000", "a number's text as written");
+    once("<Root><A></A></Root>", "A", "", "an empty element is there, with empty text");
+    none("<Root><Other>1</Other></Root>", "AAMode", "an absent element is nothing");
+    none("<Root><AAMode>1</AAMode><AAMode>2</AAMode></Root>", "AAMode", "an element that occurs twice is nothing: the shape is not known");
+    none("<Root><AAMode>1</AAMode>\r\n<Inner><AAMode>1</AAMode></Inner></Root>", "AAMode", "twice at different depths is still twice");
+    once("<Root><!-- <AAMode>9</AAMode> --><AAMode>4</AAMode></Root>", "AAMode", "4", "a commented-out element is not an occurrence");
+    none("<Root><!-- <AAMode>9</AAMode> --></Root>", "AAMode", "an element only in a comment is absent");
+    once("<Root><AAMode>4</AAMode><!-- <AAMode>9</AAMode>", "AAMode", "4", "an unterminated comment hides what follows it");
+    none("<Root><AAMode>4<Other/></Root>", "AAMode", "an element not closed straight after its text is nothing");
+    none("<Root><AAMode>4", "AAMode", "an element never closed is nothing");
+    none("<Root><AAMode x=\"1\">4</AAMode></Root>", "AAMode", "an element with an attribute is not the plain form");
+    once("<Root><AAModeX>1</AAModeX><AAMode>4</AAMode></Root>", "AAMode", "4", "a longer name that starts the same is another element");
+    check(elementCount("<R><A>1</A><A>2</A><!-- <A>3</A> --></R>", "A") == 2, "elementCount counts outside comments");
+    check(elementCount("<R></R>", "A") == 0 && elementCount("", "A") == 0 && elementCount("<R><A>1</A></R>", "") == 0,
+          "and 0 for nothing, an empty text, or an empty tag");
+
+    bool on = false;
+    check(parseEliteBool("true", &on) && on && parseEliteBool("FALSE", &on) && !on && parseEliteBool("1", &on) && on &&
+              parseEliteBool("0", &on) && !on,
+          "true, false, 1 and 0 are booleans, in any case");
+    check(!parseEliteBool("yes", &on) && !parseEliteBool("", &on) && !parseEliteBool("2", &on), "nothing else is");
+    double v = 0;
+    check(parseEliteNumber("0.750000", &v) && v == 0.75 && parseEliteNumber("1", &v) && v == 1.0 &&
+              parseEliteNumber("-2.5", &v) && v == -2.5,
+          "numbers parse");
+    check(!parseEliteNumber("", &v) && !parseEliteNumber("1.0x", &v) && !parseEliteNumber("abc", &v) &&
+              !parseEliteNumber("nan", &v) && !parseEliteNumber("0x10", &v),
+          "text that is not wholly a decimal number does not");
+}
+
+static void testEliteSettingsReader(const std::wstring& scratch) {
+    printf("\npre-flight: Elite's files, found and read\n");
+    const std::wstring base = joinPath(scratch, L"preflight_elite");
+    removeTree(base);
+    const std::wstring game = joinPath(base, L"game");
+    makeTree(joinPath(game, L"OptionDefaults"));
+    writeAll(joinPath(game, L"OptionDefaults\\VRHigh.fxcfg"), pfFxcfg("VRHigh", "1.000000", "1.000000", "2", "true"));
+    writeAll(joinPath(game, L"OptionDefaults\\VRLow.fxcfg"), pfFxcfg("VRLow", "0.500000", nullptr, "1", "true"));
+
+    auto folder = [&](const wchar_t* leaf) {
+        const std::wstring f = joinPath(base, leaf);
+        makeTree(f);
+        return f;
+    };
+    auto settings = [](const char* preset) {
+        return std::string("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\r\n<GraphicsOptions>\r\n\t<PresetName>") + preset +
+               "</PresetName>\r\n\t<FOV>55.150700</FOV>\r\n\t<TerrainCheckerboardRenderingEnabled>true</TerrainCheckerboardRenderingEnabled>\r\n</GraphicsOptions>\r\n";
+    };
+
+    // Custom: the highest Custom.<major>.<minor>.fxcfg, and not a lookalike or an older one.
+    const std::wstring custom = folder(L"custom");
+    writeAll(joinPath(custom, L"Settings.xml"), settings("Custom"));
+    writeAll(joinPath(custom, L"Custom.4.0.fxcfg"), pfFxcfg("Custom", "0.900000", "1.500000", "5", "true"));
+    writeAll(joinPath(custom, L"Custom.4.4.fxcfg"), pfFxcfg("Custom", "0.750000", "1.000000", "0", "false"));
+    writeAll(joinPath(custom, L"Custom.4.9.fxcfg-backup"), pfFxcfg("Custom", "0.100000", "9.000000", "9", "true"));
+    writeAll(joinPath(custom, L"Custom.4.4.fxcfg.baseline-bak"), pfFxcfg("Custom", "0.200000", "9.000000", "9", "true"));
+    EliteSettings e = readEliteSettingsFrom(custom, game);
+    check(e.folderFound && e.presetKnown && e.preset == "Custom" && e.usable(), "a Custom preset is found");
+    expectEq(e.file, "Custom.4.4.fxcfg", "the highest versioned Custom file is the one read");
+    check(e.hmdQuality.found && e.hmdQuality.text == "0.750000" && e.hmdQuality.file == "Custom.4.4.fxcfg",
+          "HMDRenderTargetMultiplier comes from it, with the file named");
+    check(e.supersampling.found && e.supersampling.text == "1.000000", "so does SSAAMultiplier");
+    check(e.aaMode.found && e.aaMode.text == "0", "and AAMode");
+    check(e.terrainCheckerboard.found && e.terrainCheckerboard.text == "false",
+          "and the terrain checkerboard -- not Settings.xml's own tag of that name, which says true");
+
+    // A stock preset: the game's OptionDefaults file.
+    const std::wstring stock = folder(L"stock");
+    writeAll(joinPath(stock, L"Settings.xml"), settings("VRHigh"));
+    writeAll(joinPath(stock, L"Custom.4.4.fxcfg"), pfFxcfg("Custom", "0.500000", "1.000000", "0", "false"));
+    e = readEliteSettingsFrom(stock, game);
+    check(e.usable() && e.preset == "VRHigh", "a stock preset is found");
+    expectEq(e.file, "OptionDefaults\\VRHigh.fxcfg", "and its file is the game's OptionDefaults one, not the Custom file beside it");
+    check(e.hmdQuality.text == "1.000000" && e.aaMode.text == "2" && e.terrainCheckerboard.text == "true",
+          "with that file's values");
+
+    // A stock file that lacks a value reports it as missing.
+    const std::wstring partial = folder(L"partial");
+    writeAll(joinPath(partial, L"Settings.xml"), settings("VRLow"));
+    e = readEliteSettingsFrom(partial, game);
+    check(e.usable() && e.hmdQuality.found && !e.supersampling.found, "a value the file does not have is not found, and the rest are");
+
+    // A value that occurs twice is not read at all.
+    const std::wstring twice = folder(L"twice");
+    writeAll(joinPath(twice, L"Settings.xml"), settings("Custom"));
+    std::string twiceText = pfFxcfg("Custom", "0.750000", "1.000000", "0", "false");
+    twiceText.insert(twiceText.find("</RenderOptions>"), "\t<HMDRenderTargetMultiplier>1.000000</HMDRenderTargetMultiplier>\r\n");
+    writeAll(joinPath(twice, L"Custom.4.4.fxcfg"), twiceText);
+    e = readEliteSettingsFrom(twice, game);
+    check(e.usable() && !e.hmdQuality.found && e.aaMode.found, "a repeated element is not found; its neighbours still are");
+
+    // Nothing found is a normal outcome, with the reason.
+    e = readEliteSettingsFrom(joinPath(base, L"no-such-folder"), game);
+    check(!e.folderFound && !e.usable() && !e.why.empty(), "no folder: not found, and why");
+    const std::wstring bare = folder(L"bare");
+    e = readEliteSettingsFrom(bare, game);
+    check(e.folderFound && !e.presetKnown && !e.usable() && !e.why.empty(), "a folder with no Settings.xml: not found, and why");
+    const std::wstring noName = folder(L"noname");
+    writeAll(joinPath(noName, L"Settings.xml"), "<GraphicsOptions><PresetName>  </PresetName></GraphicsOptions>");
+    check(!readEliteSettingsFrom(noName, game).usable(), "a blank PresetName: not found");
+    const std::wstring noCustom = folder(L"nocustom");
+    writeAll(joinPath(noCustom, L"Settings.xml"), settings("Custom"));
+    writeAll(joinPath(noCustom, L"Custom.fxcfg.old"), pfFxcfg("Custom", "0.5", "1", "0", "false"));
+    check(!readEliteSettingsFrom(noCustom, game).usable(), "Custom with no Custom.<major>.<minor>.fxcfg: not found");
+    const std::wstring evil = folder(L"evil");
+    writeAll(joinPath(evil, L"Settings.xml"), settings("..\\..\\evil"));
+    check(!readEliteSettingsFrom(evil, game).usable(), "a preset name that could not be a file stem is never made into a path");
+    const std::wstring unknownStock = folder(L"unknownstock");
+    writeAll(joinPath(unknownStock, L"Settings.xml"), settings("MyOwnPreset"));
+    check(!readEliteSettingsFrom(unknownStock, game).usable(), "a preset with no file in OptionDefaults: not found");
+    check(!readEliteSettingsFrom(stock, std::wstring()).usable(), "a stock preset with no game folder to look in: not found");
+
+    // The reader the runtime uses for the terrain checkerboard must agree with this one on every folder above.
+    struct Case { const wchar_t* leaf; };
+    for (const Case c : {Case{L"custom"}, Case{L"stock"}, Case{L"partial"}, Case{L"bare"}, Case{L"noname"}, Case{L"nocustom"},
+                         Case{L"evil"}, Case{L"unknownstock"}, Case{L"twice"}}) {
+        const std::wstring f = joinPath(base, c.leaf);
+        const edvr::tcn::Reading theirs = edvr::tcn::readTerrainCheckerboard(f, game);
+        const EliteSettings mine = readEliteSettingsFrom(f, game);
+        bool on = false;
+        const bool mineKnown = mine.terrainCheckerboard.found && parseEliteBool(mine.terrainCheckerboard.text, &on);
+        const edvr::tcn::State want = !mineKnown ? edvr::tcn::State::Unknown : (on ? edvr::tcn::State::On : edvr::tcn::State::Off);
+        const std::string leaf = toUtf8(c.leaf);
+        check(theirs.state == want, ("the runtime's reader and the installer's agree on the terrain checkerboard in " + leaf).c_str());
+        if (mine.usable() && theirs.state != edvr::tcn::State::Unknown)
+            check(mine.file == theirs.source, ("and on the file it came from in " + leaf).c_str());
+    }
+}
+
+static void testRecommendation() {
+    printf("\npre-flight: what is recommended\n");
+
+    // The vendor rule.
+    check(recommendUpscaler(kVendorNvidia, true, true).value == "dlss", "NVIDIA with the DLSS runtime: dlss");
+    check(recommendUpscaler(kVendorNvidia, false, true).value == "fsr", "NVIDIA without the DLSS runtime in the payload: fsr");
+    check(recommendUpscaler(kVendorAmd, true, true).value == "fsr" && recommendUpscaler(kVendorAmd, false, false).value == "fsr",
+          "AMD: fsr, whatever the payload carries");
+    check(recommendUpscaler(kVendorIntel, true, true).value == "xess", "Intel with the XeSS runtime: xess");
+    check(recommendUpscaler(kVendorIntel, true, false).value == "fsr", "Intel without the XeSS runtime in the payload: fsr");
+    check(recommendUpscaler(0x1234, true, true).value.empty() && recommendUpscaler(0, true, true).value.empty() &&
+              recommendUpscaler(kVendorMicrosoft, true, true).value.empty(),
+          "any other vendor, or none: no recommendation");
+    check(!recommendUpscaler(kVendorNvidia, true, true).why.empty(), "and a recommendation says why");
+
+    PreflightInputs base;
+    base.scope = "both";
+    base.haveGpu = true;
+    base.gpu.vendorId = kVendorNvidia;
+    base.gpu.name = L"NVIDIA GeForce RTX 4070 Ti";
+    base.gpu.dedicatedVram = 12ull << 30;
+    base.runtime.state = OpenXrRuntimeState::Ok;
+    base.runtime.name = "Virtual Desktop OpenXR";
+    base.vrTemporalNow = "off";
+    base.vrTemporalBase = "off";
+    base.flatIniPresent = true;
+    base.flatTemporalNow = "off";
+    base.flatTemporalBase = "off";
+    base.payloadHasDlss = true;
+    base.payloadHasXess = true;
+
+    // The rule through the rows.
+    {
+        const auto rows = recommendPreflight(base);
+        const PreflightRow* vr = pfFind(rows, "vr.upscaler");
+        const PreflightRow* flat = pfFind(rows, "flat.upscaler");
+        check(vr && flat && vr->value == "dlss" && flat->value == "dlss", "an NVIDIA rig gets dlss for VR and for flat");
+        check(vr && vr->kind == RowKind::EdvrWrite && vr->file == "edvr.ini" && vr->key == "fix.temporal_aa",
+              "the VR row writes fix.temporal_aa in edvr.ini");
+        check(flat && flat->file == "edvr-flat.ini" && flat->key == "fix.temporal_aa", "the flat row writes it in edvr-flat.ini");
+        check(vr && vr->label == "Upscaler (VR)" && flat && flat->label == "Upscaler (flat)", "labelled apart when both are shown");
+    }
+    {
+        PreflightInputs in = base;
+        in.payloadHasDlss = false;
+        const auto rows = recommendPreflight(in);
+        check(pfFind(rows, "vr.upscaler") && pfFind(rows, "vr.upscaler")->value == "fsr", "NVIDIA, no DLSS runtime: the row says fsr");
+    }
+    {
+        PreflightInputs in = base;
+        in.gpu.vendorId = kVendorAmd;
+        check(pfFind(recommendPreflight(in), "vr.upscaler")->value == "fsr", "AMD: the row says fsr");
+        in.gpu.vendorId = kVendorIntel;
+        check(pfFind(recommendPreflight(in), "vr.upscaler")->value == "xess", "Intel: the row says xess");
+        in.payloadHasXess = false;
+        check(pfFind(recommendPreflight(in), "vr.upscaler")->value == "fsr", "Intel, no XeSS runtime: fsr");
+    }
+    {
+        PreflightInputs in = base;
+        in.gpu.vendorId = 0x1234;
+        in.elite = pfElite("1.000000", "1.000000", "4", "true");
+        const auto rows = recommendPreflight(in);
+        const PreflightRow* none = pfFind(rows, "upscaler.none");
+        check(none && none->kind == RowKind::Info && !none->checkable, "an unknown vendor gets an info row that says there is no recommendation");
+        check(!pfFind(rows, "vr.upscaler") && !pfFind(rows, "flat.upscaler"), "and no row that writes an upscaler");
+        check(!pfFind(rows, "elite.hmd_quality") && !pfFind(rows, "elite.aa"),
+              "nor advice about the render size or anti-aliasing, which are advice for an upscaler");
+        check(pfFind(rows, "elite.terrain_checkerboard") && pfFind(rows, "elite.supersampling"),
+              "the terrain checkerboard and supersampling advice does not depend on one");
+        in.haveGpu = false;
+        const auto noCard = recommendPreflight(in);
+        check(pfFind(noCard, "upscaler.none") && !pfFind(noCard, "vr.upscaler") && pfFind(noCard, "rig.gpu")->now == "none found",
+              "no graphics card at all: the same, and the card row says so");
+    }
+
+    // The tick rule.
+    {
+        auto rows = recommendPreflight(base);
+        const PreflightRow* vr = pfFind(rows, "vr.upscaler");
+        check(vr && vr->checkable && vr->tickedByDefault && vr->tone == RowTone::Warn && !vr->alreadyGood,
+              "a value equal to the shipped base (never chosen) is checkable and ticked");
+        check(vr && vr->now == "Off" && vr->after == "DLSS", "and reads Off -> DLSS");
+        check(defaultTicks(rows) == (std::vector<std::string>{"vr.upscaler", "flat.upscaler"}), "defaultTicks names both");
+
+        PreflightInputs chosen = base;
+        chosen.vrTemporalNow = "dlaa";
+        rows = recommendPreflight(chosen);
+        vr = pfFind(rows, "vr.upscaler");
+        check(vr && vr->checkable && !vr->tickedByDefault && vr->tone == RowTone::Muted,
+              "a value the user chose is shown, checkable, and not ticked");
+        check(vr && vr->now == "DLAA" && vr->why.find("your own choice") != std::string::npos, "with the reason it is not ticked");
+        check(defaultTicks(rows) == (std::vector<std::string>{"flat.upscaler"}), "so it is not in the default ticks");
+
+        PreflightInputs done = base;
+        done.vrTemporalNow = "dlss";
+        rows = recommendPreflight(done);
+        vr = pfFind(rows, "vr.upscaler");
+        check(vr && vr->alreadyGood && !vr->checkable && !vr->tickedByDefault && vr->tone == RowTone::Good && vr->after == "already set",
+              "a value that is already the recommended one is good, 'already set', and not checkable");
+        check(vr && vr->kind == RowKind::EdvrWrite, "and is still a row about EDVR's file");
+
+        PreflightInputs upper = base;
+        upper.vrTemporalNow = " DLSS ";
+        check(pfFind(recommendPreflight(upper), "vr.upscaler")->alreadyGood, "the value is compared without case or padding");
+
+        PreflightInputs missingKey = base;
+        missingKey.vrTemporalNow = "";
+        missingKey.vrTemporalBase = "";
+        check(pfFind(recommendPreflight(missingKey), "vr.upscaler")->tickedByDefault,
+              "a key the file lacks reads as its default, off, which is what was shipped");
+
+        // The shipped base is not off (a later version shipped something else): then off is the user's choice.
+        PreflightInputs newer = base;
+        newer.vrTemporalBase = "fsr";
+        check(!pfFind(recommendPreflight(newer), "vr.upscaler")->tickedByDefault, "against a base that says fsr, off was chosen");
+
+        // The flat profile reads edvr.ini while edvr-flat.ini does not exist.
+        PreflightInputs seeded = base;
+        seeded.flatIniPresent = false;
+        seeded.flatTemporalNow = "";
+        seeded.vrTemporalNow = "dlss";
+        seeded.flatTemporalBase = "";
+        rows = recommendPreflight(seeded);
+        check(pfFind(rows, "flat.upscaler")->alreadyGood, "no edvr-flat.ini: the flat row reads edvr.ini's dlss, which is right");
+        seeded.vrTemporalNow = "off";
+        rows = recommendPreflight(seeded);
+        check(pfFind(rows, "flat.upscaler")->checkable && pfFind(rows, "flat.upscaler")->tickedByDefault &&
+                  pfFind(rows, "flat.upscaler")->now == "Off",
+              "and edvr.ini's off, which is the shipped default, is ticked");
+        seeded.flatIniPresent = true;
+        seeded.flatTemporalNow = "fsr";
+        seeded.flatTemporalBase = "off";
+        rows = recommendPreflight(seeded);
+        check(pfFind(rows, "flat.upscaler")->now == "FSR" && !pfFind(rows, "flat.upscaler")->tickedByDefault,
+              "with its own file, the flat row reads that file: fsr there is the user's");
+    }
+
+    // Scope.
+    {
+        PreflightInputs in = base;
+        in.elite = pfElite("1.000000", "1.500000", "4", "true");
+        in.rtssRunning = true;
+        in.scope = "flat";
+        auto rows = recommendPreflight(in);
+        check(!pfFind(rows, "vr.upscaler") && !pfFind(rows, "rig.runtime") && !pfFind(rows, "rig.headset") &&
+                  !pfFind(rows, "elite.hmd_quality") && !pfFind(rows, "elite.terrain_checkerboard"),
+              "flat only: no VR rows");
+        check(pfFind(rows, "flat.upscaler") && pfFind(rows, "elite.supersampling") && pfFind(rows, "elite.aa") && pfFind(rows, "rig.gpu") &&
+                  pfFind(rows, "warn.rtss"),
+              "flat only: the flat rows, the card, and the RivaTuner warning");
+        check(pfFind(rows, "flat.upscaler")->label == "Upscaler", "flat only: the upscaler row needs no '(flat)'");
+        in.scope = "vr";
+        rows = recommendPreflight(in);
+        check(!pfFind(rows, "flat.upscaler") && !pfFind(rows, "elite.supersampling"), "vr only: no flat rows");
+        check(pfFind(rows, "vr.upscaler") && pfFind(rows, "rig.runtime") && pfFind(rows, "rig.headset") && pfFind(rows, "elite.hmd_quality") &&
+                  pfFind(rows, "elite.terrain_checkerboard") && pfFind(rows, "elite.aa") && pfFind(rows, "warn.rtss"),
+              "vr only: the VR rows, the runtime and the headset");
+        check(pfFind(rows, "vr.upscaler")->label == "Upscaler", "vr only: the upscaler row needs no '(VR)'");
+        in.scope = "both";
+        rows = recommendPreflight(in);
+        check(pfFind(rows, "vr.upscaler") && pfFind(rows, "flat.upscaler") && pfFind(rows, "elite.hmd_quality") &&
+                  pfFind(rows, "elite.supersampling") && pfFind(rows, "rig.runtime"),
+              "both: every row");
+    }
+
+    // The rig rows.
+    {
+        PreflightInputs in = base;
+        auto rows = recommendPreflight(in);
+        const PreflightRow* gpu = pfFind(rows, "rig.gpu");
+        check(gpu && gpu->group == RowGroup::Rig && gpu->kind == RowKind::Info &&
+                  gpu->now == "NVIDIA GeForce RTX 4070 Ti \xC2\xB7 12 GB",
+              "the card row: name and memory");
+        const PreflightRow* rt = pfFind(rows, "rig.runtime");
+        check(rt && rt->tone == RowTone::Good && rt->now == "Virtual Desktop" && rt->why == "Change it in Virtual Desktop.",
+              "a working runtime is good, with where to change it");
+        const PreflightRow* hs = pfFind(rows, "rig.headset");
+        check(hs && hs->tone == RowTone::Muted && hs->now == "Known after your first flight", "the headset is known after the first flight");
+        in.runtime.state = OpenXrRuntimeState::NotSet;
+        in.runtime.name.clear();
+        rt = pfFind(recommendPreflight(in), "rig.runtime");
+        check(rt && rt->tone == RowTone::Bad && rt->now == "not set" && rt->why.find("Your headset's own app sets it.") != std::string::npos,
+              "no runtime set is bad, and says whose app sets it");
+        in.runtime.state = OpenXrRuntimeState::ManifestMissing;
+        in.runtime.name = "SteamVR";
+        rt = pfFind(recommendPreflight(in), "rig.runtime");
+        check(rt && rt->tone == RowTone::Bad && rt->now.find("file missing") != std::string::npos && rt->why == "Change it in SteamVR.",
+              "a runtime whose file is gone is bad, with its hint");
+    }
+
+    // Elite's own settings: advice, and never a checkbox.
+    {
+        PreflightInputs in = base;
+        in.elite = pfElite("1.000000", "1.500000", "4", "true");
+        auto rows = recommendPreflight(in);
+        const PreflightRow* hmd = pfFind(rows, "elite.hmd_quality");
+        check(hmd && hmd->kind == RowKind::EliteAdvice && !hmd->checkable && !hmd->tickedByDefault && hmd->tone == RowTone::Warn &&
+                  hmd->now == "1.00" && hmd->after == "0.75",
+              "HMD Image Quality 1.00 -> 0.75");
+        check(hmd && hmd->why.find("Elite's Graphics options") != std::string::npos, "and the row says where to set it");
+        const PreflightRow* aa = pfFind(rows, "elite.aa");
+        check(aa && aa->now == "On" && aa->after == "Off" && aa->tone == RowTone::Warn, "AA on -> Off (shown as On or Off only)");
+        const PreflightRow* tc = pfFind(rows, "elite.terrain_checkerboard");
+        check(tc && tc->now == "On" && tc->after == "Off" && tc->tone == RowTone::Warn, "terrain checkerboard on -> Off");
+        const PreflightRow* ss = pfFind(rows, "elite.supersampling");
+        check(ss && ss->now == "1.50" && ss->after == "1.00" && ss->tone == RowTone::Warn, "supersampling 1.50 -> 1.00");
+        bool anyBox = false;
+        for (const PreflightRow& r : rows)
+            if (r.kind != RowKind::EdvrWrite && (r.checkable || r.tickedByDefault)) anyBox = true;
+        check(!anyBox, "only EDVR rows are ever checkable");
+
+        in.elite = pfElite("0.750000", "1.000000", "0", "false");
+        rows = recommendPreflight(in);
+        check(pfFind(rows, "elite.hmd_quality")->alreadyGood && pfFind(rows, "elite.hmd_quality")->tone == RowTone::Good &&
+                  pfFind(rows, "elite.aa")->alreadyGood && pfFind(rows, "elite.terrain_checkerboard")->alreadyGood &&
+                  pfFind(rows, "elite.supersampling")->alreadyGood,
+              "values already as advised: good, nothing to do");
+        in.elite = pfElite("0.940000", "1.000000", "0", "false");
+        check(pfFind(recommendPreflight(in), "elite.hmd_quality")->alreadyGood, "0.94 is below 0.95: fine");
+        in.elite = pfElite("0.950000", "1.000000", "0", "false");
+        check(!pfFind(recommendPreflight(in), "elite.hmd_quality")->alreadyGood, "0.95 is advised down to 0.75");
+        in.elite = pfElite("0.500000", "1.000000", "0", "false");
+        check(pfFind(recommendPreflight(in), "elite.hmd_quality")->alreadyGood, "0.50 is fine");
+        in.elite = pfElite("1.000000", "0.800000", "0", "false");
+        check(pfFind(recommendPreflight(in), "elite.supersampling")->alreadyGood, "supersampling below 1.0 is left alone");
+        in.elite = pfElite(nullptr, nullptr, nullptr, nullptr);
+        rows = recommendPreflight(in);
+        check(pfFind(rows, "elite.hmd_quality") && pfFind(rows, "elite.hmd_quality")->kind == RowKind::Info &&
+                  pfFind(rows, "elite.hmd_quality")->now == "unknown" && pfFind(rows, "elite.hmd_quality")->tone == RowTone::Muted,
+              "a value Elite's file does not have is unknown, and advises nothing");
+
+        in.elite = EliteSettings();
+        rows = recommendPreflight(in);
+        const PreflightRow* missing = pfFind(rows, "elite.missing");
+        check(missing && missing->label == "Elite's graphics settings were not found" && missing->tone == RowTone::Muted,
+              "Elite's files not found: one muted row says so");
+        check(!pfFind(rows, "elite.hmd_quality") && !pfFind(rows, "elite.aa") && !pfFind(rows, "elite.terrain_checkerboard") &&
+                  !pfFind(rows, "elite.supersampling"),
+              "and there are no Elite rows");
+    }
+
+    // RivaTuner, and the count.
+    {
+        PreflightInputs in = base;
+        check(!pfFind(recommendPreflight(in), "warn.rtss"), "RivaTuner not running: no warning");
+        in.rtssRunning = true;
+        const PreflightRow* w = pfFind(recommendPreflight(in), "warn.rtss");
+        check(w && w->kind == RowKind::Warn && w->tone == RowTone::Warn &&
+                  (w->label + " " + w->why) == "RivaTuner is running. It has crashed Elite with EDVR: close it before you start Elite.",
+              "RivaTuner running: the warning, in its words");
+
+        PreflightInputs ready = base;
+        ready.vrTemporalNow = "dlss";
+        ready.flatTemporalNow = "dlss";
+        ready.elite = pfElite("0.750000", "1.000000", "0", "false");
+        check(pendingCount(recommendPreflight(ready)) == 0 && preflightSummary(recommendPreflight(ready)) == "Ready to fly",
+              "everything set: 0 pending, 'Ready to fly'");
+        ready.rtssRunning = true;
+        check(preflightSummary(recommendPreflight(ready)) == "1 thing to set", "one thing left: '1 thing to set'");
+        expectEq(preflightSummary(recommendPreflight(base)), "2 things to set", "two upscaler rows to set: 2 things");
+        PreflightInputs userChose = ready;
+        userChose.rtssRunning = false;
+        userChose.vrTemporalNow = "dlaa";
+        check(pendingCount(recommendPreflight(userChose)) == 0, "a value the user chose does not count as a thing to set");
+        PreflightInputs bad = ready;
+        bad.rtssRunning = false;
+        bad.runtime.state = OpenXrRuntimeState::NotSet;
+        check(pendingCount(recommendPreflight(bad)) == 1, "no runtime counts: it is a thing to set");
+    }
+
+    // Text for the console.
+    {
+        PreflightInputs in = base;
+        in.elite = pfElite("1.000000", "1.000000", "0", "false");
+        const auto rows = recommendPreflight(in);
+        const std::string text = preflightText(rows, defaultTicks(rows));
+        check(text.find("YOUR RIG") != std::string::npos && text.find("BEFORE YOU FLY") != std::string::npos &&
+                  text.find("[x] Upscaler (VR)") != std::string::npos && text.find("Off  ->  DLSS") != std::string::npos,
+              "--preflight prints both groups and the ticked rows");
+        const std::string unticked = preflightText(rows, {});
+        check(unticked.find("[ ] Upscaler (VR)") != std::string::npos, "an unticked row has an empty box");
+    }
+}
+
+static void testPreflightState() {
+    printf("\npre-flight: the record in state.ini\n");
+    InstallState st;
+    st.present = true;
+    st.edvrVersion = "v9.9.9";
+    st.scope = "both";
+    st.preflight.appliedUtc = "2026-10-14T12:00:00Z";
+    st.preflight.changes.push_back({"edvr.ini", "fix.temporal_aa", "off", "dlss"});
+    st.preflight.changes.push_back({"edvr-flat.ini", "fix.temporal_aa", "fsr", "dlss"});
+    const std::string text = serializeState(st);
+    const InstallState back = parseState(text);
+    check(back.preflight.present() && back.preflight.changes.size() == 2 && back.preflight.appliedUtc == "2026-10-14T12:00:00Z",
+          "a [preflight] record reads back: the stamp and two changes");
+    check(back.preflight.changes[0].file == "edvr.ini" && back.preflight.changes[0].key == "fix.temporal_aa" &&
+              back.preflight.changes[0].before == "off" && back.preflight.changes[0].after == "dlss",
+          "each change keeps its file, key, before and after");
+    check(back.preflight.changes[1].file == "edvr-flat.ini" && back.preflight.changes[1].before == "fsr", "in order");
+    check(back.edvrVersion == "v9.9.9" && back.scope == "both" && back.present, "and the other fields are as they were");
+    expectEq(serializeState(back), text, "serialising what was read gives the same text");
+
+    InstallState plain = st;
+    plain.preflight = PreflightRecord();
+    const std::string without = serializeState(plain);
+    check(without.find("preflight") == std::string::npos, "a record with nothing to undo has no [preflight] section at all");
+    check(!parseState(without).preflight.present(), "and reads back as none");
+    // Writing a record that predates the section changes nothing about it.
+    InstallState old = parseState(without);
+    expectEq(serializeState(old), without, "an older record round-trips byte for byte");
+
+    // A damaged record never becomes a write.
+    check(!parseState("[edvr]\r\nversion = v1\r\n[preflight]\r\nchanges = 99999\r\nchange1_file = edvr.ini\r\nchange1_key = a.b\r\n")
+               .preflight.present(),
+          "a count that is absurd reads as none");
+    check(!parseState("[edvr]\r\nversion = v1\r\n[preflight]\r\nchange1_file = edvr.ini\r\nchange1_key = a.b\r\n").preflight.present(),
+          "no count: none");
+    const InstallState gaps =
+        parseState("[edvr]\r\nversion = v1\r\n[preflight]\r\nchanges = 2\r\nchange1_file = edvr.ini\r\nchange2_file = edvr.ini\r\n"
+                   "change2_key = fix.temporal_aa\r\nchange2_before = off\r\nchange2_after = dlss\r\n");
+    check(gaps.preflight.changes.size() == 1 && gaps.preflight.changes[0].key == "fix.temporal_aa",
+          "an entry with no key is skipped, and the one that is whole is kept");
+}
+
+// The shipped edvr.ini with its fix.temporal_aa line set to `value`.
+static std::string withUpscalerValue(const std::string& text, const char* value) {
+    std::string out = text;
+    const size_t at = out.find("\ntemporal_aa = off");
+    if (at != std::string::npos) out.replace(at + 1, strlen("temporal_aa = off"), std::string("temporal_aa = ") + value);
+    return out;
+}
+
+static void testPreflightPlan(const std::wstring& root, const std::wstring& scratch) {
+    printf("\npre-flight: set up, undo, and what they touch\n");
+    const std::string shipped = readAll(joinPath(root, L"edvr.ini"));
+    if (shipped.empty()) {
+        fail("read the repository's edvr.ini", "not found next to the repo root");
+        return;
+    }
+    // The one line Pre-flight changes: the shipped edvr.ini has exactly one 'temporal_aa = off' line.
+    const size_t lineAt = shipped.find("\ntemporal_aa = off");
+    check(lineAt != std::string::npos && shipped.find("\ntemporal_aa = off", lineAt + 1) == std::string::npos,
+          "the shipped edvr.ini has exactly one 'temporal_aa = off' line");
+    if (lineAt == std::string::npos) return;
+    auto withUpscaler = [](const std::string& text, const char* value) { return withUpscalerValue(text, value); };
+    const std::string flatDlss = [&] {
+        std::string out = kPfFlatIni;
+        out.replace(out.find("temporal_aa = off"), strlen("temporal_aa = off"), "temporal_aa = dlss");
+        return out;
+    }();
+
+    Options o = testOptions();
+    o.backupStamp = L"20261014-120000";
+    o.nowUtc = "2026-10-14T12:00:00Z";
+    const PayloadProvider none = provider(false);
+    const std::wstring dir = joinPath(scratch, L"preflight_game");
+
+    // ---- set up ----
+    pfLayOut(dir, shipped, kPfFlatIni);
+    Survey s = pfSurvey(dir);
+    PreflightInputs in = pfRig(s, shipped, "both");
+    check(in.vrTemporalNow == "off" && in.vrTemporalBase == "off" && in.flatIniPresent && in.flatTemporalNow == "off" &&
+              in.flatTemporalBase == "off" && in.scope == "both",
+          "collectPreflightInputs reads fix.temporal_aa from both files, and from the bases");
+    {
+        PayloadInfo carries = testPayload(shipped);
+        check(!collectPreflightInputs(s, carries, "vr").payloadHasDlss && !collectPreflightInputs(s, carries, "vr").payloadHasXess,
+              "a payload without the DLSS and XeSS runtimes says so");
+        carries.haveNgx = true;
+        carries.haveXess = true;
+        const PreflightInputs flagged = collectPreflightInputs(s, carries, "vr");
+        check(flagged.payloadHasDlss && flagged.payloadHasXess && flagged.scope == "vr", "and one that carries them says that, and keeps the scope asked for");
+        // A hand-edited file reads as what it says; a base that is missing falls back to what this installer ships.
+        Survey edited = s;
+        edited.iniText = withUpscalerValue(shipped, "dlaa");
+        edited.baseIniText.clear();
+        const PreflightInputs hand = collectPreflightInputs(edited, testPayload(shipped), "both");
+        check(hand.vrTemporalNow == "dlaa" && hand.vrTemporalBase == "off", "a chosen value is read as chosen, against the payload's shipped one when there is no base");
+        Survey unseeded = s;
+        unseeded.flatIniPresent = false;
+        unseeded.flatIniText.clear();
+        check(!collectPreflightInputs(unseeded, testPayload(shipped), "both").flatIniPresent, "no edvr-flat.ini is carried through");
+    }
+    std::vector<PreflightRow> rows = recommendPreflight(in);
+    const std::vector<std::string> ticked = defaultTicks(rows);
+    check(ticked.size() == 2, "a fresh install has both upscaler rows ticked");
+
+    const std::string before = pfSnapshot(dir);
+    Plan plan = planPreflight(s, rows, ticked, o);
+    check(!plan.blocked && !plan.nothingToDo && plan.problems.empty(), "the plan for both rows is a plan", unifiedProblems(plan));
+    check(pfSnapshot(dir) == before, "making the plan wrote nothing at all: no file, no folder, no backup");
+    check(!dirExists(plan.backupDir), "the backup folder is named and not made");
+    check(plan.backupDir.find(L"edvr_backup") != std::wstring::npos && plan.backupDir.find(L"preflight-20261014-120000") != std::wstring::npos,
+          "the backup folder is edvr_backup\\preflight-<stamp>");
+
+    bool backsUpVr = false, backsUpFlat = false, writesVr = false, writesFlat = false, writesState = false, guarded = true;
+    for (const Step& st : plan.steps) {
+        if (st.action == Action::Backup && st.from == joinPath(dir, L"edvr.ini") && st.required && !st.expectSha.empty()) backsUpVr = true;
+        if (st.action == Action::Backup && st.from == joinPath(dir, L"edvr-flat.ini") && st.required && !st.expectSha.empty()) backsUpFlat = true;
+        if (st.action == Action::WriteText && st.to == joinPath(dir, L"edvr.ini")) {
+            writesVr = true;
+            guarded = guarded && !st.expectSha.empty() && st.expectSha == sha256File(joinPath(dir, L"edvr.ini"));
+            check(st.text == withUpscaler(shipped, "dlss"), "the text written to edvr.ini is the shipped file with that one line changed");
+        }
+        if (st.action == Action::WriteText && st.to == joinPath(dir, L"edvr-flat.ini")) {
+            writesFlat = true;
+            guarded = guarded && !st.expectSha.empty();
+            check(st.text == flatDlss, "and the text written to edvr-flat.ini is its own file with that one line changed");
+        }
+        if (st.action == Action::WriteText && st.to == statePath(dir)) {
+            writesState = true;
+            guarded = guarded && st.expectSha == s.stateSha;
+        }
+    }
+    check(backsUpVr && backsUpFlat, "each file is backed up first, as a required step carrying its hash");
+    check(writesVr && writesFlat && writesState && guarded, "each is written with its hash checked, and the record last");
+    check(plan.steps.back().action == Action::WriteText && plan.steps.back().to == statePath(dir), "the record is the last step");
+    check(plan.nextState.preflight.changes.size() == 2 && plan.nextState.preflight.appliedUtc == "2026-10-14T12:00:00Z",
+          "the next record carries the two changes and the stamp");
+    check(notesMention(plan, "Upscaler (VR)") && notesMention(plan, "Off") && notesMention(plan, "DLSS"),
+          "the notes say what changes, in the row's words");
+    check(notesMention(plan, "Elite's own settings are not changed"), "and that Elite's own settings are not");
+
+    // The command line, dry: the plan is printed and nothing is written. First over the machine's own rows (a rig with
+    // no graphics card plans nothing, which writes nothing too), then over the made-up NVIDIA ones above, which always
+    // make a plan.
+    {
+        const std::wstring dirArg = dir;
+        auto run = [&](std::vector<const wchar_t*> words) {
+            std::vector<wchar_t*> argv{const_cast<wchar_t*>(L"edvr-installer.exe")};
+            for (const wchar_t* w : words) argv.push_back(const_cast<wchar_t*>(w));
+            return runConsole(parseArgs(static_cast<int>(argv.size()), argv.data()));
+        };
+        const int shown = run({L"--preflight", L"--dir", dirArg.c_str()});
+        check(shown == 0 && pfSnapshot(dir) == before, "--preflight prints the rows and writes nothing");
+        const int dry = run({L"--preflight", L"--apply", L"--dry-run", L"--dir", dirArg.c_str()});
+        check(dry == 0 && pfSnapshot(dir) == before, "--preflight --apply --dry-run exits 0 and writes nothing at all");
+        const int dryUndo = run({L"--preflight", L"--undo", L"--dry-run", L"--dir", dirArg.c_str()});
+        check(dryUndo == 0 && pfSnapshot(dir) == before, "--preflight --undo --dry-run: nothing to put back, nothing written");
+
+        AppArgs show;
+        show.action = AppArgs::Act::Preflight;
+        AppArgs dryApply = show;
+        dryApply.preflightApply = true;
+        dryApply.dryRun = true;
+        check(runPreflight(show, s, rows) == 0 && pfSnapshot(dir) == before, "the rows of an NVIDIA rig print and write nothing");
+        check(runPreflight(dryApply, s, rows) == 0 && pfSnapshot(dir) == before,
+              "a real plan under --dry-run: exit 0, and not a file, folder or backup written");
+        AppArgs dryRows = dryApply;
+        dryRows.rowsGiven = true;
+        dryRows.rows = {"flat.upscaler"};
+        check(runPreflight(dryRows, s, rows) == 0 && pfSnapshot(dir) == before, "and with --rows");
+        AppArgs wetNone = show;
+        wetNone.preflightApply = true;
+        wetNone.rowsGiven = true;
+        wetNone.rows = {"no.such.row"};
+        check(runPreflight(wetNone, s, rows) == 0 && pfSnapshot(dir) == before, "--rows naming nothing that can be set: nothing to do, nothing written");
+    }
+
+    // Apply it.
+    const ApplyResult applied = applyPlan(plan, none);
+    check(applied.ok, "the plan applies", applied.error);
+    expectEq(readAll(joinPath(dir, L"edvr.ini")), withUpscaler(shipped, "dlss"),
+             "edvr.ini is the shipped file with exactly one line different: every other byte is as it was");
+    expectEq(readAll(joinPath(dir, L"edvr-flat.ini")), flatDlss, "so is edvr-flat.ini");
+    expectEq(readAll(joinPath(plan.backupDir, L"edvr.ini")), shipped, "the backup holds edvr.ini as it was");
+    expectEq(readAll(joinPath(plan.backupDir, L"edvr-flat.ini")), kPfFlatIni, "and edvr-flat.ini as it was");
+    InstallState rec = readState(dir);
+    check(rec.present && rec.edvrVersion == "v9.9.9-test" && rec.scope == "both" && rec.iniSha == "feedface" && rec.components == "d3d11,ini,flat-ini",
+          "state.ini still has everything the install wrote");
+    check(rec.preflight.changes.size() == 2 && rec.preflight.appliedUtc == "2026-10-14T12:00:00Z", "and now the [preflight] record");
+    check(rec.preflight.changes[0].file == "edvr.ini" && rec.preflight.changes[0].key == "fix.temporal_aa" &&
+              rec.preflight.changes[0].before == "off" && rec.preflight.changes[0].after == "dlss",
+          "with the change in it: file, key, before and after");
+    expectEq(listing(plan.backupDir), "edvr-flat.ini, edvr.ini", "and the backup folder holds nothing else: no snapshot is left behind");
+
+    // Set up again: everything is set, so there is nothing to do.
+    {
+        Survey again = pfSurvey(dir);
+        const auto rows2 = recommendPreflight(pfRig(again, shipped, "both"));
+        check(pfFind(rows2, "vr.upscaler")->alreadyGood && pfFind(rows2, "flat.upscaler")->alreadyGood && defaultTicks(rows2).empty(),
+              "after it, both rows read 'already set'");
+        const Plan twice = planPreflight(again, rows2, {"vr.upscaler", "flat.upscaler"}, o);
+        check(twice.nothingToDo && twice.steps.empty(), "and setting them up again is nothing to do, even when ticked");
+    }
+
+    // ---- undo ----
+    {
+        Survey now = pfSurvey(dir);
+        const std::string beforeUndo = pfSnapshot(dir);
+        AppArgs dryUndo;
+        dryUndo.action = AppArgs::Act::Preflight;
+        dryUndo.preflightUndo = true;
+        dryUndo.dryRun = true;
+        check(runPreflight(dryUndo, now, recommendPreflight(pfRig(now, shipped, "both"))) == 0 && pfSnapshot(dir) == beforeUndo,
+              "--preflight --undo --dry-run, with something to put back, prints the plan and writes nothing");
+        Options later = o;
+        later.backupStamp = L"20261014-130000";
+        const Plan undo = planPreflightUndo(now, later);
+        check(!undo.blocked && !undo.nothingToDo && pfSnapshot(dir) == beforeUndo, "the undo plan is a plan, and making it wrote nothing");
+        check(!dirExists(undo.backupDir), "its backup folder is named and not made");
+        check(!undo.nextState.preflight.present(), "its next record has nothing to undo");
+        const ApplyResult undone = applyPlan(undo, none);
+        check(undone.ok, "the undo applies", undone.error);
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), shipped, "edvr.ini is back to the shipped bytes");
+        expectEq(readAll(joinPath(dir, L"edvr-flat.ini")), kPfFlatIni, "edvr-flat.ini is back to its bytes");
+        check(!readState(dir).preflight.present(), "the record is cleared");
+        check(readAll(statePath(dir)).find("[preflight]") == std::string::npos, "and state.ini has no [preflight] section any more");
+        check(readState(dir).edvrVersion == "v9.9.9-test", "the rest of the record is as it was");
+        const Plan nothing = planPreflightUndo(pfSurvey(dir), later);
+        check(nothing.nothingToDo && nothing.steps.empty(), "undoing again is nothing to do");
+    }
+
+    // ---- undo leaves what the user changed since ----
+    {
+        pfLayOut(dir, shipped, kPfFlatIni);
+        Survey a = pfSurvey(dir);
+        const auto r = recommendPreflight(pfRig(a, shipped, "both"));
+        const Plan up = planPreflight(a, r, defaultTicks(r), o);
+        check(applyPlan(up, none).ok, "set up again, for the next case");
+        // The user opens the Settings window and picks FSR for VR.
+        writeAll(joinPath(dir, L"edvr.ini"), withUpscaler(shipped, "fsr"));
+        Options later = o;
+        later.backupStamp = L"20261014-140000";
+        const Plan undo = planPreflightUndo(pfSurvey(dir), later);
+        check(!undo.blocked && !undo.nothingToDo, "the undo plans");
+        check(noteHas(undo.notes, "Left fix.temporal_aa alone in edvr.ini") && noteHas(undo.notes, "fsr"),
+              "and says it leaves the value the user changed to, and what it is");
+        check(noteHas(undo.notes, "Put fix.temporal_aa back to off in edvr-flat.ini"), "while the flat one, untouched since, is put back");
+        check(applyPlan(undo, none).ok, "applied");
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), withUpscaler(shipped, "fsr"), "edvr.ini keeps the user's fsr");
+        expectEq(readAll(joinPath(dir, L"edvr-flat.ini")), kPfFlatIni, "edvr-flat.ini is put back");
+        check(!readState(dir).preflight.present(), "the record is cleared even so: what is left is the user's");
+    }
+
+    // ---- a value changed twice goes back to the first one ----
+    {
+        pfLayOut(dir, shipped, kPfFlatIni);
+        Survey a = pfSurvey(dir);
+        auto r = recommendPreflight(pfRig(a, shipped, "both"));
+        check(applyPlan(planPreflight(a, r, {"vr.upscaler"}, o), none).ok, "set up VR only");
+        check(readState(dir).preflight.changes.size() == 1, "one change recorded");
+        writeAll(joinPath(dir, L"edvr.ini"), withUpscaler(shipped, "fsr"));   // the user picks FSR
+        Survey b = pfSurvey(dir);
+        r = recommendPreflight(pfRig(b, shipped, "both"));
+        check(pfFind(r, "vr.upscaler")->checkable && !pfFind(r, "vr.upscaler")->tickedByDefault, "FSR is the user's, so it starts unticked");
+        Options second = o;
+        second.backupStamp = L"20261014-150000";
+        second.nowUtc = "2026-10-14T15:00:00Z";
+        check(applyPlan(planPreflight(b, r, {"vr.upscaler", "flat.upscaler"}, second), none).ok, "tick it anyway, with flat: applied");
+        const PreflightRecord merged = readState(dir).preflight;
+        check(merged.changes.size() == 2 && merged.appliedUtc == "2026-10-14T15:00:00Z", "two changes, the later stamp");
+        check(merged.changes[0].key == "fix.temporal_aa" && merged.changes[0].file == "edvr.ini" && merged.changes[0].before == "off" &&
+                  merged.changes[0].after == "dlss",
+              "VR keeps its first 'before' (off), not the fsr the second run found");
+        Options last = o;
+        last.backupStamp = L"20261014-160000";
+        check(applyPlan(planPreflightUndo(pfSurvey(dir), last), none).ok, "undo");
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), shipped, "back to the settings the user started with");
+    }
+
+    // ---- an edvr-flat.ini that does not exist yet is started from edvr.ini ----
+    {
+        pfLayOut(dir, shipped, std::string());
+        Survey a = pfSurvey(dir);
+        PreflightInputs flatIn = pfRig(a, shipped, "both");
+        check(!flatIn.flatIniPresent, "no edvr-flat.ini");
+        auto r = recommendPreflight(flatIn);
+        check(pfFind(r, "flat.upscaler")->tickedByDefault && pfFind(r, "flat.upscaler")->now == "Off", "the flat row reads edvr.ini's value, and is ticked");
+        const Plan p = planPreflight(a, r, {"flat.upscaler"}, o);
+        check(!p.blocked && !p.nothingToDo && noteHas(p.notes, "does not exist yet"), "its plan says edvr-flat.ini is started from edvr.ini");
+        bool backsUpFlatFile = false;
+        for (const Step& st : p.steps)
+            if (st.action == Action::Backup && leafOf(st.from) == L"edvr-flat.ini") backsUpFlatFile = true;
+        check(!backsUpFlatFile, "there is no edvr-flat.ini to back up");
+        check(applyPlan(p, none).ok, "applied");
+        expectEq(readAll(joinPath(dir, L"edvr.ini")), shipped, "edvr.ini is exactly as it was");
+        expectEq(readAll(joinPath(dir, L"edvr-flat.ini")), withUpscaler(shipped, "dlss"), "edvr-flat.ini is edvr.ini with the one change");
+        check(applyPlan(planPreflightUndo(pfSurvey(dir), o), none).ok, "undo");
+        expectEq(readAll(joinPath(dir, L"edvr-flat.ini")), shipped, "puts back the value the flat profile was reading");
+    }
+
+    // ---- a folder with no install record (a tool install): the record is made, and holds only this ----
+    {
+        pfLayOut(dir, shipped, kPfFlatIni);
+        DeleteFileW(statePath(dir).c_str());
+        Survey a = pfSurvey(dir);
+        check(!a.state.present && a.stateSha.empty(), "no state.ini: no record, no hash");
+        const auto r = recommendPreflight(pfRig(a, shipped, "both"));
+        const Plan p = planPreflight(a, r, defaultTicks(r), o);
+        check(!p.blocked && !p.nothingToDo, "Pre-flight still plans");
+        check(applyPlan(p, none).ok, "and applies");
+        const InstallState made = readState(dir);
+        check(!made.present && made.preflight.changes.size() == 2, "state.ini holds the undo record and still is not an install record");
+        check(applyPlan(planPreflightUndo(pfSurvey(dir), o), none).ok && readAll(joinPath(dir, L"edvr.ini")) == shipped, "and the undo works from it");
+    }
+
+    // ---- refusals ----
+    {
+        pfLayOut(dir, std::string(), std::string());
+        Survey a = pfSurvey(dir);
+        PreflightInputs bare = pfRig(a, shipped, "vr");
+        auto r = recommendPreflight(bare);
+        const Plan p = planPreflight(a, r, {"vr.upscaler"}, o);
+        check(p.blocked && !p.problems.empty() && p.steps.empty() && p.problems[0].find("not there yet") != std::string::npos,
+              "no edvr.ini: blocked, and says to install EDVR first");
+        check(planPreflight(a, r, {}, o).nothingToDo, "nothing ticked: nothing to do");
+        check(planPreflight(a, r, {"elite.aa", "rig.gpu", "no.such.row"}, o).nothingToDo,
+              "ids that are not rows EDVR can write are ignored");
+        AppArgs wet;
+        wet.action = AppArgs::Act::Preflight;
+        wet.preflightApply = true;
+        const std::string untouched = pfSnapshot(dir);
+        check(runPreflight(wet, a, r) == 1 && pfSnapshot(dir) == untouched, "--preflight --apply on a folder with no edvr.ini exits 1 and writes nothing");
+    }
+    {
+        // The folder changes between the plan and its confirmation: the plan is refused, and nothing is written.
+        pfLayOut(dir, shipped, kPfFlatIni);
+        Survey a = pfSurvey(dir);
+        const auto r = recommendPreflight(pfRig(a, shipped, "both"));
+        const Plan p = planPreflight(a, r, defaultTicks(r), o);
+        writeAll(joinPath(dir, L"edvr.ini"), withUpscaler(shipped, "fsr"));   // another window got there first
+        const std::string beforeApply = pfSnapshot(dir);
+        const ApplyResult stale = applyPlan(p, none);
+        check(!stale.ok && stale.error.find("changed while this was waiting") != std::string::npos, "a plan made before the file changed is refused");
+        check(pfSnapshot(dir) == beforeApply, "and nothing was written");
+    }
+    {
+        // Another installer rewrote the record meanwhile.
+        pfLayOut(dir, shipped, kPfFlatIni);
+        Survey a = pfSurvey(dir);
+        const auto r = recommendPreflight(pfRig(a, shipped, "both"));
+        const Plan p = planPreflight(a, r, defaultTicks(r), o);
+        InstallState other = readState(dir);
+        other.edvrVersion = "v10.0.0";
+        writeAll(statePath(dir), serializeState(other));
+        const ApplyResult stale = applyPlan(p, none);
+        check(!stale.ok && readState(dir).edvrVersion == "v10.0.0" && readAll(joinPath(dir, L"edvr.ini")) == shipped,
+              "a record changed since the plan was made also refuses it, and the settings files were not touched");
+    }
+    removeTree(dir);
+}
+
+static void testPreflightArgs() {
+    printf("\npre-flight: the command line\n");
+    auto parse = [](std::vector<const wchar_t*> words) {
+        std::vector<wchar_t*> argv{const_cast<wchar_t*>(L"edvr-installer.exe")};
+        for (const wchar_t* word : words) argv.push_back(const_cast<wchar_t*>(word));
+        return parseArgs(static_cast<int>(argv.size()), argv.data());
+    };
+    AppArgs a = parse({L"--preflight"});
+    check(!a.badArg && a.action == AppArgs::Act::Preflight && !a.preflightApply && !a.preflightUndo, "--preflight shows the rows");
+    a = parse({L"--preflight", L"--apply", L"--dry-run"});
+    check(!a.badArg && a.preflightApply && a.dryRun, "--preflight --apply --dry-run");
+    a = parse({L"--preflight", L"--undo"});
+    check(!a.badArg && a.preflightUndo && !a.preflightApply, "--preflight --undo");
+    a = parse({L"--preflight", L"--apply", L"--rows", L"vr.upscaler, flat.upscaler,"});
+    check(!a.badArg && a.rowsGiven && a.rows == (std::vector<std::string>{"vr.upscaler", "flat.upscaler"}),
+          "--rows takes a comma list, spaces and a trailing comma forgiven");
+    check(parse({L"--apply"}).badArg && parse({L"--undo"}).badArg && parse({L"--install", L"--apply"}).badArg,
+          "--apply and --undo mean nothing without --preflight");
+    check(parse({L"--preflight", L"--apply", L"--undo"}).badArg, "apply and undo together are refused");
+    check(parse({L"--preflight", L"--rows", L"a"}).badArg, "--rows goes with --apply");
+    check(parse({L"--preflight", L"--apply", L"--rows"}).badArg, "--rows needs a value");
+    const std::string usage = usageText();
+    check(usage.find("--preflight") != std::string::npos && usage.find("--preflight --apply") != std::string::npos &&
+              usage.find("--preflight --undo") != std::string::npos && usage.find("--rows") != std::string::npos,
+          "the usage text lists them");
+}
+
+// Three things a review found: a file still carrying the upscaler under its old name, a settings file the user made
+// read-only, and an HMD Image Quality below DLSS's floor.
+static void testPreflightReviewFixes(const std::wstring& root, const std::wstring& scratch) {
+    printf("\npre-flight: old key names, read-only files, the DLSS floor\n");
+    const std::string shipped = readAll(joinPath(root, L"edvr.ini"));
+    if (shipped.empty()) {
+        fail("read the repository's edvr.ini", "not found next to the repo root");
+        return;
+    }
+
+    // settingValueAsRead: the key's own line, else the key it moved from unless that still says its retired default.
+    check(settingValueAsRead("[experimental]\ntemporal_aa = fsr\n", "fix.temporal_aa", "") == "fsr",
+          "an un-migrated experimental.temporal_aa reads as fix.temporal_aa");
+    check(settingValueAsRead("[fix]\ntemporal_aa = dlss\n[experimental]\ntemporal_aa = fsr\n", "fix.temporal_aa", "") == "dlss",
+          "the key's own line wins over the one it moved from");
+    check(settingValueAsRead("[fix]\nintro_video_size = stock\n", "fix.intro_video", "absent") == "absent",
+          "an old line that still carries its retired default is not a choice");
+    check(settingValueAsRead("[fix]\n", "fix.temporal_aa", "absent") == "absent", "with neither line, the caller's absent value");
+
+    // Pre-flight over a file the user set up before the key moved: their FSR is their choice, so it is not ticked.
+    {
+        std::string old = shipped;
+        const size_t line = old.find("\ntemporal_aa = off");
+        const size_t section = old.find("\n[experimental]");
+        check(line != std::string::npos && section != std::string::npos, "the shipped edvr.ini has the lines this test edits");
+        if (line == std::string::npos || section == std::string::npos) return;
+        old.erase(line, strlen("\ntemporal_aa = off"));
+        const size_t sectionNow = old.find("\n[experimental]");
+        old.insert(old.find('\n', sectionNow + 1) + 1, "temporal_aa = fsr\n");
+        const std::wstring dir = joinPath(scratch, L"preflight_moved");
+        pfLayOut(dir, old, kPfFlatIni);
+        const Survey s = pfSurvey(dir);
+        const PreflightInputs in = pfRig(s, shipped, "vr");
+        check(in.vrTemporalNow == "fsr", "Pre-flight reads the un-migrated experimental.temporal_aa", in.vrTemporalNow);
+        const std::vector<PreflightRow> rows = recommendPreflight(in);
+        const PreflightRow* vr = pfFind(rows, "vr.upscaler");
+        check(vr && vr->checkable && !vr->tickedByDefault && vr->now == "FSR",
+              "so the row shows FSR, offers DLSS, and is not ticked");
+    }
+
+    // A read-only settings file is refused by the window and the command line alike, before anything is written.
+    {
+        const std::wstring dir = joinPath(scratch, L"preflight_readonly");
+        pfLayOut(dir, shipped, kPfFlatIni);
+        const Survey s = pfSurvey(dir);
+        const std::vector<PreflightRow> rows = recommendPreflight(pfRig(s, shipped, "vr"));
+        Options o = testOptions();
+        o.backupStamp = L"20261014-130000";
+        o.nowUtc = "2026-10-14T13:00:00Z";
+        const Plan plan = planPreflight(s, rows, defaultTicks(rows), o);
+        check(!plan.blocked && !plan.nothingToDo, "the read-only test has a plan to refuse", unifiedProblems(plan));
+        check(readOnlySettingsProblem(plan).empty(), "a writable edvr.ini is no problem");
+
+        const std::wstring ini = settingsPathFor(dir, "vr");
+        SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_READONLY);
+        const std::string problem = readOnlySettingsProblem(plan);
+        check(problem.rfind("edvr.ini is read-only", 0) == 0, "a read-only edvr.ini is refused, by name", problem);
+
+        // The command line refuses it too -- before --dry-run's own early return, so a dry run says so.
+        AppArgs args;
+        args.action = AppArgs::Act::Preflight;
+        args.preflightApply = true;
+        args.dryRun = true;
+        args.dir = dir;
+        const std::string before = pfSnapshot(dir);
+        check(runPreflight(args, s, rows) == 1, "--preflight --apply over a read-only edvr.ini exits 1");
+        check(pfSnapshot(dir) == before, "and writes nothing");
+        SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_NORMAL);
+        check(runPreflight(args, s, rows) == 0, "once it is writable again, the same dry run exits 0");
+    }
+
+    // HMD Image Quality: fine from DLSS's floor of 0.5 up to just under 0.95; below the floor it is advice again.
+    {
+        const std::wstring dir = joinPath(scratch, L"preflight_hmd");
+        pfLayOut(dir, shipped, kPfFlatIni);
+        const Survey s = pfSurvey(dir);
+        auto hmdRow = [&](const char* hmd) {
+            PreflightInputs in = pfRig(s, shipped, "vr");
+            in.elite = pfElite(hmd, "1.000000", "0", "false");
+            const std::vector<PreflightRow> rows = recommendPreflight(in);
+            const PreflightRow* r = pfFind(rows, "elite.hmd_quality");
+            return r ? *r : PreflightRow();
+        };
+        const PreflightRow low = hmdRow("0.400000");
+        check(low.id == "elite.hmd_quality" && !low.alreadyGood && low.tone == RowTone::Warn && low.after == "0.75",
+              "0.40 is under DLSS's floor: advise 0.75");
+        check(hmdRow("0.500000").alreadyGood, "0.50, the floor itself, is fine");
+        check(hmdRow("0.900000").alreadyGood, "0.90 is fine");
+        check(!hmdRow("1.000000").alreadyGood, "1.00 is advice: the upscaler would run as DLAA");
+    }
+}
+
+static void testPreflight(const std::wstring& root, const std::wstring& scratch) {
+    testPreflightReviewFixes(root, scratch);
+    testPreflightDetection(scratch);
+    testElementText();
+    testEliteSettingsReader(scratch);
+    testRecommendation();
+    testPreflightState();
+    testPreflightArgs();
+    testPreflightPlan(root, scratch);
+}
+
 int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
@@ -6761,6 +7944,7 @@ int wmain(int argc, wchar_t** argv) {
     testLogBundle(scratch);
     testState();
     testScopeArgs();
+    testPreflight(root, scratch);
 
     printf("\n%s\n", g_fails == 0 ? "installer_test: all good" : "installer_test: FAILURES");
     return g_fails == 0 ? 0 : 1;

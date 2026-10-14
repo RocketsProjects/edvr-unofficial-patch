@@ -705,7 +705,8 @@ set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
     "src\installer\apply.cpp" "src\installer\detect.cpp" ^
     "src\installer\probe.cpp" "src\common\iniedit.cpp" ^
     "src\installer\state.cpp" "src\installer\mirror.cpp" ^
-    "src\installer\payload.cpp"
+    "src\installer\payload.cpp" "src\installer\elite_settings.cpp" ^
+    "src\installer\preflight.cpp"
 set INSTALLER_LIBS=user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib ^
     shell32.lib ole32.lib comctl32.lib advapi32.lib version.lib bcrypt.lib dxgi.lib kernel32.lib
 
@@ -2837,6 +2838,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMA
     "src\installer\mirror.cpp" ^
     "src\installer\settings.cpp" "src\installer\logbundle.cpp" ^
     "src\installer\app.cpp" "src\installer\payload.cpp" ^
+    "src\installer\elite_settings.cpp" "src\installer\preflight.cpp" ^
     /link /INCREMENTAL:NO %INSTALLER_LIBS%
 if errorlevel 1 ( echo [edvr] ERROR: installer_test build failed & exit /b 1 )
 "%BUILD%\installer_test.exe" "%ROOT%" "%BUILD%\insttest_scratch" || (

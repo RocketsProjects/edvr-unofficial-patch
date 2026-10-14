@@ -79,6 +79,85 @@ GameRunState runStateOf(const wchar_t* exeName, const std::wstring& dir);
 // asking Windows for a snapshot.
 GameRunState runStateOfSnapshot(void* snapshot, const wchar_t* exeName, const std::wstring& dir);
 
+// ---- the rig (Pre-flight reads these; nothing here writes) -------------------
+
+// The PCI vendor ids DXGI reports, as the upscaler rule keys on them.
+constexpr unsigned kVendorNvidia = 0x10DE;
+constexpr unsigned kVendorAmd = 0x1002;
+constexpr unsigned kVendorIntel = 0x8086;
+constexpr unsigned kVendorMicrosoft = 0x1414;  // Microsoft Basic Render Driver
+
+struct GpuAdapter {
+    unsigned           vendorId = 0;
+    std::wstring       name;               // DXGI's Description, e.g. NVIDIA GeForce RTX 4070 Ti
+    unsigned long long dedicatedVram = 0;  // bytes
+    unsigned long long luid = 0;           // (HighPart << 32) | LowPart
+};
+
+struct GpuList {
+    std::vector<GpuAdapter> adapters;  // every real adapter, in DXGI's order
+    // Index into `adapters` of the card the headset is most likely on: the one
+    // Windows ranks first for high performance (IDXGIFactory6) when it can be
+    // asked, else the one with the most dedicated memory. -1 when there are none.
+    int  primary = -1;
+    bool primaryFromWindows = false;  // true when Windows chose it, false when memory did
+};
+
+// Every DXGI adapter that is a graphics card. A software adapter
+// (DXGI_ADAPTER_FLAG_SOFTWARE) and the Microsoft Basic Render Driver are not.
+GpuList gpuAdapters();
+
+// The two decisions inside gpuAdapters, apart from DXGI so a test can drive them.
+// `dxgiFlags` is DXGI_ADAPTER_DESC1::Flags.
+bool countsAsGraphicsCard(unsigned vendorId, unsigned dxgiFlags);
+// The index of the adapter whose LUID Windows ranked first when it was asked
+// (`haveWindowsChoice`), else of the one with the most dedicated memory (the
+// first of equals). -1 for an empty list. A Windows choice no adapter matches is
+// ignored rather than trusted.
+int pickPrimaryAdapter(const std::vector<GpuAdapter>& adapters, bool haveWindowsChoice,
+                       unsigned long long windowsChoiceLuid);
+
+// Windows' active OpenXR runtime: what the loader EDVR bundles will pick.
+// XR_RUNTIME_JSON when it is set, else HKLM\SOFTWARE\Khronos\OpenXR\1
+// ActiveRuntime read from the 64-bit registry view.
+enum class OpenXrRuntimeState {
+    NotSet,           // neither names a manifest
+    ManifestMissing,  // one is named, and the file is not there
+    Ok,
+};
+struct OpenXrRuntime {
+    OpenXrRuntimeState state = OpenXrRuntimeState::NotSet;
+    std::wstring       manifest;          // the path that was named
+    bool               fromEnvironment = false;  // XR_RUNTIME_JSON rather than the registry
+    // The manifest's runtime.name, else the manifest's file stem; empty when
+    // nothing is set.
+    std::string        name;
+};
+OpenXrRuntime activeOpenXrRuntime();
+// The half of the above that does not depend on this machine's registry: a
+// manifest path, however it was found.
+OpenXrRuntime openXrRuntimeAt(const std::wstring& manifestPath, bool fromEnvironment);
+
+// runtime.name out of a manifest's JSON; empty when the document is malformed,
+// has no runtime object, or the object has no string name.
+std::string openXrRuntimeNameFromManifest(const std::string& json);
+// "oculus_openxr_64" from ...\oculus_openxr_64.json.
+std::string openXrRuntimeNameFromPath(const std::wstring& manifestPath);
+
+struct OpenXrRuntimeLabel {
+    std::string display;  // a friendly name for the well-known runtimes, else `name` as it came
+    std::string hint;     // where to change it: "change it in SteamVR"; or, for an unknown one, "Your headset's own app sets it."
+    bool        known = false;
+};
+OpenXrRuntimeLabel describeOpenXrRuntime(const std::string& name, const std::wstring& manifestPath);
+
+// Is a process of this name running, in any folder, spelled in any case? Taken
+// from the same process snapshot gameRunState uses. A snapshot that could not
+// be read answers false: this is for a warning, which has no business inventing
+// a process it could not see (gameRunState treats the same failure as a refusal,
+// because there a wrong "stopped" costs files).
+bool processRunning(const wchar_t* exeName);
+
 // Is there an NVIDIA graphics adapter in this machine, by DXGI's vendor id,
 // software adapters skipped? NVIDIA's DLSS runtime is placed only where
 // there is one. The first such adapter's name goes to `name` when given. A

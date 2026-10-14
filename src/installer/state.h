@@ -19,6 +19,25 @@
 
 namespace edvr::installer {
 
+// What Pre-flight changed in EDVR's own settings files, kept so that Put my old settings
+// back can undo it value by value. One entry per value: the file ("edvr.ini" or
+// "edvr-flat.ini"), the dotted key, what it read before and what Pre-flight set. Undo
+// writes `before` only where the file still says `after`; anything changed since is the
+// user's and is left alone. Empty when nothing is recorded.
+constexpr int kMaxPreflightChanges = 64;   // a record claiming more than this is damaged, not generous
+
+struct PreflightChange {
+    std::string file;
+    std::string key;
+    std::string before;
+    std::string after;
+};
+struct PreflightRecord {
+    std::string                  appliedUtc;  // when, ISO-8601 Z
+    std::vector<PreflightChange> changes;
+    bool present() const { return !changes.empty(); }
+};
+
 struct InstallState {
     bool present = false;  // a record was found and parsed
 
@@ -60,6 +79,9 @@ struct InstallState {
     std::string nativeConfigSha;
     std::wstring nativeOriginalName;
     std::string nativeOriginalSha;
+
+    // Written by Pre-flight, not by an install: an install carries it forward untouched.
+    PreflightRecord preflight;
 };
 
 std::wstring stateDirPath(const std::wstring& gameDir);

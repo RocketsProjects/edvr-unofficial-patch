@@ -2,9 +2,20 @@
 
 ## Status
 
-- **State (2026-10-14):** P1 is being built on `claude/vibrant-maxwell-9gehb1`.
-  Nothing has flown. Sean answered Q1-Q8 on 2026-10-14 (section 10). Nothing is
-  open for Sean.
+- **State (2026-10-14):** P1 is built on `claude/vibrant-maxwell-9gehb1`.
+  - It compiles under mingw, and `installer_test` passes under Wine (1701
+    checks, no new failures).
+  - Screenshots of the tab under Wine match section 2.
+  - Not yet run: MSVC `build.bat`, and the real window on Windows.
+  - Nothing has flown. Sean answered Q1-Q8 (section 10); nothing is open for
+    him.
+- **Found in review, open:** the two sides read HMD Image Quality from
+  different files, and the two can disagree. P2 must settle which file the game
+  reads before writing one (H2).
+  - The installer reads the highest `Custom.<major>.<minor>.fxcfg`, or the
+    stock preset.
+  - The runtime's `eliteHmdMultiplier` (device_hook.cpp ~2327) reads the
+    newest `*.fxcfg` of any name.
 - **Goal (Sean, 2026-10-14):** help users set up the mod and Elite's settings
   so they get a good experience on the first launch. Make it as simple and user
   friendly as possible.
@@ -14,22 +25,17 @@
   - A first install lands on it.
   - No wizard and nothing to answer: every choice comes pre-filled. No new
     `edvr.ini` key.
-- **Decided (Sean, 2026-10-14):**
-  - Q1: the installer may write Elite's graphics files.
-  - Q2: the render size scales with the headset and the graphics card
-    (section 4).
-  - Q3: DLSS on NVIDIA, FSR on AMD, XeSS on Intel.
-  - Q4: after a flight it suggests the next step and never applies one by
-    itself.
-  - Q5: the names "Pre-flight", "Set up for me" and "Put my old settings
-    back".
-  - Q6: Detect my headset is offered on SteamVR too, and says first that it
+- **Decided (Sean, 2026-10-14; section 10):**
+  - Q1 the installer may write Elite's graphics files; Q2 the render size
+    follows headset and card.
+  - Q3 DLSS on NVIDIA, FSR on AMD, XeSS on Intel; Q4 suggest after a flight,
+    never apply.
+  - Q5 the names as proposed; Q6 Detect my headset on SteamVR too, saying it
     starts SteamVR.
-  - Q7: `fix.openxr_resolution` is written in two cases only: DLSS's 8192
-    limit, and a card short even at 0.5.
-  - Q8: flat's frame-rate target is detected from Elite's own settings and the
-    monitor. It is shown pre-filled, with one dropdown to change it (section
-    4).
+  - Q7 `fix.openxr_resolution` only at DLSS's 8192 limit or for a card short
+    at 0.5.
+  - Q8 flat's frame-rate target is detected and offered as one pre-filled
+    dropdown.
 - **Phases:**
   - P1: the rig card, the checks and the EDVR keys. Elite's rows show as
     advice, without a checkbox, until P2.

@@ -2,7 +2,7 @@
 
 #include <windows.h>
 #include <tlhelp32.h>
-#include <dxgi.h>
+#include <dxgi1_6.h>
 
 #include <algorithm>
 #include <cwctype>
@@ -484,30 +484,409 @@ std::vector<GameInstall> findInstalls() {
     return unique;
 }
 
-bool nvidiaAdapterPresent(std::wstring* name) {
-    // DXGI rather than WMI or the registry: it is the same enumeration the
-    // game's D3D11 device comes from, it needs no COM apartment, and a
-    // software adapter (the render-only "Basic Render Driver") is flagged as
-    // such rather than passing for a card. 0x10DE is NVIDIA's PCI vendor id.
+bool processRunning(const wchar_t* exeName) {
+    if (!exeName || !*exeName) return false;
+    // With no folder to compare against a name match is a match (runStateOfSnapshot
+    // reads the empty folder as "any"), which is the question asked here.
+    const GameRunState state = runStateOf(exeName, std::wstring());
+    return state == GameRunState::ThisFolder || state == GameRunState::OtherFolder;
+}
+
+// ---------------------------------------------------------------------------
+// the graphics cards
+// ---------------------------------------------------------------------------
+
+bool countsAsGraphicsCard(unsigned vendorId, unsigned dxgiFlags) {
+    // The render-only "Basic Render Driver" is flagged as software; its vendor id is
+    // checked as well, since a driver that forgot the flag would otherwise pass for a card.
+    if (dxgiFlags & DXGI_ADAPTER_FLAG_SOFTWARE) return false;
+    return vendorId != kVendorMicrosoft;
+}
+
+int pickPrimaryAdapter(const std::vector<GpuAdapter>& adapters, bool haveWindowsChoice,
+                       unsigned long long windowsChoiceLuid) {
+    if (adapters.empty()) return -1;
+    if (haveWindowsChoice) {
+        for (size_t i = 0; i < adapters.size(); ++i)
+            if (adapters[i].luid == windowsChoiceLuid) return static_cast<int>(i);
+    }
+    size_t best = 0;
+    for (size_t i = 1; i < adapters.size(); ++i)
+        if (adapters[i].dedicatedVram > adapters[best].dedicatedVram) best = i;
+    return static_cast<int>(best);
+}
+
+namespace {
+
+GpuAdapter adapterFrom(const DXGI_ADAPTER_DESC1& desc) {
+    GpuAdapter a;
+    a.vendorId = desc.VendorId;
+    a.name = desc.Description;
+    a.dedicatedVram = static_cast<unsigned long long>(desc.DedicatedVideoMemory);
+    a.luid = (static_cast<unsigned long long>(static_cast<unsigned long>(desc.AdapterLuid.HighPart)) << 32) |
+             static_cast<unsigned long long>(desc.AdapterLuid.LowPart);
+    return a;
+}
+
+// DXGI rather than WMI or the registry: it is the same enumeration the game's D3D11
+// device comes from, it needs no COM apartment, and a software adapter (the
+// render-only "Basic Render Driver") is flagged as such rather than passing for a
+// card. `askWindows` adds the high-performance ranking (IDXGIFactory6, Windows 10
+// 1803 and later; absent on anything older, which then falls back to memory).
+GpuList enumerateAdapters(bool askWindows) {
+    GpuList list;
     IDXGIFactory1* factory = nullptr;
     if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))) ||
         !factory) {
-        return false;
+        return list;
     }
-    bool found = false;
-    for (UINT i = 0; !found; ++i) {
+    for (UINT i = 0;; ++i) {
         IDXGIAdapter1* adapter = nullptr;
         if (factory->EnumAdapters1(i, &adapter) != S_OK || !adapter) break;
         DXGI_ADAPTER_DESC1 desc{};
-        if (SUCCEEDED(adapter->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
-            desc.VendorId == 0x10DE) {
-            found = true;
-            if (name) *name = desc.Description;
-        }
+        if (SUCCEEDED(adapter->GetDesc1(&desc)) && countsAsGraphicsCard(desc.VendorId, desc.Flags))
+            list.adapters.push_back(adapterFrom(desc));
         adapter->Release();
     }
+
+    bool haveChoice = false;
+    unsigned long long choiceLuid = 0;
+    if (askWindows && !list.adapters.empty()) {
+        IDXGIFactory6* factory6 = nullptr;
+        if (SUCCEEDED(factory->QueryInterface(__uuidof(IDXGIFactory6),
+                                              reinterpret_cast<void**>(&factory6))) &&
+            factory6) {
+            for (UINT i = 0; !haveChoice; ++i) {
+                IDXGIAdapter1* adapter = nullptr;
+                if (factory6->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                                                         __uuidof(IDXGIAdapter1),
+                                                         reinterpret_cast<void**>(&adapter)) != S_OK ||
+                    !adapter) {
+                    break;
+                }
+                DXGI_ADAPTER_DESC1 desc{};
+                // The first adapter Windows ranks that is a card at all: its list can
+                // open with the software one.
+                if (SUCCEEDED(adapter->GetDesc1(&desc)) &&
+                    countsAsGraphicsCard(desc.VendorId, desc.Flags)) {
+                    haveChoice = true;
+                    choiceLuid = adapterFrom(desc).luid;
+                }
+                adapter->Release();
+            }
+            factory6->Release();
+        }
+    }
     factory->Release();
-    return found;
+
+    list.primary = pickPrimaryAdapter(list.adapters, haveChoice, choiceLuid);
+    list.primaryFromWindows =
+        haveChoice && list.primary >= 0 &&
+        list.adapters[static_cast<size_t>(list.primary)].luid == choiceLuid;
+    return list;
+}
+
+}  // namespace
+
+GpuList gpuAdapters() { return enumerateAdapters(true); }
+
+bool nvidiaAdapterPresent(std::wstring* name) {
+    const GpuList list = enumerateAdapters(false);
+    for (const GpuAdapter& a : list.adapters) {
+        if (a.vendorId != kVendorNvidia) continue;
+        if (name) *name = a.name;
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// the active OpenXR runtime
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Just enough JSON to find runtime.name in a runtime's manifest. Strict about the
+// whole document: a manifest that does not parse names nothing, because the loader
+// would not read it either.
+class ManifestReader {
+public:
+    explicit ManifestReader(const std::string& text) : t_(text) {}
+
+    std::string runtimeName() {
+        if (t_.compare(0, 3, "\xEF\xBB\xBF") == 0) i_ = 3;   // a byte order mark is allowed in front
+        std::string name;
+        skipSpace();
+        if (!object(0, &name)) return std::string();
+        skipSpace();
+        if (i_ != t_.size()) return std::string();
+        return name;
+    }
+
+private:
+    static const int kMaxDepth = 32;
+    const std::string& t_;
+    size_t i_ = 0;
+
+    char peek() const { return i_ < t_.size() ? t_[i_] : '\0'; }
+    bool eat(char c) {
+        if (peek() != c || i_ >= t_.size()) return false;
+        ++i_;
+        return true;
+    }
+    void skipSpace() {
+        while (i_ < t_.size() && (t_[i_] == ' ' || t_[i_] == '\t' || t_[i_] == '\r' || t_[i_] == '\n')) ++i_;
+    }
+
+    static void appendUtf8(std::string* out, unsigned long cp) {
+        if (cp < 0x80) {
+            *out += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            *out += static_cast<char>(0xC0 | (cp >> 6));
+            *out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            *out += static_cast<char>(0xE0 | (cp >> 12));
+            *out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            *out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            *out += static_cast<char>(0xF0 | (cp >> 18));
+            *out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            *out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            *out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    }
+
+    bool hex4(unsigned long* out) {
+        if (i_ + 4 > t_.size()) return false;
+        unsigned long v = 0;
+        for (int k = 0; k < 4; ++k) {
+            const char c = t_[i_ + static_cast<size_t>(k)];
+            v <<= 4;
+            if (c >= '0' && c <= '9') v |= static_cast<unsigned long>(c - '0');
+            else if (c >= 'a' && c <= 'f') v |= static_cast<unsigned long>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') v |= static_cast<unsigned long>(c - 'A' + 10);
+            else return false;
+        }
+        i_ += 4;
+        *out = v;
+        return true;
+    }
+
+    bool string(std::string* out) {
+        if (!eat('"')) return false;
+        std::string s;
+        for (;;) {
+            if (i_ >= t_.size()) return false;
+            const unsigned char c = static_cast<unsigned char>(t_[i_++]);
+            if (c == '"') break;
+            if (c < 0x20) return false;
+            if (c != '\\') {
+                s += static_cast<char>(c);
+                continue;
+            }
+            if (i_ >= t_.size()) return false;
+            const char e = t_[i_++];
+            switch (e) {
+                case '"': s += '"'; break;
+                case '\\': s += '\\'; break;
+                case '/': s += '/'; break;
+                case 'b': s += '\b'; break;
+                case 'f': s += '\f'; break;
+                case 'n': s += '\n'; break;
+                case 'r': s += '\r'; break;
+                case 't': s += '\t'; break;
+                case 'u': {
+                    unsigned long cp = 0;
+                    if (!hex4(&cp)) return false;
+                    if (cp >= 0xD800 && cp < 0xDC00) {   // a high surrogate: its low half follows
+                        unsigned long low = 0;
+                        if (!eat('\\') || !eat('u') || !hex4(&low) || low < 0xDC00 || low > 0xDFFF) return false;
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                    } else if (cp >= 0xDC00 && cp < 0xE000) {
+                        return false;
+                    }
+                    appendUtf8(&s, cp);
+                    break;
+                }
+                default: return false;
+            }
+        }
+        *out = s;
+        return true;
+    }
+
+    bool skipValue(int depth) {
+        if (depth > kMaxDepth) return false;
+        skipSpace();
+        const char c = peek();
+        if (c == '"') {
+            std::string ignored;
+            return string(&ignored);
+        }
+        if (c == '{') {
+            ++i_;
+            skipSpace();
+            if (eat('}')) return true;
+            for (;;) {
+                skipSpace();
+                std::string key;
+                if (!string(&key)) return false;
+                skipSpace();
+                if (!eat(':')) return false;
+                if (!skipValue(depth + 1)) return false;
+                skipSpace();
+                if (eat(',')) continue;
+                return eat('}');
+            }
+        }
+        if (c == '[') {
+            ++i_;
+            skipSpace();
+            if (eat(']')) return true;
+            for (;;) {
+                if (!skipValue(depth + 1)) return false;
+                skipSpace();
+                if (eat(',')) continue;
+                return eat(']');
+            }
+        }
+        // A number, true, false or null: the characters those are made of, and at least one.
+        const size_t from = i_;
+        while (i_ < t_.size() && ((t_[i_] >= '0' && t_[i_] <= '9') || (t_[i_] >= 'a' && t_[i_] <= 'z') ||
+                                  (t_[i_] >= 'A' && t_[i_] <= 'Z') || t_[i_] == '+' || t_[i_] == '-' ||
+                                  t_[i_] == '.'))
+            ++i_;
+        return i_ > from;
+    }
+
+    // level 0 is the document, level 1 the "runtime" object inside it; everything else is skipped.
+    bool object(int level, std::string* name) {
+        if (!eat('{')) return false;
+        skipSpace();
+        if (eat('}')) return true;
+        for (;;) {
+            skipSpace();
+            std::string key;
+            if (!string(&key)) return false;
+            skipSpace();
+            if (!eat(':')) return false;
+            skipSpace();
+            if (level == 0 && key == "runtime" && peek() == '{') {
+                if (!object(1, name)) return false;
+            } else if (level == 1 && key == "name" && peek() == '"') {
+                std::string value;
+                if (!string(&value)) return false;
+                *name = value;   // the last of a repeated key, as a JSON reader keeps it
+            } else if (!skipValue(level + 1)) {
+                return false;
+            }
+            skipSpace();
+            if (eat(',')) continue;
+            return eat('}');
+        }
+    }
+};
+
+std::string lowerAscii(std::string s) {
+    for (char& c : s)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return s;
+}
+
+std::string trimmed(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) ++a;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n')) --b;
+    return s.substr(a, b - a);
+}
+
+// Environment variables can be long (a runtime manifest path is a full path); asked for at its own size.
+std::wstring envAnySize(const wchar_t* name) {
+    const DWORD need = GetEnvironmentVariableW(name, nullptr, 0);
+    if (need == 0) return std::wstring();
+    std::wstring value(need, L'\0');
+    const DWORD got = GetEnvironmentVariableW(name, &value[0], need);
+    if (got == 0 || got >= need) return std::wstring();
+    value.resize(got);
+    return value;
+}
+
+}  // namespace
+
+std::string openXrRuntimeNameFromManifest(const std::string& json) {
+    std::string name = trimmed(ManifestReader(json).runtimeName());
+    if (name.size() > 80) name.resize(80);
+    return name;
+}
+
+std::string openXrRuntimeNameFromPath(const std::wstring& manifestPath) {
+    std::wstring leaf = leafOf(manifestPath);
+    const size_t dot = leaf.find_last_of(L'.');
+    if (dot != std::wstring::npos && dot > 0) leaf.resize(dot);
+    return toUtf8(leaf);
+}
+
+OpenXrRuntime openXrRuntimeAt(const std::wstring& manifestPath, bool fromEnvironment) {
+    OpenXrRuntime rt;
+    if (manifestPath.empty()) return rt;
+    rt.manifest = manifestPath;
+    rt.fromEnvironment = fromEnvironment;
+    if (!fileExists(manifestPath)) {
+        rt.state = OpenXrRuntimeState::ManifestMissing;
+        rt.name = openXrRuntimeNameFromPath(manifestPath);
+        return rt;
+    }
+    rt.state = OpenXrRuntimeState::Ok;
+    rt.name = openXrRuntimeNameFromManifest(readTextFile(manifestPath, 1u << 20));
+    if (rt.name.empty()) rt.name = openXrRuntimeNameFromPath(manifestPath);
+    return rt;
+}
+
+OpenXrRuntime activeOpenXrRuntime() {
+    // The loader's own order: the environment variable overrides the registry.
+    const std::wstring fromEnv = envAnySize(L"XR_RUNTIME_JSON");
+    if (!fromEnv.empty()) return openXrRuntimeAt(fromEnv, true);
+    // The 64-bit view: this installer is 64-bit today, but the key is the 64-bit
+    // loader's, and a 32-bit process would otherwise be redirected away from it.
+    const std::wstring registered =
+        regString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Khronos\\OpenXR\\1", L"ActiveRuntime", KEY_WOW64_64KEY);
+    return openXrRuntimeAt(registered, false);
+}
+
+OpenXrRuntimeLabel describeOpenXrRuntime(const std::string& name, const std::wstring& manifestPath) {
+    OpenXrRuntimeLabel label;
+    const std::string hay = lowerAscii(name + " " + toUtf8(manifestPath));
+    auto has = [&](const char* needle) { return hay.find(needle) != std::string::npos; };
+    // The wording names the app and nothing finer: where in it the switch lives
+    // moves between versions, and a menu path that was wrong would cost more than
+    // none.
+    if (has("steamvr") || has("steamxr")) {
+        label.display = "SteamVR";
+        label.hint = "change it in SteamVR";
+        label.known = true;
+    } else if (has("virtual desktop") || has("virtualdesktop") || has("vdxr")) {
+        label.display = "Virtual Desktop";
+        label.hint = "change it in Virtual Desktop";
+        label.known = true;
+    } else if (has("pimax") || has("piopenxr")) {
+        label.display = has("pimaxxr") ? "PimaxXR" : "Pimax";
+        label.hint = "change it in Pimax Play";
+        label.known = true;
+    } else if (has("oculus") || has("meta quest") || has("meta horizon")) {
+        // Meta's PC app has been called Oculus, Meta Quest Link and Meta Horizon Link; the runtime's
+        // manifest still lives under Oculus, so it is the file that is matched and "Link" that is said.
+        label.display = "Oculus (Meta)";
+        label.hint = "change it in Meta's Link app";
+        label.known = true;
+    } else if (has("mixed reality") || has("mixedreality")) {
+        label.display = "Windows Mixed Reality";
+        label.hint = "change it in OpenXR Tools for Windows Mixed Reality";
+        label.known = true;
+    } else {
+        label.display = name;
+        label.hint = "Your headset's own app sets it.";
+    }
+    return label;
 }
 
 }  // namespace edvr::installer

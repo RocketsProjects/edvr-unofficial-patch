@@ -105,7 +105,9 @@ int  textWidth(HDC dc, const std::wstring& text, HFONT font);
 // A card: the surface everything sits on.
 void paintCard(HDC dc, RECT rect, UINT dpi);
 
-enum class ButtonStyle { Primary, Secondary, Tab, TabActive, Link };
+// Link is a link on the window; CardLink is the same link on a card (it fills with the card's colour, where Link
+// fills with the window's).
+enum class ButtonStyle { Primary, Secondary, Tab, TabActive, Link, CardLink };
 
 // Owner-drawn button. `style` is remembered per control, and the pointer is
 // tracked so it can light up under the mouse.
@@ -118,6 +120,7 @@ void drawButton(const DRAWITEMSTRUCT* item, UINT dpi);
 HWND makeCheckbox(HWND parent, const wchar_t* text, int id, bool checked, HFONT font);
 bool checkboxChecked(HWND box);
 void toggleCheckbox(HWND box);
+void setCheckbox(HWND box, bool checked);
 void drawCheckbox(const DRAWITEMSTRUCT* item, UINT dpi);
 
 // True when the control is one of ours, so WM_DRAWITEM can dispatch.

@@ -23,6 +23,12 @@ This file is why it does what it does. Using it is one paragraph in the
   its own kept default, `edvr_install\edvr.ini.base` and
   `edvr_install\edvr-flat.ini.base`. A scope change deletes no settings file.
 - **Which profile runs** is set by Elite's 3D mode, not the installer.
+- **Pre-flight (2026-10-14, phase 1 of [the
+  design](design-preflight-setup-2026-10-14.md)):** a third tab, between Setup
+  and Settings, that reads the rig and sets EDVR's own `fix.temporal_aa` for a
+  good first flight, with an undo. Elite's graphics files are read and advised
+  on, never written yet. See "Pre-flight". `installer_test` pins the rules and
+  the plan over real files.
 - **Installs by `tools\install_edvr.py` (2026-10-14):** the game's original
   runtime is recovered from the newest receipt that still holds it, so an
   update, a switch to flat-only and an uninstall work after two tool installs
@@ -380,6 +386,71 @@ that was supposed to expose it is silent. `hidden` is a valid answer, with a
 reason; forgetting is not. Commented-out expert settings are exempt: annotate
 one and it appears, leave it and it stays where it is.
 
+## Pre-flight
+
+The third tab, between Setup and Settings, answers "is this set up for a good
+first flight?" without asking anything. A first install opens it, with every
+row ticked; the Setup tab's status card carries one row, "Pre-flight", that
+reads "Ready to fly" or "2 things to set" and opens the tab when clicked.
+
+**Your rig** is read, not asked: the graphics card Windows ranks first for
+performance (its name and memory; a software adapter and the Microsoft Basic
+Render Driver are not cards), the active OpenXR runtime (`XR_RUNTIME_JSON` when
+set, else `HKLM\SOFTWARE\Khronos\OpenXR\1` `ActiveRuntime`, read from the
+64-bit view; named from the manifest's `runtime.name`, with the app to change
+it in for the well-known ones), and whether RivaTuner is running, which has
+crashed Elite with EDVR. The headset reads "Known after your first flight" for
+now.
+
+**Before you fly** lists what to set, each row saying what it is, why, the
+value now and the value after:
+
+- **Upscaler**, the only row the installer writes. NVIDIA gets `dlss`, AMD
+  `fsr`, Intel `xess`; where the installer carries no DLSS (or XeSS) runtime
+  the row says `fsr` instead, and any other card gets no recommendation and a
+  row saying so. It writes `fix.temporal_aa` in `edvr.ini` for the VR scope and
+  in `edvr-flat.ini` for the flat scope. While `edvr-flat.ini` does not exist
+  the flat profile reads `edvr.ini`, so that is the value the row shows; the
+  first change starts `edvr-flat.ini` from it and leaves `edvr.ini` alone.
+- **Elite's own settings**, advice only: HMD Image Quality below 1.0 (0.75),
+  anti-aliasing off, terrain checkerboard off in VR, supersampling 1.0 in flat.
+  The current values are read from the game's files and each row says to set it
+  in Elite's Graphics options. The files are the highest
+  `Custom.<major>.<minor>.fxcfg` when `Settings.xml` names Custom, else the
+  stock preset under `<game>\OptionDefaults\`, found by the same helpers the
+  runtime uses for its terrain checkerboard notice. Not finding them is a
+  normal outcome (a fresh install, Proton): one muted row says so.
+
+**A row is ticked only while its value is one the user never chose** — the
+value the installed version shipped (`edvr_install\edvr.ini.base`). A value
+they set themselves is shown, can be ticked, and starts unticked; a value
+already right reads "already set" and has no box.
+
+**Set up for me** is the same flow as Install: it asks the disk again, shows
+the plan and waits for a yes (No is the default), asks for administrator rights
+only if the folder needs them, applies, and refreshes the rows. The edit is the
+settings window's own single-key merge, so only that line changes; `edvr.ini`
+or `edvr-flat.ini` is copied to `edvr_backup\preflight-<stamp>\` first, and the
+install record gains a `[preflight]` section: when, and for each change the
+file, key, value before and value after. The value now is read the way the
+runtime and the settings list read it: through the moved-from map for a file
+not yet migrated, so an old `experimental.temporal_aa` the user chose counts as
+their choice. A settings file marked read-only is refused, as the settings list
+refuses it, and nothing is changed.
+
+**Put my old settings back** (shown only when that record exists) writes each
+`before` only where the file still says `after`. Anything changed since, in the
+Settings window or by hand, is left alone and named in the plan, and the record
+is cleared either way. A value changed twice keeps its first `before`.
+
+From the command line, `--preflight` prints the rig and the rows, `--preflight
+--apply` sets the rows ticked by default (`--rows a,b` names others), and
+`--preflight --undo` puts back; each takes `--dry-run`, which prints the plan
+and writes nothing at all.
+
+Not built yet (see the design): writing Elite's own files, detecting the
+headset and sizing the render for it, and the suggestion after a flight.
+
 ## Save logs
 
 **Save logs** writes one zip to the Desktop: the most recent session's logs,
@@ -489,9 +560,9 @@ runtime, and says so in its window and its report.
 
 No network access of any kind: it installs what it carries, and "update" means
 running the newer installer. No telemetry. No registry writes — the registry is
-only read, to find the game. No Add/Remove Programs entry, no shortcuts, no
-services, no scheduled tasks. Nothing outside the game folder, `edvr_backup\`
-and `edvr_install\`.
+only read, to find the game and the active OpenXR runtime. No Add/Remove
+Programs entry, no shortcuts, no services, no scheduled tasks. Nothing outside
+the game folder, `edvr_backup\` and `edvr_install\`.
 
 ## The command line
 
@@ -503,6 +574,7 @@ edvr-installer.exe --install [--dir D] [--scope both|vr|flat] [--dry-run]
 edvr-installer.exe --repair [--dir D]
 edvr-installer.exe --uninstall [--dir D] [--remove-settings]
 edvr-installer.exe --collect-logs [--dir D]
+edvr-installer.exe --preflight [--apply [--rows a,b] | --undo] [--dir D] [--dry-run]
 edvr-installer.exe --help
 ```
 

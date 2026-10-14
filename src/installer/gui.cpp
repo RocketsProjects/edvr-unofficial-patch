@@ -18,6 +18,7 @@
 #include <shlobj.h>
 #include <uxtheme.h>
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,7 @@
 #include "logbundle.h"
 #include "mirror.h"
 #include "payload.h"
+#include "preflight.h"
 #include "settings.h"
 #include "settings_view.h"
 #include "ui.h"
@@ -49,11 +51,15 @@ enum : int {
     kIdDiscord = 1041,
     kIdTabInstall = 1050,
     kIdTabSettings = 1051,
+    kIdTabPreflight = 1052,
     kIdSearch = 1060,
     kIdSettingsList = 1061,
     kIdSettingsVr = 1062,
     kIdSettingsFlat = 1063,
     kIdScope = 1070,
+    kIdPfSetUp = 1082,
+    kIdPfUndo = 1083,
+    kIdPfBox = 1090,   // kPfBoxCount ids from here: one checkbox per EDVR row on the Pre-flight tab
 };
 
 const UINT kMsgFirstScan = WM_APP + 1;
@@ -74,7 +80,24 @@ const int kCardPad = 20;
 // default is the folder's own scope, else both.
 const wchar_t* kScopeChoices[] = {L"VR and flat (recommended)", L"VR only", L"Flat only"};
 
-enum class Screen { Install, Settings };
+// The Pre-flight tab's geometry, in 96-dpi units (the window is fixed at 720x688 and the tab does not scroll).
+// The tallest list is both scopes with every Elite row and RivaTuner: 3 rig rows, 6 two-line rows and 1 warning,
+// which ends at 552, above the result line.
+const int kPfLeft = kMargin + kCardPad;                  // the checkbox and dot column
+const int kPfRight = kClientWidth - kMargin - kCardPad;
+const int kPfCardBottom = 648;
+const int kPfRigHeadingY = 200;
+const int kPfRigRow = 22;
+const int kPfFlyRow = 35;     // the label and its numbers, then the why line under them
+const int kPfWarnRow = 22;
+const int kPfNowX = 400;      // the "now" column; the arrow and the "after" column follow
+const int kPfArrowX = 478;
+const int kPfAfterX = 504;
+const int kPfResultY = 564;   // what the last button did
+const int kPfButtonY = 588;
+const int kPfCaptionY = 626;
+
+enum class Screen { Install, Preflight, Settings };
 
 enum class Tone { Good, Warn, Bad, Muted };
 
@@ -91,6 +114,10 @@ struct Place {
     bool bothScreens = false;
 };
 
+// The Pre-flight tab. Its rows are painted (dots, columns, the why line); only the checkboxes and the two
+// buttons are controls. Checkboxes come from a small pool bound to the EDVR rows that can be ticked.
+constexpr size_t kPfBoxCount = 8;
+
 struct Gui {
     HWND window = nullptr;
     HWND combo = nullptr;
@@ -103,6 +130,16 @@ struct Gui {
     HWND collectLogs = nullptr;
     HWND tabInstall = nullptr;
     HWND tabSettings = nullptr;
+    HWND tabPreflight = nullptr;
+    HWND pfSetUp = nullptr;                 // Set up for me
+    HWND pfUndo = nullptr;                  // Put my old settings back
+    std::vector<HWND> pfBoxes;              // the checkbox pool
+    std::vector<int>  pfBoxRow;             // the row each pool box is bound to, -1 when it is hidden
+    std::vector<PreflightRow> pfRows;       // what recommendPreflight said when the tab was last refreshed
+    std::map<std::string, bool> pfTicks;    // the user's ticks by row id, kept across refreshes
+    std::wstring pfResult;                  // one line under the rows: what the last button did
+    RowTone      pfResultTone = RowTone::Muted;   // that line's colour
+    int          pfStatusRow = -1;          // the Setup tab's Pre-flight row, for a click on it
     HWND settingsVr = nullptr;
     HWND settingsFlat = nullptr;
     HWND tip = nullptr;
@@ -264,6 +301,8 @@ void syncSettingsSelector() {
     ShowWindow(g.settingsFlat, settingsShown && scope != "vr" ? SW_SHOW : SW_HIDE);
 }
 
+void layoutPreflight();   // the Pre-flight tab's own controls, placed from its rows (below)
+
 // Everything moved and shown or hidden for the current screen and scale.
 //
 // The first version of this took the window's size from GetDpiForSystem and the
@@ -328,6 +367,7 @@ void applyLayout() {
 
     // Shown or hidden by the scope, not by the screen alone, so it runs after the loop above.
     syncSettingsSelector();
+    layoutPreflight();
     InvalidateRect(g.window, nullptr, TRUE);
 }
 
@@ -356,6 +396,7 @@ void rebuildStatus() {
     g.status.clear();
     g.modeLine.clear();
     g.scopeLine.clear();
+    g.pfStatusRow = -1;
     if (!g.haveSurvey) {
         g.statusPath.clear();
         return;
@@ -498,6 +539,18 @@ void rebuildStatus() {
         g.status.push_back(running);
     }
 
+    // Pre-flight: one row saying whether anything is left to set, and a click on it opens the tab. Only for a
+    // folder that has EDVR's settings to set (the rows are read from the Pre-flight tab's own refresh).
+    if (!g.pfRows.empty() && (s.iniPresent || s.flatIniPresent)) {
+        StatusRow pre;
+        pre.label = L"Pre-flight";
+        const int pending = pendingCount(g.pfRows);
+        pre.value = fromUtf8(preflightSummary(g.pfRows)) + (pending > 0 ? L" \x2014 open the Pre-flight tab" : L"");
+        pre.tone = pending > 0 ? Tone::Warn : Tone::Good;
+        g.pfStatusRow = static_cast<int>(g.status.size());
+        g.status.push_back(pre);
+    }
+
     // Elite's 3D mode decides which half of EDVR runs. Said in a sentence under the rows, and
     // when the scope leaves that half out, said again: somebody who installed VR only and
     // then turned 3D off is owed the reason the flat fixes are not there.
@@ -522,6 +575,137 @@ COLORREF colourFor(Tone tone) {
         case Tone::Warn: return t.warn;
         case Tone::Bad: return t.bad;
         default: return t.muted;
+    }
+}
+
+Tone toneOf(RowTone tone) {
+    switch (tone) {
+        case RowTone::Good: return Tone::Good;
+        case RowTone::Warn: return Tone::Warn;
+        case RowTone::Bad: return Tone::Bad;
+        default: return Tone::Muted;
+    }
+}
+
+// The status card's rows are 20 apart; with the Pre-flight row there can be eight, and eight at 20 would push the
+// two lines under them out of the card, so they close up to 18.
+int statusPitch() { return g.status.size() >= 8 ? 18 : 20; }
+
+// Is this client point on the Setup tab's Pre-flight row? The rows are painted, not controls, so the hit test is
+// the paint's own arithmetic (paintInstallScreen: rows from y=202, statusPitch() apart).
+bool pfStatusRowAt(int x, int y) {
+    if (g.pfStatusRow < 0) return false;
+    const int top = 202 + g.pfStatusRow * statusPitch();
+    return x >= dp(kMargin + kCardPad) && x < dp(kClientWidth - kMargin - kCardPad) && y >= dp(top) &&
+           y < dp(top + statusPitch());
+}
+
+// ---------------------------------------------------------------------------
+// Pre-flight: the rows behind the tab, and where they sit
+// ---------------------------------------------------------------------------
+
+// The scope the rows are for: what is installed here, else what the Setup tab is about to install.
+std::string pfScope() {
+    const std::string installed = installedScope(g.survey);
+    return installed.empty() ? scopeChoice() : installed;
+}
+
+bool pfAnyTicked() {
+    for (const auto& kv : g.pfTicks)
+        if (kv.second) return true;
+    return false;
+}
+
+void updatePreflightButtons() {
+    if (g.pfSetUp) EnableWindow(g.pfSetUp, g.haveSurvey && pfAnyTicked());
+}
+
+// Reads the machine again and rebinds the checkboxes. The user's ticks survive a refresh (by row id); a row that
+// is not tickable any more forgets its tick, so it starts from its default if it comes back.
+void refreshPreflight() {
+    g.pfRows.clear();
+    g.pfBoxRow.assign(g.pfBoxes.size(), -1);
+    if (!g.haveSurvey) {
+        g.pfTicks.clear();
+        updatePreflightButtons();
+        return;
+    }
+    g.pfRows = recommendPreflight(collectPreflightInputs(g.survey, payloadInfo(), pfScope()));
+
+    std::map<std::string, bool> kept;
+    size_t box = 0;
+    for (size_t i = 0; i < g.pfRows.size() && box < g.pfBoxes.size(); ++i) {
+        const PreflightRow& r = g.pfRows[i];
+        if (r.kind != RowKind::EdvrWrite || !r.checkable) continue;
+        const auto earlier = g.pfTicks.find(r.id);
+        const bool on = earlier != g.pfTicks.end() ? earlier->second : r.tickedByDefault;
+        kept[r.id] = on;
+        g.pfBoxRow[box] = static_cast<int>(i);
+        SetWindowTextW(g.pfBoxes[box], fromUtf8(r.label).c_str());
+        ui::setCheckbox(g.pfBoxes[box], on);
+        InvalidateRect(g.pfBoxes[box], nullptr, TRUE);
+        ++box;
+    }
+    g.pfTicks = kept;
+    updatePreflightButtons();
+}
+
+struct PfSlot {
+    size_t index = 0;   // into g.pfRows
+    int    y = 0;
+    int    height = 0;
+};
+struct PfLayout {
+    std::vector<PfSlot> slots;
+    int flyHeadingY = 0;
+};
+
+PfLayout pfLayout() {
+    PfLayout layout;
+    int y = kPfRigHeadingY + 20;
+    for (size_t i = 0; i < g.pfRows.size(); ++i) {
+        if (g.pfRows[i].group != RowGroup::Rig) continue;
+        layout.slots.push_back({i, y, kPfRigRow});
+        y += kPfRigRow;
+    }
+    y += 10;
+    layout.flyHeadingY = y;
+    y += 24;
+    for (size_t i = 0; i < g.pfRows.size(); ++i) {
+        if (g.pfRows[i].group != RowGroup::Fly) continue;
+        const int height = g.pfRows[i].kind == RowKind::Warn ? kPfWarnRow : kPfFlyRow;
+        layout.slots.push_back({i, y, height});
+        y += height;
+    }
+    return layout;
+}
+
+// The tab's own controls: each bound checkbox beside its row's label, and the undo link only when there is
+// something to undo. Called from applyLayout and again whenever the rows change.
+void layoutPreflight() {
+    const bool shown = g.screen == Screen::Preflight && g.haveSurvey;
+    const PfLayout layout = pfLayout();
+    for (size_t b = 0; b < g.pfBoxes.size(); ++b) {
+        const int row = b < g.pfBoxRow.size() ? g.pfBoxRow[b] : -1;
+        const PfSlot* slot = nullptr;
+        for (const PfSlot& s : layout.slots)
+            if (row >= 0 && s.index == static_cast<size_t>(row)) slot = &s;
+        if (shown && slot) {
+            MoveWindow(g.pfBoxes[b], dp(kPfLeft), dp(slot->y), dp(kPfNowX - 8 - kPfLeft), dp(20), TRUE);
+            ShowWindow(g.pfBoxes[b], SW_SHOW);
+        } else {
+            ShowWindow(g.pfBoxes[b], SW_HIDE);
+        }
+    }
+    if (g.pfUndo) {
+        const bool offered = shown && g.survey.state.preflight.present();
+        if (offered) {
+            HDC dc = GetDC(g.window);
+            const int width = ui::textWidth(dc, L"Put my old settings back", ui::fonts().caption) + dp(2);
+            ReleaseDC(g.window, dc);
+            MoveWindow(g.pfUndo, dp(kPfLeft + 156), dp(kPfButtonY + 8), width, dp(20), TRUE);
+        }
+        ShowWindow(g.pfUndo, offered ? SW_SHOW : SW_HIDE);
     }
 }
 
@@ -565,7 +749,7 @@ void paintInstallScreen(HDC dc) {
         ui::drawText(dc, row.value, value, f.body, t.text,
                      DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         // 20 apart, not 22: seven rows and the two lines under them fit the card at the window's fixed height.
-        y += 20;
+        y += statusPitch();
     }
 
     if (!g.modeLine.empty()) {
@@ -600,6 +784,105 @@ void paintInstallScreen(HDC dc) {
         reportScrollState(&content, &page, &pos);
         ui::drawSlimScrollbar(dc, report, content, page, pos, g.dpi, g.reportDrag);
     }
+}
+
+// One Pre-flight row. A rig row is a dot, a label and a value with a note beside it. A row EDVR can set has a
+// checkbox (a control, bound to it) where the dot would be; the rest have the dot. Then the columns:
+// now, an arrow, after -- or, for a value that is already right, that said in the "after" place.
+void paintPreflightRow(HDC dc, const PreflightRow& r, int top) {
+    const ui::Theme& t = ui::theme();
+    const ui::Fonts& f = ui::fonts();
+    const COLORREF dot = colourFor(toneOf(r.tone));
+
+    if (r.group == RowGroup::Rig) {
+        ui::fillCircle(dc, dp(kMargin + kCardPad + 5), dp(top + 10), dp(4), dot);
+        RECT label{dp(kPfLeft + 20), dp(top), dp(kPfLeft + 180), dp(top + 20)};
+        ui::drawText(dc, fromUtf8(r.label), label, f.body, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        const std::wstring value = fromUtf8(r.now);
+        const int valueX = kPfLeft + 190;
+        RECT valueRect{dp(valueX), dp(top), dp(kPfRight), dp(top + 20)};
+        ui::drawText(dc, value, valueRect, f.body, t.text, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (!r.why.empty()) {
+            const int used = ui::textWidth(dc, value, f.body) + dp(12);
+            RECT note{dp(valueX) + used, dp(top + 2), dp(kPfRight), dp(top + 20)};
+            if (note.left < note.right)
+                ui::drawText(dc, fromUtf8(r.why), note, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        return;
+    }
+
+    const bool boxed = r.kind == RowKind::EdvrWrite && r.checkable;
+    if (!boxed) ui::fillCircle(dc, dp(kMargin + kCardPad + 5), dp(top + 10), dp(4), dot);
+
+    if (r.kind == RowKind::Warn) {
+        // "RivaTuner is running." in the warning colour, then what to do about it, on the same line.
+        const std::wstring head = fromUtf8(r.label);
+        RECT headRect{dp(kPfLeft + 28), dp(top), dp(kPfRight), dp(top + 20)};
+        ui::drawText(dc, head, headRect, f.bodyBold, colourFor(Tone::Warn), DT_LEFT | DT_SINGLELINE);
+        const int used = ui::textWidth(dc, head, f.bodyBold) + dp(8);
+        RECT rest{dp(kPfLeft + 28) + used, dp(top), dp(kPfRight), dp(top + 20)};
+        if (rest.left < rest.right)
+            ui::drawText(dc, fromUtf8(r.why), rest, f.body, t.text, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
+
+    if (!boxed) {
+        RECT label{dp(kPfLeft + 28), dp(top), dp(kPfNowX - 8), dp(top + 20)};
+        ui::drawText(dc, fromUtf8(r.label), label, f.body, t.text, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    if (!r.now.empty()) {
+        RECT now{dp(kPfNowX), dp(top), dp(kPfArrowX - 4), dp(top + 20)};
+        ui::drawText(dc, fromUtf8(r.now), now, f.body, t.text, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    if (r.alreadyGood && !r.after.empty()) {
+        RECT done{dp(kPfArrowX), dp(top), dp(kPfRight), dp(top + 20)};
+        ui::drawText(dc, fromUtf8(r.after), done, f.body, t.good, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    } else if (!r.after.empty()) {
+        RECT arrow{dp(kPfArrowX), dp(top), dp(kPfAfterX - 4), dp(top + 20)};
+        ui::drawText(dc, L"\x2192", arrow, f.body, t.subtext, DT_LEFT | DT_SINGLELINE);
+        RECT after{dp(kPfAfterX), dp(top), dp(kPfRight), dp(top + 20)};
+        ui::drawText(dc, fromUtf8(r.after), after, f.bodyBold, t.text, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    if (!r.why.empty()) {
+        RECT why{dp(kPfLeft + 28), dp(top + 18), dp(kPfRight), dp(top + 34)};
+        ui::drawText(dc, fromUtf8(r.why), why, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+}
+
+void paintPreflightScreen(HDC dc) {
+    const ui::Theme& t = ui::theme();
+    const ui::Fonts& f = ui::fonts();
+    RECT card{dp(kMargin), dp(186), dp(kClientWidth - kMargin), dp(kPfCardBottom)};
+    ui::paintCard(dc, card, g.dpi);
+
+    if (!g.haveSurvey) {
+        RECT note{dp(kPfLeft), dp(202), dp(kPfRight), dp(222)};
+        ui::drawText(dc, L"Pick an install above first.", note, f.caption, t.subtext,
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
+
+    const PfLayout layout = pfLayout();
+    RECT rigHeading{dp(kPfLeft), dp(kPfRigHeadingY), dp(kPfRight), dp(kPfRigHeadingY + 16)};
+    ui::drawText(dc, L"YOUR RIG", rigHeading, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE);
+
+    RECT flyHeading{dp(kPfLeft), dp(layout.flyHeadingY), dp(kPfNowX - 8), dp(layout.flyHeadingY + 16)};
+    ui::drawText(dc, L"BEFORE YOU FLY", flyHeading, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE);
+    RECT nowHead{dp(kPfNowX), dp(layout.flyHeadingY), dp(kPfArrowX - 4), dp(layout.flyHeadingY + 16)};
+    ui::drawText(dc, L"now", nowHead, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE);
+    RECT afterHead{dp(kPfAfterX), dp(layout.flyHeadingY), dp(kPfRight), dp(layout.flyHeadingY + 16)};
+    ui::drawText(dc, L"after", afterHead, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE);
+
+    for (const PfSlot& slot : layout.slots) paintPreflightRow(dc, g.pfRows[slot.index], slot.y);
+
+    if (!g.pfResult.empty()) {
+        RECT result{dp(kPfLeft), dp(kPfResultY), dp(kPfRight), dp(kPfResultY + 20)};
+        ui::drawText(dc, g.pfResult, result, f.body, colourFor(toneOf(g.pfResultTone)),
+                     DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    RECT caption{dp(kPfLeft), dp(kPfCaptionY), dp(kPfRight), dp(kPfCaptionY + 18)};
+    ui::drawText(dc, L"Everything changed is copied to edvr_backup\\ first.", caption, f.caption, t.subtext,
+                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
 void paintSettingsScreen(HDC dc) {
@@ -657,6 +940,8 @@ void paintWindow(HWND window) {
     paintInstallPicker(dc);
     if (g.screen == Screen::Install)
         paintInstallScreen(dc);
+    else if (g.screen == Screen::Preflight)
+        paintPreflightScreen(dc);
     else
         paintSettingsScreen(dc);
 
@@ -677,7 +962,10 @@ void paintWindow(HWND window) {
 void showSurvey() {
     // Read again on every change: the game's 3D switch is flipped outside this window.
     g.mode = eliteGameMode();
+    // The Pre-flight rows first: the Setup tab's status card carries a row made from them.
+    refreshPreflight();
     rebuildStatus();
+    layoutPreflight();
     if (!g.haveSurvey) {
         EnableWindow(g.install, FALSE);
         EnableWindow(g.repair, FALSE);
@@ -721,6 +1009,8 @@ void selectInstall(size_t index) {
     }
     g.survey = surveyTarget(g.installs[index]);
     g.haveSurvey = true;
+    g.pfTicks.clear();      // another folder starts from its own defaults, and its own last result
+    g.pfResult.clear();
     // The scope this folder gets: the one the run was started with, else the folder's own, else both.
     SendMessageW(g.scopeCombo, CB_SETCURSEL, scopeIndex(g.args.scope.empty() ? defaultScope(g.survey) : g.args.scope), 0);
     g.mode = eliteGameMode();
@@ -847,6 +1137,8 @@ std::wstring confirmText(const Plan& plan, const wchar_t* verb) {
     return text;
 }
 
+void showScreen(Screen screen);
+
 void runAction(AppArgs::Act action) {
     if (!g.haveSurvey) return;
 
@@ -854,6 +1146,10 @@ void runAction(AppArgs::Act action) {
     // started, another installer runs. Ask the disk again rather than acting on
     // a picture that may be minutes old.
     g.survey = surveyTarget(g.survey.game);
+
+    // A first install, as opposed to an update, repair or uninstall: the one the Pre-flight tab opens after.
+    const bool freshInstall = action == AppArgs::Act::Install && g.survey.d3d11.kind != DllKind::Edvr &&
+                              g.survey.openvrCurrent.kind != DllKind::Edvr && !g.survey.state.present;
 
     AppArgs args = g.args;
     args.action = action;
@@ -990,6 +1286,9 @@ void runAction(AppArgs::Act action) {
 
     g.survey = surveyTarget(g.survey.game);
     showSurvey();
+    // The next job after a first install is making the first flight good; the tab is right there with every
+    // row ticked. Not after an update or a failure: those people know where they are.
+    if (result.ok && freshInstall) showScreen(Screen::Preflight);
 }
 
 // One zip on the Desktop with the logs, the breadcrumbs, any fatal note, the
@@ -1024,12 +1323,130 @@ void saveLogs() {
     }
     setReport(text);
 }
+void setPreflightResult(const std::wstring& text, RowTone tone) {
+    g.pfResult = text;
+    g.pfResultTone = tone;
+    InvalidateRect(g.window, nullptr, FALSE);
+}
+
+// Set up for me (undo false) and Put my old settings back (undo true): the install flow in miniature. Ask the
+// disk again, plan, say what is about to happen and wait for a yes (No is the default button, for the reason
+// runAction gives), ask for administrator rights only if the folder needs them, apply, mirror the settings,
+// and say what happened in one line under the rows.
+//
+// `confirmed` is the elevated relaunch, which was confirmed before it started; `onlyRows` is the rows that
+// copy was told to set (the user's ticks travel with it), null otherwise.
+void runPreflightAction(bool undo, bool confirmed, const std::vector<std::string>* onlyRows) {
+    if (!g.haveSurvey) return;
+    g.survey = surveyTarget(g.survey.game);
+    const std::string scope = pfScope();
+    const std::vector<PreflightRow> rows =
+        recommendPreflight(collectPreflightInputs(g.survey, payloadInfo(), scope));
+    std::vector<std::string> ticked;
+    if (onlyRows) {
+        ticked = *onlyRows;
+    } else {
+        for (const auto& kv : g.pfTicks)
+            if (kv.second) ticked.push_back(kv.first);
+    }
+
+    AppArgs args = g.args;
+    args.action = AppArgs::Act::Preflight;
+    args.dir = g.survey.game.dir;
+    args.scope = scope;
+    args.preflightApply = !undo;
+    args.preflightUndo = undo;
+    args.rowsGiven = !undo;
+    args.rows = ticked;
+
+    const Options options = optionsFor(args, false);
+    const Plan plan = undo ? planPreflightUndo(g.survey, options) : planPreflight(g.survey, rows, ticked, options);
+    if (plan.blocked || plan.nothingToDo) {
+        const std::string& first = plan.blocked ? (plan.problems.empty() ? std::string("That could not be planned.") : plan.problems.front())
+                                                : (plan.notes.empty() ? std::string("Nothing to do.") : plan.notes.front());
+        setPreflightResult(fromUtf8(first), plan.blocked ? RowTone::Bad : RowTone::Muted);
+        showSurvey();
+        return;
+    }
+    const std::string readOnly = readOnlySettingsProblem(plan);
+    if (!readOnly.empty()) {
+        setPreflightResult(fromUtf8(readOnly), RowTone::Bad);
+        return;
+    }
+
+    if (!confirmed) {
+        const wchar_t* verb = undo ? L"About to put your old settings back:" : L"About to set up EDVR for your first flight:";
+        const int answer = MessageBoxW(g.window, confirmText(plan, verb).c_str(), L"EDVR installer",
+                                       MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+        if (answer != IDYES) return;
+    }
+
+    // Only the game folder is written: the backup, the record and the settings files all live in it.
+    if (!canWriteInto(g.survey.game.dir) && !isElevated()) {
+        const int answer = MessageBoxW(
+            g.window,
+            L"This game folder can only be written to by an administrator (it is usually under "
+            L"Program Files).\n\nRestart the installer with administrator rights and carry on?",
+            L"EDVR installer", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+        if (answer != IDYES) return;
+        AppArgs elevated = args;
+        elevated.autorun = true;
+        if (relaunchElevated(elevated)) {
+            PostMessageW(g.window, WM_CLOSE, 0, 0);
+        } else {
+            setPreflightResult(L"Windows would not start the installer with administrator rights, so nothing was changed.",
+                               RowTone::Bad);
+        }
+        return;
+    }
+
+    const ApplyResult result = applyPlan(plan, payloadItem);
+    if (!result.ok) {
+        std::string why = result.error;
+        if (result.rolledBack) why += " Everything was put back as it was.";
+        setPreflightResult(fromUtf8(why), RowTone::Bad);
+        return;
+    }
+    updateMirrorIni(g.survey.game.dir, mirrorDirFor(g.survey.game));
+
+    // Ticks start again from the defaults: what was set is "already set" now, and what was put back is a
+    // default again.
+    g.pfTicks.clear();
+    g.survey = surveyTarget(g.survey.game);
+    showSurvey();
+
+    if (undo) {
+        bool leftAlone = false;
+        for (const std::string& n : plan.notes)
+            if (n.rfind("Left ", 0) == 0) leftAlone = true;
+        setPreflightResult(leftAlone ? L"Your old settings are back. Anything you changed since was left alone."
+                                     : L"Your old settings are back.",
+                           RowTone::Good);
+    } else {
+        // The rows the plan set, not the ticks: a tick kept from an earlier refresh can name a row that has
+        // nothing left to set.
+        size_t changed = 0;
+        for (const PreflightRow& r : rows)
+            if (r.kind == RowKind::EdvrWrite && r.checkable &&
+                std::find(ticked.begin(), ticked.end(), r.id) != ticked.end())
+                ++changed;
+        const std::wstring count = std::to_wstring(changed);
+        setPreflightResult(L"Done. " + count + (changed == 1 ? L" setting" : L" settings") +
+                               L" changed; the old values are copied to edvr_backup\\.",
+                           RowTone::Good);
+    }
+}
+
 void showScreen(Screen screen) {
     g.screen = screen;
     ui::setButtonStyle(g.tabInstall,
                        screen == Screen::Install ? ui::ButtonStyle::TabActive : ui::ButtonStyle::Tab);
+    ui::setButtonStyle(g.tabPreflight, screen == Screen::Preflight ? ui::ButtonStyle::TabActive
+                                                                   : ui::ButtonStyle::Tab);
     ui::setButtonStyle(g.tabSettings, screen == Screen::Settings ? ui::ButtonStyle::TabActive
                                                                  : ui::ButtonStyle::Tab);
+    // The rig can have changed since the tab was last drawn (RivaTuner started, a runtime chosen).
+    if (screen == Screen::Preflight) refreshPreflight();
     applyLayout();
 }
 
@@ -1046,8 +1463,11 @@ void createControls(HWND window) {
                                   f.body);
     g.tabSettings = ui::makeButton(window, L"Settings", kIdTabSettings, ui::ButtonStyle::Tab,
                                    f.body);
+    // Pre-flight sits between Setup and Settings: install, then make the first flight good, then tune.
+    g.tabPreflight = ui::makeButton(window, L"Pre-flight", kIdTabPreflight, ui::ButtonStyle::Tab, f.body);
     place(g.tabInstall, kMargin, 146, 84, 30, Screen::Install, true);
-    place(g.tabSettings, kMargin + 92, 146, 92, 30, Screen::Install, true);
+    place(g.tabPreflight, kMargin + 92, 146, 104, 30, Screen::Install, true);
+    place(g.tabSettings, kMargin + 204, 146, 92, 30, Screen::Install, true);
 
     // The scope prompt, on the same row as the tabs and drawn beside it as
     // "Install EDVR for:". Owner-drawn like the install combo, sized the same way.
@@ -1107,6 +1527,20 @@ void createControls(HWND window) {
     place(g.repair, 172, 436, 104, 34, Screen::Install);
     place(g.uninstall, 284, 436, 104, 34, Screen::Install);
     place(g.collectLogs, 396, 436, 116, 34, Screen::Install);
+    // The Pre-flight tab: Set up for me, the undo link (shown only when there is something to undo), and a pool of
+    // checkboxes that refreshPreflight binds to the rows EDVR can set. Their places are the rows', not fixed ones,
+    // so layoutPreflight positions them; they start hidden.
+    g.pfSetUp = ui::makeButton(window, L"Set up for me", kIdPfSetUp, ui::ButtonStyle::Primary, f.body);
+    place(g.pfSetUp, kPfLeft, kPfButtonY, 140, 34, Screen::Preflight);
+    g.pfUndo = ui::makeButton(window, L"Put my old settings back", kIdPfUndo, ui::ButtonStyle::CardLink, f.caption);
+    place(g.pfUndo, kPfLeft + 156, kPfButtonY + 8, 160, 20, Screen::Preflight);
+    for (size_t i = 0; i < kPfBoxCount; ++i) {
+        HWND box = ui::makeCheckbox(window, L"", kIdPfBox + static_cast<int>(i), false, f.body);
+        ShowWindow(box, SW_HIDE);
+        g.pfBoxes.push_back(box);
+    }
+    g.pfBoxRow.assign(g.pfBoxes.size(), -1);
+
     // No Close button: it was the one control at list height marked
     // both-screens, so it painted through the settings page -- and the
     // window's own close box already does the job.
@@ -1169,6 +1603,7 @@ void rescale(HWND window, UINT dpi, const RECT* suggested) {
         SendMessageW(p.hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
     }
     SendMessageW(g.report, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
+    for (HWND box : g.pfBoxes) SendMessageW(box, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
     settingsListRescale(g.settingsList, dpi);
     applyLayout();
     if (suggested) {
@@ -1242,7 +1677,10 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 case kIdUninstall: runAction(AppArgs::Act::Uninstall); return 0;
                 case kIdCollectLogs: saveLogs(); return 0;
                 case kIdTabInstall: showScreen(Screen::Install); return 0;
+                case kIdTabPreflight: showScreen(Screen::Preflight); return 0;
                 case kIdTabSettings: showScreen(Screen::Settings); return 0;
+                case kIdPfSetUp: runPreflightAction(false, false, nullptr); return 0;
+                case kIdPfUndo: runPreflightAction(true, false, nullptr); return 0;
                 case kIdKofi:
                     ShellExecuteW(window, L"open", kTipUrl, nullptr, nullptr, SW_SHOWNORMAL);
                     return 0;
@@ -1252,7 +1690,17 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 case kIdChkKeep:
                     ui::toggleCheckbox(reinterpret_cast<HWND>(lparam));
                     return 0;
-                default: return 0;
+                default:
+                    if (id >= kIdPfBox && id < kIdPfBox + static_cast<int>(kPfBoxCount)) {
+                        // A Pre-flight checkbox: flip it, and remember the choice against its row.
+                        HWND box = reinterpret_cast<HWND>(lparam);
+                        ui::toggleCheckbox(box);
+                        const int row = g.pfBoxRow[static_cast<size_t>(id - kIdPfBox)];
+                        if (row >= 0 && static_cast<size_t>(row) < g.pfRows.size())
+                            g.pfTicks[g.pfRows[static_cast<size_t>(row)].id] = ui::checkboxChecked(box);
+                        updatePreflightButtons();
+                    }
+                    return 0;
             }
         }
 
@@ -1260,6 +1708,10 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         // keeps no bar of its own): a press in the right gutter grabs or
         // jumps the thumb, and the drag drives the EDIT by whole lines.
         case WM_LBUTTONDOWN: {
+            if (g.screen == Screen::Install && pfStatusRowAt(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
+                showScreen(Screen::Preflight);
+                return 0;
+            }
             if (g.screen != Screen::Install || !g.report) break;
             const int x = GET_X_LPARAM(lparam);
             const int y = GET_Y_LPARAM(lparam);
@@ -1339,6 +1791,29 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             return reinterpret_cast<LRESULT>(brushes[slot]);
         }
 
+        case WM_SETCURSOR:
+            // A hand over the Setup tab's Pre-flight row, which opens the tab.
+            if (g.screen == Screen::Install && LOWORD(lparam) == HTCLIENT) {
+                POINT pt{};
+                GetCursorPos(&pt);
+                ScreenToClient(window, &pt);
+                if (pfStatusRowAt(pt.x, pt.y)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+            }
+            break;
+
+        case WM_ACTIVATE:
+            // Back from closing RivaTuner, choosing a runtime or setting Elite's options: the Pre-flight rows are read
+            // again so the tab shows the rig as it is now, not as it was when the window last had the screen.
+            if (LOWORD(wparam) != WA_INACTIVE && g.screen == Screen::Preflight && g.haveSurvey) {
+                refreshPreflight();
+                layoutPreflight();
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            break;
+
         case WM_SETTINGCHANGE:
             // The system switched between light and dark while we were open.
             if (lparam && wcscmp(reinterpret_cast<const wchar_t*>(lparam), L"ImmersiveColorSet") == 0) {
@@ -1364,8 +1839,16 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             } else {
                 scanForInstalls();
             }
-            if (g.args.autorun && g.args.action != AppArgs::Act::None && g.haveSurvey) {
+            if (g.args.autorun && g.args.action == AppArgs::Act::Preflight && g.haveSurvey) {
+                // The elevated copy of a Pre-flight button: the plan was confirmed before it started, and the rows
+                // are the ones that were ticked.
+                showScreen(Screen::Preflight);
+                runPreflightAction(g.args.preflightUndo, true, g.args.rowsGiven ? &g.args.rows : nullptr);
+            } else if (g.args.autorun && g.args.action != AppArgs::Act::None && g.haveSurvey) {
                 runAction(g.args.action);
+            } else if (g.args.action == AppArgs::Act::Preflight) {
+                // --preflight that found no console to print to: the window opens on the tab it asked about.
+                showScreen(Screen::Preflight);
             }
             return 0;
         }

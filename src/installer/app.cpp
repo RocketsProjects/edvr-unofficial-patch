@@ -7,10 +7,13 @@
 
 #include "apply.h"
 #include "detect.h"
+#include "elite_settings.h"
 #include "logbundle.h"
 #include "mirror.h"
 #include "payload.h"
-#include "../common/elite_graphics_folder.h"
+#include "preflight.h"
+#include "settings.h"
+#include "../common/iniedit.h"
 
 namespace edvr::installer {
 namespace {
@@ -48,6 +51,9 @@ std::string usageText() {
            "  " + std::string(exe) + " --repair  [--dir D]    repair this install\r\n"
            "  " + std::string(exe) + " --uninstall [--dir D]  remove EDVR, restoring what it replaced\r\n"
            "  " + std::string(exe) + " --collect-logs         zip the latest logs onto the Desktop\r\n"
+           "  " + std::string(exe) + " --preflight            show what to set for a good first flight\r\n"
+           "  " + std::string(exe) + " --preflight --apply    set it (EDVR's own settings; Elite's are yours)\r\n"
+           "  " + std::string(exe) + " --preflight --undo     put back what --apply changed\r\n"
            "\r\n"
            "  --dir <path>         the folder holding EliteDangerous64.exe. Without it, the\r\n"
            "                       installer finds your installs itself and uses the only one.\r\n"
@@ -55,6 +61,8 @@ std::string usageText() {
            "                       (flat only). Without it, the scope already installed is kept,\r\n"
            "                       and a new install gets both.\r\n"
            "  --dry-run            say what would happen; touch nothing.\r\n"
+           "  --rows a,b           with --preflight --apply, set only these rows (their ids, as\r\n"
+           "                       --preflight prints them) instead of the ones ticked by default.\r\n"
            "  --convert-profile    accepted for older scripts; no longer needed. A scope change\r\n"
            "                       is an ordinary install with --scope.\r\n"
            "  --replace-settings   replace your settings files with the shipped defaults instead\r\n"
@@ -99,6 +107,28 @@ AppArgs parseArgs(int argc, wchar_t** argv) {
             a.action = AppArgs::Act::Uninstall;
         else if (arg == L"--collect-logs")
             a.action = AppArgs::Act::CollectLogs;
+        else if (arg == L"--preflight")
+            a.action = AppArgs::Act::Preflight;
+        else if (arg == L"--apply")
+            a.preflightApply = true;
+        else if (arg == L"--undo")
+            a.preflightUndo = true;
+        else if (arg == L"--rows") {
+            std::wstring value;
+            if (next(&value)) {
+                a.rowsGiven = true;
+                a.rows.clear();
+                std::string id;
+                for (const char c : toUtf8(value) + ",") {
+                    if (c != ',') {
+                        if (c != ' ') id += c;
+                        continue;
+                    }
+                    if (!id.empty()) a.rows.push_back(id);
+                    id.clear();
+                }
+            }
+        }
         else if (arg == L"--dir")
             next(&a.dir);
         else if (arg.rfind(L"--dir=", 0) == 0)
@@ -125,6 +155,19 @@ AppArgs parseArgs(int argc, wchar_t** argv) {
             a.badArgText = L"unknown argument: " + arg;
         }
     }
+    if (!a.badArg) {
+        // The Pre-flight switches mean nothing alone, and "apply" and "undo" are opposite jobs.
+        if (a.action != AppArgs::Act::Preflight && (a.preflightApply || a.preflightUndo || a.rowsGiven)) {
+            a.badArg = true;
+            a.badArgText = L"--apply, --undo and --rows go with --preflight";
+        } else if (a.preflightApply && a.preflightUndo) {
+            a.badArg = true;
+            a.badArgText = L"--apply and --undo cannot be used together";
+        } else if (a.rowsGiven && !a.preflightApply) {
+            a.badArg = true;
+            a.badArgText = L"--rows goes with --preflight --apply";
+        }
+    }
     return a;
 }
 
@@ -144,16 +187,7 @@ std::string scopeFor(const AppArgs& args, const Survey& survey) {
 }
 
 edvr::ModeRead eliteGameMode() {
-    PWSTR path = nullptr;
-    std::wstring base;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path)) && path) {
-        base = path;
-        CoTaskMemFree(path);
-    } else {
-        wchar_t env[MAX_PATH]{};
-        if (GetEnvironmentVariableW(L"LOCALAPPDATA", env, MAX_PATH)) base = env;
-    }
-    const std::wstring folder = edvr::eliteGraphicsFolderUnder(base);
+    const std::wstring folder = eliteGraphicsFolderNow();
     if (folder.empty()) return edvr::readGameMode(nullptr);
     const std::string xml = readTextFile(joinPath(folder, L"Settings.xml"));
     return edvr::readGameMode(xml.empty() ? nullptr : xml.c_str());
@@ -243,6 +277,51 @@ std::string planReport(const Plan& plan) {
     return out;
 }
 
+PreflightInputs collectPreflightInputs(const Survey& s, const PayloadInfo& p, const std::string& scope) {
+    PreflightInputs in;
+    in.scope = scope;
+
+    const GpuList gpus = gpuAdapters();
+    if (gpus.primary >= 0) {
+        in.haveGpu = true;
+        in.gpu = gpus.adapters[static_cast<size_t>(gpus.primary)];
+    }
+    in.runtime = activeOpenXrRuntime();
+    in.rtssRunning = processRunning(L"RTSS.exe");
+    in.elite = readEliteSettings(s.game.dir);
+
+    // fix.temporal_aa as each file reads it now -- through the moved-from map, as the runtime and the
+    // settings list read it, so an un-migrated experimental.temporal_aa the user chose counts as their
+    // choice. A key the file lacks reads as its default (off), which recommendPreflight takes an empty
+    // string to mean. The shipped value is the installed version's own base copy; a folder without one
+    // (a hand install) is compared against what this installer ships.
+    const std::string key = "fix.temporal_aa";
+    const std::string shippedVr = iniValue(p.iniText, key, "off");
+    const std::string shippedFlat = iniValue(p.flatIniText, key, "off");
+    in.vrTemporalNow = s.iniPresent ? settingValueAsRead(s.iniText, key, std::string()) : std::string();
+    in.vrTemporalBase = s.baseIniText.empty() ? shippedVr : iniValue(s.baseIniText, key, shippedVr);
+    in.flatIniPresent = s.flatIniPresent;
+    in.flatTemporalNow = s.flatIniPresent ? settingValueAsRead(s.flatIniText, key, std::string()) : std::string();
+    in.flatTemporalBase = s.flatBaseIniText.empty() ? shippedFlat : iniValue(s.flatBaseIniText, key, shippedFlat);
+
+    in.payloadHasDlss = p.haveNgx;
+    in.payloadHasXess = p.haveXess;
+    return in;
+}
+
+std::string readOnlySettingsProblem(const Plan& plan) {
+    for (const Step& step : plan.steps) {
+        if (step.action != Action::WriteText) continue;
+        const std::wstring leaf = leafOf(step.to);
+        if (_wcsicmp(leaf.c_str(), L"edvr.ini") != 0 && _wcsicmp(leaf.c_str(), L"edvr-flat.ini") != 0) continue;
+        const DWORD attrs = GetFileAttributesW(step.to.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_READONLY)) continue;
+        return toUtf8(leaf) + " is read-only, so nothing was changed. Clear Read-only in its Properties to let "
+               "the installer change it.";
+    }
+    return std::string();
+}
+
 bool needsElevationFor(const Survey& s) {
     if (!canWriteInto(s.game.dir)) return true;
     if (s.haveOpenvrDir && !canWriteInto(s.game.openvrDir)) return true;
@@ -268,6 +347,17 @@ bool relaunchElevated(const AppArgs& args) {
         case AppArgs::Act::Install: cmd += L"--install "; break;
         case AppArgs::Act::Repair: cmd += L"--repair "; break;
         case AppArgs::Act::Uninstall: cmd += L"--uninstall "; break;
+        case AppArgs::Act::Preflight: {
+            // The rows the user ticked travel with it: the elevated copy applies what was confirmed, not the defaults.
+            cmd += L"--preflight ";
+            cmd += args.preflightUndo ? L"--undo " : L"--apply ";
+            if (args.rowsGiven && !args.preflightUndo) {
+                std::string ids;
+                for (const std::string& id : args.rows) ids += (ids.empty() ? "" : ",") + id;
+                cmd += L"--rows \"" + fromUtf8(ids) + L"\" ";
+            }
+            break;
+        }
         // Collecting logs never needs elevation: it reads, and writes to the
         // Desktop.
         case AppArgs::Act::CollectLogs:
@@ -291,6 +381,55 @@ bool relaunchElevated(const AppArgs& args) {
     if (!ShellExecuteExW(&info)) return false;  // declined at the UAC prompt, or failed
     if (info.hProcess) CloseHandle(info.hProcess);
     return true;
+}
+
+// --preflight: the rig and the rows; with --apply or --undo, the same plan, report, refusals and apply
+// the window runs. Exit codes as for an install: 0 done (or nothing to do), 1 refused or failed, 3 needs
+// administrator rights.
+int runPreflight(const AppArgs& args, const Survey& survey, const std::vector<PreflightRow>& rows) {
+    const std::vector<std::string> defaults = defaultTicks(rows);
+
+    if (!args.preflightApply && !args.preflightUndo) {
+        writeOut(preflightText(rows, defaults));
+        writeOut("\r\n" + preflightSummary(rows) + ".\r\n");
+        if (!defaults.empty())
+            writeOut("--preflight --apply sets the ticked rows (add --dry-run to see the plan first).\r\n");
+        if (survey.state.preflight.present())
+            writeOut("--preflight --undo puts back what it changed on " + survey.state.preflight.appliedUtc + ".\r\n");
+        return 0;
+    }
+
+    const Options options = optionsFor(args, false);
+    const Plan plan = args.preflightUndo
+                          ? planPreflightUndo(survey, options)
+                          : planPreflight(survey, rows, args.rowsGiven ? args.rows : defaults, options);
+    writeOut(planReport(plan));
+    if (plan.blocked) return 1;
+    if (plan.nothingToDo) return 0;
+    const std::string readOnly = readOnlySettingsProblem(plan);
+    if (!readOnly.empty()) {
+        writeOut("\r\n" + readOnly + "\r\n");
+        return 1;
+    }
+    if (args.dryRun) return 0;
+
+    // Only the game folder is written: edvr_backup\, edvr_install\ and the settings files all live in it.
+    if (!canWriteInto(survey.game.dir) && !isElevated()) {
+        writeOut("\r\nThis folder needs administrator rights. Run the same command from an elevated prompt.\r\n");
+        return 3;
+    }
+    const ApplyResult result = applyPlan(plan, payloadItem);
+    for (const std::string& line : result.done) writeOut("  " + line + "\r\n");
+    if (!result.ok) {
+        writeOut("\r\n" + result.error + "\r\n");
+        if (result.rolledBack) writeOut("Everything was restored; recovery backups were kept.\r\n");
+        return 1;
+    }
+    const std::wstring mirrorDir = mirrorDirFor(survey.game);
+    const MirrorResult m = updateMirrorIni(survey.game.dir, mirrorDir);
+    if (m.ok) writeOut(bullets(("\r\nMirrored to " + toUtf8(mirrorDir) + ":").c_str(), m.saved));
+    writeOut("\r\nDone.\r\n");
+    return 0;
 }
 
 int runConsole(const AppArgs& args) {
@@ -349,6 +488,9 @@ int runConsole(const AppArgs& args) {
         }
         return 0;
     }
+
+    if (args.action == AppArgs::Act::Preflight)
+        return runPreflight(args, survey, recommendPreflight(collectPreflightInputs(survey, payload, scope)));
 
     const std::wstring mirrorDir = mirrorDirFor(survey.game);
     const bool canMirror = args.action != AppArgs::Act::Uninstall;

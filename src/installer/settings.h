@@ -130,4 +130,10 @@ private:
 // Split "a|b|c", each optionally "value=label".
 std::vector<Choice> splitChoices(const char* packed);
 
+// A setting's value as the runtime reads it from a settings file's text: the key's own
+// line, or -- for a file not yet migrated -- the key it moved from, unless that old line
+// still carries its retired default. `absent` when neither is there. The settings list and
+// Pre-flight both read through this, so neither shows a value the runtime does not use.
+std::string settingValueAsRead(const std::string& text, const std::string& dotted, const std::string& absent);
+
 }  // namespace edvr::installer

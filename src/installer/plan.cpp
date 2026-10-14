@@ -403,6 +403,7 @@ Survey surveyTarget(const GameInstall& game) {
     s.flatBaseIniText = readTextFile(flatBaseIniPath(game.dir));
     s.state = readState(game.dir);
     if (!game.dir.empty()) {
+        s.stateSha = sha256File(statePath(game.dir));
         s.toolReceipts = readToolReceipts(game.dir);
         s.toolReceiptHistory = readNativeReceiptHistory(game.dir);
     }

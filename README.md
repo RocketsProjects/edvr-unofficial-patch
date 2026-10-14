@@ -68,6 +68,11 @@ about to do and waits for a yes, and it copies every file it replaces into
 `edvr_backup\` first. [docs/installer.md](docs/installer.md) covers its buttons
 and explains what it decides and why.
 
+After a first install the installer opens its **Pre-flight** tab: **Set up for
+me** turns on the upscaler that suits your card (DLSS, FSR or XeSS) after
+copying your old settings into `edvr_backup\`, and **Put my old settings back**
+undoes it. The tab also lists what to change in Elite's own Graphics menu.
+
 The same installer serves flat-screen players. Under "Install EDVR for:",
 choose "VR and flat" (the default), "VR only" or "Flat only"; the choice can be
 changed later with an ordinary Update, and no settings file is deleted by it.

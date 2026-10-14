@@ -11,14 +11,16 @@
 #include <windows.h>
 
 #include <string>
+#include <vector>
 
 #include "../common/install_scope.h"
 #include "plan.h"
+#include "preflight.h"
 
 namespace edvr::installer {
 
 struct AppArgs {
-    enum class Act { None, Install, Repair, Uninstall, CollectLogs };
+    enum class Act { None, Install, Repair, Uninstall, CollectLogs, Preflight };
 
     Act          action = Act::None;
     std::wstring dir;                    // --dir, the game folder
@@ -26,6 +28,12 @@ struct AppArgs {
     bool         keepSettings = true;    // --replace-settings
     bool         removeSettings = false; // --remove-settings (uninstall)
     bool         dryRun = false;         // --dry-run
+    // --preflight: print the rig and what to set. With --apply, set the EDVR rows that are ticked by default (or
+    // only those named by --rows); with --undo, put back what the last --apply changed.
+    bool         preflightApply = false;
+    bool         preflightUndo = false;
+    bool         rowsGiven = false;       // --rows a,b: the row ids to set instead of the defaults
+    std::vector<std::string> rows;
     bool         convertProfile = false; // --convert-profile: accepted, and no longer needed
     bool         autorun = false;        // set on the elevated relaunch: already confirmed
     bool         help = false;
@@ -53,6 +61,17 @@ std::string statusReport(const Survey& survey, const PayloadInfo& payload, const
 // Everything the plan will do, then everything the merge decided.
 std::string planReport(const Plan& plan);
 
+// What Pre-flight needs to know, read from this machine and this folder: the primary graphics card, the active
+// OpenXR runtime, whether RivaTuner is running, Elite's graphics files, and fix.temporal_aa as each settings
+// file reads it now and as the installed version shipped it. `scope` is the install scope the rows are for.
+PreflightInputs collectPreflightInputs(const Survey& survey, const PayloadInfo& payload, const std::string& scope);
+
+// A Pre-flight plan that would write a settings file the user has made read-only is refused, as the settings
+// list refuses it: whoever ticked Read-only meant nothing to change the file, and applyPlan -- which clears the
+// attribute for an install -- would quietly undo that. Empty when no such file is in the plan; otherwise one line
+// naming it, which the caller reports as the plan's problem.
+std::string readOnlySettingsProblem(const Plan& plan);
+
 // Does this run need administrator rights for that folder?
 bool needsElevationFor(const Survey& survey);
 
@@ -63,6 +82,10 @@ bool relaunchElevated(const AppArgs& args);
 bool isElevated();
 
 int runConsole(const AppArgs& args);
+
+// --preflight over rows somebody else worked out (runConsole passes the machine's; the rig passes made-up ones).
+// Prints the rows, or with --apply / --undo plans, reports and carries it out; --dry-run stops after the report.
+int runPreflight(const AppArgs& args, const Survey& survey, const std::vector<PreflightRow>& rows);
 int runGui(HINSTANCE instance, const AppArgs& args);
 
 }  // namespace edvr::installer
