@@ -1049,6 +1049,7 @@ struct SealInputs {
     bool setting = false;        // fix.optimized_stations is on
     bool docked = false;         // Status.json Flags bit 0
     bool aboard = false;         // the commander is seated (Status.json: Flags bits 24-26 or Flags2 bits 1-2) and that is known; unknown reads false
+    bool onFloor = false;        // on foot, in the hangar and on its floor (FloorHold): the seal may stand without the seat
     bool ownKnown = false;       // the game has named the own pad this dock (r0 was called on it)
     bool r1Fresh = false;        // the own pad's r1 was called within kPadStateFreshMs
     bool inHangar = false;       // the own pad's r1 is 1 (meaningful only with r1Fresh)
@@ -1674,52 +1675,6 @@ inline size_t selectMechanism(const LatchCand* cands, size_t n, uintptr_t ownAdd
     return k;
 }
 
-// ---- TEMPORARY instrument (2026-10-14): the character census. The seal's levers (the instance store, the kinematic producers) never reach skinned characters. This counts what
-// a cull of them would act on while the seal is held, and says plainly what it cannot see. Read-only; zero work when unsealed. Remove with the arc (the doc's Status block lists it).
-struct CharCensus {
-    uint32_t samples = 0;                 // snapshots of the game's skinning assembly list taken while sealed (about one a second)
-    uint64_t entSum = 0, rowsSum = 0;
-    uint32_t entMin = 0xFFFFFFFFu, entMax = 0, rowsMax = 0, bonesMax = 0;
-    uint64_t draws = 0;                   // skinned family draws counted while sealed (VR only: the second skin lists them)
-    uint64_t sealedFrames = 0;
-    int hook = 0;                         // the skin hook: 0 not armed (flat, or the second skin off), 1 armed, 2 stood down
-    void sample(uint32_t entities, uint32_t rows, uint32_t largestBones) noexcept {
-        ++samples;
-        entSum += entities;
-        rowsSum += rows;
-        if (entities < entMin) entMin = entities;
-        if (entities > entMax) entMax = entities;
-        if (rows > rowsMax) rowsMax = rows;
-        if (largestBones > bonesMax) bonesMax = largestBones;
-    }
-};
-// The one 30 s line, written for every window with a sealed frame so that a missing line means the seal was never held, and a line with `0 samples` means the list could not be
-// seen. Entity positions are not in the assembly list (the function reads only the entry, its mesh and its base), so the distance to the box is stated as unknown.
-inline size_t formatCharCensus(char* out, size_t cap, const CharCensus& c) noexcept {
-    if (cap == 0) return 0;
-    char ents[360];
-    if (c.hook != 1) {
-        std::snprintf(ents, sizeof(ents), "skinned entities not observed (the skin hook is %s)", c.hook == 2 ? "stood down" : "not armed in this profile");
-    } else if (c.samples == 0) {
-        std::snprintf(ents, sizeof(ents), "skinned entities: the hook is armed but no list was read (0 samples)");
-    } else {
-        std::snprintf(ents, sizeof(ents), "skinned entities in the game's assembly list (exe+0x4C540E0): %u samples, per sample min %u avg %.1f max %u; palette rows avg %.0f max %u; largest entity %u bones",
-                      c.samples, c.entMin, static_cast<double>(c.entSum) / c.samples, c.entMax, static_cast<double>(c.rowsSum) / c.samples, c.rowsMax, c.bonesMax);
-    }
-    char draws[160];
-    if (c.hook == 1) {
-        std::snprintf(draws, sizeof(draws), "skinned draws %.1f a sealed frame, both eyes (%llu in the window)",
-                      c.sealedFrames ? static_cast<double>(c.draws) / static_cast<double>(c.sealedFrames) : 0.0, static_cast<unsigned long long>(c.draws));
-    } else {
-        std::snprintf(draws, sizeof(draws), "skinned draws not counted (the second skin that lists them is VR only)");
-    }
-    const int n = std::snprintf(out, cap,
-                                "optimized station: characters while sealed (last 30 s, %llu sealed frames): %s; %s; distance of each entity to the sealed box: unknown (the list carries no position), so none is counted "
-                                "inside or outside; GPU time of the skinned draws: not measured.",
-                                static_cast<unsigned long long>(c.sealedFrames), ents, draws);
-    return n < 0 ? 0 : static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
-}
-
 // ---- TEMPORARY instrument (2026-10-14): the lift trace. While docked and on foot, ~4 samples a second of the camera (height along the pad's shaft, vertical speed), the Status
 // words, and the smallest records whose sphere holds the camera (the personal lift's cab is expected to be one: it should hold the camera and move with it). Events: ride
 // start and stop (vertical speed with no horizontal travel), the smallest holder changing (the camera left the cab: the door), the Status words changing. Dumped as a block
@@ -1881,13 +1836,125 @@ inline size_t formatTraceEvent(char* out, size_t cap, const LiftTrace& t, unsign
     return n < 0 ? 0 : static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
 
+// ---- On the hangar floor, on foot (2026-10-14). The lift trace of Sean's flat flight (v0.20.0-rc.1-29-g8459abf4, edvr_gfx_20261014_170914.log, 17:19:19 to 17:22:02) gave the numbers:
+//   * The flat camera FOLLOWS the commander: its z moved smoothly 0.5 to 62.76 m (9.25 s at 7.15 m/s), 62.9 to 73.4, 73.4 to 118.5, 118.5 to 123.15 (the last 4.7 m at 3.5 to 3.9 m/s).
+//     z is the shaft axis there. A Status-independent measure of "off the floor" exists in both profiles.
+//   * Standing on the floor the camera held z 0.99 (settled at 4.5 s), then 0.43 after a step onto the lift platform (a 0.56 m drop), still to within 0.01 m. Disembarking moves it
+//     0.00 to -2.85 to +0.99 in about 4 s (up to 4 m/s), so the floor reference is only taken after the camera has been vertically still for a second.
+//   * A ride starts from 0.43 m with +0.09 m in the first 0.25 s sample and +0.74 m in the next (3 m/s), then 5.5 m/s and 7 m/s. A release at 0.5 m of rise fires about 0.2 s
+//     after the start, before the rise reaches 1 m.
+//   * Flags2 in-hangar (bit 13) stayed 1 through the whole ride (all four legs, 123 m) and dropped 0.5 s after the 797 m jump into the concourse's own frame (camera jump at
+//     +80.00 s, flag change at +80.50 s). It does not change at the lift doors. Social space (bit 14) was 1 from the disembark on, so it carries no information.
+// The rule: hold while on foot, in the hangar (Status), and on the floor; release when the camera rises more than kFloorReleaseRiseM above it. The floor is remembered, so the hold
+// returns when the camera is back within kFloorEngageBandM of it after the ride down. The caller resets it on boarding, an undock, a hangar change and the setting going off.
+constexpr uint64_t kFloorSampleMs = 100;        // the rule is sampled ten times a second
+constexpr float kFloorStillMps = 0.3f;          // vertical speed below this is standing, walking or a step (the trace: 0.00 to 0.09 m/s standing; a ride's first sample is 0.36 then 3 m/s)
+constexpr float kFloorStepM = 1.0f;             // a slow drift up to this is the floor moving (the 0.56 m step onto the platform); the reference follows it
+constexpr float kFloorReleaseRiseM = 0.5f;      // the ride's start: +0.09 m then +0.74 m in two 0.25 s samples, so about 0.2 s after it begins
+constexpr float kFloorEngageBandM = 0.3f;       // back within this of the remembered floor, still, for kFloorBackSamples: the hold returns
+constexpr int kFloorSettleSamples = 10;         // one second still before the first floor is taken (the disembark moves the camera 3 m in 4 s)
+constexpr int kFloorBackSamples = 3;
+constexpr float kFloorJumpM = 20.0f;            // a camera jump (the concourse's frame was 797 m away; an origin rebase is 50 m) ends the hold and keeps the floor
+struct FloorHold {
+    bool holding = false;       // on the floor: the sun skip and the seal may stand on foot
+    bool haveFloor = false;
+    float floorU = 0.0f;        // the floor's height along the shaft axis
+    bool havePrev = false;
+    float prevU = 0.0f;
+    uint64_t prevMs = 0;
+    int settle = 0, back = 0;
+    float rise = 0.0f, vu = 0.0f;   // the last sample's rise over the floor and vertical speed (for the log)
+    char why[120] = {};
+    void reset() noexcept { *this = FloorHold{}; }
+    // One sample. eligible: docked, Status known, not aboard, on foot and in the hangar (Flags2 bits 0 and 13). upOk: the shaft axis is known. u: the camera's height along it.
+    // jumped: the camera moved more than kFloorJumpM since the last sample. Returns true when `holding` changed (why says why).
+    bool step(bool eligible, bool upOk, float u, bool jumped, uint64_t ms) noexcept {
+        const bool was = holding;
+        if (!eligible || !upOk) {
+            holding = false;
+            settle = back = 0;
+            havePrev = false;
+            std::snprintf(why, sizeof(why), "%s", !eligible ? "not on foot in the hangar (Status)" : "the shaft axis is unknown");
+            return was;
+        }
+        float vuNow = 0.0f;
+        bool vOk = false;
+        if (havePrev && ms > prevMs && ms - prevMs <= 1000) {
+            vuNow = std::fabs(u - prevU) / (static_cast<float>(ms - prevMs) / 1000.0f);
+            vOk = true;
+        }
+        prevU = u;
+        prevMs = ms;
+        havePrev = true;
+        vu = vuNow;
+        if (jumped) {
+            holding = false;
+            settle = back = 0;
+            std::snprintf(why, sizeof(why), "the camera jumped over %.0f m (another frame)", static_cast<double>(kFloorJumpM));
+            return was;
+        }
+        if (!haveFloor) {
+            // Provisional hold from the disembark: the camera is not on a ride yet, and the sun must not flash back while it settles.
+            holding = true;
+            rise = 0.0f;
+            if (vOk && vuNow < kFloorStillMps) ++settle;
+            else settle = 0;
+            if (settle >= kFloorSettleSamples) {
+                floorU = u;
+                haveFloor = true;
+                std::snprintf(why, sizeof(why), "settled on the hangar floor");
+            } else if (!was) {
+                std::snprintf(why, sizeof(why), "on foot in the hangar, settling");
+            }
+            return holding != was;
+        }
+        rise = u - floorU;
+        const float absRise = std::fabs(rise);
+        const bool still = vOk && vuNow < kFloorStillMps;
+        if (holding) {
+            if (still && absRise <= kFloorStepM) {   // standing, walking, a step: the floor reference follows
+                floorU = u;
+                rise = 0.0f;
+                return false;
+            }
+            if (absRise > kFloorReleaseRiseM) {
+                holding = false;
+                back = 0;
+                std::snprintf(why, sizeof(why), "rose %.2f m off the floor (%.2f m/s vertical)", static_cast<double>(rise), static_cast<double>(vuNow));
+                return true;
+            }
+            return false;
+        }
+        if (still && absRise < kFloorEngageBandM) ++back;
+        else back = 0;
+        if (still && absRise <= kFloorStepM) ++settle;   // a platform a step off the old floor: a second still re-anchors it (the trace: 0.56 m)
+        else settle = 0;
+        if (back >= kFloorBackSamples) {
+            holding = true;
+            back = settle = 0;
+            std::snprintf(why, sizeof(why), "back on the floor (%.2f m from it)", static_cast<double>(absRise));
+            return true;
+        }
+        if (settle >= kFloorSettleSamples) {
+            holding = true;
+            floorU = u;
+            rise = 0.0f;
+            back = settle = 0;
+            std::snprintf(why, sizeof(why), "a new floor level %.2f m from the old one", static_cast<double>(absRise));
+            return true;
+        }
+        return false;
+    }
+};
+
 // Built v14.23: the sun inside the hangar, from the game's pad state. The skip is off while the own pad's latest r0 is 1 (moving in) or 3 (the descent),
 // read fresh. It comes back on when the pad is out (not r1 1 fresh), r0 is neither 1 nor 3 (or stale), and the pad is raised (the geometric test),
 // or on undock, setting off, or a hangar change. An outpost surface (r0 0) never turns it off.
 struct SunInputs {
     bool setting = false;
     bool docked = false;
-    bool aboard = false;         // the commander is seated in the ship (Status.json); on foot (or unknown) the sun skip is off, as the seal is
+    bool aboard = false;         // the commander is seated in the ship (Status.json); on foot (or unknown) the sun skip is off, as the seal is, unless floorHold
+    bool floorHold = false;      // on foot, in the hangar and on its floor (FloorHold): the skip stands without the seat
     bool ownKnown = false;       // the game has named the own pad this dock
     bool r0Fresh = false;        // the own pad's r0 was called within kPadStateFreshMs
     uint8_t r0 = 0;              // the own pad's latest r0 code (meaningful with r0Fresh)
@@ -1912,6 +1979,11 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
             *why = "pad moving in or locked in (r0)";
             return true;
         }
+        if (in.setting && in.docked && !in.aboard && in.floorHold) {   // walking the hangar floor: the leak is there too
+            st->off = true;
+            *why = "on foot on the hangar floor";
+            return true;
+        }
         return false;
     }
     if (!in.setting) {
@@ -1924,14 +1996,15 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
         *why = "undocked";
         return true;
     }
-    if (!in.aboard) {   // 2026-10-14: the skip persisted for minutes on foot (the pad's r1 stays 1 and Status stays docked), through the lift and the concourse
-        st->off = false;
-        *why = "on foot (not seated in the ship)";
-        return true;
-    }
     if (in.hangarChanged) {
         st->off = false;
         *why = "hangar changed";
+        return true;
+    }
+    if (!in.aboard) {   // 2026-10-14: the skip persisted for minutes on foot (the pad's r1 stays 1 and Status stays docked), through the lift and the concourse
+        if (in.floorHold) return false;   // on the hangar floor: the pad's state does not matter on foot
+        st->off = false;
+        *why = "on foot, off the hangar floor (the ride, or out of the hangar)";
         return true;
     }
     if (moving) return false;                              // still moving in, or the descent
@@ -2040,7 +2113,7 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
     if (in.held) {
         ReleaseWhy w = ReleaseWhy::kNone;
         if (!in.docked) w = ReleaseWhy::kUndocked;
-        else if (!in.aboard) w = ReleaseWhy::kOnFoot;   // the seat left: on foot in the hangar, the lift, the concourse. No edge is needed to seal again when the seat comes back
+        else if (!in.aboard && !in.onFloor) w = ReleaseWhy::kOnFoot;   // the seat left: on foot in the hangar, the lift, the concourse. No edge is needed to seal again when the seat comes back
         else if (st->camOutRun >= kCameraFrames) w = ReleaseWhy::kCameraLeft;
         else if (in.mechanismMoved) w = ReleaseWhy::kMechanism;   // the hatch or the lift moved: the launch
         else if (in.padMoved) w = ReleaseWhy::kPadMoved;
@@ -2068,7 +2141,7 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
         st->poseRun = 0;
         return SealAction::kNone;
     }
-    if (!in.aboard) {   // on foot (or the seat unknown): never seal; a request in flight is withdrawn
+    if (!in.aboard && !in.onFloor) {   // on foot off the floor (or the seat unknown): never seal; a request in flight is withdrawn
         clearTrigger(st);
         return SealAction::kNone;
     }

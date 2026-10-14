@@ -16,7 +16,6 @@
 
 #include "../common/config.h"
 #include "../common/log.h"
-#include "engine_velocity.h"
 #include "journal_watch.h"
 #include "kinematic_eval_hook.h"
 #include "optimized_station_core.h"
@@ -24,7 +23,6 @@
 #include "station_lockfree_core.h"
 #include "station_pass_core.h"
 #include "pad_state_probe.h"
-#include "skin_entity_hook.h"
 #include "store_hook.h"
 #include "view_source.h"
 
@@ -1168,6 +1166,15 @@ uint32_t g_flagLogFlags = 0, g_flagLogFlags2 = 0;
 bool g_flagLogKnown = false;
 uint32_t g_flagLogN = 0;
 char g_onFootText[320] = "on foot";
+// On the hangar floor, on foot (FloorHold; the functions are below, with the tick)
+sealed::FloorHold g_floor;
+bool g_floorHolding = false;               // the sun skip and the seal may stand on foot: on the hangar floor
+float g_upAxis[3] = {};                    // the shaft axis (the pad box's W axis), kept across the frames the box is missing
+bool g_upKnown = false;
+float g_floorPrevCam[3] = {};
+bool g_floorPrevCamOk = false;
+uint64_t g_floorNextMs = 0;
+uint32_t g_floorLines = 0;
 sealed::GameView g_waitLast;              // the waiting line last written (built v14.23: the game's pad state)
 bool g_waitLastSet = false;
 sealed::GameView g_waitCand;              // built v14.27: the key this tick had, and how long it has held (the line is written on a stable change)
@@ -1322,7 +1329,7 @@ const char* releaseText(sealed::ReleaseWhy w) noexcept {
         case sealed::ReleaseWhy::kOnFoot: {   // the words at the moment of the release, with the bits that matter
             char t[300];
             sealed::describeStatusFlags(t, sizeof(t), g_statusKnownNow, g_statusFlagsNow, g_statusFlags2Now);
-            std::snprintf(g_onFootText, sizeof(g_onFootText), "on foot, not seated in the ship (%s); the seal is for the cockpit only", t);
+            std::snprintf(g_onFootText, sizeof(g_onFootText), "on foot and off the hangar floor (%s; %s); the seal stands only in the cockpit or on the floor", g_floor.why, t);
             return g_onFootText;
         }
         default: return "released";
@@ -1550,40 +1557,53 @@ void sealStatus(const sealed::OwnCell& cell, uint32_t frame) noexcept {
                     g_shellValid ? g_shellName : "none (the pad's motion is not checked)", lat, yaw);
 }
 
-// ---- TEMPORARY: the character census (optimized_station_core.h CharCensus; docs/optimized-station-2026-10-12.md). Render thread (the tick and the summary), read-only. ----
-sealed::CharCensus g_census;
-bool g_censusGateOn = false;
-bool g_censusAnnounced = false;
-uint64_t g_censusNextMs = 0;
-uint64_t g_censusDraws0 = 0;
-skinjoin::Snapshot g_censusSnap;   // 32 KB, taken once a second while sealed and never otherwise
+// ---- On the hangar floor, on foot (optimized_station_core.h FloorHold; docs/optimized-station-2026-10-12.md, 2026-10-14). The render thread. ----
 
-void characterCensusTick() noexcept {
-    const bool held = g_heldValid;
-    if (held != g_censusGateOn) {   // the draw counter runs only while the seal is held: unsealed, the draw path does one relaxed load
-        g_censusGateOn = held;
-        engineVelocitySkinCensusGate(held);
-        if (held) {
-            g_censusNextMs = 0;
-            g_censusDraws0 = engineVelocitySkinCensusDraws();
-            if (!g_censusAnnounced) {
-                g_censusAnnounced = true;
-                Log::get().note("optimized station: character census (temporary): while the seal is held, a line every 30 s counts the skinned entities in the game's skinning assembly list and the "
-                                "skinned draws. Read-only; nothing is culled.");
+// Forget the floor: boarding, an undock, a hangar change, the setting going off (full: also the shaft axis). Logs only if the hold was on.
+void floorHoldDrop(const char* why, bool full) noexcept {
+    if (g_floorHolding && g_floorLines < 400) {
+        ++g_floorLines;
+        Log::get().note("optimized station: on foot, hangar floor hold OFF (%s).", why);
+    }
+    g_floor.reset();
+    g_floorHolding = false;
+    g_floorPrevCamOk = false;
+    if (full) g_upKnown = false;
+}
+
+void floorHoldTick() noexcept {
+    if (g_pickCell.has && g_pickCell.box) {   // the box comes and goes frame to frame: the axis stays; its sign follows the previous one
+        float w[3] = {g_pickCell.boxW[0], g_pickCell.boxW[1], g_pickCell.boxW[2]};
+        const float len = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+        if (std::isfinite(len) && len > 0.5f) {
+            for (float& c : w) c /= len;
+            if (g_upKnown && w[0] * g_upAxis[0] + w[1] * g_upAxis[1] + w[2] * g_upAxis[2] < 0.0f) {
+                for (float& c : w) c = -c;
             }
+            for (int k = 0; k < 3; ++k) g_upAxis[k] = w[k];
+            g_upKnown = true;
         }
     }
-    if (!held) return;
-    const uint64_t t = GetTickCount64();
-    if (t < g_censusNextMs) return;
-    g_censusNextMs = t + 1000;
-    if (skinEntityHookState() != SkinHookState::Armed) return;
-    if (!skinEntityHookLatest(g_censusSnap) || !skinjoin::checkSnapshot(g_censusSnap)) return;
-    uint32_t largest = 0;
-    for (uint32_t i = 0; i < g_censusSnap.n; ++i) {
-        if (g_censusSnap.e[i].count > largest) largest = g_censusSnap.e[i].count;
+    if (g_aboardNow || !g_dockedNow.load(std::memory_order_acquire) || !g_statusKnownNow) {
+        if (g_floorHolding || g_floor.haveFloor) floorHoldDrop(g_aboardNow ? "aboard the ship" : "undocked, or Status unknown", false);
+        return;
     }
-    g_census.sample(g_censusSnap.n, g_censusSnap.end, largest);
+    const bool eligible = (g_statusFlags2Now & sealed::kFlags2OnFoot) != 0 && (g_statusFlags2Now & sealed::kFlags2OnFootInHangar) != 0;
+    const uint64_t t = GetTickCount64();
+    if (t < g_floorNextMs) return;
+    g_floorNextMs = t + sealed::kFloorSampleMs;
+    if (!g_frameCamValid) return;   // the camera is held: the last decision stands
+    const float u = g_frameCam[0] * g_upAxis[0] + g_frameCam[1] * g_upAxis[1] + g_frameCam[2] * g_upAxis[2];
+    const bool jumped = g_floorPrevCamOk && sealed::distance(g_frameCam, g_floorPrevCam) > sealed::kFloorJumpM;
+    for (int k = 0; k < 3; ++k) g_floorPrevCam[k] = g_frameCam[k];
+    g_floorPrevCamOk = true;
+    const bool changed = g_floor.step(eligible, g_upKnown, u, jumped, t);
+    g_floorHolding = g_floor.holding;
+    if (changed && g_floorLines < 400) {
+        ++g_floorLines;
+        Log::get().note("optimized station: on foot, hangar floor hold %s (%s); camera %+.2f m over the floor reference, vertical %.2f m/s, in hangar %d.", g_floor.holding ? "ON" : "OFF", g_floor.why,
+                        static_cast<double>(g_floor.rise), static_cast<double>(g_floor.vu), (g_statusFlags2Now & sealed::kFlags2OnFootInHangar) != 0 ? 1 : 0);
+    }
 }
 
 // ---- TEMPORARY: the lift trace (optimized_station_core.h LiftTrace; docs/optimized-station-2026-10-12.md). Armed only while docked and on foot (Status), read-only. ----
@@ -1845,17 +1865,6 @@ void summaryLine(uint64_t now) noexcept {
         g_rigTally.asked = 0;
     }
 
-    if (g_winSealedFrames > 0) {   // the census line: only for a window with a sealed frame
-        const SkinHookState hs = skinEntityHookState();
-        g_census.hook = hs == SkinHookState::Armed ? 1 : hs == SkinHookState::StoodDown ? 2 : 0;
-        g_census.sealedFrames = g_winSealedFrames;
-        g_census.draws = engineVelocitySkinCensusDraws() - g_censusDraws0;
-        char line[1100];
-        sealed::formatCharCensus(line, sizeof(line), g_census);
-        SUMMARY_NOTE("%s", line);
-    }
-    g_census = sealed::CharCensus{};
-    g_censusDraws0 = engineVelocitySkinCensusDraws();
     g_prodStats.maxProbes.store(0, std::memory_order_relaxed);
     g_rigStats.maxProbes = g_collStats.maxProbes = 0;
     g_prodStats.full.store(0, std::memory_order_relaxed);
@@ -1941,10 +1950,7 @@ void applySetting(bool on, uint32_t frame) noexcept {
         }
         if (!on) {
             releaseSeal("setting off", frame);
-            if (g_censusGateOn) {   // the tick no longer runs with the setting off: shut the census's draw counter here
-                g_censusGateOn = false;
-                engineVelocitySkinCensusGate(false);
-            }
+            floorHoldDrop("the setting is off", true);
         }
     }
     if (on) {
@@ -2719,7 +2725,6 @@ void optimizedStationFrameBody(uint32_t frame) {
     ++g_winFrames;
     if (g_dockedNow.load(std::memory_order_acquire)) ++g_winDockedFrames;
     if (g_heldValid) ++g_winSealedFrames;
-    characterCensusTick();   // TEMPORARY: zero work unsealed (the gate follows the seal)
     // Built v14.34: the Status.json docked flag under either profile (the flat profile's journal accessors answer the no-journal values).
     g_dockedKnownNow.store(journalStatusDockedKnown(), std::memory_order_release);
     g_dockedNow.store(journalStatusDockedKnown() && journalStatusDocked(), std::memory_order_release);
@@ -2740,9 +2745,11 @@ void optimizedStationFrameBody(uint32_t frame) {
             Log::get().note("optimized station: status flags changed (frame %u): %s; aboard %s; seal %s.", frame, text, g_aboardNow ? "yes" : "no", g_heldValid ? "held" : "not held");
         }
     }
+    floorHoldTick();   // after the Status words of this tick are read, before the sun and the seal read it
     liftTraceTick();   // TEMPORARY: zero work unless docked and on foot (after the Status words of this tick are read)
     // Built v14.20 (review 4): an undock is a lifecycle point: the rig and collection tables start afresh.
     if (g_dockedWasNow && !g_dockedNow.load(std::memory_order_acquire)) {
+        floorHoldDrop("undocked", true);
         bumpRigEpoch();
         g_track.reset(padStateNowQpc());   // built v14.23: an undock ends the dock's own pad (the game names a new one on the next dock)
     }
@@ -2905,6 +2912,7 @@ void optimizedStationFrameBody(uint32_t frame) {
         su.setting = g_setting.load(std::memory_order_acquire);
         su.docked = g_dockedNow.load(std::memory_order_acquire);
         su.aboard = g_aboardNow;
+        su.floorHold = g_floorHolding;
         su.ownKnown = g_game.ownKnown;
         su.r0Fresh = g_game.r0Fresh;
         su.r0 = static_cast<uint8_t>(g_game.r0 < 0 ? 0 : g_game.r0);
@@ -2936,6 +2944,7 @@ void optimizedStationFrameBody(uint32_t frame) {
     in.setting = true;   // the tick returns above while the setting is off
     in.docked = g_dockedNow;
     in.aboard = g_aboardNow;
+    in.onFloor = g_floorHolding;
     in.ownKnown = g_game.ownKnown;
     in.poseBack = mechanismPoseTick(now);   // built v14.24: the latched records back at their sealed poses (the mechanism re-seal)
     in.r1Fresh = g_game.r1Fresh;
@@ -2949,6 +2958,7 @@ void optimizedStationFrameBody(uint32_t frame) {
     in.cameraOutside = cameraOutside;
     in.padMoved = g_flagPadMoved;
     if (g_flagHangarChanged) g_sealGuard = sealed::SealRateGuard{};   // a new hangar: the safety net starts afresh
+    if (g_flagHangarChanged) floorHoldDrop("the hangar changed", true);
     if (g_flagHangarChanged) {   // a new hangar: the trigger, the latch and the own pad start afresh (built v14.23)
         g_sealState = sealed::SealState{};
         g_preShellValid = false;

@@ -1089,70 +1089,116 @@ int main(int argc, char** argv) {
         check(std::strstr(text, "in main ship 1") && std::strstr(text, "on foot 0"), "aboard in the main ship reads as such");
     }
 
-    // ---- TEMPORARY: the character census (read-only; it says what a cull of skinned entities would act on while the seal is held) -------------------------------
+    // ---- On the hangar floor, on foot: the rule and its numbers, from the lift trace of edvr_gfx_20261014_170914.log -------------------------------------------------
     {
-        se::CharCensus c;
-        c.hook = 1;
-        c.sealedFrames = 2000;
-        c.draws = 36000;
-        c.sample(9, 240, 70);
-        c.sample(12, 300, 90);
-        c.sample(6, 180, 50);
-        char line[1100];
-        se::formatCharCensus(line, sizeof(line), c);
-        const std::string got(line);
-        const std::string want =
-            "optimized station: characters while sealed (last 30 s, 2000 sealed frames): skinned entities in the game's assembly list (exe+0x4C540E0): 3 samples, per sample min 6 avg 9.0 max 12; "
-            "palette rows avg 240 max 300; largest entity 90 bones; skinned draws 18.0 a sealed frame, both eyes (36000 in the window); distance of each entity to the sealed box: unknown (the list carries "
-            "no position), so none is counted inside or outside; GPU time of the skinned draws: not measured.";
-        check(got == want, "census: the 30 s line has exactly this text (observed)");
-        if (got != want) std::printf("  got:  %s\n  want: %s\n", got.c_str(), want.c_str());
-        // never ran / could not see: distinguishable from the observed line, and from no line at all (a window with no sealed frame writes none)
-        se::CharCensus flat;
-        flat.sealedFrames = 500;
-        se::formatCharCensus(line, sizeof(line), flat);
-        check(std::strstr(line, "skinned entities not observed (the skin hook is not armed in this profile)") && std::strstr(line, "skinned draws not counted") && !std::strstr(line, "samples"),
-              "census: flat (hook not armed) says not observed, never zero entities");
-        se::CharCensus down = flat;
-        down.hook = 2;
-        se::formatCharCensus(line, sizeof(line), down);
-        check(std::strstr(line, "stood down") != nullptr, "census: a stood-down hook says so");
-        se::CharCensus blind = flat;
-        blind.hook = 1;
-        se::formatCharCensus(line, sizeof(line), blind);
-        check(std::strstr(line, "armed but no list was read (0 samples)") != nullptr, "census: armed with no list read is 0 samples, not 0 entities");
-        // a tiny buffer never overruns and always terminates
-        char tiny[40];
-        std::memset(tiny, 'x', sizeof(tiny));
-        const size_t n = se::formatCharCensus(tiny, sizeof(tiny), c);
-        check(n < sizeof(tiny) && tiny[n] == '\0', "census: the formatter respects its buffer");
+        // The camera's z (the shaft axis there) over time, linearly interpolated between the trace's own samples: the disembark (0 to -2.85 to 0.99 in 4 s), standing, a 0.56 m
+        // step onto the lift platform, the first leg of the ride (starts at 8.75 s from 0.52, 7.15 m/s, stops at 62.76), the wait, then a return to the platform at the end.
+        const double pts[][2] = {{0.00, 0.00}, {0.50, -0.28}, {0.75, -1.25}, {1.00, -2.11}, {1.25, -2.76}, {1.50, -2.85}, {1.75, -2.56}, {2.00, -2.72}, {2.25, -2.82}, {2.50, -2.28},
+                                 {2.75, -1.87}, {3.00, -1.66}, {3.25, -1.03}, {3.50, -0.35}, {3.75, 0.44}, {4.00, 0.99}, {6.75, 0.99}, {7.00, 0.86}, {7.25, 0.43}, {8.50, 0.43},
+                                 {8.75, 0.52}, {9.00, 1.26}, {9.25, 2.55}, {9.50, 4.23}, {9.75, 6.00}, {18.00, 62.76}, {33.25, 62.76}};
+        const int np = static_cast<int>(sizeof(pts) / sizeof(pts[0]));
+        auto zAt = [&](double t) {
+            for (int i = 0; i + 1 < np; ++i) {
+                if (t >= pts[i][0] && t <= pts[i + 1][0]) return pts[i][1] + (pts[i + 1][1] - pts[i][1]) * (t - pts[i][0]) / (pts[i + 1][0] - pts[i][0]);
+            }
+            return pts[np - 1][1];
+        };
+        se::FloorHold f;
+        double releasedAt = -1.0, settledAt = -1.0;
+        bool heldThroughDisembark = true;
+        uint64_t ms = 1000;
+        for (double t = 0.0; t <= 33.2; t += 0.1, ms += 100) {
+            const bool hadFloor = f.haveFloor;
+            const bool wasHolding = f.holding;
+            f.step(true, true, static_cast<float>(zAt(t)), false, ms);
+            if (t < 4.0 && !f.holding) heldThroughDisembark = false;
+            if (!hadFloor && f.haveFloor && settledAt < 0.0) settledAt = t;
+            if (releasedAt < 0.0 && t > 8.5 && wasHolding && !f.holding) releasedAt = t;
+        }
+        check(heldThroughDisembark, "floor hold: held from the disembark on, through the 3 m the camera moves while it settles (the sun does not flash back)");
+        check(settledAt > 4.9 && settledAt < 5.3 && f.floorU < 1.0f, "floor hold: the floor is taken after one second still (about 5.1 s), at the standing height");
+        check(releasedAt > 8.8 && releasedAt < 9.1, "floor hold: the ride's start releases it about 0.2 s after the lift begins (trace: starts 8.75 s)");
+        check(!f.holding && f.haveFloor, "floor hold: it stays off at the 62.76 m stop (15 s still, a floor 62 m up is no floor)");
+        // the step onto the platform (7.0 to 7.25 s, 0.56 m) did not strand the hold: it re-anchored and held until the ride
+        se::FloorHold g;
+        uint64_t ms2 = 1000;
+        bool heldBeforeRide = true;
+        for (double t = 0.0; t < 8.7; t += 0.1, ms2 += 100) {
+            g.step(true, true, static_cast<float>(zAt(t)), false, ms2);
+            if (t > 5.3 && !g.holding && t < 7.0) heldBeforeRide = false;
+        }
+        check(g.holding && heldBeforeRide, "floor hold: a 0.56 m step onto the lift platform keeps (or regains within a second) the hold before the ride");
+        // the return: the ride down ends on the platform. 3 samples still within 0.3 m of the remembered floor bring the hold back.
+        double tz = 33.3;
+        bool backHeld = false;
+        for (int i = 0; i < 12; ++i, tz += 0.1, ms += 100) f.step(true, true, 0.45f, false, ms);   // jumped to the platform height (a restored frame): still, within the band
+        backHeld = f.holding;
+        check(backHeld && std::strstr(f.why, "back on the floor") != nullptr, "floor hold: back on the platform after the ride down, the hold returns");
+        // in-hangar dropped (the concourse's frame): off at once, the floor is kept; back in the hangar at the top of the shaft it is not the floor
+        f.step(false, true, 123.1f, false, ms += 100);
+        check(!f.holding && f.haveFloor, "floor hold: Status says not in the hangar: off, floor kept");
+        for (int i = 0; i < 40; ++i) f.step(true, true, 123.1f, false, ms += 100);
+        check(!f.holding, "floor hold: still at the top of the shaft, 120 m over the floor, never holds");
+        // a camera jump ends the hold and keeps the floor
+        se::FloorHold h;
+        uint64_t ms3 = 1000;
+        for (int i = 0; i < 30; ++i) h.step(true, true, 0.99f, false, ms3 += 100);
+        check(h.holding && h.haveFloor, "floor hold: still on the floor holds");
+        h.step(true, true, 0.99f, true, ms3 += 100);
+        check(!h.holding && h.haveFloor && std::strstr(h.why, "jumped") != nullptr, "floor hold: a camera jump over 20 m ends the hold (another frame) and keeps the floor");
+        // no axis: no hold; the reset forgets the floor
+        se::FloorHold k;
+        k.step(true, false, 0.0f, false, 1000);
+        check(!k.holding, "floor hold: with no shaft axis there is no hold");
+        for (int i = 0; i < 30; ++i) k.step(true, true, 0.5f, false, 2000 + 100u * static_cast<uint64_t>(i));
+        k.reset();
+        check(!k.holding && !k.haveFloor, "floor hold: reset forgets the floor");
+        // named constants: the relations they were derived from
+        check(se::kFloorReleaseRiseM > 0.3f && se::kFloorReleaseRiseM < se::kFloorStepM && se::kFloorEngageBandM < se::kFloorReleaseRiseM && se::kFloorStillMps < 1.0f,
+              "floor hold: the margins keep their order (band < release rise < step; still speed below the ride's first sample)");
     }
     {
-        // Source pins: the census must stay read-only and gated (the rig cannot run the DLL, so the wiring is pinned in the text).
-        auto slurp = [](const char* path) {
-            std::string out;
-            if (FILE* f = std::fopen(path, "rb")) {
-                char buf[8192];
-                size_t k;
-                while ((k = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, k);
-                std::fclose(f);
-            }
-            return out;
-        };
-        const std::string st = slurp("src/d3d11/optimized_station.cpp");
-        const std::string ev = slurp("src/d3d11/engine_velocity.cpp");
-        check(!st.empty() && !ev.empty(), "census pins: the sources were read (run the rig from the repository root)");
-        if (!st.empty() && !ev.empty()) {
-            check(st.find("engineVelocitySkinCensusGate(held)") != std::string::npos && st.find("if (!held) return;") != std::string::npos,
-                  "census pins: the draw counter follows the held seal and the sampler returns at once when unsealed");
-            check(st.find("characterCensusTick();") != std::string::npos && st.find("if (g_winSealedFrames > 0) {   // the census line") != std::string::npos,
-                  "census pins: the tick calls the census and the line is written only for a window with a sealed frame");
-            check(st.find("engineVelocitySkinCensusGate(false)") != std::string::npos, "census pins: turning the setting off shuts the draw counter");
-            check(ev.find("if (g_skinCensusGate.load(std::memory_order_relaxed)) g_skinCensusDraws.fetch_add") != std::string::npos,
-                  "census pins: the draw path counts only behind the gate");
-            check(st.find("skinEntityHookLatest(g_censusSnap)") != std::string::npos && st.find("skinEntityHookSetGate") == std::string::npos,
-                  "census pins: the census reads the hook's latest snapshot and never touches the hook's gate");
-        }
+        // The sun skip and the seal on foot under the same rule.
+        se::SunState sun;
+        se::SunInputs si;
+        si.setting = true;
+        si.aboard = true;
+        si.docked = true;
+        si.ownKnown = true;
+        si.r0Fresh = true;
+        si.r0 = 1;
+        si.r1Fresh = true;
+        si.inHangar = true;
+        si.relOk = true;
+        si.rel = -45.0f;
+        const char* why = "";
+        check(se::sunStep(si, &sun, &why) && sun.off, "floor sun: aboard, the pad moving in, the skip goes on");
+        si.aboard = false;
+        si.floorHold = true;   // the disembark onto the floor
+        check(!se::sunStep(si, &sun, &why) && sun.off, "floor sun: on foot on the floor the skip STANDS (the hangar leak stays out)");
+        si.r0 = 0;
+        si.inHangar = false;   // the pad's state does not matter on foot
+        check(!se::sunStep(si, &sun, &why) && sun.off, "floor sun: the pad's r1 going away does not release it on foot on the floor");
+        si.floorHold = false;  // the ride starts
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "off the hangar floor") != nullptr, "floor sun: the camera rising off the floor releases it, with that reason");
+        si.floorHold = true;   // back on the floor after the ride down
+        check(se::sunStep(si, &sun, &why) && sun.off && std::strstr(why, "on foot on the hangar floor") != nullptr, "floor sun: back on the floor it is restored");
+        si.hangarChanged = true;
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "hangar changed") != nullptr, "floor sun: a hangar change still releases it");
+        // the seal
+        se::SealState st;
+        se::SealInputs in = inHangar(0);
+        in.aboard = false;
+        in.onFloor = true;
+        check(firstEngage(&st, in, 100, 1000) == 100, "floor seal: on foot on the hangar floor seals like aboard");
+        in.held = true;
+        se::ReleaseWhy rw = se::ReleaseWhy::kNone;
+        check(se::sealStep(in, &st, &rw) == se::SealAction::kNone && rw == se::ReleaseWhy::kNone, "floor seal: held on the floor stays held");
+        in.onFloor = false;   // the ride
+        check(se::sealStep(in, &st, &rw) == se::SealAction::kRelease && rw == se::ReleaseWhy::kOnFoot, "floor seal: rising off the floor releases it, reason kOnFoot");
+        in.held = false;
+        st = se::SealState{};
+        check(firstEngage(&st, in, 2000, 12000) == 0, "floor seal: on foot off the floor never seals");
     }
 
     // ---- TEMPORARY: the lift trace (ride detection, holder tracking, line formats) ---------------------------------------------------------------------
@@ -1285,6 +1331,15 @@ int main(int argc, char** argv) {
             check(st.find("!g_aboardNow && (g_statusFlags2Now & sealed::kFlags2OnFoot) != 0") != std::string::npos && st.find("g_dockedNow.load(std::memory_order_acquire) && g_statusKnownNow") != std::string::npos,
                   "lift trace pins: armed only docked, with the words known, not aboard, and on foot");
             check(st.find("if (!on) return;") != std::string::npos && st.find("s.traceOn = g_traceOn;") != std::string::npos, "lift trace pins: off, the tick returns at once and the callbacks see traceOn false");
+            // the floor hold feeds the sun skip and the seal, runs after the Status words and before the inputs are made, and every reset path drops it
+            const size_t fcall = st.find("floorHoldTick();   // after the Status words");
+            const size_t sunIn = st.find("su.floorHold = g_floorHolding;");
+            const size_t sealIn = st.find("in.onFloor = g_floorHolding;");
+            check(fcall != std::string::npos && words != std::string::npos && fcall > words && sunIn != std::string::npos && sealIn != std::string::npos && fcall < sealIn && fcall < sunIn,
+                  "floor pins: the floor hold runs after the Status words and before the sun and seal inputs read it");
+            check(st.find("floorHoldDrop(\"undocked\", true);") != std::string::npos && st.find("floorHoldDrop(\"the hangar changed\", true);") != std::string::npos &&
+                      st.find("floorHoldDrop(\"the setting is off\", true);") != std::string::npos && st.find("floorHoldDrop(g_aboardNow ?") != std::string::npos,
+                  "floor pins: boarding, an undock, a hangar change and the setting going off all drop the floor");
             check(st.find("if (s.traceOn && containsCam && radius < sealed::kTraceMaxRadiusM && tc.traceCands < 12)") != std::string::npos,
                   "lift trace pins: the callbacks gather holders only behind traceOn, under 25 m, at most 12 a thread a pass");
         }
