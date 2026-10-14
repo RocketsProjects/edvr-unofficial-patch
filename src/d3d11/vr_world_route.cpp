@@ -21,6 +21,7 @@
 #include "flat_camera_phase.h"     // flatCameraCheckRowPair: the rows carry the phases they are claimed to
 #include "flat_live_phase.h"       // FlatLivePhase: the flat profile's phase machine, reused
 #include "dlaa.h"
+#include "flat_hdr_energy.h"       // TEMPORARY (design doc section 107): the energy line on this route's H
 #include "flat_mono_resolve.h"
 #include "gpu_census.h"
 #include "panel_curve.h"    // panelCurveInfo: the curve in use, named in the route's 5 s line and its OWNS line
@@ -409,13 +410,23 @@ void treatWorld(ID3D11DeviceContext* ctx) {
     ComPtr<ID3D11ShaderResourceView> none;
     const char* why = nullptr;
     bool ok = false;
+    bool energySample = false;
     try {
         GpuCensusScope census(ctx, GpuCensusSection::FrameWorldResolve);
         VrWorldInternalScope internal;
+        // TEMPORARY (design doc section 107): the same energy line as the flat HDR route, on this route's H. The route keeps
+        // AutoExposure, so the line names its exposure "world-auto". Nothing here changes what the route does.
+        flatHdrEnergyPoll(ctx);
+        energySample = flatHdrEnergyBegin(ctx, hdrView.Get(), t.hdrWidth, t.hdrHeight, "vr-world");
         ok = flatMonoResolve(device.Get(), ctx, f, none.GetAddressOf(), &why);
+        if (energySample) {
+            if (ok) flatHdrEnergyEnd(ctx, hdrView.Get(), flatMonoResolveModeName(f.mode), 0u, "world-auto");
+            else flatHdrEnergyAbandon();
+        }
     } catch (...) {
         ok = false;
         why = "exception-in-resolve";
+        if (energySample) flatHdrEnergyAbandon();
     }
     if (!ok) {
         // The backend or the route's own guard refused before H was written (the resolver writes H last): H is still the

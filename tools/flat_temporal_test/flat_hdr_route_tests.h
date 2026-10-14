@@ -8,6 +8,7 @@
 #include "../../src/d3d11/flat_camera_phase.h"
 #include "../../src/d3d11/flat_trace.h"
 #include "../../src/d3d11/hdr_backend_flags.h"
+#include "../../src/d3d11/flat_hdr_energy.h"
 #include "../../src/d3d11/flat_standdown.h"
 #include "flat_standdown_tests.h"
 #include <cstdio>
@@ -365,10 +366,117 @@ inline int flatHdrRouteTests() {
     expect(flatDlssCreateFlags(true, true) == (1u << 0 | 1u << 1 | 1u << 3) && flatDlssCreateFlags(true, true) == 0x0Bu &&
            (flatDlssCreateFlags(true, true) & (kDlssFlagMvJittered | kDlssFlagAutoExposure)) == 0,
            "DLSS on the flat HDR route adds IsHDR only (fixed exposure, section 106), keeps MVLowRes and DepthInverted, never MVJittered");
-    expect(flatDlssCreateFlags(true, false) == 0x4Bu && flatDlssFixedExposure(true, true) &&
-           !flatDlssFixedExposure(true, false) && !flatDlssFixedExposure(false, true),
-           "the VR world route keeps IsHDR | AutoExposure, and only the flat HDR route evaluates with the fixed exposure texture");
-    expect(flatFsrCreateFlags(false, false, false) == (1u << 3) &&
+    expect(flatDlssCreateFlags(true, false) == 0x4Bu && flatDlssCreateFlags(true, false, FlatDlssExposure::Fixed) == 0x4Bu &&
+           flatDlssCreateFlags(true, false, FlatDlssExposure::Auto) == 0x4Bu,
+           "the VR world route keeps IsHDR | AutoExposure whatever advanced.flat_dlss_exposure says");
+    expect(flatDlssCreateFlags(true, true, FlatDlssExposure::Scene) == 0x0Bu && flatDlssCreateFlags(true, true, FlatDlssExposure::Fixed) == 0x0Bu &&
+           flatDlssCreateFlags(true, true, FlatDlssExposure::Auto) == 0x4Bu && flatDlssCreateFlags(false, true, FlatDlssExposure::Auto) == 0x0Au &&
+           flatDlssAutoExposure(true, true, FlatDlssExposure::Auto) && !flatDlssAutoExposure(true, true, FlatDlssExposure::Scene) &&
+           !flatDlssAutoExposure(false, true, FlatDlssExposure::Auto) && flatDlssAutoExposure(true, false, FlatDlssExposure::Scene),
+           "the flat HDR route drops AutoExposure for scene and fixed and keeps it only for auto (the A/B), and the LDR set never carries it");
+    expect(flatDlssExposureInput(true, true, FlatDlssExposure::Scene) == DlssExposureInput::Measured &&
+           flatDlssExposureInput(true, true, FlatDlssExposure::Fixed) == DlssExposureInput::One &&
+           flatDlssExposureInput(true, true, FlatDlssExposure::Auto) == DlssExposureInput::None &&
+           flatDlssExposureInput(true, false, FlatDlssExposure::Scene) == DlssExposureInput::None &&
+           flatDlssExposureInput(false, true, FlatDlssExposure::Scene) == DlssExposureInput::None,
+           "only the flat HDR route evaluates with an exposure texture: measured for scene, 1.0 for fixed, none for auto, the VR route and the LDR copy route");
+    expect(flatDlssExposureFromText("scene") == FlatDlssExposure::Scene && flatDlssExposureFromText("FIXED") == FlatDlssExposure::Fixed &&
+           flatDlssExposureFromText("Auto") == FlatDlssExposure::Auto && flatDlssExposureFromText("off") == FlatDlssExposure::Scene &&
+           flatDlssExposureFromText("") == FlatDlssExposure::Scene && flatDlssExposureFromText(nullptr) == FlatDlssExposure::Scene &&
+           flatDlssExposureFromText("fixed ") == FlatDlssExposure::Scene &&
+           std::strcmp(flatDlssExposureName(FlatDlssExposure::Scene), "scene") == 0 &&
+           std::strcmp(flatDlssExposureName(FlatDlssExposure::Fixed), "fixed") == 0 &&
+           std::strcmp(flatDlssExposureName(FlatDlssExposure::Auto), "auto") == 0,
+           "advanced.flat_dlss_exposure reads scene, fixed and auto (any case); anything else, and a key the profile does not list, is scene");
+    // ---- the HDR route's energy instrument and measured exposure, pure half (flat_hdr_energy.h, TEMPORARY, section 107) ---------
+    {
+        const auto closeTo = [](double a, double b, double rel) { return std::fabs(a - b) <= rel * (std::fabs(b) > 1e-30 ? std::fabs(b) : 1.0); };
+        expect(kFlatHdrEnergyGroups == 1024 && kFlatHdrEnergyHeader == 8 && kFlatHdrEnergyBright == 8 && kFlatHdrEnergyTotal == 1032 &&
+               kFlatHdrEnergyLog == 2056 && kFlatHdrEnergyWords == 3080,
+               "the energy pass's layout is 8 header words and three arrays of 1024 group sums");
+        // The decode: a header and the three arrays, the way the shader writes them.
+        std::vector<uint32_t> words(kFlatHdrEnergyWords, 0u);
+        const float b0 = 1000.0f, b1 = 24.0f, t0 = 5000.0f, t1 = 100.0f, l0 = 30.0f, l1 = -10.0f, mx = 4321.5f;
+        std::memcpy(&words[kFlatHdrEnergyBright + 0], &b0, 4); std::memcpy(&words[kFlatHdrEnergyBright + 1023], &b1, 4);
+        std::memcpy(&words[kFlatHdrEnergyTotal + 0], &t0, 4); std::memcpy(&words[kFlatHdrEnergyTotal + 1023], &t1, 4);
+        std::memcpy(&words[kFlatHdrEnergyLog + 0], &l0, 4); std::memcpy(&words[kFlatHdrEnergyLog + 1023], &l1, 4);
+        std::memcpy(&words[kFlatHdrEnergyMax], &mx, 4);
+        words[kFlatHdrEnergyOver] = 7; words[kFlatHdrEnergyBad] = 3; words[kFlatHdrEnergySaturated] = 2; words[kFlatHdrEnergyFinite] = 10;
+        const FlatHdrEnergySample d = flatHdrEnergyDecode(words.data());
+        expect(d.bright == 1024.0 && d.total == 5100.0 && closeTo(d.max, 4321.5, 1e-9) && d.over == 7 && d.bad == 3 &&
+               d.saturated == 2 && d.finite == 10 && closeTo(d.geoMean, std::exp2(2.0), 1e-9),
+               "the energy decode adds the group sums in double, reads the max from its bits, and takes the geometric mean over the finite count");
+        // The CPU reference over a 4x2 image: luma 0.2126 R + 0.7152 G + 0.0722 B, over the threshold, saturated, bad.
+        const float img[8 * 4] = {
+            1, 1, 1, 1,      0, 0, 0, 1,     100, 100, 100, 1,   65000, 65000, 65000, 1,
+            0.5f, 0.5f, 0.5f, 1,   -1, -1, -1, 1,   200, 0, 0, 1,    0, 0, 0, 1 };
+        const FlatHdrEnergySample r = flatHdrEnergyReference(img, 4, 2, 50.0f);
+        // pixel lumas: 1, 0, 100, 65000, 0.5, (negative: bad), 42.52, 0. Over 50: 100 and 65000. Saturated: 65000.
+        expect(r.finite == 7 && r.bad == 1 && r.over == 2 && r.saturated == 1 && closeTo(r.bright, 65100.0, 1e-5) &&
+               closeTo(r.max, 65000.0, 1e-5) && closeTo(r.total, 65100.0 + 1.0 + 0.5 + 42.52, 1e-4),
+               "the energy reference counts finite, bad, over-threshold and saturated pixels and sums the bright luma");
+        expect(flatHdrEnergyThreshold(0.0) == 8.0f && flatHdrEnergyThreshold(-1.0) == 8.0f && flatHdrEnergyThreshold(0.001) == 1.0f &&
+               flatHdrEnergyThreshold(2.0) == 128.0f && flatHdrEnergyThreshold(1e6) == 4096.0f,
+               "the energy threshold is 64 times the last geometric mean, between 1 and 4096, and 8 before the first sample");
+        // The exposure pass's procedure.
+        expect(flatHdrExposureBin(1.0f) == 32 && flatHdrExposureBin(0.0f) == 0 && flatHdrExposureBin(-3.0f) == 0 &&
+               flatHdrExposureBin(1e-9f) == 0 && flatHdrExposureBin(65000.0f) == 63 && flatHdrExposureBin(1e30f) == 63 &&
+               flatHdrExposureBin(0.5f) == 30 && flatHdrExposureBin(1.5f) == 33,
+               "the exposure bins are half stops from 2^-16: 1.0 in bin 32, 0.5 in 30, 1.5 in 33, zero and the dark in 0, the bright in 63");
+        expect(flatHdrExposurePixel(0, 4096) == 16 && flatHdrExposurePixel(127, 4096) == 4080 && flatHdrExposurePixel(0, 1080) == 4 &&
+               flatHdrExposurePixel(127, 1080) == 1075 && flatHdrExposurePixel(64, 3840) == 1935,
+               "the exposure grid point is ((2 g + 1) size) / 256 in integer division, the pixel the shader loads");
+        uint32_t hist[kFlatHdrExposureBins] = {};
+        hist[30] = 5; hist[40] = 4; hist[50] = 1;
+        expect(flatHdrExposurePercentileBin(hist, 10) == 40 && flatHdrExposurePercentileBin(hist, 1) == 30 &&
+               flatHdrExposureWhiteLog2(40) == 4.25 && flatHdrExposureWhiteLog2(32) == 0.25,
+               "the 90th percentile of ten samples is the bin that holds the ninth, and W is that bin's centre");
+        {
+            std::vector<float> flat(64 * 64 * 4, 0.0f);
+            for (size_t i = 0; i < flat.size(); i += 4) { flat[i] = flat[i + 1] = flat[i + 2] = 0.6f; flat[i + 3] = 1.0f; }
+            const FlatHdrExposureMeasure m = flatHdrExposureMeasure(flat.data(), 64, 64);
+            expect(m.samples == 16384 && m.bin == 30 && m.whiteLog2 == -0.75 &&
+                   closeTo(flatHdrExposureValue(m.whiteLog2), std::exp2(0.75), 1e-12),
+                   "a uniform 0.6 image is 16384 grid samples in bin 30, W about 0.59, and an exposure about 1.68");
+            // 87% dark 0.01, 13% bright 100: the 90th percentile sits in the bright 13%, so the exposure follows the bright surfaces.
+            std::vector<float> mix(64 * 64 * 4, 0.0f);
+            for (uint32_t y = 0; y < 64; ++y) for (uint32_t x = 0; x < 64; ++x) {
+                const float v = x >= 56 ? 100.0f : 0.01f;
+                float* c = &mix[(static_cast<size_t>(y) * 64 + x) * 4]; c[0] = c[1] = c[2] = v; c[3] = 1.0f;
+            }
+            const FlatHdrExposureMeasure mm = flatHdrExposureMeasure(mix.data(), 64, 64);
+            expect(mm.samples == 16384 && mm.bin == flatHdrExposureBin(100.0f),
+                   "the 90th percentile of a dark image with a bright eighth is a bright bin, not the dark majority");
+            std::vector<float> bad(64 * 64 * 4, -1.0f);
+            const FlatHdrExposureMeasure none = flatHdrExposureMeasure(bad.data(), 64, 64);
+            expect(none.samples == 0 && none.bin == 0 && none.whiteLog2 == 0.0, "an image with no valid sample measures nothing");
+        }
+        expect(flatHdrExposureSmooth(0.0, false, 5.0, false) == 5.0 && flatHdrExposureSmooth(2.0, true, 5.0, true) == 5.0 &&
+               closeTo(flatHdrExposureSmooth(2.0, true, 5.0, false), 2.0 + 3.0 * kFlatHdrExposureAlpha, 1e-12),
+               "the exposure smoothing starts at once, restarts on a reset, and otherwise moves 8% a frame in log2");
+        // The line, for one window: R, M, T and N as the instrument names them.
+        FlatHdrEnergyWindow w;
+        std::snprintf(w.route, sizeof(w.route), "flat"); std::snprintf(w.backend, sizeof(w.backend), "dlaa");
+        std::snprintf(w.exposure, sizeof(w.exposure), "scene"); w.preset = 11; w.width = 3840; w.height = 2160;
+        w.frames = 290; w.samples = 2;
+        w.brightIn = 2000; w.brightOut = 2040; w.totalIn = 100; w.totalOut = 99; w.maxIn = 10000; w.maxOut = 10100; w.maxRatioPeak = 1.04;
+        w.overIn = 800; w.overOut = 820; w.satIn = 0; w.satOut = 2; w.thresholdSum = 136; w.geoMeanIn = 1.5; w.exposureSum = 0.05; w.exposureSamples = 2;
+        w.fallbacks = 1;
+        char line[900];
+        flatHdrEnergyFormatLine(line, sizeof(line), w);
+        expect(closeTo(flatHdrEnergyR(w), 1.02, 1e-12) && closeTo(flatHdrEnergyM(w), 1.01, 1e-12) &&
+               std::strcmp(line, "flat hdr energy: route=flat backend=dlaa preset=K exposure=scene samples=2 frames=290 size=3840x2160 "
+                                 "R=1.0200 M=1.0100 Mpeak=1.0400 T=68 N=400.0/410.0 (in/out) bright-in=1000 bright-out=1020 max-in=5000 max-out=5050 "
+                                 "total-out/in=0.9900 saturated=0.0/1.0 gm-in=0.75 applied-exposure=0.025 (2) bad=0/0 "
+                                 "fallbacks=1 hazards=0 dropped=0 failures=0") == 0,
+               "the energy line names R, M, T and N in the order the flight checklist reads them");
+        FlatHdrEnergyWindow quiet;
+        std::snprintf(quiet.route, sizeof(quiet.route), "flat"); std::snprintf(quiet.backend, sizeof(quiet.backend), "none");
+        std::snprintf(quiet.exposure, sizeof(quiet.exposure), "none"); quiet.frames = 300;
+        flatHdrEnergyFormatLine(line, sizeof(line), quiet);
+        expect(std::strstr(line, "samples=0 frames=300 ") != nullptr && std::strstr(line, "R=0.0000 M=0.0000") != nullptr,
+               "a window that was offered frames and took no sample still prints, with samples=0, so it reads differently from never ran");
+    }    expect(flatFsrCreateFlags(false, false, false) == (1u << 3) &&
            flatFsrCreateFlags(true, false, false) == (1u << 3 | 1u << 4) &&
            flatFsrCreateFlags(true, true, false) == (1u << 3 | 1u << 4 | 1u << 8) &&
            flatFsrCreateFlags(false, true, false) == (1u << 3 | 1u << 8),
@@ -1559,13 +1667,18 @@ inline int flatHdrRouteTests() {
             return n;
         };
         const std::string dlaa = slurpSource("src/d3d11/dlaa.cpp");
-        expect(!dlaa.empty() && count(dlaa, "cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr, runtimeFlatProfile()));") == 1 &&
+        expect(!dlaa.empty() && count(dlaa, "cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr, runtimeFlatProfile(), g_hdrExposure));") == 1 &&
                    count(dlaa, "flatDlssCreateFlags(hdr") == 1 &&
-                   count(dlaa, "if (flatDlssFixedExposure(hdr, runtimeFlatProfile())) {") == 1 &&
-                   count(dlaa, "ep.pInExposureTexture = g_exposureOne;") == 1,
-               "dlaa.cpp creates the DLSS feature with exactly the flags hdr_backend_flags.h names for the route, in one place");
-        expect(count(dlaa, "f.presetGen != g_presetGen || f.hdr != hdr") == 1 && count(dlaa, "f.hdr = hdr;") == 1,
-               "dlaa.cpp keys the feature on the route's bit and stores it when the feature is made, so a flip remakes it");
+                   count(dlaa, "flatDlssExposureInput(hdr, runtimeFlatProfile(), g_hdrExposure);") == 2 &&
+                   count(dlaa, "exposureTexture = flatHdrExposureTexture();") == 1 &&
+                   count(dlaa, "if (!exposureTexture) flatHdrExposureCountFallback();") == 1 &&
+                   count(dlaa, "exposureTexture = g_exposureOne;") == 1 &&
+                   count(dlaa, "ep.pInExposureTexture = exposureTexture;") == 1,
+               "dlaa.cpp creates the DLSS feature with exactly the flags hdr_backend_flags.h names for the route, in one place, and hands the evaluation the measured exposure texture, or 1.0 counted when there is none");
+        expect(count(dlaa, "f.presetGen != g_presetGen || f.hdr != hdr ||") == 1 && count(dlaa, "f.hdr = hdr;") == 1 &&
+                   count(dlaa, "(hdr && f.autoExposure != flatDlssAutoExposure(hdr, runtimeFlatProfile(), g_hdrExposure))") == 1 &&
+                   count(dlaa, "f.autoExposure = flatDlssAutoExposure(hdr, runtimeFlatProfile(), g_hdrExposure);") == 1,
+               "dlaa.cpp keys the feature on the route's bit and on its AutoExposure bit and stores both when the feature is made, so a flip remakes it");
         expect(count(dlaa, "ensureFeature(ctx, eye, w, h, outW, outH, reason, nullptr, hdr)") == 1,
                "dlaaEvaluate hands the route's bit to the feature it asks for");
         // The resolver hands the frame's bit down to each engine, with no literal in its place.
