@@ -2057,6 +2057,8 @@ SceneInspectEnv sceneInspectEnv() {
     e.logDir = &sceneInspectLogDir;
     e.producerTotals = &sceneInspectProducerTotals;
     e.iniName = &sceneInspectIniName;
+    e.showReticle = &menuShowReticle;
+    e.hideReticle = &menuHideReticle;
     return e;
 }
 

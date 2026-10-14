@@ -35,8 +35,11 @@ namespace {
 
 using namespace inspect;
 
-enum Phase : int { kIdle = 0, kArmed = 1, kCollecting = 2, kReading = 3 };
+enum Phase : int { kIdle = 0, kArmed = 1, kCollecting = 2, kReading = 3, kAiming = 4 };
 std::atomic<int> g_phase{kIdle};
+uint32_t g_boxSide = kBox;                 // the box's side; the default is the named constant, the rig may set another
+uint64_t g_aimUntilMs = 0;                 // the aiming window's end (kAiming)
+char g_aimTrigger[64] = {};
 std::atomic<uint32_t> g_seen{0};          // eye-0 (or unknown-eye) draws offered in the collecting frame
 std::atomic<bool> g_inputsOffered{false};
 bool g_installed = false;
@@ -332,7 +335,7 @@ void fixBox(int eye, float vpX, float vpY, float vpW, float vpH, uint32_t ordina
     b.vpY = vpY;
     b.vpW = vpW;
     b.vpH = vpH;
-    b.side = kBox;
+    b.side = g_boxSide;
     float fr[4] = {}, rot[9] = {};
     bool haveRot = false;
     bool ok = false;
@@ -441,7 +444,7 @@ void drawImpl(ID3D11DeviceContext* ctx, const SceneDrawInfo& info, SceneReplayFn
         }
         float px = 0.0f, py = 0.0f;
         imagePointToTarget(g_box.u, g_box.v, t.vpX, t.vpY, t.vpW, t.vpH, &px, &py);
-        if (!boxAround(px, py, kBox, t.w, t.h, &t.box)) {
+        if (!boxAround(px, py, g_boxSide, t.w, t.h, &t.box)) {
             ++c.untestedState;
             return;
         }
@@ -1055,7 +1058,7 @@ void writeReport() {
     if (inputsRead) {
         Rect b;
         const float icx = g_box.u * static_cast<float>(g_in.w), icy = g_box.v * static_cast<float>(g_in.h);
-        boxAround(icx, icy, kBox, g_in.w, g_in.h, &b);
+        boxAround(icx, icy, g_boxSide, g_in.w, g_in.h, &b);
         centrePixel(icx, icy, b, &centreX, &centreY);
         ib.x0 = b.x0;
         ib.y0 = b.y0;
@@ -1352,7 +1355,7 @@ void writeReport() {
                     cur += name;
                     std::snprintf(files.pngs, sizeof(files.pngs), "%s", cur.c_str());
                     Log::get().note("scene inspect image: %s %ux%u: %s%sthe magenta ring just outside the %ux%u box is drawn on the file; the box's own pixels are untouched (box at %d,%d..%d,%d in the image)",
-                                    suffix.c_str(), w, h, note ? note : "", note && note[0] ? "; " : "", kBox, kBox, box.x0, box.y0, box.x1, box.y1);
+                                    suffix.c_str(), w, h, note ? note : "", note && note[0] ? "; " : "", g_boxSide, g_boxSide, box.x0, box.y0, box.x1, box.y1);
                 }
             };
             const size_t n = static_cast<size_t>(cw) * ch;
@@ -1406,11 +1409,14 @@ void finishCapture() {
     g_phase.store(kIdle, std::memory_order_release);
 }
 
+uint64_t clockMs() { return g_env.nowMs ? g_env.nowMs() : static_cast<uint64_t>(GetTickCount64()); }
+
 const char* phaseName(int p) {
     switch (p) {
         case kArmed: return "armed";
         case kCollecting: return "collecting";
         case kReading: return "reading its answers";
+        case kAiming: return "aiming";
         default: return "idle";
     }
 }
@@ -1436,7 +1442,23 @@ void sceneInspectRequest(const char* trigger) {
         return;
     }
     const int now = g_phase.load(std::memory_order_acquire);
-    if (now != kIdle) {
+    char line[kLineBuf];
+    if (now == kIdle) {
+        // The first press: the reticle, then the window for the second. With no reticle to show the press captures at once (and says so).
+        if (g_env.showReticle && g_env.showReticle(kAimWindowMs)) {
+            std::snprintf(g_aimTrigger, sizeof(g_aimTrigger), "%s", trigger ? trigger : "");
+            g_aimUntilMs = clockMs() + kAimWindowMs;
+            g_phase.store(kAiming, std::memory_order_release);
+            formatAimLine(line, sizeof(line), kAimWindowMs, g_boxSide, true);
+            say(line);
+            return;
+        }
+        formatAimLine(line, sizeof(line), kAimWindowMs, g_boxSide, false);
+        say(line);
+    } else if (now == kAiming) {
+        // The second press, inside the window: capture, and take the reticle down (it is composited after the temporal pass, so it was never in the inputs).
+        if (g_env.hideReticle) g_env.hideReticle();
+    } else {
         Log::get().note("scene inspect: refused (%s): the capture is %s (trigger %s)", refusalText(Refusal::kBusy), phaseName(now), trigger ? trigger : "");
         return;
     }
@@ -1445,15 +1467,27 @@ void sceneInspectRequest(const char* trigger) {
     std::snprintf(g_pendingTrigger, sizeof(g_pendingTrigger), "%s", trigger ? trigger : "");
     g_pendingCap = g_capId + 1;
     g_phase.store(kArmed, std::memory_order_release);
-    char line[kLineBuf];
-    formatArmedLine(line, sizeof(line), g_pendingCap, g_pendingTrigger);
+    formatArmedLine(line, sizeof(line), g_pendingCap, g_pendingTrigger, g_boxSide);
     say(line);
 }
+
+void sceneInspectSetBoxSideForTest(uint32_t side) { g_boxSide = side >= 2 ? side : kBox; }
 
 void sceneInspectFrameBoundary(uint32_t gameFrame) noexcept {
     const int p = g_phase.load(std::memory_order_acquire);
     if (p == kIdle) return;
     try {
+        if (p == kAiming) {
+            // The window ran out with no second press: cancel, say so, and take the reticle down.
+            if (clockMs() >= g_aimUntilMs) {
+                if (g_env.hideReticle) g_env.hideReticle();
+                g_phase.store(kIdle, std::memory_order_release);
+                char line[kLineBuf];
+                formatAimCancelLine(line, sizeof(line), kAimWindowMs);
+                say(line);
+            }
+            return;
+        }
         if (p == kArmed) {
             releaseAll();
             g_capId = g_pendingCap;

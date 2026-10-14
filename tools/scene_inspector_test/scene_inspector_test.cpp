@@ -389,7 +389,7 @@ void testVerdicts() {
     // Thin and hidden.
     v = baseIn(); v.cls = Cls::Additive; v.depthWrite = false; v.box = 3; v.ctr = 1; v.topology = 2; v.uiTaken = true; v.routeNone = false;
     verdictFor(v, &o);
-    check(has(o.text, "thin: 3 of 256") && has(o.text, "line or point"), "three samples and a line primitive: thin");
+    check(has(o.text, "thin: 3 of 2304") && has(o.text, "line or point"), "three samples and a line primitive: thin");
     v = baseIn(); v.cls = Cls::Opaque; v.depthWrite = true; v.isDepthOwner = true; v.keyed = true; v.routeNone = false; v.px.flags.hidden = true;
     verdictFor(v, &o);
     check(has(o.text, "history is hidden"), "a hidden pixel is said");
@@ -500,7 +500,7 @@ void testEngineRecords() {
 
 void testText() {
     char b[kLineBuf];
-    check(formatInstallLine(b, sizeof(b), false, true, "F4", "edvr.ini") > 0 && std::strcmp(b, "scene inspect: off; hotkey.scene_inspect is bound to F4") == 0, "install line, bound");
+    check(formatInstallLine(b, sizeof(b), false, true, "F4", "edvr.ini") > 0 && std::strncmp(b, "scene inspect: off; hotkey.scene_inspect is bound to F4", 55) == 0, "install line, bound");
     formatInstallLine(b, sizeof(b), false, false, "", "edvr.ini");
     check(std::strcmp(b, "scene inspect: off; hotkey.scene_inspect is NOT bound -- add \"scene_inspect = <a free key>\" under [hotkey] in edvr.ini to use it") == 0,
           "install line, unbound: pinned text");
@@ -829,7 +829,27 @@ void testImages() {
     check(std::strlen(motionImageLegend()) > 10 && std::strlen(pathImageLegend()) > 10, "the image legends exist");
 }
 
+void testAim() {
+    char b[kLineBuf];
+    int n = formatAimLine(b, sizeof(b), 3000, 48, true);
+    check(n > 0 && static_cast<size_t>(n) < kLineMax && has(b, "scene inspect: aiming:") && has(b, "3000 ms") && has(b, "48x48 px") && has(b, "no second press cancels"), "the aiming line");
+    n = formatAimLine(b, sizeof(b), 3000, 48, false);
+    check(n > 0 && has(b, "no reticle available") && has(b, "captures at once") && has(b, "48x48 px"), "the no-reticle line says the press captures at once");
+    n = formatAimCancelLine(b, sizeof(b), 3000);
+    check(n > 0 && has(b, "scene inspect: cancelled:") && has(b, "within 3000 ms") && has(b, "nothing was captured"), "the cancel line");
+    n = formatArmedLine(b, sizeof(b), 3, "hotkey.scene_inspect");
+    check(n > 0 && has(b, "armed cap=3 (trigger hotkey.scene_inspect)") && has(b, "the box is 48x48 px"), "the armed line carries the box size (48 by default)");
+    n = formatInstallLine(b, sizeof(b), false, true, "F6", "edvr.ini");
+    check(n > 0 && has(b, "bound to F6") && has(b, "again within 3000 ms to capture") && has(b, "48x48 px"), "the install line says how the key works");
+    // The 48 pixel box in a real eye, a corner, and the thin rule's scale.
+    Rect r;
+    check(boxAround(1008.0f, 1008.0f, kBox, 2016, 2017, &r) && r.width() == 48 && r.height() == 48 && r.x0 == 984 && r.y0 == 984, "the box is 48 square about the point");
+    check(boxAround(3.0f, 3.0f, kBox, 2016, 2017, &r) && r.x0 == 0 && r.width() == 48 && r.y0 == 0, "and moves inside, not smaller, at a corner");
+    check(kThinSamples == 24, "a draw under 24 samples of the 48 box is as thin as under 8 in the old 16 box");
+}
+
 void runPure() {
+    testAim();
     testBox();
     testClasses();
     testStatus();
@@ -1099,8 +1119,26 @@ bool envProducers(uint64_t v[5]) {
     return true;
 }
 const char* envIni() { return "edvr.ini"; }
+// The aiming reticle's stand-in: what the menu would be asked, and a clock the rig moves by hand.
+struct FakeReticle {
+    bool available = false;   // false: no panel to show it on (the press captures at once, as every earlier scenario assumes)
+    unsigned shows = 0, hides = 0;
+    uint32_t lastMs = 0;
+    uint64_t clock = 1000000;
+} g_reticle;
+bool envShowReticle(uint32_t ms) {
+    if (!g_reticle.available) return false;
+    ++g_reticle.shows;
+    g_reticle.lastMs = ms;
+    return true;
+}
+void envHideReticle() { ++g_reticle.hides; }
+uint64_t envNowMs() { return g_reticle.clock; }
 edvr::SceneInspectEnv makeEnv() {
     edvr::SceneInspectEnv e;
+    e.showReticle = &envShowReticle;
+    e.hideReticle = &envHideReticle;
+    e.nowMs = &envNowMs;
     e.eyeOfTarget = &envEye;
     e.eyeGeometry = &envGeometry;
     e.setBlendRaw = &envBlend;
@@ -1365,6 +1403,8 @@ void runDevice() {
     edvr::g_lines.clear();
     edvr::sceneInspectInstall(false, false, "", makeEnv());
     check(!lineWith(0, "hotkey.scene_inspect is NOT bound").empty(), "S7: install says the key is unbound");
+    // The scenarios below are built on a 16 pixel box (a 64 pixel target, quads at 16 pixel offsets); the box's default, 48, is tested at the end (S9).
+    edvr::sceneInspectSetBoxSideForTest(16);
     uint32_t frame = 100;
 
     // The control: the same draws with the module idle.
@@ -1646,6 +1686,61 @@ void runDevice() {
         check(lineWith(from, "scene inspect occluded:").empty(), "a withheld opaque draw buries nothing");
         check(has(lineWith(from, "scene inspect draw: #0 "), "status=top"), "the draw under it stays on top");
         check(has(lineWith(from, "scene inspect frame:"), "1 withheld by EDVR"), "and the frame line counts the withheld draw");
+    }
+
+    // ---- S9: the two-press flow (reticle, a second press inside the window, a cancel) and the 48 pixel box ---------------------------------------
+    {
+        edvr::sceneInspectSetBoxSideForTest(kBox);   // the default
+        check(kBox == 48 && kThinSamples == 24 && kCrop >= kBox + 32 && kAimWindowMs == 3000, "S9: the box is 48 px (a named constant), the thin test scales with it, the crop has room for it");
+        g_reticle.available = true;
+        const size_t from = edvr::g_lines.size();
+        const unsigned shows0 = g_reticle.shows, hides0 = g_reticle.hides;
+        edvr::sceneInspectRequest("rig");
+        check(g_reticle.shows == shows0 + 1 && g_reticle.lastMs == kAimWindowMs, "S9: the first press shows the reticle for the aiming window");
+        check(has(lineWith(from, "scene inspect: aiming:"), "press again while it shows to capture") && has(lineWith(from, "scene inspect: aiming:"), "48x48"),
+              "S9: the first press says what happens next and the box size");
+        check(!edvr::sceneInspectWantsDraws() && lineWith(from, "armed cap=").empty(), "S9: the first press captures nothing");
+        edvr::sceneInspectFrameBoundary(++frame);
+        check(!edvr::sceneInspectWantsDraws() && lineWith(from, "armed cap=").empty() && lineWith(from, "cancelled").empty(), "S9: a boundary inside the window changes nothing");
+        // No second press: cancelled, said, the reticle taken down.
+        g_reticle.clock += kAimWindowMs - 1;
+        edvr::sceneInspectFrameBoundary(++frame);
+        check(lineWith(from, "cancelled").empty() && g_reticle.hides == hides0, "S9: one millisecond short of the window is not a cancel");
+        g_reticle.clock += 1;
+        edvr::sceneInspectFrameBoundary(++frame);
+        check(has(lineWith(from, "scene inspect: cancelled:"), "no second press within 3000 ms") && g_reticle.hides == hides0 + 1, "S9: no second press within the window cancels, says so, and takes the reticle down");
+        edvr::sceneInspectFrameBoundary(++frame);
+        check(!edvr::sceneInspectWantsDraws() && lineWith(from, "armed cap=").empty(), "S9: and nothing is armed after it");
+        // A fresh two-press: the second press captures.
+        const size_t from2 = edvr::g_lines.size();
+        edvr::sceneInspectRequest("rig");
+        g_reticle.clock += 800;
+        edvr::sceneInspectRequest("rig");
+        check(g_reticle.hides == hides0 + 2, "S9: the second press takes the reticle down");
+        check(has(lineWith(from2, "scene inspect: armed cap="), "the box is 48x48 px"), "S9: the armed line notes the box size");
+        edvr::sceneInspectFrameBoundary(++frame);
+        check(edvr::sceneInspectWantsDraws(), "S9: the capture starts at the next boundary after the second press");
+        Synth syn9;
+        makeSynth(r, syn9, 1.6f, 1.6f);
+        unsigned snaps = 0;
+        const std::string diffs9 = drawRun(r, true, &snaps);
+        check(diffs9.empty(), "S9: the 48 pixel box's duplicates restore every state too");
+        check(edvr::sceneInspectInputsWanted(), "S9: inputs wanted after the draws");
+        edvr::sceneInspectInputsOffer(r.g.ctx.Get(), syn9.in);
+        edvr::sceneInspectOutputsOffer(r.g.ctx.Get(), syn9.out);
+        pump(r, &frame, from2, "complete cap=");
+        check(!lineWith(from2, "complete cap=").empty(), "S9: the capture completes");
+        auto d = [&](unsigned idx) { return lineWith(from2, ("scene inspect draw: #" + std::to_string(idx) + " ").c_str()); };
+        check(has(lineWith(from2, "scene inspect box: cap="), "side=48px"), "S9: the box line says 48px");
+        check(has(lineWith(from2, "scene inspect target: rt=#0"), "box=[8,56)x[8,56)") && has(lineWith(from2, "scene inspect target: rt=#0"), "centre_px=32,32"), "S9: the box is 48 square about the centre, the centre pixel kept");
+        check(has(lineWith(from2, "scene inspect occluded: #0 "), "box=2304 ctr=1"), "S9: the floor covers all 2304 samples of the box");
+        check(has(d(2), "box=576 ctr=1") && has(d(2), "status=top"), "S9: the closer object covers 576 of the box and the centre");
+        check(has(d(3), "box=256 ctr=1"), "S9: the overlay's 256");
+        check(has(d(6), "box=128 ctr=0"), "S9: a draw off the centre pixel is still listed, with its coverage of the larger box");
+        check(d(4).empty() && d(5).empty(), "S9: a quad outside the box and one that failed the depth test are not involved");
+        check(has(lineWith(from2, "scene inspect box stats:"), "2304 pixels read"), "S9: all 2304 box pixels read");
+        g_reticle.available = false;
+        edvr::sceneInspectSetBoxSideForTest(16);
     }
 
     // Cost: what an idle session pays, per call. The figures are printed (docs\scene-inspector-2026-10-14.md quotes them); the bound is loose, so only an

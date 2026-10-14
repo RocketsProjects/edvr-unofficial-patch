@@ -3,7 +3,7 @@
 // hotkey.scene_inspect (unbound by default), and the log, a CSV and a few PNGs say which draws wrote the pixels at the centre of the
 // left eye's view, what EDVR did with each, what the temporal pass handed DLSS there, and which rule explains the smear.
 //
-// One press captures ONE frame. Every eye draw of the left eye is duplicated once more, scissored to a 16x16 box and then to its centre
+// One press captures ONE frame. Every eye draw of the left eye is duplicated once more, scissored to a 48x48 box (kBox) and then to its centre
 // pixel, writing nothing (colour mask 0, depth and stencil writes off), each under an occlusion query. The duplicate runs BEFORE the
 // game's own draw, so its count is what the draw adds over the earlier ones. After the capture frame the answers are read back, and the
 // temporal pass's offer of its inputs (colour, depth, the motion handed to DLSS, the decision texture, the masks) and of DLSS's output
@@ -33,11 +33,21 @@ struct SceneInspectEnv {
     // Cumulative pool-record totals per producer (v[0..1] emit calls/items, v[2..3] second producer, v[4] primary calls); null or false: not available.
     bool (*producerTotals)(uint64_t v[5]) = nullptr;
     const char* (*iniName)() = nullptr;
+    // The aiming reticle (two-press flow): show a small reticle at the head-forward point for `ms` in both eyes (the menu panel's head-locked overlay, which the
+    // runtime composites after the temporal pass, so it is never in the captured inputs); false when there is none to show. Null: no reticle, the press captures.
+    bool (*showReticle)(uint32_t ms) = nullptr;
+    void (*hideReticle)() = nullptr;
+    uint64_t (*nowMs)() = nullptr;   // a millisecond clock for the aiming window; null: GetTickCount64
 };
+
+// For the rig only: the box's side for the captures that follow (the default is kBox, 48). A rig whose geometry is built around 16 pixels sets 16.
+void sceneInspectSetBoxSideForTest(uint32_t side);
 
 // Once, at install: said in the log (bound or not), and the environment kept.
 void sceneInspectInstall(bool flatProfile, bool keyBound, const char* key, const SceneInspectEnv& env);
-// A press: arms a capture at the next frame boundary. Refused (and said) while one runs, or in the flat profile.
+// A press. The TWO-PRESS flow: the first press shows the reticle (the head-forward point, the same direction the box is taken in) for kAimWindowMs; a
+// second press inside the window arms the capture at the next frame boundary; none cancels it (logged). With no reticle available (no menu panel) a press
+// arms the capture at once, and says so. Refused (and said) while a capture runs, or in the flat profile.
 void sceneInspectRequest(const char* trigger);
 // vScreenFrameBoundary: starts, advances and finishes the capture.
 void sceneInspectFrameBoundary(uint32_t gameFrame) noexcept;

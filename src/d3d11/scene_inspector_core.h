@@ -34,8 +34,9 @@ using blend::DecisionFlags;
 using blend::DepthDesc;
 using blend::Rect;
 
-constexpr uint32_t kBox = 16;             // the box's side, in render pixels of the target a draw writes
-constexpr uint32_t kCrop = 128;           // the PNG crops' side, in DLSS input pixels
+constexpr uint32_t kBox = 48;             // the box's side, in render pixels of the target a draw writes (16 until 2026-10-14: three captures missed their element)
+constexpr uint32_t kCrop = 160;           // the PNG crops' side, in DLSS input pixels (room for the box and a ring around it)
+constexpr uint32_t kAimWindowMs = 3000;   // the two-press flow: the reticle shows, and a second press inside this window captures; none cancels it
 constexpr uint32_t kMaxDraws = 6000;      // eye draws tested per capture (two queries each); the rest are counted
 constexpr uint32_t kMaxListed = 300;      // involved draws listed in full; the rest are counted
 constexpr uint32_t kReadTicksMax = 90;    // frame boundaries the answers are waited for before the report is written anyway
@@ -525,7 +526,7 @@ struct VerdictOut {
 };
 
 constexpr float kMotionTolerancePx = 0.5f;
-constexpr int64_t kThinSamples = 8;   // under this many box samples a draw is sub-pixel thin at the centre
+constexpr int64_t kThinSamples = 8 * (kBox / 16);   // under this many box samples a draw is sub-pixel thin at the centre (8 in a 16 px box, scaled with the box's side)
 
 // Composed from independent findings, joined by "; ". The code is the first finding that applies in the order below: what makes DLSS
 // treat the pixel wrongly first, then the facts that explain it, then the cases where EDVR already handles the draw.
@@ -741,14 +742,28 @@ inline const char* refusalText(Refusal r) noexcept {
 }
 inline int formatInstallLine(char* out, size_t cap, bool flat, bool bound, const char* key, const char* iniName) noexcept {
     if (flat) return std::snprintf(out, cap, "scene inspect: off; VR only, hotkey.scene_inspect does nothing in the flat profile");
-    if (bound) return std::snprintf(out, cap, "scene inspect: off; hotkey.scene_inspect is bound to %s", key ? key : "");
+    if (bound)
+        return std::snprintf(out, cap, "scene inspect: off; hotkey.scene_inspect is bound to %s (press once to show a reticle at the head-forward point, again within %u ms to capture; the box is %ux%u px)",
+                             key ? key : "", kAimWindowMs, kBox, kBox);
     return std::snprintf(out, cap,
                          "scene inspect: off; hotkey.scene_inspect is NOT bound -- add \"scene_inspect = <a free key>\" under [hotkey] in %s to use it",
                          iniName ? iniName : "the settings file");
 }
-inline int formatArmedLine(char* out, size_t cap, uint32_t cap_, const char* trigger) noexcept {
-    return std::snprintf(out, cap, "scene inspect: armed cap=%u (trigger %s): the next frame boundary starts a one-frame capture of the left eye.", cap_,
-                         trigger ? trigger : "");
+inline int formatArmedLine(char* out, size_t cap, uint32_t cap_, const char* trigger, uint32_t side = kBox) noexcept {
+    return std::snprintf(out, cap,
+                         "scene inspect: armed cap=%u (trigger %s): the next frame boundary starts a one-frame capture of the left eye; the box is %ux%u px (centre pixel measured separately).",
+                         cap_, trigger ? trigger : "", side, side);
+}
+// The two-press flow: the first press shows a reticle at the box's centre (head-forward, in both eyes) and waits `windowMs` for a second press.
+inline int formatAimLine(char* out, size_t cap, uint32_t windowMs, uint32_t side, bool reticle) noexcept {
+    if (reticle)
+        return std::snprintf(out, cap,
+                             "scene inspect: aiming: a reticle shows at the head-forward point for %u ms; press again while it shows to capture (the box is %ux%u px); no second press cancels.",
+                             windowMs, side, side);
+    return std::snprintf(out, cap, "scene inspect: no reticle available (the menu panel is not up), so this press captures at once (the box is %ux%u px).", side, side);
+}
+inline int formatAimCancelLine(char* out, size_t cap, uint32_t windowMs) noexcept {
+    return std::snprintf(out, cap, "scene inspect: cancelled: no second press within %u ms of the first, so nothing was captured.", windowMs);
 }
 inline int formatCollectingLine(char* out, size_t cap, uint32_t cap_, uint32_t gameFrame) noexcept {
     return std::snprintf(out, cap, "scene inspect: collecting cap=%u from game frame %u.", cap_, gameFrame);

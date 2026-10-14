@@ -82,6 +82,11 @@ bool menuTakeConfigPollRequest();
 typedef void (*MenuActionFn)(void* user);
 void menuRegisterAction(const char* label, const char* hint, MenuActionFn fn, void* user);
 
+// The aiming reticle (the scene inspector's first press): a small "+" in the head-locked overlay panel at the head-forward point, for `ms`, seen in both
+// eyes. False when there is no panel to show it on (the menu is not configured, or no compositor consumer is there). Any thread. menuHideReticle ends it.
+bool menuShowReticle(uint32_t ms);
+void menuHideReticle();
+
 void menuShutdown();
 
 }  // namespace edvr

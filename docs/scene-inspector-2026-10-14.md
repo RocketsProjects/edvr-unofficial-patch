@@ -153,3 +153,11 @@ these (S7).
   (the path labels above, and verdicts on intermediate lighting and bloom targets). Railing (cap 1, 2): the railing's draws are keyed and substituted
   (`DE545DC8EE4FBB87`/`E46E3E4832B2FDB0` rigid#3, `EB5234DB6ADB491D`/`3434972DB5336AA4` rigid#0) but their pixels read engine kind 3, a pool record with
   no marker from this frame or the last 64, so the pass falls back to the world camera term. See the coordinator report for the proposed fix.
+- **2026-10-14, aiming (claude/effect-history).** Build B's three captures all missed their element (the railing was 18 px off the box). The key is now a
+  two-press flow: the first press shows a small "+" reticle at the head-forward point, in both eyes, for 3000 ms (`kAimWindowMs`); a second press inside
+  the window captures; none cancels, and the log says `scene inspect: cancelled: no second press within 3000 ms`. With no menu panel to show it on the press
+  captures at once and says so. The reticle is the menu panel's head-locked overlay at yaw 0, pitch 0 (`menuShowReticle`, menu.cpp); the runtime composites it
+  after the temporal pass (native_runtime_host.h: after_temporal_before_menu), so it is never in the captured inputs. It sits at the head-forward direction
+  the box is taken in, but the eyes see a quad at finite distance along their own rays (about a degree off at 2 m), which the larger box absorbs. The box is
+  48 px (`kBox`, was 16); the crop is 160; the thin-sample rule scales with the side (24 in the 48 box). Every draw's `box=` is its coverage of the 48 box, so
+  an element near the centre is listed with `ctr=0`. The armed line and the install line note the box size. NOT FLOWN.
