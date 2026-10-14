@@ -225,6 +225,14 @@ bool engineReprojectSkinned(EnginePoolRecord r, float3 skinCm, float2 ndc, float
 // ENGINE_MOTION_HLSL_END
 )HLSL"
 R"HLSL(
+// effect_history_core.h: the effect-history rule on the effect's light (e) and the pixel's (f), linear HDR.
+bool effectHideTest(float3 e, float3 f, float share, float floorValue) {
+    const float3 lw = float3(0.2126, 0.7152, 0.0722);
+    float le = dot(max(e, 0.0), lw), lf = dot(max(f, 0.0), lw);
+    return le > floorValue && le >= share * lf;
+}
+Texture2D<float4> EFX : register(t5);    // effect_history.h: the listed effect draws' own light this eye, R11G11B10 (bound with probe.w bit 32768)
+Texture2D<float4> EFH : register(t16);    // ...and the game's HDR target they drew into, same size (bound with it); split.y the share, split.z the floor
 Texture2D<float4> Screen : register(t14);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
 RWTexture2D<float> MK : register(u5);    // for a trained pass: NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
@@ -261,8 +269,8 @@ cbuffer P : register(b0) {
     float4 tvUsed;      // xyz the translation term for the used delta (depth motion), w unused
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
     float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
-    float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); yzw unused
-    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 128 the scanner's screen is up (its interface takes the head's path), 8192 the celestial records are bound (t15)
+    float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); y the effect rule's share, z its luma floor (probe.w bit 32768); w unused
+    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 128 the scanner's screen is up (its interface takes the head's path), 8192 the celestial records are bound (t15), 32768 the effect rule's two inputs are bound (t5, t16)
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
 };
 float3 rgbToYcocg(float3 c) {
@@ -801,6 +809,9 @@ uint clipSize(float3 hc, float3 hy) {
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
+// The pixels of this group the effect rule hid (effect_history_core.h), flushed to Stats[40] by a group that hid any -- in every variant, not only the
+// diagnostic one: effect_history.cpp reads the running total a few times a minute for its census line.
+groupshared uint gEffectHidden;
 #if EDVR_TEMPORAL_DIAGNOSTICS
 // 0..47 are Stats' own slots; mv's 48..53 are engine-record motion's pixel
 // counts (joined, masked, a pool record that is not a rig record, stale
@@ -826,6 +837,7 @@ R"HLSL(
 void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     int2 local = int2(gi & 7u, gi >> 3u);
     int2 origin = int2(id.xy) - local;
+    if (gi == 0) gEffectHidden = 0;
     for (uint k = gi; k < 144; k += 64) {
         int2 q = clamp(origin + int2(k % 12, k / 12) - 2, int2(0,0), size - 1);
         mvDepthTile[k] = zSceneAt(region.xy + q);
@@ -967,6 +979,16 @@ R"HLSL(
         // hidden background does (modern presets honour only this), and sets
         // the reactive mask for the presets and FSR that read it.
         bool hidden = engineMasked || (!trackedForeground && !uiHere && backgroundHistoryHidden(local,p,motion,zraw,zPred));
+        // The effect rule (effect_history_core.h, probe.w bit 32768): a pixel where a listed glow (a particle, a halo, a flare: it moves on its own, so
+        // no vector here is true for it) supplies the share of the pixel's light keeps no history either. Only a pixel not already hidden is read, and
+        // never a UI pixel (the post-DLSS resolve owns those); the loads happen only on the eye-frames an effect drew.
+        bool effectHidden = false;
+        if (!hidden && !uiHere && (uint(probe.w + 0.5) & 32768u) != 0u) {
+            int3 effectAt = int3(region.xy + int2(p), 0);
+            effectHidden = effectHideTest(EFX.Load(effectAt).rgb, EFH.Load(effectAt).rgb, split.y, split.z);
+            hidden = effectHidden;
+            if (effectHidden) InterlockedAdd(gEffectHidden, 1u);
+        }
         // Keep physical motion for diagnostics/reactivity. Only NVIDIA's
         // history lookup is invalidated, as with new source-screen pixels.
         float2 written = hidden ? float2(size)*2 : motion;
@@ -985,7 +1007,8 @@ R"HLSL(
             (decisionPath==10u && !projectionValid?32u:0u) | (uiHere?64u:0u) |
             (worldAvailable?128u:0u) | (depthValid?256u:0u) |
             (trackedForeground?512u:0u) | (projectionValid?1024u:0u) |
-            ((engineKind & 7u) << 12); // capture-only ownership result, bits 12..14; exactly representable as float
+            ((engineKind & 7u) << 12) | // capture-only ownership result, bits 12..14; exactly representable as float
+            (effectHidden?32768u:0u);   // bit 15: hidden by the effect rule (the bit-16 hidden flag is set with it)
         DT[id.xy]=float4(decisionMotion,decisionDepth,float(decisionFlags));
 #endif
 )HLSL"
@@ -1089,6 +1112,11 @@ R"HLSL(
     for (uint flushed = gi; flushed < 88u; flushed += 64u)
         if (gCount[flushed] != 0) InterlockedAdd(Stats[flushed < 48u ? flushed : flushed + 2u], gCount[flushed]);
 #endif
+    // The effect rule's running total (uniform: the bit is a constant). Stats[40] is free in the diagnostic layout and nothing else writes it.
+    if ((uint(probe.w + 0.5) & 32768u) != 0u) {
+        GroupMemoryBarrierWithGroupSync();
+        if (gi == 0 && gEffectHidden != 0u) InterlockedAdd(Stats[40], gEffectHidden);
+    }
 }
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)

@@ -40,6 +40,8 @@
 #include "ui_depth.h"   // the interface's coverage mask and resolve tuning
 #include "blend_probe.h"   // TEMPORARY blend probe: asks for eye 0's per-pixel decisions, one relaxed load a frame unarmed
 #include "scene_inspector.h"   // the scene inspector: the same ask for its frame, and the DLSS output; one relaxed load a frame unarmed
+#include "effect_history.h"   // the effect rule: the listed glows' own light, bound for the motion shader on the NVIDIA path
+#include "effect_history_core.h"   // its share, floor and the probe.w bit
 #include "ui_resolve.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
@@ -3516,6 +3518,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (worldOn) ++g_footWorldFrames;
         }
         p.split[0] = temporalShipSplitMetres(kTemporalShipMetres, footSplit);
+        p.split[1] = kEffectHideShare;   // the effect rule's two numbers; the shader reads them only with probe.w bit 32768
+        p.split[2] = kEffectHideFloor;
         for (int c = 0; c < 3; ++c) {
             p.dR0[c] = delta[0 * 3 + c];
             p.dR1[c] = delta[1 * 3 + c];
@@ -4128,6 +4132,16 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // Bit 16384 and t23: the skinned characters' exact previous position (the second skin).
                     if (engineBound && engineSkinSrv)
                         p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 16384u);
+                    // The effect rule (effect_history.h): on NVIDIA's path only, the eye's listed glows' own light and the game's HDR target, at t5 and
+                    // t16, with probe.w bit 32768. Asking consumes the eye's replicas; nothing replicated, or an HDR target that cannot be read, leaves
+                    // the bit clear and the motion shader exactly as it was.
+                    const bool effectNvidia = !amdEngine && !intelEngine;
+                    effectHistorySetNvidia(effectNvidia);
+                    ID3D11ShaderResourceView* effectLight = nullptr;
+                    ID3D11ShaderResourceView* effectFrame = nullptr;
+                    const bool effectBound = effectNvidia && p.region[0] == 0 && p.region[1] == 0 && depthSrv &&
+                                             effectHistoryViews(e.depthRes, w, h, &effectLight, &effectFrame);
+                    if (effectBound) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | kEffectProbeBit);
                     engineCounted = engineBound && diagnostics;
                     // A masked engine pixel sets the bias mask too, for the
                     // presets and FSR that read it (modern DLSS honours the
@@ -4148,10 +4162,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           depthSrv,
                                                           p.holoJitter[3] != 0.0f ? e.zPrevSrv : nullptr,
                                                           uiBound ? e.uiMaskSrv : nullptr,
-                                                          nullptr,   // t5: free since the body path retired (2026-09-23)
+                                                          effectBound ? effectLight : nullptr,   // t5: the listed effect draws' own light (probe.w bit 32768; free since the body path retired 2026-09-23)
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, celestial.srv, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15: the planet patch records (probe.w bit 8192); t16..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
+                                                          nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, celestial.srv, effectBound ? effectFrame : nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15: the planet patch records (probe.w bit 8192); t16: the game's HDR target beside t5 (the effect rule, probe.w bit 32768); t17..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                           engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr,
                                                           engineBound ? engineSkinSrv.Get() : nullptr};   // t23: target 7, the skinned characters' E (probe.w 16384)
@@ -6081,6 +6095,11 @@ static void beginEyeRun() {
     // The pixel probe rides the same eye run, for the same reason: no
     // second keypress, and its one frame is this run's first.
     pixelProbeArm();
+}
+
+ID3D11Buffer* temporalPassEffectCounter(uint32_t* byteOffset) {
+    if (byteOffset) *byteOffset = 40u * 4u;   // Stats[40]: the motion shader's running count of the pixels the effect rule hid
+    return g_stats;
 }
 
 void temporalPassShutdown() {

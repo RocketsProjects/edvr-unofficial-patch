@@ -85,6 +85,8 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "gpu_pass_profile.h"   // TEMPORARY hotkey.gpu_pass_profile: the GPU pass profiler's request
 #include "blend_probe.h"       // TEMPORARY hotkey.blend_probe: the blend probe's install and request
 #include "scene_inspector.h"   // hotkey.scene_inspect: the scene inspector's install and request
+#include "effect_history.h"    // the effect rule's install and its environment
+#include "gpu_interval.h"      // its sampled GPU timer
 #include "ui_depth.h"          // uiDepthEyeOfTargetReadOnly, for the inspector's environment
 #include "vr_camera_census.h"  // nativeTemporalEyeGeometry / nativeTemporalEyeToHead, for the inspector's environment
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
@@ -2025,6 +2027,28 @@ bool sceneInspectEyeGeometry(uint32_t eye, float frustum[4], float eyeToHead[9])
 std::wstring sceneInspectLogDir() { return Config::get().logDir(); }
 bool sceneInspectProducerTotals(uint64_t v[5]) { return kinematicEvalProducerTotals(v); }
 const char* sceneInspectIniName() { return Config::get().iniName(); }
+// The effect rule's environment (effect_history.h): the same hooks-free paths, and a sampled GPU timer around its replicas.
+GpuIntervals<8> g_effectGpu;
+bool effectGpuBegin(ID3D11DeviceContext* ctx) { return g_effectGpu.begin(ctx); }
+void effectGpuEnd(ID3D11DeviceContext* ctx) { g_effectGpu.end(ctx); }
+void effectGpuPoll(ID3D11DeviceContext* ctx, double* ms, uint32_t* samples, uint32_t* skipped, uint32_t* invalid) {
+    g_effectGpu.poll(ctx);
+    *ms = g_effectGpu.totals.ms;
+    *samples = g_effectGpu.totals.samples;
+    *skipped = g_effectGpu.totals.skipped;
+    *invalid = g_effectGpu.totals.invalid;
+    g_effectGpu.totals = {};
+}
+EffectHistoryEnv effectHistoryEnv() {
+    EffectHistoryEnv e;
+    e.setRenderTargets = &vScreenSetRenderTargetsRaw;
+    e.clearRenderTarget = &vScreenClearRenderTargetViewRaw;
+    e.timerBegin = &effectGpuBegin;
+    e.timerEnd = &effectGpuEnd;
+    e.timerPoll = &effectGpuPoll;
+    e.hiddenCounter = &temporalPassEffectCounter;
+    return e;
+}
 SceneInspectEnv sceneInspectEnv() {
     SceneInspectEnv e;
     e.eyeOfTarget = &uiDepthEyeOfTargetReadOnly;
@@ -2996,6 +3020,9 @@ void hookDevice(ID3D11Device* device) {
             blendProbeInstall(runtimeFlatProfile(), g_state->blendProbeKey.bound(), g_state->blendProbeKeyText.c_str());
             // The scene inspector (scene_inspector.cpp): the same, armed by key only; one line saying whether the key is bound.
             sceneInspectInstall(runtimeFlatProfile(), g_state->sceneInspectKey.bound(), g_state->sceneInspectKeyText.c_str(), sceneInspectEnv());
+            // The effect rule (effect_history.cpp; docs/dlss-blur-elements-2026-10-14.md): VR only, where the temporal pass runs NVIDIA's upscaler. It acts only
+            // while the pass says it does; one line says it is installed.
+            if (!runtimeFlatProfile()) effectHistoryInstall(effectHistoryEnv());
 
             // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
             // own commit writes two dozen entries of this table in the shared

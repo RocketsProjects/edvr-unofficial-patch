@@ -5679,6 +5679,8 @@ def parse_inspect(text):
             cur["lines"]["centre"] = msg
         elif msg.startswith("scene inspect box stats:"):
             cur["lines"]["stats"] = msg
+        elif msg.startswith("scene inspect effect:"):
+            cur["lines"]["effect"] = msg
         elif msg.startswith("scene inspect dlss:"):
             cur["lines"]["dlss"] = msg
         elif msg.startswith("scene inspect files:"):
@@ -5788,9 +5790,9 @@ def print_inspect(text, log_path=None, full=False):
             print("   %s" % o.replace("scene inspect occluded: ", "", 1))
     if cap["unmeasured"]:
         print("  unmeasured (%d): %s" % (len(cap["unmeasured"]), "; ".join(u.replace("scene inspect unmeasured: ", "", 1) for u in cap["unmeasured"][:5])))
-    for key, label in (("input", "input"), ("centre", "centre"), ("stats", "box"), ("dlss", "dlss")):
+    for key, label in (("input", "input"), ("centre", "centre"), ("stats", "box"), ("effect", "effect rule"), ("dlss", "dlss")):
         if key in cap["lines"]:
-            print("  %s: %s" % (label, _inspect_short(re.sub(r"^scene inspect (pixel centre|box stats|input|dlss): ", "", cap["lines"][key]), 900)))
+            print("  %s: %s" % (label, _inspect_short(re.sub(r"^scene inspect (pixel centre|box stats|input|dlss|effect): ", "", cap["lines"][key]), 900)))
     for e in cap["engine"]:
         print("  %s" % _inspect_short(e.replace("scene inspect ", "", 1), 700))
     if "producers" in cap["lines"]:
@@ -5833,7 +5835,7 @@ def self_test_inspect():
     for rel, needles in (
             (os.path.join("src", "d3d11", "scene_inspector_core.h"),
              ["scene inspect draw: #%u", "scene inspect route: #%u", "scene inspect verdict: #%u %s: %s", "scene inspect occluded: #%u", "scene inspect box: cap=%u",
-              "scene inspect frame: cap=%u", "scene inspect target: rt=#%u", "scene inspect pixel %s: input px", "scene inspect box stats:", "scene inspect dlss:",
+              "scene inspect frame: cap=%u", "scene inspect target: rt=#%u", "scene inspect pixel %s: input px", "scene inspect box stats:", "scene inspect effect: %u of %u box pixels", "scene inspect dlss:",
               "scene inspect files: cap=%u", "scene inspect: complete cap=%u", "scene inspect: armed cap=%u (trigger %s)", "scene inspect: collecting cap=%u",
               "scene inspect empty: cap=%u", "NOT bound", "no eye pass seen", "scene inspect engine slot: slot=%d", "scene inspect producers:"]),
             (os.path.join("src", "d3d11", "scene_inspector.cpp"),
@@ -5867,6 +5869,7 @@ def self_test_inspect():
         "scene inspect input: DLSS input 2016x2016, box [1092,1108)x[1076,1092) centre 1100,1084, crop 128x128 at 1036,1020 (same frame as the draws)",
         "scene inspect pixel centre: input px 1100,1084 depth=0.250000 (2.000 m) mv_pass=(1.600,0.000) mv_dlss=(1.600,0.000) expect_world=(1.600,0.000) expect_ship=(0.000,0.000) mismatch=0.000 px vs the world camera term path=2(camera-world) engine_kind=0(none) coverage_mask=0 bias_mask=0",
         "scene inspect box stats: 256 pixels read; depth min=0.250000 max=0.250000",
+        "scene inspect effect: 37 of 256 box pixels have NVIDIA's history hidden by the effect rule (a listed glow supplies at least 0.35 of the pixel's light); the pixels belong to the one pair covering the box; listed draws in the capture: halo-billboard #3 box=256 ctr=1",
         "scene inspect dlss: preset=K(11) input 2016x2016 -> output 4032x4032 jitter=(0.2500,-0.1250) px history_reset=0 exposure=pre 1.000 scale 1.000 texture=none hdr=0",
         "scene inspect engine legend: a pixel's engine kind is 1 when ...",
         "scene inspect engine: 1 distinct slots under the box; pool read (9216 records of 336 bytes)",
@@ -5885,7 +5888,8 @@ def self_test_inspect():
     if rc != 0 or "scene inspect: COMPLETE" not in out:
         fail("a good capture did not report COMPLETE (rc=%d):\n%s" % (rc, out))
     for need in ("#3  B75A6FF2CA9FA5D6/D56F859BE4781431  additive top", "-> TRANSLUCENT_NO_MASK", "occluded (1)", "#0 rt=#0", "centre: input px 1100,1084",
-                 "dlss: preset=K(11)", "complete cap=1", "box: cap=1 centre=head-forward", "stack: rt=#0", "engine slot: slot=5 pixels=153", "MOVED", "producers: records appended"):
+                 "dlss: preset=K(11)", "complete cap=1", "box: cap=1 centre=head-forward", "stack: rt=#0", "engine slot: slot=5 pixels=153", "MOVED", "producers: records appended",
+                 "effect rule: 37 of 256 box pixels have NVIDIA's history hidden by the effect rule"):
         if need not in out:
             fail("the COMPLETE report lacks %r:\n%s" % (need, out))
     # Files beside the log are checked when the log's path is given.

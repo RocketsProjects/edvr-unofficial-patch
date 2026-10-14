@@ -25,6 +25,7 @@
 
 #include "../common/config.h"
 #include "../common/log.h"
+#include "effect_history_core.h"   // the effect rule's list and share: the inspector names the pairs that drew and counts the pixels the rule hid
 #include "engine_velocity_families.h"
 #include "scene_inspector_core.h"
 #include "ui_layer_math.h"
@@ -1218,6 +1219,28 @@ void writeReport() {
         // The box corners that bound the range are summarised; the CSV has every pixel.
         formatBoxStatsLine(line, sizeof(line), stats);
         say(line);
+        // The effect rule (effect_history.h): how many box pixels it hid, and the listed pairs that drew in the capture with their coverage of the box.
+        {
+            constexpr size_t kMaxEffectHits = 12;
+            EffectHit hits[kMaxEffectHits];
+            size_t nHits = 0, more = 0;
+            for (const Cand& cd : g_cands) {
+                const int pi = effectPairIndex(cd.row.vs, cd.row.ps);
+                if (pi < 0 || cd.neverDrawn) continue;
+                if (nHits >= kMaxEffectHits) {
+                    ++more;
+                    continue;
+                }
+                hits[nHits].name = kEffectHistoryPairs[pi].name;
+                hits[nHits].idx = cd.row.idx;
+                hits[nHits].box = cd.row.box;
+                hits[nHits].ctr = cd.row.ctr;
+                ++nHits;
+            }
+            if (formatEffectLine(line, sizeof(line), stats, hits, nHits, more, kEffectHistoryPairCount, kEffectHideShare) < 0)
+                std::snprintf(line, sizeof(line), "scene inspect effect: %u of %u box pixels hidden by the effect rule (the pair text did not fit)", stats.effectHidden, stats.n);
+            say(line);
+        }
         // The engine records under the box: one line per slot (the most pixels first), what the pool holds for it.
         if (!g_in.slotX.empty()) {
             std::vector<SlotInfo> slots;

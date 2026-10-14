@@ -618,7 +618,10 @@ inline void verdictFor(const VerdictIn& in, VerdictOut* out) noexcept {
                           static_cast<long long>(in.box), in.boxArea, topologyThin(in.topology) ? " (line or point primitive)" : "");
             add("THIN", b);
         }
-        if (in.havePixel && in.px.valid && in.px.flags.hidden) add("HISTORY_HIDDEN", "NVIDIA's history is hidden (restarted) at the centre pixel");
+        if (in.havePixel && in.px.valid && in.px.flags.hidden) {
+            if (in.px.flags.effect) add("HISTORY_HIDDEN", "NVIDIA's history is hidden (restarted) at the centre pixel by the effect rule: a listed glow supplies the share of its light");
+            else add("HISTORY_HIDDEN", "NVIDIA's history is hidden (restarted) at the centre pixel");
+        }
         if (in.status == Status::Partial) {
             add("PARTIAL", "a later opaque draw writes elsewhere in the box; whether this one survives at the centre is unproven");
         }
@@ -812,6 +815,7 @@ struct SampleStats {
     uint32_t path[16] = {};
     uint32_t kind[8] = {};
     uint32_t hidden = 0, ui = 0, coverageSet = 0, biasSet = 0;
+    uint32_t effectHidden = 0;   // of `hidden`: the pixels the effect rule hid (decision bit 15)
     int coverageMax = -1, biasMax = -1;
 };
 
@@ -843,6 +847,7 @@ inline void accumulate(SampleStats* s, const BoxSample& b) noexcept {
     ++s->path[p.flags.path & 15u];
     ++s->kind[p.flags.engineKind & 7u];
     if (p.flags.hidden) ++s->hidden;
+    if (p.flags.hidden && p.flags.effect) ++s->effectHidden;
     if (p.flags.ui) ++s->ui;
     if (p.coverage > 0) ++s->coverageSet;
     if (p.bias > 0) ++s->biasSet;
@@ -879,17 +884,18 @@ inline int formatPixelLine(char* out, size_t cap, const char* which, int x, int 
         "scene inspect pixel %s: input px %d,%d depth=%s mv_pass=(%.3f,%.3f) mv_dlss=%s expect_world=%s expect_ship=%s mismatch=%s path=%u(%s)%s%s "
         "engine_kind=%u(%s) coverage_mask=%s bias_mask=%s",
         which, x, y, dep, static_cast<double>(p.mvx), static_cast<double>(p.mvy), dl, ew, eh, mism, p.flags.path, pathName(p.flags.path),
-        p.flags.hidden ? " HIDDEN" : "", p.flags.ui ? " UI" : "", p.flags.engineKind, blend::engineKindName(p.flags.engineKind), cov, bia);
+        p.flags.hidden ? (p.flags.effect ? " HIDDEN(effect rule)" : " HIDDEN") : "", p.flags.ui ? " UI" : "", p.flags.engineKind,
+        blend::engineKindName(p.flags.engineKind), cov, bia);
 }
 inline int formatBoxStatsLine(char* out, size_t cap, const SampleStats& s) noexcept {
     return std::snprintf(out, cap,
         "scene inspect box stats: %u pixels read; depth min=%.6f max=%.6f; mv x %.3f..%.3f y %.3f..%.3f; max |mv - camera term| = %.3f px; paths "
         "world=%u ship=%u hologram=%u screen=%u engine=%u planet=%u other=%u; engine kinds none=%u exact=%u masked=%u stale-slot=%u bad-code=%u "
-        "stale-pose=%u; hidden=%u ui=%u; coverage mask set=%u max=%d; bias mask set=%u max=%d",
+        "stale-pose=%u; hidden=%u (by the effect rule %u) ui=%u; coverage mask set=%u max=%d; bias mask set=%u max=%d",
         s.n, static_cast<double>(s.depthMin), static_cast<double>(s.depthMax), static_cast<double>(s.mvxMin), static_cast<double>(s.mvxMax),
         static_cast<double>(s.mvyMin), static_cast<double>(s.mvyMax), static_cast<double>(s.deltaMax), s.path[2], s.path[1], s.path[8], s.path[10],
         s.path[11], s.path[12], s.n - (s.path[1] + s.path[2] + s.path[8] + s.path[10] + s.path[11] + s.path[12]), s.kind[0], s.kind[1], s.kind[2],
-        s.kind[4], s.kind[5], s.kind[6], s.hidden, s.ui, s.coverageSet, s.coverageMax, s.biasSet, s.biasMax);
+        s.kind[4], s.kind[5], s.kind[6], s.hidden, s.effectHidden, s.ui, s.coverageSet, s.coverageMax, s.biasSet, s.biasMax);
 }
 
 struct DlssFacts {
@@ -1036,7 +1042,7 @@ inline std::string drawsCsvRow(uint32_t capId, const DrawRow& r, int32_t by, con
 }
 inline const char* boxCsvHeader() noexcept {
     return "cap,x,y,depth,metres,mv_pass_x,mv_pass_y,mv_dlss_x,mv_dlss_y,expect_world_x,expect_world_y,expect_ship_x,expect_ship_y,path,hidden,ui,"
-           "engine_kind,coverage_mask,bias_mask,engine_slot\n";
+           "engine_kind,coverage_mask,bias_mask,engine_slot,effect_hidden\n";
 }
 inline void csvFloat(std::string* line, float v) {
     char b[40];
@@ -1067,8 +1073,53 @@ inline std::string boxCsvRow(uint32_t capId, const BoxSample& s) {
     csvNumber(&l, p.coverage);
     csvNumber(&l, p.bias);
     csvNumber(&l, p.slot);
+    csvNumber(&l, p.flags.effect ? 1 : 0);
     l += '\n';
     return l;
+}
+
+// ---- the effect rule's line ------------------------------------------------------------------------------------------------------------------
+// The listed effect pairs (effect_history_pairs.h) that drew in the captured eye, with what the inspector measured for each: how many of the box's
+// samples the draw covered. The hidden pixels are the rule's decision on light, not geometry, so the owner of a hidden pixel is named by coverage: the one
+// pair that covers the box, or, with several, the set to choose from.
+struct EffectHit {
+    const char* name = "";
+    uint32_t idx = 0;           // the capture's draw number
+    int64_t box = kUnknown, ctr = kUnknown;
+};
+inline int formatEffectLine(char* out, size_t cap, const SampleStats& s, const EffectHit* hits, size_t nHits, size_t more, uint32_t listedPairs,
+                            float share) noexcept {
+    int n = std::snprintf(out, cap,
+        "scene inspect effect: %u of %u box pixels have NVIDIA's history hidden by the effect rule (a listed glow supplies at least %.2f of the pixel's light); ",
+        s.effectHidden, s.n, static_cast<double>(share));
+    if (n < 0 || static_cast<size_t>(n) >= cap) return -1;
+    if (nHits == 0) {
+        const int m = std::snprintf(out + n, cap - static_cast<size_t>(n), "none of the %u listed pairs drew into the captured eye%s", listedPairs,
+                                    s.effectHidden ? " (a hidden pixel with no listed draw is a bug: the rule only hides where one drew)" : "");
+        if (m < 0 || static_cast<size_t>(n + m) >= cap) return -1;
+        return n + m;
+    }
+    uint32_t covering = 0;
+    for (size_t i = 0; i < nHits; ++i)
+        if (hits[i].box > 0) ++covering;
+    const char* who = s.effectHidden == 0 ? "no pixel is hidden" : covering == 1 ? "the pixels belong to the one pair covering the box" : covering == 0 ? "no listed draw covers the box at the sampled pixels (the light came from outside the box's coverage query)" : "the owner is one of the pairs covering the box";
+    int m = std::snprintf(out + n, cap - static_cast<size_t>(n), "%s; listed draws in the capture:", who);
+    if (m < 0 || static_cast<size_t>(n + m) >= cap) return -1;
+    n += m;
+    for (size_t i = 0; i < nHits; ++i) {
+        char b[24], c[24];
+        countText(b, sizeof(b), hits[i].box);
+        countText(c, sizeof(c), hits[i].ctr);
+        m = std::snprintf(out + n, cap - static_cast<size_t>(n), "%s %s #%u box=%s ctr=%s", i ? "," : "", hits[i].name, hits[i].idx, b, c);
+        if (m < 0 || static_cast<size_t>(n + m) >= cap) return -1;
+        n += m;
+    }
+    if (more) {
+        m = std::snprintf(out + n, cap - static_cast<size_t>(n), ", and %zu more", more);
+        if (m < 0 || static_cast<size_t>(n + m) >= cap) return -1;
+        n += m;
+    }
+    return n;
 }
 
 // ---- the engine records under the box ------------------------------------------------------------------------------------------------------
@@ -1327,13 +1378,14 @@ inline void pathToRgb(const DecisionFlags& f, uint8_t rgb[3]) noexcept {
     const uint8_t* t = table[f.path & 15u];
     rgb[0] = t[0]; rgb[1] = t[1]; rgb[2] = t[2];
     if (f.hidden) { rgb[0] = 255; rgb[1] = 255; rgb[2] = 255; }
+    if (f.hidden && f.effect) { rgb[0] = 255; rgb[1] = 0; rgb[2] = 255; }
 }
 inline const char* motionImageLegend() noexcept {
     return "red = 128 + scale*mv_x, green = 128 + scale*mv_y (input pixels, current to previous), blue 0; 128,128 is no motion";
 }
 inline const char* pathImageLegend() noexcept {
     return "blue = camera on the ship (the head's delta, path 1), green = camera on the world (path 2), red = engine record, yellow = cockpit hologram, violet = screen, pink = planet patch, "
-           "white = NVIDIA history hidden, black = no decision";
+           "white = NVIDIA history hidden, magenta = hidden by the effect rule (a listed glow), black = no decision";
 }
 
 }  // namespace edvr::inspect

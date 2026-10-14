@@ -6,6 +6,8 @@
 #include "gpu_pass_profile.h" // TEMPORARY GPU pass profiler (hotkey.gpu_pass_profile): one bool read per hook unarmed
 #include "blend_probe.h"      // TEMPORARY blend probe (hotkey.blend_probe): one relaxed load per eye draw unarmed
 #include "scene_inspector.h"  // the scene inspector (hotkey.scene_inspect): one relaxed load per eye draw unarmed
+#include "effect_history_pairs.h"   // the rule's list: effectVsListed, the draw path's first test
+#include "effect_history.h"   // the effect rule: a listed glow drawn once more into a private target (one relaxed load per eye draw while the pass is not on NVIDIA's path)
 #include "../common/d3d11_gpu_command_slots.h"
 #include "vr_runtime.h"
 
@@ -1700,6 +1702,7 @@ bool drawGateSubscribed(State* s) {
         drawCensusArmed() ||
         blendProbeWantsDraws() ||   // TEMPORARY, the blend probe (blend_probe.h): it reads each eye draw's verdict and routing, so the ladder must run
         sceneInspectWantsDraws() ||   // the scene inspector (scene_inspector.h) reads the same, for one frame
+        effectHistoryLive() ||        // the effect rule (effect_history.h): the listed glows are drawn once more while the pass is on NVIDIA's path
 
         objectProbeWantsDraws() ||
         panelCurveWants() || particleWantsDraws() || backdropWantsDraws() ||
@@ -3770,6 +3773,16 @@ __declspec(noinline) void blendProbeOfferDraw(ID3D11DeviceContext* self, DrawVer
     }
 }
 
+// The effect rule's offer (effect_history.h): an eye draw whose vertex shader is on the list is drawn once more into the module's private target, before the
+// game's own issue, with the game's bindings. The caller has tested that the pass is on NVIDIA's path and that this is an eye draw with no verdict of its own.
+// NOINLINE so an ordinary draw pays only the vertex shader's compare against the list.
+__declspec(noinline) void effectHistoryOffer(ID3D11DeviceContext* self, char kind, UINT count, UINT instances, const DrawArgs& args) {
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+    if (!effectVsListed(vs)) return;
+    BlendReplayArgs a{self, kind, count, instances, &args};
+    effectHistoryDraw(self, vs, bindingShaderHash(BindSlot::Ps), &blendReplay, &a);
+}
+
 // the crisp-HUD half of fix.ui_quality's tonemap re-issue (ui_layer.h): the game's admitted tonemap
 // draw once more through pureDrawReissue, between uiLayerCrispToneBegin's
 // rebind (the HDR HUD layer at the admitted HDR slot, the eye's 8-bit layer
@@ -4155,6 +4168,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         }
         return;
     }
+    // The effect rule (effect_history.h): the listed glows, drawn once more into the module's private target, before the game's own issue. Only the game's
+    // own plain issue is replicated: a draw with a verdict, or one the UI layer took, is not the draw the rule means. (Below the composite census's
+    // read-only block and the loader panel's branch, which a plain draw never enters.)
+    if (owner && v == DrawVerdict::kNone && !uiLayer && g_state->rtv0Eye && effectHistoryLive())
+        effectHistoryOffer(self, kind, count, instances, args);
     if (v == DrawVerdict::kQuadSkip) {
         if (seedOutcome.on) {
             seedOutcome.substituted = true;
@@ -5903,6 +5921,7 @@ EDVR_BOUNDARY_TICK(tkObjectProbe, "object_probe");
 EDVR_BOUNDARY_TICK(tkPixelProbe, "pixel_probe");
 EDVR_BOUNDARY_TICK(tkBlendProbe, "blend_probe");   // TEMPORARY (blend_probe.h): arms, advances and reports a capture
 EDVR_BOUNDARY_TICK(tkSceneInspect, "scene_inspect");   // the scene inspector (scene_inspector.h): arms, advances and reports a capture
+EDVR_BOUNDARY_TICK(tkEffectHistory, "effect_history");   // the effect rule (effect_history.h): ages the eyes, polls its queries and timer, the 30 s census
 EDVR_BOUNDARY_TICK(tkWakePulse, "wake_pulse");
 EDVR_BOUNDARY_TICK(tkUiDepth, "ui_depth");
 EDVR_BOUNDARY_TICK(tkUiLayer, "ui_layer");
@@ -5970,6 +5989,7 @@ void vScreenFrameBoundary() {
         // Before drawGateSet below re-samples the draw gate, so a capture that starts here is seen by the next frame's first draw.
         tkBlendProbe.run([&] { blendProbeFrameBoundary(g_state->frameNo); });
         tkSceneInspect.run([&] { sceneInspectFrameBoundary(g_state->frameNo); });
+        tkEffectHistory.run([&] { effectHistoryFrameBoundary(g_state->ownerCtx); });
         tkWakePulse.run([&] { wakePulseReport(); });
         tkUiDepth.run([&] { uiDepthFrameBoundary(g_state->ownerCtx); });
         // fix.ui_quality: the layer's warm compile, the surfaces' five-second

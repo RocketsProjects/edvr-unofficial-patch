@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State (2026-10-14, evening):** the scene inspector (`docs\scene-inspector-2026-10-14.md`, `hotkey.scene_inspect`) flew seven captures on
-  v0.20.0-rc.1-4-g66dfe94f (Frontier). It replaced the blend probe as the instrument; `claude/blur-fixes` carries the inspector, one fix, one
-  instrument and the decisions below, BUILT, NOT FLOWN. The blend probe and its key stay until the next flight confirms the inspector (it has not been
-  removed).
+- **State (2026-10-14, night):** the scene inspector (`docs\scene-inspector-2026-10-14.md`, `hotkey.scene_inspect`) flew seven captures on
+  v0.20.0-rc.1-4-g66dfe94f and three more on test build B (v0.20.0-rc.1-14-geeb168e4, which has the advert and the railing instrument). `claude/blur-fixes`
+  carries the inspector, the advert fix and the railing instrument. `claude/effect-history` (cut from it) adds option A, the effect history rule: BUILT,
+  NOT FLOWN. The blend probe and its key stay until a flight confirms the inspector.
 - **The five elements:** (1) the hologram over the landing pad; (2) the gantry railing while the pad moves; (3) the hologram adverts; (4) weapons fire;
   (5) the station "mail slot" force field. (The inspector's captures: cap1-2 railing, cap3 pad, cap4 force field, cap5 advert, cap6 weapons, cap7 another
   ship's engine flares.)
@@ -35,13 +35,26 @@
     gives them parallax. Mechanism: the pass stamps depth into the AA depth copy; it writes no mask.
   - *Decided against, from the evidence:* the force field (a G-buffer draw: the pass compares its light contribution with the lit frame, which an albedo write
     breaks), the light volumes, `B75A6FF2`, and the particle pair (no velocity source, and a post-DLSS take would lose scene occlusion).
-- **Open:** the pad hologram (no draw named), the force field, weapons fire and the engine flares (no route gives a thin fast mover its own motion).
+- **Built on `claude/effect-history` (option A):** where a listed glow supplies >= 0.35 of a pixel's light (and > 0.002 luma), the motion shader writes the
+  out-of-range vector (`hidden`), so DLSS starts that pixel's history afresh. The sentinel is what preset K honours: flown on the background-uncovered case
+  (`backgroundHistoryHidden`) and for masked engine pixels (temporal_shader_source.h `hidden`; dlaa.cpp:711 says K ignores the mask, not the vector). List: effect_history_pairs.h (particle-billboard 68DDDEF0/06332CA1, halo-billboard
+  B75A6FF2/D56F859B; never the light volumes or the force field's G-buffer quad). Each listed eye draw is replicated before the game's, into a private R11G11B10 target
+  (own blend, the game's depth view tested, nothing written to the game's targets, state restored), per eye, found by the scene depth it tests against; the pass binds
+  it at t5 and the game's HDR target at t16 (probe.w bit 32768). Census every 30 s: `effect history: last 30 s ...`. No key. Inspector: `effect rule:` line,
+  `HIDDEN(effect rule)`, magenta in path.png, CSV column `effect_hidden`. Tests: tools\effect_history_test (WARP, in build.bat).
+- **Build B captures (14:55-14:56, Frontier):** all three boxes missed their element (the box is head-forward, 180 px right of the view centre). Advert: no draw of
+  4654/95D0 and no `holo=` route in any capture, but the hologram depth census showed 117 world-marker draws/frame at 14:55:20 (the pass is live). Pad (cap2): the box
+  sat on pad floor; the lit HDR target there takes 17 overlapping B75A6FF2 halo sprites (listed) plus 1C506222/2519C905 (additive, 384 indices, reads only depth: a
+  hologram-volume candidate, NOT listed) and D005EBB1 alpha pairs. Railing (cap3): the rail is 18 px above the box; all box pixels kind 4 (a marker whose depth is
+  not the scene's: another draw owns the pixel), slot 354 MOVED; cap2 slots 749 (kind 4, 183 px) and 829 (exact, 73 px) are one object with equal pose deltas.
+- **Open:** a pad-hologram capture that names its draws; an advert capture with the box on it; the railing's owning draw (kind 4: which draw wrote the depth the
+  marker lost to); weapons fire, flares (option A covers the two sprite pairs, NOT FLOWN); the force field.
 - **Ruled out:** railing motion mismatch (tool label bug, finding 1); the 2026-09-29 pad-into-layer rule as wired in 9122f31e; reactive bias or sharpening as
-  a fix (docs/hologram-depth-2026-09-24.md "Ruled out"); the light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (finding 4).
-- **Next flight:** the same session on the new build. Railing mid-cycle: read the `engine slot` lines (MOVED + kind 3 = a mover EDVR never stamped; STATIC =
-  the camera term is right and the blur is elsewhere) and the `producers` line (second producer items > 0 in the captured frame names its producer). Advert:
-  `holo=world`, verdict HOLO_PASS, a finite `metres` at the box instead of the far plane, `world markers N draws/frame` above 0 in the 30 s census. Pad
-  hologram and force field: aim at the effect's brightest part and capture again; read each target's `role=` first.
+  a fix (docs/hologram-depth-2026-09-24.md "Ruled out"); the light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (finding 4); the second
+  producer FUN_14369C9C0 as the railing's writer, because its hook (kinematic-build-14369c9c0) was installed and counted 0 calls since launch in all three captures.
+- **Next flight:** `effect history:` census line (hidden px per eye-frame, covered px per draw, GPU ms per replica, `HDR target ... readable`); on a glow
+  capture the box stats' `by the effect rule N` and the `effect rule:` line. A census saying the HDR target COULD NOT BE READ means the game's HDR target could not be bound
+  or was not the eye's size at the pass. Aim by the crop: the box is not at the view centre.
 
 ## Triage
 
@@ -164,3 +177,20 @@ arrived (a menu, no VR), none was a candidate, or none reached the window.
   The adverts were added as world markers on the evidence that the two pairs cover the whole box over bare sky in the HDR target that shares the scene depth,
   with no route, and sit with the target sprite and the reticle in flat_projection_recipes.h's dp4 b0 4..7 group. Their log signature after the fix:
   `holo=world`, `HOLO_PASS`, a finite depth under the box. Decisions without code are in the Status block (findings 3-6).
+
+- **2026-10-14, option A: the effect history rule.** The check first. History-hide is the out-of-range motion vector (2 x the frame size) the motion shader
+  writes for `hidden` pixels (temporal_shader_source.h, the `hidden` bool and `written = hidden ? float2(size)*2 : motion`); decision flag bit 16 is the
+  inspector's "NVIDIA history hidden". It is what the other hidden cases already use on K, and K ignores only the reactive mask. Cost per pixel: one vector
+  select; this rule adds two texel loads on the eye-frames an effect drew (nothing otherwise) and a group atomic for the census. The replica costs the listed draw
+  once more (the census prices it).
+  Design: replica into a private R11G11B10 target (blend and shaders as the game's, the game's depth view with writes off, so a glow behind a wall counts for
+  nothing), the pass compares it with the game's HDR target, `effectHideTest` in effect_history_core.h (one HLSL definition, spliced into the shader and compared
+  with the C++ rule on 4000 cases in the rig). Threshold: the effect supplies at least 0.35 of the pixel's light, i.e. E >= 0.54 U: enough that its own motion
+  decides the pixel; below it the scene dominates and its vector is right, and a faint halo around a lamp keeps DLSS's anti-aliasing. Floor 0.002 luma: a black
+  pixel's ratio is noise. Named constants, no key.
+  Found while building: the pass's eye table does not know the lit HDR target until late in the frame (962 of 1244 draws read eye=-1 in cap1), so the module
+  keys each private target by the scene depth texture the draw tests against, which is also what the pass reads per eye. The pass unbinds its render targets before
+  it reads (a resource still bound as a target reads as null; the rig's first run proved it), so t16 is readable there.
+  Not verified offline: that the game's HDR target still holds the lit frame when the pass runs. The census says `COULD NOT BE READ` only for a bind failure; a
+  wrong-content target would hide every pixel with any glow. The first flight's `pixels hidden` figure against `covered pixels` shows it (hidden near covered =
+  the share test is not thinning).
