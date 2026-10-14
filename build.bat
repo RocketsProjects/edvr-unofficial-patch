@@ -622,6 +622,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\sky_ring.cpp" ^
     "src\d3d11\terrain_cull_cover_hook.cpp" ^
+    "src\d3d11\planet_lod_trace_hook.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
@@ -1902,6 +1903,23 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: terrain_cover_test build failed & exit /b 1 )
 "%OBJ%\terraincover\terrain_cover_test.exe" --dry-run || exit /b 1
 "%OBJ%\terraincover\terrain_cover_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
+:rig_planet_lod_trace_test
+echo [edvr] === planet LOD trace: pins, rings, counters, lines, the detours on synthetic game memory ===
+REM Build gate for the TEMPORARY planet LOD trace (src\d3d11\planet_lod_trace_core.h and planet_lod_trace_hook.cpp, EDVR_PLT_TEST; docs\planet-lod-streaming-2026-10-14.md): five read-only
+REM hooks on the terrain generation scheduler and the tile tree. The rig pins the identity check on synthetic images, reads a synthetic pump state's two rings, drives the real detours
+REM with stand-ins for the originals (nothing about an argument or a result may change), pins the window lines, and installs the real CodeHook on the five real prologues.
+if not exist "%OBJ%\planetlodtrace" mkdir "%OBJ%\planetlodtrace"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_PLT_TEST /I"src\d3d11" /I"src\common" ^
+    /Fo"%OBJ%\planetlodtrace"\ /Fe"%OBJ%\planetlodtrace\planet_lod_trace_test.exe" ^
+    "tools\planet_lod_trace_test\planet_lod_trace_test.cpp" "src\d3d11\planet_lod_trace_hook.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: planet_lod_trace_test build failed & exit /b 1 )
+"%OBJ%\planetlodtrace\planet_lod_trace_test.exe" --dry-run || exit /b 1
+"%OBJ%\planetlodtrace\planet_lod_trace_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_luma_probe_test
