@@ -2,8 +2,9 @@
 
 ## Status
 
-- **State (2026-10-14):** design only. Nothing is built, and nothing has flown.
-  Sean answered Q1-Q5 on 2026-10-14 (section 10). Q6 is open.
+- **State (2026-10-14):** P1 is being built on `claude/vibrant-maxwell-9gehb1`.
+  Nothing has flown. Sean answered Q1-Q6 on 2026-10-14 (section 10); Q7 and Q8
+  are open.
 - **Goal (Sean, 2026-10-14):** help users set up the mod and Elite's settings
   so they get a good experience on the first launch. Make it as simple and user
   friendly as possible.
@@ -21,8 +22,13 @@
     itself.
   - Q5: the names "Pre-flight", "Set up for me" and "Put my old settings
     back".
+  - Q6: Detect my headset is offered on SteamVR too, and says first that it
+    starts SteamVR.
 - **Phases:**
-  - P1: the rig card, the checks and the EDVR keys.
+  - P1: the rig card, the checks and the EDVR keys. Elite's rows show as
+    advice, without a checkbox, until P2.
+  - P1 and P2 ship together. The upscaler alone at HMD Image Quality 1.0 runs
+    DLAA, which costs more than Elite's native path.
   - P2: Elite's own graphics files.
   - P3: `edvr_logs\flight_summary.ini` from the runtime, and the suggestion
     after a flight.
@@ -35,7 +41,7 @@
   - Writes happen only with the game closed, after a backup, and with an
     undo that restores values one at a time.
   - The runtime DLL keeps its never-write rule (`vr-supersampling-gate`).
-- **Open hypotheses:** H1-H11 (section 9). Nothing is ruled out yet. Section 8
+- **Open hypotheses:** H1-H12 (section 9). Nothing is ruled out yet. Section 8
   lists what was considered and left out.
 - **Next flight:** none until P2 is built. Then one sitting per headset on the
   5090, Quest 3 over VDXR and Pimax over PiOpenXR (section 9).
@@ -135,7 +141,8 @@ The written rows (ticked by default, under the rule above):
 | Anti-aliasing | upscaler row is on | Off | fxcfg `AAMode` | README:153-154 |
 | Terrain checkerboard | scope has VR | Off | fxcfg `TerrainCheckerboardRenderingEnabled` | every stock VR preset ships it on and it shimmers under DLSS (`terrain_checkerboard_reader.h`) |
 | Upscaler (flat) | scope has flat | same vendor rule | `edvr-flat.ini` `fix.temporal_aa` | release/README.txt |
-| Supersampling | flat upscaler row is on | 1.0 | fxcfg `SSAAMultiplier` | "DLAA requires native SS"; VR holds 1.0 anyway (`vr-supersampling-gate`) |
+| Supersampling | flat upscaler row is on | P1-P3: 1.0 when above 1.0; P4: sized for the card and the screen (section 4) | fxcfg `SSAAMultiplier` | "DLAA requires native SS"; it is the flat render-scale control (`design-flat-temporal-aa`); VR holds 1.0 anyway (`vr-supersampling-gate`) |
+| EDVR output size | P4, two cases only (Q7) | a width for this headset's key | `edvr.ini` `fix.openxr_resolution` | section 4 |
 
 - **Which card the vendor rule reads:** the card the headset is on. That is the
   probe's adapter LUID when Detect my headset has run, and otherwise the
@@ -243,6 +250,44 @@ expect reprojection."
   fly (H10).
 - A wrong guess costs one flight at a sub-optimal size, not a lasting bad
   setup.
+- The estimate snaps to values Elite's own menu offers, so the menu shows what
+  was written (H12).
+
+**EDVR's output size, `fix.openxr_resolution` (Q7).** There are two sizes in
+play:
+
+- **The output:** the per-eye width EDVR hands Elite as the headset's size. It
+  is `openxr_resolution` when the headset has an entry, and otherwise 100% of
+  the runtime's recommendation (edvr.ini:605-634).
+- **The input:** that size times HMD Image Quality. It is what Elite actually
+  renders before the upscaler fills in the rest.
+
+Elite's cost follows the input. The output sets the upscaler's own cost and how
+sharp the result is. The proposal is for Pre-flight to write a width for the
+headset's key (`runtime/system`, the same normalisation the runtime uses; P4
+shares that code) in two cases only:
+
+- **DLSS's limit.** NGX fails above 8192 per axis, and a Pimax 8KX with
+  Parallel Projection on asks for 8268 (anti-aliasing.md:2370-2391). The entry
+  caps the output under the limit.
+- **A card short even at 0.5.** Lowering the output comes before telling the
+  user to lower the refresh rate.
+
+It stays empty otherwise. The runtime's number already carries the user's own
+choice in Virtual Desktop, Pimax Play, SteamVR or the Meta app. The entry is a
+fixed pixel width, so writing one would silently stop those choices from having
+an effect, within a quarter to twice the recommendation.
+
+**Flat: Supersampling sized for the card and the screen.** In flat, Elite's
+Supersampling is the render-scale control. Below 1.0 the upscaler fills the
+screen; at 1.0, DLSS runs as DLAA. The same model applies with:
+
+- W×H being Elite's resolution, read (never written) from
+  `DisplaySettings.xml`;
+- one view instead of two;
+- a frame-rate target in place of the headset's refresh (Q8).
+
+The flight summary's `profile` key keeps flat flights apart from VR ones.
 
 ## 5. Writing Elite's settings (P2)
 
@@ -433,6 +478,9 @@ expect reprojection."
   and it is what P4's accuracy rests on.
 - **H11 open:** a default-settings log already carries the whole frame's GPU
   time.
+- **H12 open:** Elite's menu offers HMD Image Quality and Supersampling in
+  fixed steps. A written value on one of those steps is kept and shown by the
+  menu. The steps are read from the game's own menu before P2 writes anything.
 - **The sitting, per headset** (Quest 3 over VDXR and Pimax over PiOpenXR, both
   on the 5090), each flight a fixed 3-minute route that passes a station:
   1. Press **Detect my headset** and note what it reports (H4, H9).
@@ -457,7 +505,11 @@ expect reprojection."
 - **Q4 decided (Sean, 2026-10-14):** after a flight, suggest the next step.
 - **Q5 decided (Sean, 2026-10-14):** "Pre-flight", "Set up for me", "Put my old
   settings back".
-- **Q6 open:** when SteamVR is the active runtime, Detect my headset starts
-  SteamVR, and the button says so beforehand. Recommended: allow it, labelled;
-  the alternative is to hide the button on SteamVR and rely on the first
-  flight.
+- **Q6 decided (Sean, 2026-10-14):** allow Detect my headset on SteamVR; the
+  button says first that it starts SteamVR.
+- **Q7 open:** should Pre-flight write `fix.openxr_resolution` only in the two
+  cases of section 4 (recommended), or always to a target size per headset?
+  "Always" needs a table of panel sizes per headset. It also overrides the
+  user's streaming-quality choice.
+- **Q8 open:** the frame-rate target for sizing flat Supersampling.
+  Recommended: 60 fps, or the monitor's refresh when that is lower.
