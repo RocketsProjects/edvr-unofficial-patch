@@ -39,6 +39,7 @@
 #include "pixel_probe.h"    // pixelProbeArm: who drew this pixel, the same armed frame
 #include "ui_depth.h"   // the interface's coverage mask and resolve tuning
 #include "blend_probe.h"   // TEMPORARY blend probe: asks for eye 0's per-pixel decisions, one relaxed load a frame unarmed
+#include "scene_inspector.h"   // the scene inspector: the same ask for its frame, and the DLSS output; one relaxed load a frame unarmed
 #include "ui_resolve.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
@@ -3976,9 +3977,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 // TEMPORARY, the blend probe (blend_probe.h): a collecting capture wants eye 0's per-pixel decisions too. The same
                 // capture-only shader variant, which leaves the production motion output as it was.
                 const bool probeTrace = eye == 0 && blendProbeGridWanted();
+                // The scene inspector (scene_inspector.h) wants the same decisions for its frame: one relaxed load a frame while no capture runs.
+                const bool inspectTrace = eye == 0 && sceneInspectInputsWanted();
                 if (probeTrace && (amdEngine || intelEngine))
                     blendProbeGridRefuse("the upscaler path is not NVIDIA's: the capture-only decision shader runs only for DLSS");
-                const bool traceRequested = eyeRunTrace || (probeTrace && !amdEngine && !intelEngine);
+                if (inspectTrace && (amdEngine || intelEngine))
+                    sceneInspectInputsRefuse("the upscaler path is not NVIDIA's: the capture-only decision shader runs only for DLSS");
+                const bool traceRequested = eyeRunTrace || ((probeTrace || inspectTrace) && !amdEngine && !intelEngine);
+                bool inspectOffered = false;   // the inspector took this frame's inputs: it is owed the output too
                 // The blend probe's decision texture (65 MB at the DLAA size) is not kept past its capture; an eye run releases its own
                 // with its artifacts, so only a texture nobody is waiting for goes.
                 if (!traceRequested && eye == 0 && e.dlDecision && g_eyeRunLeft <= 0 && !g_eyeRunReady) {
@@ -4039,12 +4045,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                                                        : "decision_shader_unavailable";
                         if (probeTrace) blendProbeGridRefuse(traceCs ? "the decision texture could not be made"
                                                                       : "the capture-only decision shader could not be created");
+                        if (inspectTrace) sceneInspectInputsRefuse(traceCs ? "the decision texture could not be made"
+                                                                           : "the capture-only decision shader could not be created");
                     }
                 } else if (eye == 0 && g_eyeRunLeft > 0 &&
                            g_eyeRunTaken < kEyeRun && (amdEngine || intelEngine)) {
                     g_eyeDecisions[g_eyeRunTaken].error = "non_nvidia_trace_unsupported";
-                } else if (probeTrace && !made) {
-                    blendProbeGridRefuse("the pass's own textures were not made this frame");
+                } else if ((probeTrace || inspectTrace) && !made) {
+                    if (probeTrace) blendProbeGridRefuse("the pass's own textures were not made this frame");
+                    if (inspectTrace) sceneInspectInputsRefuse("the pass's own textures were not made this frame");
                 }
                 if (made && setParams(ctx, p)) {
                     if(uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
@@ -4199,6 +4208,34 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         gi.transLen = std::sqrt(p.tvCam[0] * p.tvCam[0] + p.tvCam[1] * p.tvCam[1] + p.tvCam[2] * p.tvCam[2]);
                         gi.transValid = p.tvCam[3] != 0.0f;
                         blendProbeGridOffer(ctx, gi);
+                    }
+                    // The scene inspector (scene_inspector.h): this eye's colour, motion, depth, decisions and masks as NVIDIA is handed them, and the
+                    // pass's camera term for the cross-check. Read-only staging copies; nothing it binds or writes changes. Marks the offer made, so the
+                    // output below is staged too.
+                    if (traceReady && inspectTrace) {
+                        SceneInputsIn si;
+                        si.colour = e.dlColour;
+                        si.motion = e.dlMv;
+                        si.depth = e.dlDepth;
+                        si.decision = e.dlDecision;
+                        si.coverage = coverageMask;
+                        si.bias = (uiTrack || engineBound) ? e.dlMask : nullptr;
+                        si.w = w;
+                        si.h = h;
+                        si.sceneFrame = g_rowsFrame;
+                        std::memcpy(si.tanNow, p.tanNow, sizeof(si.tanNow));
+                        std::memcpy(si.tanPrev, p.tanPrev, sizeof(si.tanPrev));
+                        std::memcpy(si.worldRows[0], p.cand[2][0], sizeof(si.worldRows[0]));
+                        std::memcpy(si.worldRows[1], p.cand[2][1], sizeof(si.worldRows[1]));
+                        std::memcpy(si.worldRows[2], p.cand[2][2], sizeof(si.worldRows[2]));
+                        std::memcpy(si.headRows[0], p.dR0, sizeof(si.headRows[0]));
+                        std::memcpy(si.headRows[1], p.dR1, sizeof(si.headRows[1]));
+                        std::memcpy(si.headRows[2], p.dR2, sizeof(si.headRows[2]));
+                        std::memcpy(si.tvCam, p.tvCam, sizeof(si.tvCam));
+                        std::memcpy(si.tvUsed, p.tvUsed, sizeof(si.tvUsed));
+                        std::memcpy(si.knobs, p.knobs, sizeof(si.knobs));
+                        sceneInspectInputsOffer(ctx, si);
+                        inspectOffered = true;
                     }
                     if (traceReady) {
                         ctx->CSSetUnorderedAccessViews(7,1,&savedTraceUav,nullptr);
@@ -4431,6 +4468,40 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         const bool uiResolvedHere = applyUiResolve(e.dlOutSrv);
                         gpuCensusEnd(ctx, GpuCensusSection::DoorUiResolve);
                         if (!uiResolvedHere) ctx->CopyResource(e.dlSubmit, e.dlOut);
+                        // The scene inspector: DLSS's output (before the UI resolve) and the frame that goes out (after it), the evaluation's own
+                        // parameters, and why the history restarted if it did. Only when it took this frame's inputs.
+                        if (inspectOffered) {
+                            SceneOutputsIn so;
+                            so.dlss = e.dlOut;
+                            so.final = e.dlSubmit;
+                            so.w = w;
+                            so.h = h;
+                            so.outW = oW;
+                            so.outH = oH;
+                            so.jx = jxNow;
+                            so.jy = jyNow;
+                            so.reset = resetHist;
+                            static char whyBuf[200];
+                            if (resetHist) {
+                                if (flags & 1u)
+                                    std::snprintf(whyBuf, sizeof(whyBuf),
+                                                  "the pass asked for a restart (flags 0x%X: bit 4 held, 8 returned, 16 unjudged, 32 no delta)",
+                                                  static_cast<unsigned>(flags));
+                                else
+                                    std::snprintf(whyBuf, sizeof(whyBuf), "this eye had no NVIDIA history (its first frame, or its textures were rebuilt)");
+                                so.resetWhy = whyBuf;
+                            }
+                            so.reactiveHanded = biasMask != nullptr;
+                            so.frameMs = frameMs;
+                            so.uiResolved = uiResolvedHere;
+                            const DlaaEvalFacts df = dlaaEvalFacts(false, oW != w);
+                            so.preset = df.preset;
+                            so.preExposure = df.preExposure;
+                            so.exposureScale = df.exposureScale;
+                            so.exposureTexture = df.exposureTexture;
+                            so.hdr = false;
+                            sceneInspectOutputsOffer(ctx, so);
+                        }
                     }
                     // luma probe stage 1, dlss_out: e.dlSubmit already holds it
                     // here on every usedDlaa path, UI-resolved or copied

@@ -5,6 +5,7 @@
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
 #include "gpu_pass_profile.h" // TEMPORARY GPU pass profiler (hotkey.gpu_pass_profile): one bool read per hook unarmed
 #include "blend_probe.h"      // TEMPORARY blend probe (hotkey.blend_probe): one relaxed load per eye draw unarmed
+#include "scene_inspector.h"  // the scene inspector (hotkey.scene_inspect): one relaxed load per eye draw unarmed
 #include "../common/d3d11_gpu_command_slots.h"
 #include "vr_runtime.h"
 
@@ -1698,6 +1699,7 @@ bool drawGateSubscribed(State* s) {
         sunglareWantsDraws() ||
         drawCensusArmed() ||
         blendProbeWantsDraws() ||   // TEMPORARY, the blend probe (blend_probe.h): it reads each eye draw's verdict and routing, so the ladder must run
+        sceneInspectWantsDraws() ||   // the scene inspector (scene_inspector.h) reads the same, for one frame
 
         objectProbeWantsDraws() ||
         panelCurveWants() || particleWantsDraws() || backdropWantsDraws() ||
@@ -2820,6 +2822,14 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
             flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource),FlatOverlayMutationOp::ClearRtv);
     }
     if (g_vrWorldWatchWrites) vrWorldRouteNoteRtvClear(rtv);
+    if (sceneInspectWantsDraws() && rtv && self == s->ownerCtx) {   // the scene inspector: draws into this target before the clear are not on screen
+        ID3D11Resource* cleared = nullptr;
+        rtv->GetResource(&cleared);
+        if (cleared) {
+            sceneInspectNoteClear(cleared);
+            cleared->Release();
+        }
+    }
     if (flatTemporalCapturing()) flatTemporalClearColor(rtv);
     // The census's record of this clear, before the probes and before
     // the void fix touches the colour: the line carries what the GAME
@@ -3734,7 +3744,30 @@ __declspec(noinline) void blendProbeOfferDraw(ID3D11DeviceContext* self, DrawVer
     info.holoWorld = holoOn && ud.holoWorldMarker;
     info.engineSubstituted = engineVelocityDrawSubstituted();
     BlendReplayArgs a{self, kind, count, instances, &args};
-    blendProbeDraw(self, info, &blendReplay, &a);
+    if (blendProbeWantsDraws()) blendProbeDraw(self, info, &blendReplay, &a);
+    // The scene inspector gets the same facts, with the shader hashes, and the same replay.
+    if (sceneInspectWantsDraws()) {
+        SceneDrawInfo si;
+        si.kind = info.kind;
+        si.count = info.count;
+        si.instances = info.instances;
+        si.ordinal = info.ordinal;
+        si.gameFrame = info.gameFrame;
+        si.vs = bindingShaderHash(BindSlot::Vs);
+        si.ps = bindingShaderHash(BindSlot::Ps);
+        si.verdict = info.verdict;
+        si.uiFamily = info.uiFamily;
+        si.uiTaken = info.uiTaken;
+        si.uiDecided = info.uiDecided;
+        si.uiDecision = info.uiDecision;
+        si.udCoverage = info.udCoverage;
+        si.udWantMask = info.udWantMask;
+        si.udMaskSlot = info.udMaskSlot;
+        si.holoMatched = info.holoMatched;
+        si.holoWorld = info.holoWorld;
+        si.engineSubstituted = info.engineSubstituted;
+        sceneInspectDraw(self, si, &blendReplay, &a);
+    }
 }
 
 // the crisp-HUD half of fix.ui_quality's tonemap re-issue (ui_layer.h): the game's admitted tonemap
@@ -3937,7 +3970,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (owner && uiLayerIssueBlocked()) return;
     // TEMPORARY, the blend probe (blend_probe.h): an eye draw of a collecting capture is offered once its routing is decided. One relaxed
     // load for every draw while no capture runs.
-    const bool blendProbing = owner && g_state->rtv0Eye && blendProbeWantsDraws();
+    // The scene inspector (scene_inspector.h) is offered the same draws by the same call, for its one frame.
+    const bool blendProbing = owner && g_state->rtv0Eye && (blendProbeWantsDraws() || sceneInspectWantsDraws());
     const uint32_t blendDecisionsBefore = blendProbing ? uiLayerDecisionCount() : 0;
     struct EffectCaptureScope {
         ID3D11DeviceContext* ctx;
@@ -4450,6 +4484,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
     }
     if (blendProbeWantsDraws() && self == g_state->ownerCtx && g_state->rtv0Eye) blendProbeNoteIndirect();   // TEMPORARY: counted, not replayable
+    if (sceneInspectWantsDraws() && self == g_state->ownerCtx && g_state->rtv0Eye) sceneInspectNoteIndirect();   // counted, not replayable
     if (!foreignContext(self)) {
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
@@ -4482,6 +4517,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
     }
     if (blendProbeWantsDraws() && self == g_state->ownerCtx && g_state->rtv0Eye) blendProbeNoteIndirect();   // TEMPORARY: counted, not replayable
+    if (sceneInspectWantsDraws() && self == g_state->ownerCtx && g_state->rtv0Eye) sceneInspectNoteIndirect();   // counted, not replayable
     if (!foreignContext(self)) {
         depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
@@ -5866,6 +5902,7 @@ EDVR_BOUNDARY_TICK(tkDrawCensusTick, "draw_census_tick");
 EDVR_BOUNDARY_TICK(tkObjectProbe, "object_probe");
 EDVR_BOUNDARY_TICK(tkPixelProbe, "pixel_probe");
 EDVR_BOUNDARY_TICK(tkBlendProbe, "blend_probe");   // TEMPORARY (blend_probe.h): arms, advances and reports a capture
+EDVR_BOUNDARY_TICK(tkSceneInspect, "scene_inspect");   // the scene inspector (scene_inspector.h): arms, advances and reports a capture
 EDVR_BOUNDARY_TICK(tkWakePulse, "wake_pulse");
 EDVR_BOUNDARY_TICK(tkUiDepth, "ui_depth");
 EDVR_BOUNDARY_TICK(tkUiLayer, "ui_layer");
@@ -5932,6 +5969,7 @@ void vScreenFrameBoundary() {
         tkPixelProbe.run([&] { pixelProbeFrameBoundary(g_state->ownerCtx); });
         // Before drawGateSet below re-samples the draw gate, so a capture that starts here is seen by the next frame's first draw.
         tkBlendProbe.run([&] { blendProbeFrameBoundary(g_state->frameNo); });
+        tkSceneInspect.run([&] { sceneInspectFrameBoundary(g_state->frameNo); });
         tkWakePulse.run([&] { wakePulseReport(); });
         tkUiDepth.run([&] { uiDepthFrameBoundary(g_state->ownerCtx); });
         // fix.ui_quality: the layer's warm compile, the surfaces' five-second
