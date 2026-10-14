@@ -21,6 +21,8 @@
 
 #include <cstdint>
 
+#include "hdr_backend_flags.h"   // FlatDlssExposure (dlaaSetHdrExposure)
+
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
@@ -201,6 +203,10 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
 // Performance mode's default M is at 2.7x K's error at rest on fine detail;
 // on the full frame the models cost the same.
 void dlaaSetPreset(unsigned preset);
+// TEMPORARY A/B (advanced.flat_dlss_exposure, design doc section 107): the exposure the flat HDR route hands NVIDIA. A change
+// that flips AutoExposure (to or from auto) remakes that route's feature on its next evaluation; scene and fixed differ only
+// in the texture the evaluation hands over. The VR world route never reads it.
+void dlaaSetHdrExposure(FlatDlssExposure mode);
 
 // The measured price, for the totals line: evaluations, the mean
 // milliseconds by timestamp query, and how many evaluations carried the

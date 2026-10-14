@@ -2,6 +2,7 @@
 // Build-only registry and independent original call contracts.
 #include "../../src/d3d11/fixed_extra_shader_source.h"
 #include "../../src/d3d11/flat_foreground_ownership.h"
+#include "../../src/d3d11/flat_hdr_energy_shader.h"
 static std::vector<Variant> extraVariants() { return {
     {"kBackdropBytecode","backdrop deband","main",nullptr,{},false,edvr::fixed_extra_source::backdrop_fix::kBackdropCsHlsl,"cs_5_0"},
     {"kMenuCompositeBytecode","menu_panel_cs","main",nullptr,{},false,edvr::fixed_extra_source::menu_panel::kCompositeCs,"cs_5_0"},
@@ -20,6 +21,9 @@ static std::vector<Variant> extraVariants() { return {
     {"kFlatForegroundOwnershipBytecode","flat_foreground_ownership_cs","main",nullptr,{},false,edvr::kFlatForegroundOwnershipCs,"cs_5_0"},
     {"kFlatForegroundMergeBytecode","flat_foreground_merge_cs","main",nullptr,{},false,edvr::kFlatForegroundMergeCs,"cs_5_0"},
     {"kWeaponFootprintBytecode","weapon_footprint_cs","main",nullptr,{},false,edvr::fixed_extra_source::weapon_footprint::kExtractCsHlsl,"cs_5_0"},
+    // TEMPORARY: the HDR route's energy census and measured exposure (flat_hdr_energy.h, design doc section 107).
+    {"kFlatHdrEnergyBytecode","flat_hdr_energy_cs","main",nullptr,{},false,edvr::kFlatHdrEnergyCsHlsl,"cs_5_0"},
+    {"kFlatHdrExposureBytecode","flat_hdr_exposure_cs","main",nullptr,{},false,edvr::kFlatHdrExposureCsHlsl,"cs_5_0"},
 }; }
 static std::vector<LegacyContract> extraLegacyContracts() { return {
     {"backdrop deband","main","cs_5_0",nullptr,0x6D209E9C37D3C19Bull},
