@@ -31,6 +31,9 @@ experimental; their visual quality is not yet qualified.
 - [fix] temporal_aa also accepts off, on (TAA), dlaa, dlss, fsr or xess (default off).
 - XeSS-SR needs libxess.dll beside the game; the installer includes it when built with the SDK.
 - Game supersampling controls render scale; DLAA requires native SS.
+- [fix] intro_video = skip leaves out the launch movie (the F8 menu's Intro
+  movie row does the same; it applies at the next launch). The default,
+  screen, plays it as the game makes it.
 - Press NumLock while the issue is visible to collect a diagnostic capture.
 
 MANUAL INSTALL

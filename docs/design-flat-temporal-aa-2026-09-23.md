@@ -53,6 +53,7 @@
   real cause in the messages, a VR Supersampling warning: BUILT 10-01
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
+- **Flat intro skip (2026-10-14, BUILT, NOT FLOWN):** `fix.intro_video = skip` works in flat; see docs/intro-video.md.
 - **Jitter phases (section 84, 2026-10-01):** the phase-count switch flew with
   no visible change on the hills and is REMOVED (fixed eight phases, byte-
   identical). ROOT CAUSE of the VR hills shimmer, ruled in: Elite's terrain
