@@ -1674,12 +1674,220 @@ inline size_t selectMechanism(const LatchCand* cands, size_t n, uintptr_t ownAdd
     return k;
 }
 
+// ---- TEMPORARY instrument (2026-10-14): the character census. The seal's levers (the instance store, the kinematic producers) never reach skinned characters. This counts what
+// a cull of them would act on while the seal is held, and says plainly what it cannot see. Read-only; zero work when unsealed. Remove with the arc (the doc's Status block lists it).
+struct CharCensus {
+    uint32_t samples = 0;                 // snapshots of the game's skinning assembly list taken while sealed (about one a second)
+    uint64_t entSum = 0, rowsSum = 0;
+    uint32_t entMin = 0xFFFFFFFFu, entMax = 0, rowsMax = 0, bonesMax = 0;
+    uint64_t draws = 0;                   // skinned family draws counted while sealed (VR only: the second skin lists them)
+    uint64_t sealedFrames = 0;
+    int hook = 0;                         // the skin hook: 0 not armed (flat, or the second skin off), 1 armed, 2 stood down
+    void sample(uint32_t entities, uint32_t rows, uint32_t largestBones) noexcept {
+        ++samples;
+        entSum += entities;
+        rowsSum += rows;
+        if (entities < entMin) entMin = entities;
+        if (entities > entMax) entMax = entities;
+        if (rows > rowsMax) rowsMax = rows;
+        if (largestBones > bonesMax) bonesMax = largestBones;
+    }
+};
+// The one 30 s line, written for every window with a sealed frame so that a missing line means the seal was never held, and a line with `0 samples` means the list could not be
+// seen. Entity positions are not in the assembly list (the function reads only the entry, its mesh and its base), so the distance to the box is stated as unknown.
+inline size_t formatCharCensus(char* out, size_t cap, const CharCensus& c) noexcept {
+    if (cap == 0) return 0;
+    char ents[360];
+    if (c.hook != 1) {
+        std::snprintf(ents, sizeof(ents), "skinned entities not observed (the skin hook is %s)", c.hook == 2 ? "stood down" : "not armed in this profile");
+    } else if (c.samples == 0) {
+        std::snprintf(ents, sizeof(ents), "skinned entities: the hook is armed but no list was read (0 samples)");
+    } else {
+        std::snprintf(ents, sizeof(ents), "skinned entities in the game's assembly list (exe+0x4C540E0): %u samples, per sample min %u avg %.1f max %u; palette rows avg %.0f max %u; largest entity %u bones",
+                      c.samples, c.entMin, static_cast<double>(c.entSum) / c.samples, c.entMax, static_cast<double>(c.rowsSum) / c.samples, c.rowsMax, c.bonesMax);
+    }
+    char draws[160];
+    if (c.hook == 1) {
+        std::snprintf(draws, sizeof(draws), "skinned draws %.1f a sealed frame, both eyes (%llu in the window)",
+                      c.sealedFrames ? static_cast<double>(c.draws) / static_cast<double>(c.sealedFrames) : 0.0, static_cast<unsigned long long>(c.draws));
+    } else {
+        std::snprintf(draws, sizeof(draws), "skinned draws not counted (the second skin that lists them is VR only)");
+    }
+    const int n = std::snprintf(out, cap,
+                                "optimized station: characters while sealed (last 30 s, %llu sealed frames): %s; %s; distance of each entity to the sealed box: unknown (the list carries no position), so none is counted "
+                                "inside or outside; GPU time of the skinned draws: not measured.",
+                                static_cast<unsigned long long>(c.sealedFrames), ents, draws);
+    return n < 0 ? 0 : static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
+// ---- TEMPORARY instrument (2026-10-14): the lift trace. While docked and on foot, ~4 samples a second of the camera (height along the pad's shaft, vertical speed), the Status
+// words, and the smallest records whose sphere holds the camera (the personal lift's cab is expected to be one: it should hold the camera and move with it). Events: ride
+// start and stop (vertical speed with no horizontal travel), the smallest holder changing (the camera left the cab: the door), the Status words changing. Dumped as a block
+// when a ride ends or every 30 s. Read-only, zero work unless docked and on foot. Remove with the arc.
+constexpr int kTraceRing = 160, kTraceCands = 4;
+constexpr float kTraceMaxRadiusM = 25.0f;       // a record's sphere is a cab candidate only below this radius (the callbacks' filter)
+constexpr uint64_t kTraceSampleMs = 250, kTraceDumpMs = 30000;
+constexpr float kRideSpeedMps = 0.8f, kRideHorizMps = 1.0f, kRideStillMps = 0.15f;
+constexpr int kRideStartRun = 2, kRideStopRun = 3;
+struct TraceCand {
+    uintptr_t rec = 0;
+    char name[40] = {};
+    float radius = 0.0f;
+    float centre[3] = {};
+};
+struct TraceSample {
+    uint64_t ms = 0;
+    float cam[3] = {};
+    bool hOk = false;       // the height along the shaft is known (the pad's box is built)
+    float h = 0.0f;         // metres above the box floor
+    float vz = 0.0f;        // metres a second along the shaft (0 without a previous sample)
+    float horiz = 0.0f;     // metres a second across the shaft
+    float speed = 0.0f;     // total
+    bool jump = false;      // the camera moved over 20 m between samples (an origin rebase): speeds are 0
+    bool known = false;     // Status words known
+    uint32_t flags = 0, flags2 = 0;
+    bool candFresh = false; // the candidate list is from a pass within the last second
+    int nCand = 0;
+    TraceCand cand[kTraceCands];
+    float candDist[kTraceCands] = {};    // camera to the candidate's centre
+    float candSpeed[kTraceCands] = {};   // the candidate's centre speed since the previous sample (same record)
+};
+enum TraceEvent : unsigned { kTrNone = 0, kTrRideStart = 1, kTrRideStop = 2, kTrHolder = 4, kTrFlags = 8 };
+struct LiftTrace {
+    TraceSample ring[kTraceRing];
+    uint32_t total = 0;       // samples ever added
+    uint32_t dumped = 0;      // samples already written
+    bool havePrev = false;
+    TraceSample prev;
+    bool riding = false;
+    int moveRun = 0, stillRun = 0;
+    uint32_t rides = 0, ridesAtDump = 0;
+    uint64_t firstMs = 0, rideStartMs = 0, lastDumpMs = 0;
+    char holder[40] = {};     // the smallest candidate holding the camera at the last sample
+    char eventText[160] = {}; // the last event's words, for the event line
+    unsigned eventsSinceDump = 0;
+    // Adds one sample (fills its speeds from the previous one) and returns the events it caused. The first sample has no speeds and no events.
+    unsigned add(TraceSample s) noexcept {
+        if (total == 0) firstMs = s.ms;
+        unsigned ev = kTrNone;
+        const double dt = havePrev && s.ms > prev.ms ? static_cast<double>(s.ms - prev.ms) / 1000.0 : 0.0;
+        if (dt > 0.0 && dt <= 2.0) {
+            const float dx = s.cam[0] - prev.cam[0], dy = s.cam[1] - prev.cam[1], dz = s.cam[2] - prev.cam[2];
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (d > 20.0f) {
+                s.jump = true;
+            } else {
+                s.speed = static_cast<float>(d / dt);
+                if (s.hOk && prev.hOk) {
+                    s.vz = static_cast<float>((s.h - prev.h) / dt);
+                    const float h2 = s.speed * s.speed - s.vz * s.vz;
+                    s.horiz = h2 > 0.0f ? std::sqrt(h2) : 0.0f;
+                } else {
+                    s.horiz = s.speed;
+                }
+                for (int i = 0; i < s.nCand; ++i) {
+                    for (int j = 0; j < prev.nCand; ++j) {
+                        if (s.cand[i].rec != 0 && s.cand[i].rec == prev.cand[j].rec) {
+                            const float cx = s.cand[i].centre[0] - prev.cand[j].centre[0], cy = s.cand[i].centre[1] - prev.cand[j].centre[1], cz = s.cand[i].centre[2] - prev.cand[j].centre[2];
+                            s.candSpeed[i] = static_cast<float>(std::sqrt(cx * cx + cy * cy + cz * cz) / dt);
+                        }
+                    }
+                }
+            }
+            // the ride: vertical travel (or any travel when the height is unknown) with no horizontal travel
+            const float along = s.hOk ? std::fabs(s.vz) : s.speed;
+            const bool moving = !s.jump && along > kRideSpeedMps && (!s.hOk || s.horiz < kRideHorizMps);
+            const bool still = !s.jump && along < kRideStillMps;
+            if (!riding) {
+                moveRun = moving ? moveRun + 1 : 0;
+                if (moveRun >= kRideStartRun) {
+                    riding = true;
+                    ++rides;
+                    rideStartMs = s.ms;
+                    stillRun = 0;
+                    ev |= kTrRideStart;
+                    std::snprintf(eventText, sizeof(eventText), "ride %u start: %s speed %.2f m/s, height %s", rides, s.hOk ? "vertical" : "total", along,
+                                  s.hOk ? "known" : "unknown (no box)");
+                }
+            } else {
+                stillRun = still ? stillRun + 1 : 0;
+                if (stillRun >= kRideStopRun) {
+                    riding = false;
+                    moveRun = 0;
+                    ev |= kTrRideStop;
+                    std::snprintf(eventText, sizeof(eventText), "ride %u stop after %.1f s", rides, static_cast<double>(s.ms - rideStartMs) / 1000.0);
+                }
+            }
+        }
+        if (s.candFresh) {   // a stale gather says nothing about the holder
+            const char* h = s.nCand > 0 ? s.cand[0].name : "";   // the candidates arrive smallest first
+            if (total > 0 && std::strcmp(h, holder) != 0) ev |= kTrHolder;
+            std::snprintf(holder, sizeof(holder), "%s", h);
+        }
+        if (total > 0 && havePrev && (s.flags != prev.flags || s.flags2 != prev.flags2 || s.known != prev.known)) ev |= kTrFlags;
+        ring[total % kTraceRing] = s;
+        ++total;
+        prev = s;
+        havePrev = true;
+        eventsSinceDump |= ev & (kTrRideStart | kTrRideStop | kTrHolder);
+        return ev;
+    }
+    uint32_t unflushed() const noexcept { return total - dumped; }
+    const TraceSample& at(uint32_t index) const noexcept { return ring[index % kTraceRing]; }
+};
+inline size_t formatTraceSample(char* out, size_t cap, const LiftTrace& t, const TraceSample& s) noexcept {
+    char holders[300] = {};
+    size_t used = 0;
+    if (s.nCand == 0) {
+        std::snprintf(holders, sizeof(holders), "no record sphere under 25 m holds the camera%s", s.candFresh ? "" : " (no fresh gather)");
+    } else {
+        for (int i = 0; i < s.nCand && used + 8 < sizeof(holders); ++i) {
+            const int n = std::snprintf(holders + used, sizeof(holders) - used, "%s%s r=%.1f m, %.1f m from its centre, moving %.2f m/s", i ? "; " : "", s.cand[i].name[0] ? s.cand[i].name : "(unnamed)",
+                                        s.cand[i].radius, s.candDist[i], s.candSpeed[i]);
+            if (n < 0) break;
+            used += static_cast<size_t>(n) < sizeof(holders) - used ? static_cast<size_t>(n) : sizeof(holders) - used - 1;
+        }
+    }
+    char hs[40];
+    if (s.hOk) std::snprintf(hs, sizeof(hs), "%+.2f m", s.h);
+    else std::snprintf(hs, sizeof(hs), "unknown (no box)");
+    char fl[160];
+    if (s.known) {
+        std::snprintf(fl, sizeof(fl), "Flags 0x%08x Flags2 0x%08x (on foot %d, in hangar %d, social space %d)", s.flags, s.flags2, (s.flags2 & kFlags2OnFoot) != 0, (s.flags2 & kFlags2OnFootInHangar) != 0,
+                      (s.flags2 & kFlags2OnFootSocialSpace) != 0);
+    } else {
+        std::snprintf(fl, sizeof(fl), "Status Flags unknown");
+    }
+    const int n = std::snprintf(out, cap, "optimized station: lift trace +%.2f s%s cam (%.2f, %.2f, %.2f) height %s vz %+.2f m/s across %.2f m/s%s; %s; holders: %s.",
+                                static_cast<double>(s.ms - t.firstMs) / 1000.0, t.riding && s.ms >= t.rideStartMs ? " [ride]" : "", s.cam[0], s.cam[1], s.cam[2], hs, s.vz, s.horiz,
+                                s.jump ? " (camera jumped over 20 m: origin rebase?)" : "", fl, holders);
+    return n < 0 ? 0 : static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+inline size_t formatTraceEvent(char* out, size_t cap, const LiftTrace& t, unsigned ev, const TraceSample& s) noexcept {
+    char what[260] = {};
+    size_t used = 0;
+    auto add = [&](const char* text) {
+        const int n = std::snprintf(what + used, sizeof(what) - used, "%s%s", used ? "; " : "", text);
+        if (n > 0) used += static_cast<size_t>(n) < sizeof(what) - used ? static_cast<size_t>(n) : sizeof(what) - used - 1;
+    };
+    if (ev & (kTrRideStart | kTrRideStop)) add(t.eventText);
+    if (ev & kTrHolder) {
+        char b[120];
+        std::snprintf(b, sizeof(b), "smallest record holding the camera is now %s", s.nCand > 0 ? s.cand[0].name : "(none)");
+        add(b);
+    }
+    if (ev & kTrFlags) add("Status words changed");
+    const int n = std::snprintf(out, cap, "optimized station: lift trace EVENT +%.2f s: %s.", static_cast<double>(s.ms - t.firstMs) / 1000.0, what);
+    return n < 0 ? 0 : static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
 // Built v14.23: the sun inside the hangar, from the game's pad state. The skip is off while the own pad's latest r0 is 1 (moving in) or 3 (the descent),
 // read fresh. It comes back on when the pad is out (not r1 1 fresh), r0 is neither 1 nor 3 (or stale), and the pad is raised (the geometric test),
 // or on undock, setting off, or a hangar change. An outpost surface (r0 0) never turns it off.
 struct SunInputs {
     bool setting = false;
     bool docked = false;
+    bool aboard = false;         // the commander is seated in the ship (Status.json); on foot (or unknown) the sun skip is off, as the seal is
     bool ownKnown = false;       // the game has named the own pad this dock
     bool r0Fresh = false;        // the own pad's r0 was called within kPadStateFreshMs
     uint8_t r0 = 0;              // the own pad's latest r0 code (meaningful with r0Fresh)
@@ -1699,7 +1907,7 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
     *why = "";
     const bool moving = in.ownKnown && in.r0Fresh && (in.r0 == kReaderMoving || in.r0 == kReaderDescent);
     if (!st->off) {
-        if (in.setting && in.docked && moving) {
+        if (in.setting && in.docked && in.aboard && moving) {
             st->off = true;
             *why = "pad moving in or locked in (r0)";
             return true;
@@ -1714,6 +1922,11 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
     if (!in.docked) {
         st->off = false;
         *why = "undocked";
+        return true;
+    }
+    if (!in.aboard) {   // 2026-10-14: the skip persisted for minutes on foot (the pad's r1 stays 1 and Status stays docked), through the lift and the concourse
+        st->off = false;
+        *why = "on foot (not seated in the ship)";
         return true;
     }
     if (in.hangarChanged) {

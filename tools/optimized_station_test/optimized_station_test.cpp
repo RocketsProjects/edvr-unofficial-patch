@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -105,6 +106,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -128,6 +130,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -273,6 +276,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -295,6 +299,29 @@ int main(int argc, char** argv) {
         check(se::sunStep(si, &sun, &why) && sun.off, "v14.23 sun: moving again turns it off");
         si.docked = false;
         check(se::sunStep(si, &sun, &why) && !sun.off && std::strcmp(why, "undocked") == 0, "v14.23 sun: undock turns it on");
+    }
+    {
+        // 2026-10-14: the sun skip follows the seat like the seal. Flight log edvr_gfx_20261014_144320.log: the skip went on at 14:56:20 and stayed on, with Status docked and the
+        // pad's r1 still 1, for the whole walk on foot through the lift and the concourse (sun draws skipped in every 30 s window for minutes).
+        se::SunState sun;
+        se::SunInputs si;
+        si.setting = true;
+        si.aboard = true;
+        si.docked = true;
+        si.ownKnown = true;
+        si.r0Fresh = true;
+        si.r0 = 1;
+        si.r1Fresh = true;
+        si.inHangar = true;
+        si.relOk = true;
+        si.rel = -45.0f;
+        const char* why = "";
+        check(se::sunStep(si, &sun, &why) && sun.off, "on foot sun: aboard in the bay, the skip goes on");
+        si.aboard = false;   // the disembark: the pad is still in the bay (r1 1), Status still docked
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "on foot") != nullptr, "on foot sun: the seat leaving turns the sun back on although r1 is 1 and Status is docked");
+        check(!se::sunStep(si, &sun, &why) && !sun.off, "on foot sun: it stays on while on foot, even with the pad moving (r0 1)");
+        si.aboard = true;
+        check(se::sunStep(si, &sun, &why) && sun.off, "on foot sun: boarding again, the pad moving in, turns it off again");
     }
     // The pure helpers that are not about the seal trigger (kept): the latch's identity, the bounded probe, the rig's epoch rule, the view's centre.
     {
@@ -1060,6 +1087,207 @@ int main(int argc, char** argv) {
         check(std::strcmp(text, "Status Flags unknown") == 0, "an unknown sample says so");
         se::describeStatusFlags(text, sizeof(text), true, 0x01000001u, 0x0u);
         check(std::strstr(text, "in main ship 1") && std::strstr(text, "on foot 0"), "aboard in the main ship reads as such");
+    }
+
+    // ---- TEMPORARY: the character census (read-only; it says what a cull of skinned entities would act on while the seal is held) -------------------------------
+    {
+        se::CharCensus c;
+        c.hook = 1;
+        c.sealedFrames = 2000;
+        c.draws = 36000;
+        c.sample(9, 240, 70);
+        c.sample(12, 300, 90);
+        c.sample(6, 180, 50);
+        char line[1100];
+        se::formatCharCensus(line, sizeof(line), c);
+        const std::string got(line);
+        const std::string want =
+            "optimized station: characters while sealed (last 30 s, 2000 sealed frames): skinned entities in the game's assembly list (exe+0x4C540E0): 3 samples, per sample min 6 avg 9.0 max 12; "
+            "palette rows avg 240 max 300; largest entity 90 bones; skinned draws 18.0 a sealed frame, both eyes (36000 in the window); distance of each entity to the sealed box: unknown (the list carries "
+            "no position), so none is counted inside or outside; GPU time of the skinned draws: not measured.";
+        check(got == want, "census: the 30 s line has exactly this text (observed)");
+        if (got != want) std::printf("  got:  %s\n  want: %s\n", got.c_str(), want.c_str());
+        // never ran / could not see: distinguishable from the observed line, and from no line at all (a window with no sealed frame writes none)
+        se::CharCensus flat;
+        flat.sealedFrames = 500;
+        se::formatCharCensus(line, sizeof(line), flat);
+        check(std::strstr(line, "skinned entities not observed (the skin hook is not armed in this profile)") && std::strstr(line, "skinned draws not counted") && !std::strstr(line, "samples"),
+              "census: flat (hook not armed) says not observed, never zero entities");
+        se::CharCensus down = flat;
+        down.hook = 2;
+        se::formatCharCensus(line, sizeof(line), down);
+        check(std::strstr(line, "stood down") != nullptr, "census: a stood-down hook says so");
+        se::CharCensus blind = flat;
+        blind.hook = 1;
+        se::formatCharCensus(line, sizeof(line), blind);
+        check(std::strstr(line, "armed but no list was read (0 samples)") != nullptr, "census: armed with no list read is 0 samples, not 0 entities");
+        // a tiny buffer never overruns and always terminates
+        char tiny[40];
+        std::memset(tiny, 'x', sizeof(tiny));
+        const size_t n = se::formatCharCensus(tiny, sizeof(tiny), c);
+        check(n < sizeof(tiny) && tiny[n] == '\0', "census: the formatter respects its buffer");
+    }
+    {
+        // Source pins: the census must stay read-only and gated (the rig cannot run the DLL, so the wiring is pinned in the text).
+        auto slurp = [](const char* path) {
+            std::string out;
+            if (FILE* f = std::fopen(path, "rb")) {
+                char buf[8192];
+                size_t k;
+                while ((k = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, k);
+                std::fclose(f);
+            }
+            return out;
+        };
+        const std::string st = slurp("src/d3d11/optimized_station.cpp");
+        const std::string ev = slurp("src/d3d11/engine_velocity.cpp");
+        check(!st.empty() && !ev.empty(), "census pins: the sources were read (run the rig from the repository root)");
+        if (!st.empty() && !ev.empty()) {
+            check(st.find("engineVelocitySkinCensusGate(held)") != std::string::npos && st.find("if (!held) return;") != std::string::npos,
+                  "census pins: the draw counter follows the held seal and the sampler returns at once when unsealed");
+            check(st.find("characterCensusTick();") != std::string::npos && st.find("if (g_winSealedFrames > 0) {   // the census line") != std::string::npos,
+                  "census pins: the tick calls the census and the line is written only for a window with a sealed frame");
+            check(st.find("engineVelocitySkinCensusGate(false)") != std::string::npos, "census pins: turning the setting off shuts the draw counter");
+            check(ev.find("if (g_skinCensusGate.load(std::memory_order_relaxed)) g_skinCensusDraws.fetch_add") != std::string::npos,
+                  "census pins: the draw path counts only behind the gate");
+            check(st.find("skinEntityHookLatest(g_censusSnap)") != std::string::npos && st.find("skinEntityHookSetGate") == std::string::npos,
+                  "census pins: the census reads the hook's latest snapshot and never touches the hook's gate");
+        }
+    }
+
+    // ---- TEMPORARY: the lift trace (ride detection, holder tracking, line formats) ---------------------------------------------------------------------
+    {
+        se::LiftTrace tr;
+        auto cabAt = [](float z) {
+            se::TraceCand c;
+            c.rec = 0xCAB;
+            std::snprintf(c.name, sizeof(c.name), "PersonalLiftCab");
+            c.radius = 2.5f;
+            c.centre[0] = 10.0f;
+            c.centre[1] = 20.0f;
+            c.centre[2] = z;
+            return c;
+        };
+        auto sampleAt = [&](uint64_t ms, float z, bool inCab, uint32_t flags2) {
+            se::TraceSample smp;
+            smp.ms = ms;
+            smp.cam[0] = 10.0f;
+            smp.cam[1] = 20.0f;
+            smp.cam[2] = z;
+            smp.hOk = true;
+            smp.h = z;   // the shaft axis is the world z in this fixture
+            smp.known = true;
+            smp.flags = 5u;
+            smp.flags2 = flags2;
+            smp.candFresh = true;
+            if (inCab) {
+                smp.nCand = 1;
+                smp.cand[0] = cabAt(z);
+            } else {
+                smp.nCand = 1;
+                smp.cand[0] = cabAt(0.0f);
+                std::snprintf(smp.cand[0].name, sizeof(smp.cand[0].name), "HangarFloorTile");
+                smp.cand[0].rec = 0xF100;
+                smp.cand[0].radius = 6.0f;
+            }
+            return smp;
+        };
+        unsigned ev = 0, allEv = 0;
+        uint64_t t = 1000;
+        // standing in the hangar, then walking across it (1.4 m/s horizontal): no ride
+        for (int i = 0; i < 6; ++i, t += 250) allEv |= tr.add(sampleAt(t, 1.0f, false, 0x2001u));
+        check(!tr.riding && tr.rides == 0 && (allEv & se::kTrRideStart) == 0, "lift trace: standing is not a ride");
+        for (int i = 0; i < 6; ++i, t += 250) {
+            se::TraceSample w = sampleAt(t, 1.0f, false, 0x2001u);
+            w.cam[0] += 0.35f * static_cast<float>(i + 1);   // 1.4 m/s across at 4 Hz
+            allEv |= tr.add(w);
+        }
+        check(!tr.riding && tr.rides == 0, "lift trace: walking across the floor is not a ride");
+        // the ride: 3 m/s up, the cab holds the camera and moves with it
+        float z = 1.0f;
+        int startedAt = -1;
+        char startLine[900] = {};
+        for (int i = 0; i < 8; ++i, t += 250) {
+            z += 0.75f;
+            ev = tr.add(sampleAt(t, z, true, 0x2001u));
+            if ((ev & se::kTrRideStart) && startedAt < 0) {
+                startedAt = i;
+                se::formatTraceEvent(startLine, sizeof(startLine), tr, ev, tr.at(tr.total - 1));
+            }
+        }
+        check(startedAt == 2 && tr.riding && tr.rides == 1, "lift trace: two moving samples in a row start a ride");
+        const se::TraceSample& rideS = tr.at(tr.total - 1);
+        check(std::fabs(rideS.vz - 3.0f) < 0.05f && rideS.horiz < 0.05f && std::fabs(rideS.candSpeed[0] - 3.0f) < 0.05f && rideS.candFresh,
+              "lift trace: the ride reads 3 m/s up, none across, and the cab moves with the camera (same speed)");
+        // the stop, then the door: the holder changes to the concourse's floor and the Status words change
+        unsigned stopEv = 0;
+        for (int i = 0; i < 4; ++i, t += 250) stopEv |= tr.add(sampleAt(t, z, true, 0x2001u));
+        check((stopEv & se::kTrRideStop) != 0 && !tr.riding, "lift trace: three still samples stop the ride");
+        ev = tr.add(sampleAt(t, z, false, 0x4001u));
+        t += 250;
+        check((ev & se::kTrHolder) != 0 && (ev & se::kTrFlags) != 0, "lift trace: the holder changing and the Status words changing are events (the door)");
+        // a stale gather does not change the holder
+        se::TraceSample stale = sampleAt(t, z, false, 0x4001u);
+        stale.candFresh = false;
+        stale.nCand = 0;
+        ev = tr.add(stale);
+        check((ev & se::kTrHolder) == 0, "lift trace: a stale gather says nothing about the holder");
+        // an origin rebase (a 50 m jump) is flagged, has no speed, and starts no ride
+        se::LiftTrace tj;
+        tj.add(sampleAt(1000, 1.0f, false, 0x2001u));
+        se::TraceSample jump = sampleAt(1250, 51.0f, false, 0x2001u);
+        ev = tj.add(jump);
+        check(tj.at(1).jump && tj.at(1).speed == 0.0f && (ev & se::kTrRideStart) == 0 && tj.rides == 0, "lift trace: a jump over 20 m is a rebase, not a ride");
+        // without a box the height is unknown and the ride is judged on the total speed
+        se::LiftTrace tn;
+        uint64_t u = 1000;
+        float zz = 0.0f;
+        unsigned nev = 0;
+        for (int i = 0; i < 4; ++i, u += 250) {
+            se::TraceSample q = sampleAt(u, zz, false, 0x2001u);
+            q.hOk = false;
+            zz += 0.8f;
+            nev |= tn.add(q);
+        }
+        check((nev & se::kTrRideStart) != 0, "lift trace: with no box a ride is judged on the total speed");
+        // formats
+        char line[900];
+        se::formatTraceSample(line, sizeof(line), tr, tr.at(tr.total - 1 - 7));
+        check(std::strstr(line, "optimized station: lift trace +") && std::strstr(line, "height +") && std::strstr(line, "PersonalLiftCab r=2.5 m") && std::strstr(line, "moving 3.00 m/s") &&
+                  std::strstr(line, "Flags 0x00000005 Flags2 0x00002001 (on foot 1, in hangar 1, social space 0)") && std::strstr(line, "[ride]") == nullptr,
+              "lift trace: a sample line names the camera, height, vertical and cross speed, the Status words and the holders");
+        check(std::strstr(startLine, "optimized station: lift trace EVENT +") && std::strstr(startLine, "ride 1 start") != nullptr, "lift trace: an event line says which event");
+        se::TraceSample nobox = sampleAt(5000, 2.0f, false, 0x2001u);
+        nobox.hOk = false;
+        nobox.nCand = 0;
+        nobox.candFresh = false;
+        se::formatTraceSample(line, sizeof(line), tr, nobox);
+        check(std::strstr(line, "height unknown (no box)") && std::strstr(line, "(no fresh gather)"), "lift trace: no box and no gather are stated, not hidden");
+        // the ring keeps the newest 160
+        se::LiftTrace big;
+        for (int i = 0; i < 400; ++i) big.add(sampleAt(1000 + 250u * static_cast<uint64_t>(i), 1.0f, false, 0x2001u));
+        check(big.total == 400 && big.at(399).ms == 1000 + 250u * 399u && big.at(399 - 159).ms == 1000 + 250u * 240u, "lift trace: the ring keeps the last 160 samples");
+    }
+    {
+        // Source pins: armed only docked and on foot; the callbacks read one bool; read-only; the tick calls it after the Status words are read.
+        std::string st;
+        if (FILE* f = std::fopen("src/d3d11/optimized_station.cpp", "rb")) {
+            char buf[8192];
+            size_t k;
+            while ((k = std::fread(buf, 1, sizeof(buf), f)) > 0) st.append(buf, k);
+            std::fclose(f);
+        }
+        check(!st.empty(), "lift trace pins: the source was read (run the rig from the repository root)");
+        if (!st.empty()) {
+            const size_t words = st.find("g_statusFlags2Now = journalStatusFlags2();");
+            const size_t call = st.find("liftTraceTick();   // TEMPORARY");
+            check(words != std::string::npos && call != std::string::npos && call > words, "lift trace pins: the tick runs the trace after this tick's Status words are read");
+            check(st.find("!g_aboardNow && (g_statusFlags2Now & sealed::kFlags2OnFoot) != 0") != std::string::npos && st.find("g_dockedNow.load(std::memory_order_acquire) && g_statusKnownNow") != std::string::npos,
+                  "lift trace pins: armed only docked, with the words known, not aboard, and on foot");
+            check(st.find("if (!on) return;") != std::string::npos && st.find("s.traceOn = g_traceOn;") != std::string::npos, "lift trace pins: off, the tick returns at once and the callbacks see traceOn false");
+            check(st.find("if (s.traceOn && containsCam && radius < sealed::kTraceMaxRadiusM && tc.traceCands < 12)") != std::string::npos,
+                  "lift trace pins: the callbacks gather holders only behind traceOn, under 25 m, at most 12 a thread a pass");
+        }
     }
 
     // ---- Built v14.24 (2026-10-13, the review of the 013c6122 flight) -----------------------------------------------------------------------------
