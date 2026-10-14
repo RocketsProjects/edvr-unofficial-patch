@@ -1049,6 +1049,7 @@ struct SealInputs {
     bool setting = false;        // fix.optimized_stations is on
     bool docked = false;         // Status.json Flags bit 0
     bool aboard = false;         // the commander is seated (Status.json: Flags bits 24-26 or Flags2 bits 1-2) and that is known; unknown reads false
+    bool onFloor = false;        // on foot, in the hangar and on its floor (FloorHold): the seal may stand without the seat
     bool ownKnown = false;       // the game has named the own pad this dock (r0 was called on it)
     bool r1Fresh = false;        // the own pad's r1 was called within kPadStateFreshMs
     bool inHangar = false;       // the own pad's r1 is 1 (meaningful only with r1Fresh)
@@ -1674,12 +1675,286 @@ inline size_t selectMechanism(const LatchCand* cands, size_t n, uintptr_t ownAdd
     return k;
 }
 
+// ---- TEMPORARY instrument (2026-10-14): the lift trace. While docked and on foot, ~4 samples a second of the camera (height along the pad's shaft, vertical speed), the Status
+// words, and the smallest records whose sphere holds the camera (the personal lift's cab is expected to be one: it should hold the camera and move with it). Events: ride
+// start and stop (vertical speed with no horizontal travel), the smallest holder changing (the camera left the cab: the door), the Status words changing. Dumped as a block
+// when a ride ends or every 30 s. Read-only, zero work unless docked and on foot. Remove with the arc.
+constexpr int kTraceRing = 160, kTraceCands = 4;
+constexpr float kTraceMaxRadiusM = 25.0f;       // a record's sphere is a cab candidate only below this radius (the callbacks' filter)
+constexpr uint64_t kTraceSampleMs = 250, kTraceDumpMs = 30000;
+constexpr float kRideSpeedMps = 0.8f, kRideHorizMps = 1.0f, kRideStillMps = 0.15f;
+constexpr int kRideStartRun = 2, kRideStopRun = 3;
+struct TraceCand {
+    uintptr_t rec = 0;
+    char name[40] = {};
+    float radius = 0.0f;
+    float centre[3] = {};
+};
+struct TraceSample {
+    uint64_t ms = 0;
+    float cam[3] = {};
+    bool hOk = false;       // the height along the shaft is known (the pad's box is built)
+    float h = 0.0f;         // metres above the box floor
+    float vz = 0.0f;        // metres a second along the shaft (0 without a previous sample)
+    float horiz = 0.0f;     // metres a second across the shaft
+    float speed = 0.0f;     // total
+    bool jump = false;      // the camera moved over 20 m between samples (an origin rebase): speeds are 0
+    bool known = false;     // Status words known
+    uint32_t flags = 0, flags2 = 0;
+    bool candFresh = false; // the candidate list is from a pass within the last second
+    int nCand = 0;
+    TraceCand cand[kTraceCands];
+    float candDist[kTraceCands] = {};    // camera to the candidate's centre
+    float candSpeed[kTraceCands] = {};   // the candidate's centre speed since the previous sample (same record)
+};
+enum TraceEvent : unsigned { kTrNone = 0, kTrRideStart = 1, kTrRideStop = 2, kTrHolder = 4, kTrFlags = 8 };
+struct LiftTrace {
+    TraceSample ring[kTraceRing];
+    uint32_t total = 0;       // samples ever added
+    uint32_t dumped = 0;      // samples already written
+    bool havePrev = false;
+    TraceSample prev;
+    bool riding = false;
+    int moveRun = 0, stillRun = 0;
+    uint32_t rides = 0, ridesAtDump = 0;
+    uint64_t firstMs = 0, rideStartMs = 0, lastDumpMs = 0;
+    char holder[40] = {};     // the smallest candidate holding the camera at the last sample
+    char eventText[160] = {}; // the last event's words, for the event line
+    unsigned eventsSinceDump = 0;
+    // Adds one sample (fills its speeds from the previous one) and returns the events it caused. The first sample has no speeds and no events.
+    unsigned add(TraceSample s) noexcept {
+        if (total == 0) firstMs = s.ms;
+        unsigned ev = kTrNone;
+        const double dt = havePrev && s.ms > prev.ms ? static_cast<double>(s.ms - prev.ms) / 1000.0 : 0.0;
+        if (dt > 0.0 && dt <= 2.0) {
+            const float dx = s.cam[0] - prev.cam[0], dy = s.cam[1] - prev.cam[1], dz = s.cam[2] - prev.cam[2];
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (d > 20.0f) {
+                s.jump = true;
+            } else {
+                s.speed = static_cast<float>(d / dt);
+                if (s.hOk && prev.hOk) {
+                    s.vz = static_cast<float>((s.h - prev.h) / dt);
+                    const float h2 = s.speed * s.speed - s.vz * s.vz;
+                    s.horiz = h2 > 0.0f ? std::sqrt(h2) : 0.0f;
+                } else {
+                    s.horiz = s.speed;
+                }
+                for (int i = 0; i < s.nCand; ++i) {
+                    for (int j = 0; j < prev.nCand; ++j) {
+                        if (s.cand[i].rec != 0 && s.cand[i].rec == prev.cand[j].rec) {
+                            const float cx = s.cand[i].centre[0] - prev.cand[j].centre[0], cy = s.cand[i].centre[1] - prev.cand[j].centre[1], cz = s.cand[i].centre[2] - prev.cand[j].centre[2];
+                            s.candSpeed[i] = static_cast<float>(std::sqrt(cx * cx + cy * cy + cz * cz) / dt);
+                        }
+                    }
+                }
+            }
+            // the ride: vertical travel (or any travel when the height is unknown) with no horizontal travel
+            const float along = s.hOk ? std::fabs(s.vz) : s.speed;
+            const bool moving = !s.jump && along > kRideSpeedMps && (!s.hOk || s.horiz < kRideHorizMps);
+            const bool still = !s.jump && along < kRideStillMps;
+            if (!riding) {
+                moveRun = moving ? moveRun + 1 : 0;
+                if (moveRun >= kRideStartRun) {
+                    riding = true;
+                    ++rides;
+                    rideStartMs = s.ms;
+                    stillRun = 0;
+                    ev |= kTrRideStart;
+                    std::snprintf(eventText, sizeof(eventText), "ride %u start: %s speed %.2f m/s, height %s", rides, s.hOk ? "vertical" : "total", along,
+                                  s.hOk ? "known" : "unknown (no box)");
+                }
+            } else {
+                stillRun = still ? stillRun + 1 : 0;
+                if (stillRun >= kRideStopRun) {
+                    riding = false;
+                    moveRun = 0;
+                    ev |= kTrRideStop;
+                    std::snprintf(eventText, sizeof(eventText), "ride %u stop after %.1f s", rides, static_cast<double>(s.ms - rideStartMs) / 1000.0);
+                }
+            }
+        }
+        if (s.candFresh) {   // a stale gather says nothing about the holder
+            const char* h = s.nCand > 0 ? s.cand[0].name : "";   // the candidates arrive smallest first
+            if (total > 0 && std::strcmp(h, holder) != 0) ev |= kTrHolder;
+            std::snprintf(holder, sizeof(holder), "%s", h);
+        }
+        if (total > 0 && havePrev && (s.flags != prev.flags || s.flags2 != prev.flags2 || s.known != prev.known)) ev |= kTrFlags;
+        ring[total % kTraceRing] = s;
+        ++total;
+        prev = s;
+        havePrev = true;
+        eventsSinceDump |= ev & (kTrRideStart | kTrRideStop | kTrHolder);
+        return ev;
+    }
+    uint32_t unflushed() const noexcept { return total - dumped; }
+    const TraceSample& at(uint32_t index) const noexcept { return ring[index % kTraceRing]; }
+};
+inline size_t formatTraceSample(char* out, size_t cap, const LiftTrace& t, const TraceSample& s) noexcept {
+    char holders[300] = {};
+    size_t used = 0;
+    if (s.nCand == 0) {
+        std::snprintf(holders, sizeof(holders), "no record sphere under 25 m holds the camera%s", s.candFresh ? "" : " (no fresh gather)");
+    } else {
+        for (int i = 0; i < s.nCand && used + 8 < sizeof(holders); ++i) {
+            const int n = std::snprintf(holders + used, sizeof(holders) - used, "%s%s r=%.1f m, %.1f m from its centre, moving %.2f m/s", i ? "; " : "", s.cand[i].name[0] ? s.cand[i].name : "(unnamed)",
+                                        s.cand[i].radius, s.candDist[i], s.candSpeed[i]);
+            if (n < 0) break;
+            used += static_cast<size_t>(n) < sizeof(holders) - used ? static_cast<size_t>(n) : sizeof(holders) - used - 1;
+        }
+    }
+    char hs[40];
+    if (s.hOk) std::snprintf(hs, sizeof(hs), "%+.2f m", s.h);
+    else std::snprintf(hs, sizeof(hs), "unknown (no box)");
+    char fl[160];
+    if (s.known) {
+        std::snprintf(fl, sizeof(fl), "Flags 0x%08x Flags2 0x%08x (on foot %d, in hangar %d, social space %d)", s.flags, s.flags2, (s.flags2 & kFlags2OnFoot) != 0, (s.flags2 & kFlags2OnFootInHangar) != 0,
+                      (s.flags2 & kFlags2OnFootSocialSpace) != 0);
+    } else {
+        std::snprintf(fl, sizeof(fl), "Status Flags unknown");
+    }
+    const int n = std::snprintf(out, cap, "optimized station: lift trace +%.2f s%s cam (%.2f, %.2f, %.2f) height %s vz %+.2f m/s across %.2f m/s%s; %s; holders: %s.",
+                                static_cast<double>(s.ms - t.firstMs) / 1000.0, t.riding && s.ms >= t.rideStartMs ? " [ride]" : "", s.cam[0], s.cam[1], s.cam[2], hs, s.vz, s.horiz,
+                                s.jump ? " (camera jumped over 20 m: origin rebase?)" : "", fl, holders);
+    return n < 0 ? 0 : static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+inline size_t formatTraceEvent(char* out, size_t cap, const LiftTrace& t, unsigned ev, const TraceSample& s) noexcept {
+    char what[260] = {};
+    size_t used = 0;
+    auto add = [&](const char* text) {
+        const int n = std::snprintf(what + used, sizeof(what) - used, "%s%s", used ? "; " : "", text);
+        if (n > 0) used += static_cast<size_t>(n) < sizeof(what) - used ? static_cast<size_t>(n) : sizeof(what) - used - 1;
+    };
+    if (ev & (kTrRideStart | kTrRideStop)) add(t.eventText);
+    if (ev & kTrHolder) {
+        char b[120];
+        std::snprintf(b, sizeof(b), "smallest record holding the camera is now %s", s.nCand > 0 ? s.cand[0].name : "(none)");
+        add(b);
+    }
+    if (ev & kTrFlags) add("Status words changed");
+    const int n = std::snprintf(out, cap, "optimized station: lift trace EVENT +%.2f s: %s.", static_cast<double>(s.ms - t.firstMs) / 1000.0, what);
+    return n < 0 ? 0 : static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
+// ---- On the hangar floor, on foot (2026-10-14). The lift trace of Sean's flat flight (v0.20.0-rc.1-29-g8459abf4, edvr_gfx_20261014_170914.log, 17:19:19 to 17:22:02) gave the numbers:
+//   * The flat camera FOLLOWS the commander: its z moved smoothly 0.5 to 62.76 m (9.25 s at 7.15 m/s), 62.9 to 73.4, 73.4 to 118.5, 118.5 to 123.15 (the last 4.7 m at 3.5 to 3.9 m/s).
+//     z is the shaft axis there. A Status-independent measure of "off the floor" exists in both profiles.
+//   * Standing on the floor the camera held z 0.99 (settled at 4.5 s), then 0.43 after a step onto the lift platform (a 0.56 m drop), still to within 0.01 m. Disembarking moves it
+//     0.00 to -2.85 to +0.99 in about 4 s (up to 4 m/s), so the floor reference is only taken after the camera has been vertically still for a second.
+//   * A ride starts from 0.43 m with +0.09 m in the first 0.25 s sample and +0.74 m in the next (3 m/s), then 5.5 m/s and 7 m/s. A release at 0.5 m of rise fires about 0.2 s
+//     after the start, before the rise reaches 1 m.
+//   * Flags2 in-hangar (bit 13) stayed 1 through the whole ride (all four legs, 123 m) and dropped 0.5 s after the 797 m jump into the concourse's own frame (camera jump at
+//     +80.00 s, flag change at +80.50 s). It does not change at the lift doors. Social space (bit 14) was 1 from the disembark on, so it carries no information.
+// The rule: hold while on foot, in the hangar (Status), and on the floor; release when the camera rises more than kFloorReleaseRiseM above it. The floor is remembered, so the hold
+// returns when the camera is back within kFloorEngageBandM of it after the ride down. The caller resets it on boarding, an undock, a hangar change and the setting going off.
+constexpr uint64_t kFloorSampleMs = 100;        // the rule is sampled ten times a second
+constexpr float kFloorStillMps = 0.3f;          // vertical speed below this is standing, walking or a step (the trace: 0.00 to 0.09 m/s standing; a ride's first sample is 0.36 then 3 m/s)
+constexpr float kFloorStepM = 1.0f;             // a slow drift up to this is the floor moving (the 0.56 m step onto the platform); the reference follows it
+constexpr float kFloorReleaseRiseM = 0.5f;      // the ride's start: +0.09 m then +0.74 m in two 0.25 s samples, so about 0.2 s after it begins
+constexpr float kFloorEngageBandM = 0.3f;       // back within this of the remembered floor, still, for kFloorBackSamples: the hold returns
+constexpr int kFloorSettleSamples = 10;         // one second still before the first floor is taken (the disembark moves the camera 3 m in 4 s)
+constexpr int kFloorBackSamples = 3;
+constexpr float kFloorJumpM = 20.0f;            // a camera jump (the concourse's frame was 797 m away; an origin rebase is 50 m) ends the hold and keeps the floor
+struct FloorHold {
+    bool holding = false;       // on the floor: the sun skip and the seal may stand on foot
+    bool haveFloor = false;
+    float floorU = 0.0f;        // the floor's height along the shaft axis
+    bool havePrev = false;
+    float prevU = 0.0f;
+    uint64_t prevMs = 0;
+    int settle = 0, back = 0;
+    float rise = 0.0f, vu = 0.0f;   // the last sample's rise over the floor and vertical speed (for the log)
+    char why[120] = {};
+    void reset() noexcept { *this = FloorHold{}; }
+    // One sample. eligible: docked, Status known, not aboard, on foot and in the hangar (Flags2 bits 0 and 13). upOk: the shaft axis is known. u: the camera's height along it.
+    // jumped: the camera moved more than kFloorJumpM since the last sample. Returns true when `holding` changed (why says why).
+    bool step(bool eligible, bool upOk, float u, bool jumped, uint64_t ms) noexcept {
+        const bool was = holding;
+        if (!eligible || !upOk) {
+            holding = false;
+            settle = back = 0;
+            havePrev = false;
+            std::snprintf(why, sizeof(why), "%s", !eligible ? "not on foot in the hangar (Status)" : "the shaft axis is unknown");
+            return was;
+        }
+        float vuNow = 0.0f;
+        bool vOk = false;
+        if (havePrev && ms > prevMs && ms - prevMs <= 1000) {
+            vuNow = std::fabs(u - prevU) / (static_cast<float>(ms - prevMs) / 1000.0f);
+            vOk = true;
+        }
+        prevU = u;
+        prevMs = ms;
+        havePrev = true;
+        vu = vuNow;
+        if (jumped) {
+            holding = false;
+            settle = back = 0;
+            std::snprintf(why, sizeof(why), "the camera jumped over %.0f m (another frame)", static_cast<double>(kFloorJumpM));
+            return was;
+        }
+        if (!haveFloor) {
+            // Provisional hold from the disembark: the camera is not on a ride yet, and the sun must not flash back while it settles.
+            holding = true;
+            rise = 0.0f;
+            if (vOk && vuNow < kFloorStillMps) ++settle;
+            else settle = 0;
+            if (settle >= kFloorSettleSamples) {
+                floorU = u;
+                haveFloor = true;
+                std::snprintf(why, sizeof(why), "settled on the hangar floor");
+            } else if (!was) {
+                std::snprintf(why, sizeof(why), "on foot in the hangar, settling");
+            }
+            return holding != was;
+        }
+        rise = u - floorU;
+        const float absRise = std::fabs(rise);
+        const bool still = vOk && vuNow < kFloorStillMps;
+        if (holding) {
+            if (still && absRise <= kFloorStepM) {   // standing, walking, a step: the floor reference follows
+                floorU = u;
+                rise = 0.0f;
+                return false;
+            }
+            if (absRise > kFloorReleaseRiseM) {
+                holding = false;
+                back = 0;
+                std::snprintf(why, sizeof(why), "rose %.2f m off the floor (%.2f m/s vertical)", static_cast<double>(rise), static_cast<double>(vuNow));
+                return true;
+            }
+            return false;
+        }
+        if (still && absRise < kFloorEngageBandM) ++back;
+        else back = 0;
+        if (still && absRise <= kFloorStepM) ++settle;   // a platform a step off the old floor: a second still re-anchors it (the trace: 0.56 m)
+        else settle = 0;
+        if (back >= kFloorBackSamples) {
+            holding = true;
+            back = settle = 0;
+            std::snprintf(why, sizeof(why), "back on the floor (%.2f m from it)", static_cast<double>(absRise));
+            return true;
+        }
+        if (settle >= kFloorSettleSamples) {
+            holding = true;
+            floorU = u;
+            rise = 0.0f;
+            back = settle = 0;
+            std::snprintf(why, sizeof(why), "a new floor level %.2f m from the old one", static_cast<double>(absRise));
+            return true;
+        }
+        return false;
+    }
+};
+
 // Built v14.23: the sun inside the hangar, from the game's pad state. The skip is off while the own pad's latest r0 is 1 (moving in) or 3 (the descent),
 // read fresh. It comes back on when the pad is out (not r1 1 fresh), r0 is neither 1 nor 3 (or stale), and the pad is raised (the geometric test),
 // or on undock, setting off, or a hangar change. An outpost surface (r0 0) never turns it off.
 struct SunInputs {
     bool setting = false;
     bool docked = false;
+    bool aboard = false;         // the commander is seated in the ship (Status.json); on foot (or unknown) the sun skip is off, as the seal is, unless floorHold
+    bool floorHold = false;      // on foot, in the hangar and on its floor (FloorHold): the skip stands without the seat
     bool ownKnown = false;       // the game has named the own pad this dock
     bool r0Fresh = false;        // the own pad's r0 was called within kPadStateFreshMs
     uint8_t r0 = 0;              // the own pad's latest r0 code (meaningful with r0Fresh)
@@ -1699,9 +1974,14 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
     *why = "";
     const bool moving = in.ownKnown && in.r0Fresh && (in.r0 == kReaderMoving || in.r0 == kReaderDescent);
     if (!st->off) {
-        if (in.setting && in.docked && moving) {
+        if (in.setting && in.docked && in.aboard && moving) {
             st->off = true;
             *why = "pad moving in or locked in (r0)";
+            return true;
+        }
+        if (in.setting && in.docked && !in.aboard && in.floorHold) {   // walking the hangar floor: the leak is there too
+            st->off = true;
+            *why = "on foot on the hangar floor";
             return true;
         }
         return false;
@@ -1719,6 +1999,12 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
     if (in.hangarChanged) {
         st->off = false;
         *why = "hangar changed";
+        return true;
+    }
+    if (!in.aboard) {   // 2026-10-14: the skip persisted for minutes on foot (the pad's r1 stays 1 and Status stays docked), through the lift and the concourse
+        if (in.floorHold) return false;   // on the hangar floor: the pad's state does not matter on foot
+        st->off = false;
+        *why = "on foot, off the hangar floor (the ride, or out of the hangar)";
         return true;
     }
     if (moving) return false;                              // still moving in, or the descent
@@ -1827,7 +2113,7 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
     if (in.held) {
         ReleaseWhy w = ReleaseWhy::kNone;
         if (!in.docked) w = ReleaseWhy::kUndocked;
-        else if (!in.aboard) w = ReleaseWhy::kOnFoot;   // the seat left: on foot in the hangar, the lift, the concourse. No edge is needed to seal again when the seat comes back
+        else if (!in.aboard && !in.onFloor) w = ReleaseWhy::kOnFoot;   // the seat left: on foot in the hangar, the lift, the concourse. No edge is needed to seal again when the seat comes back
         else if (st->camOutRun >= kCameraFrames) w = ReleaseWhy::kCameraLeft;
         else if (in.mechanismMoved) w = ReleaseWhy::kMechanism;   // the hatch or the lift moved: the launch
         else if (in.padMoved) w = ReleaseWhy::kPadMoved;
@@ -1855,7 +2141,7 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
         st->poseRun = 0;
         return SealAction::kNone;
     }
-    if (!in.aboard) {   // on foot (or the seat unknown): never seal; a request in flight is withdrawn
+    if (!in.aboard && !in.onFloor) {   // on foot off the floor (or the seat unknown): never seal; a request in flight is withdrawn
         clearTrigger(st);
         return SealAction::kNone;
     }

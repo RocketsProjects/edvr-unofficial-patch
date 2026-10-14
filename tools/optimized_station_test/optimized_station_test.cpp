@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -105,6 +106,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -128,6 +130,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -273,6 +276,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -295,6 +299,29 @@ int main(int argc, char** argv) {
         check(se::sunStep(si, &sun, &why) && sun.off, "v14.23 sun: moving again turns it off");
         si.docked = false;
         check(se::sunStep(si, &sun, &why) && !sun.off && std::strcmp(why, "undocked") == 0, "v14.23 sun: undock turns it on");
+    }
+    {
+        // 2026-10-14: the sun skip follows the seat like the seal. Flight log edvr_gfx_20261014_144320.log: the skip went on at 14:56:20 and stayed on, with Status docked and the
+        // pad's r1 still 1, for the whole walk on foot through the lift and the concourse (sun draws skipped in every 30 s window for minutes).
+        se::SunState sun;
+        se::SunInputs si;
+        si.setting = true;
+        si.aboard = true;
+        si.docked = true;
+        si.ownKnown = true;
+        si.r0Fresh = true;
+        si.r0 = 1;
+        si.r1Fresh = true;
+        si.inHangar = true;
+        si.relOk = true;
+        si.rel = -45.0f;
+        const char* why = "";
+        check(se::sunStep(si, &sun, &why) && sun.off, "on foot sun: aboard in the bay, the skip goes on");
+        si.aboard = false;   // the disembark: the pad is still in the bay (r1 1), Status still docked
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "on foot") != nullptr, "on foot sun: the seat leaving turns the sun back on although r1 is 1 and Status is docked");
+        check(!se::sunStep(si, &sun, &why) && !sun.off, "on foot sun: it stays on while on foot, even with the pad moving (r0 1)");
+        si.aboard = true;
+        check(se::sunStep(si, &sun, &why) && sun.off, "on foot sun: boarding again, the pad moving in, turns it off again");
     }
     // The pure helpers that are not about the seal trigger (kept): the latch's identity, the bounded probe, the rig's epoch rule, the view's centre.
     {
@@ -1060,6 +1087,262 @@ int main(int argc, char** argv) {
         check(std::strcmp(text, "Status Flags unknown") == 0, "an unknown sample says so");
         se::describeStatusFlags(text, sizeof(text), true, 0x01000001u, 0x0u);
         check(std::strstr(text, "in main ship 1") && std::strstr(text, "on foot 0"), "aboard in the main ship reads as such");
+    }
+
+    // ---- On the hangar floor, on foot: the rule and its numbers, from the lift trace of edvr_gfx_20261014_170914.log -------------------------------------------------
+    {
+        // The camera's z (the shaft axis there) over time, linearly interpolated between the trace's own samples: the disembark (0 to -2.85 to 0.99 in 4 s), standing, a 0.56 m
+        // step onto the lift platform, the first leg of the ride (starts at 8.75 s from 0.52, 7.15 m/s, stops at 62.76), the wait, then a return to the platform at the end.
+        const double pts[][2] = {{0.00, 0.00}, {0.50, -0.28}, {0.75, -1.25}, {1.00, -2.11}, {1.25, -2.76}, {1.50, -2.85}, {1.75, -2.56}, {2.00, -2.72}, {2.25, -2.82}, {2.50, -2.28},
+                                 {2.75, -1.87}, {3.00, -1.66}, {3.25, -1.03}, {3.50, -0.35}, {3.75, 0.44}, {4.00, 0.99}, {6.75, 0.99}, {7.00, 0.86}, {7.25, 0.43}, {8.50, 0.43},
+                                 {8.75, 0.52}, {9.00, 1.26}, {9.25, 2.55}, {9.50, 4.23}, {9.75, 6.00}, {18.00, 62.76}, {33.25, 62.76}};
+        const int np = static_cast<int>(sizeof(pts) / sizeof(pts[0]));
+        auto zAt = [&](double t) {
+            for (int i = 0; i + 1 < np; ++i) {
+                if (t >= pts[i][0] && t <= pts[i + 1][0]) return pts[i][1] + (pts[i + 1][1] - pts[i][1]) * (t - pts[i][0]) / (pts[i + 1][0] - pts[i][0]);
+            }
+            return pts[np - 1][1];
+        };
+        se::FloorHold f;
+        double releasedAt = -1.0, settledAt = -1.0;
+        bool heldThroughDisembark = true;
+        uint64_t ms = 1000;
+        for (double t = 0.0; t <= 33.2; t += 0.1, ms += 100) {
+            const bool hadFloor = f.haveFloor;
+            const bool wasHolding = f.holding;
+            f.step(true, true, static_cast<float>(zAt(t)), false, ms);
+            if (t < 4.0 && !f.holding) heldThroughDisembark = false;
+            if (!hadFloor && f.haveFloor && settledAt < 0.0) settledAt = t;
+            if (releasedAt < 0.0 && t > 8.5 && wasHolding && !f.holding) releasedAt = t;
+        }
+        check(heldThroughDisembark, "floor hold: held from the disembark on, through the 3 m the camera moves while it settles (the sun does not flash back)");
+        check(settledAt > 4.9 && settledAt < 5.3 && f.floorU < 1.0f, "floor hold: the floor is taken after one second still (about 5.1 s), at the standing height");
+        check(releasedAt > 8.8 && releasedAt < 9.1, "floor hold: the ride's start releases it about 0.2 s after the lift begins (trace: starts 8.75 s)");
+        check(!f.holding && f.haveFloor, "floor hold: it stays off at the 62.76 m stop (15 s still, a floor 62 m up is no floor)");
+        // the step onto the platform (7.0 to 7.25 s, 0.56 m) did not strand the hold: it re-anchored and held until the ride
+        se::FloorHold g;
+        uint64_t ms2 = 1000;
+        bool heldBeforeRide = true;
+        for (double t = 0.0; t < 8.7; t += 0.1, ms2 += 100) {
+            g.step(true, true, static_cast<float>(zAt(t)), false, ms2);
+            if (t > 5.3 && !g.holding && t < 7.0) heldBeforeRide = false;
+        }
+        check(g.holding && heldBeforeRide, "floor hold: a 0.56 m step onto the lift platform keeps (or regains within a second) the hold before the ride");
+        // the return: the ride down ends on the platform. 3 samples still within 0.3 m of the remembered floor bring the hold back.
+        double tz = 33.3;
+        bool backHeld = false;
+        for (int i = 0; i < 12; ++i, tz += 0.1, ms += 100) f.step(true, true, 0.45f, false, ms);   // jumped to the platform height (a restored frame): still, within the band
+        backHeld = f.holding;
+        check(backHeld && std::strstr(f.why, "back on the floor") != nullptr, "floor hold: back on the platform after the ride down, the hold returns");
+        // in-hangar dropped (the concourse's frame): off at once, the floor is kept; back in the hangar at the top of the shaft it is not the floor
+        f.step(false, true, 123.1f, false, ms += 100);
+        check(!f.holding && f.haveFloor, "floor hold: Status says not in the hangar: off, floor kept");
+        for (int i = 0; i < 40; ++i) f.step(true, true, 123.1f, false, ms += 100);
+        check(!f.holding, "floor hold: still at the top of the shaft, 120 m over the floor, never holds");
+        // a camera jump ends the hold and keeps the floor
+        se::FloorHold h;
+        uint64_t ms3 = 1000;
+        for (int i = 0; i < 30; ++i) h.step(true, true, 0.99f, false, ms3 += 100);
+        check(h.holding && h.haveFloor, "floor hold: still on the floor holds");
+        h.step(true, true, 0.99f, true, ms3 += 100);
+        check(!h.holding && h.haveFloor && std::strstr(h.why, "jumped") != nullptr, "floor hold: a camera jump over 20 m ends the hold (another frame) and keeps the floor");
+        // no axis: no hold; the reset forgets the floor
+        se::FloorHold k;
+        k.step(true, false, 0.0f, false, 1000);
+        check(!k.holding, "floor hold: with no shaft axis there is no hold");
+        for (int i = 0; i < 30; ++i) k.step(true, true, 0.5f, false, 2000 + 100u * static_cast<uint64_t>(i));
+        k.reset();
+        check(!k.holding && !k.haveFloor, "floor hold: reset forgets the floor");
+        // named constants: the relations they were derived from
+        check(se::kFloorReleaseRiseM > 0.3f && se::kFloorReleaseRiseM < se::kFloorStepM && se::kFloorEngageBandM < se::kFloorReleaseRiseM && se::kFloorStillMps < 1.0f,
+              "floor hold: the margins keep their order (band < release rise < step; still speed below the ride's first sample)");
+    }
+    {
+        // The sun skip and the seal on foot under the same rule.
+        se::SunState sun;
+        se::SunInputs si;
+        si.setting = true;
+        si.aboard = true;
+        si.docked = true;
+        si.ownKnown = true;
+        si.r0Fresh = true;
+        si.r0 = 1;
+        si.r1Fresh = true;
+        si.inHangar = true;
+        si.relOk = true;
+        si.rel = -45.0f;
+        const char* why = "";
+        check(se::sunStep(si, &sun, &why) && sun.off, "floor sun: aboard, the pad moving in, the skip goes on");
+        si.aboard = false;
+        si.floorHold = true;   // the disembark onto the floor
+        check(!se::sunStep(si, &sun, &why) && sun.off, "floor sun: on foot on the floor the skip STANDS (the hangar leak stays out)");
+        si.r0 = 0;
+        si.inHangar = false;   // the pad's state does not matter on foot
+        check(!se::sunStep(si, &sun, &why) && sun.off, "floor sun: the pad's r1 going away does not release it on foot on the floor");
+        si.floorHold = false;  // the ride starts
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "off the hangar floor") != nullptr, "floor sun: the camera rising off the floor releases it, with that reason");
+        si.floorHold = true;   // back on the floor after the ride down
+        check(se::sunStep(si, &sun, &why) && sun.off && std::strstr(why, "on foot on the hangar floor") != nullptr, "floor sun: back on the floor it is restored");
+        si.hangarChanged = true;
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "hangar changed") != nullptr, "floor sun: a hangar change still releases it");
+        // the seal
+        se::SealState st;
+        se::SealInputs in = inHangar(0);
+        in.aboard = false;
+        in.onFloor = true;
+        check(firstEngage(&st, in, 100, 1000) == 100, "floor seal: on foot on the hangar floor seals like aboard");
+        in.held = true;
+        se::ReleaseWhy rw = se::ReleaseWhy::kNone;
+        check(se::sealStep(in, &st, &rw) == se::SealAction::kNone && rw == se::ReleaseWhy::kNone, "floor seal: held on the floor stays held");
+        in.onFloor = false;   // the ride
+        check(se::sealStep(in, &st, &rw) == se::SealAction::kRelease && rw == se::ReleaseWhy::kOnFoot, "floor seal: rising off the floor releases it, reason kOnFoot");
+        in.held = false;
+        st = se::SealState{};
+        check(firstEngage(&st, in, 2000, 12000) == 0, "floor seal: on foot off the floor never seals");
+    }
+
+    // ---- TEMPORARY: the lift trace (ride detection, holder tracking, line formats) ---------------------------------------------------------------------
+    {
+        se::LiftTrace tr;
+        auto cabAt = [](float z) {
+            se::TraceCand c;
+            c.rec = 0xCAB;
+            std::snprintf(c.name, sizeof(c.name), "PersonalLiftCab");
+            c.radius = 2.5f;
+            c.centre[0] = 10.0f;
+            c.centre[1] = 20.0f;
+            c.centre[2] = z;
+            return c;
+        };
+        auto sampleAt = [&](uint64_t ms, float z, bool inCab, uint32_t flags2) {
+            se::TraceSample smp;
+            smp.ms = ms;
+            smp.cam[0] = 10.0f;
+            smp.cam[1] = 20.0f;
+            smp.cam[2] = z;
+            smp.hOk = true;
+            smp.h = z;   // the shaft axis is the world z in this fixture
+            smp.known = true;
+            smp.flags = 5u;
+            smp.flags2 = flags2;
+            smp.candFresh = true;
+            if (inCab) {
+                smp.nCand = 1;
+                smp.cand[0] = cabAt(z);
+            } else {
+                smp.nCand = 1;
+                smp.cand[0] = cabAt(0.0f);
+                std::snprintf(smp.cand[0].name, sizeof(smp.cand[0].name), "HangarFloorTile");
+                smp.cand[0].rec = 0xF100;
+                smp.cand[0].radius = 6.0f;
+            }
+            return smp;
+        };
+        unsigned ev = 0, allEv = 0;
+        uint64_t t = 1000;
+        // standing in the hangar, then walking across it (1.4 m/s horizontal): no ride
+        for (int i = 0; i < 6; ++i, t += 250) allEv |= tr.add(sampleAt(t, 1.0f, false, 0x2001u));
+        check(!tr.riding && tr.rides == 0 && (allEv & se::kTrRideStart) == 0, "lift trace: standing is not a ride");
+        for (int i = 0; i < 6; ++i, t += 250) {
+            se::TraceSample w = sampleAt(t, 1.0f, false, 0x2001u);
+            w.cam[0] += 0.35f * static_cast<float>(i + 1);   // 1.4 m/s across at 4 Hz
+            allEv |= tr.add(w);
+        }
+        check(!tr.riding && tr.rides == 0, "lift trace: walking across the floor is not a ride");
+        // the ride: 3 m/s up, the cab holds the camera and moves with it
+        float z = 1.0f;
+        int startedAt = -1;
+        char startLine[900] = {};
+        for (int i = 0; i < 8; ++i, t += 250) {
+            z += 0.75f;
+            ev = tr.add(sampleAt(t, z, true, 0x2001u));
+            if ((ev & se::kTrRideStart) && startedAt < 0) {
+                startedAt = i;
+                se::formatTraceEvent(startLine, sizeof(startLine), tr, ev, tr.at(tr.total - 1));
+            }
+        }
+        check(startedAt == 2 && tr.riding && tr.rides == 1, "lift trace: two moving samples in a row start a ride");
+        const se::TraceSample& rideS = tr.at(tr.total - 1);
+        check(std::fabs(rideS.vz - 3.0f) < 0.05f && rideS.horiz < 0.05f && std::fabs(rideS.candSpeed[0] - 3.0f) < 0.05f && rideS.candFresh,
+              "lift trace: the ride reads 3 m/s up, none across, and the cab moves with the camera (same speed)");
+        // the stop, then the door: the holder changes to the concourse's floor and the Status words change
+        unsigned stopEv = 0;
+        for (int i = 0; i < 4; ++i, t += 250) stopEv |= tr.add(sampleAt(t, z, true, 0x2001u));
+        check((stopEv & se::kTrRideStop) != 0 && !tr.riding, "lift trace: three still samples stop the ride");
+        ev = tr.add(sampleAt(t, z, false, 0x4001u));
+        t += 250;
+        check((ev & se::kTrHolder) != 0 && (ev & se::kTrFlags) != 0, "lift trace: the holder changing and the Status words changing are events (the door)");
+        // a stale gather does not change the holder
+        se::TraceSample stale = sampleAt(t, z, false, 0x4001u);
+        stale.candFresh = false;
+        stale.nCand = 0;
+        ev = tr.add(stale);
+        check((ev & se::kTrHolder) == 0, "lift trace: a stale gather says nothing about the holder");
+        // an origin rebase (a 50 m jump) is flagged, has no speed, and starts no ride
+        se::LiftTrace tj;
+        tj.add(sampleAt(1000, 1.0f, false, 0x2001u));
+        se::TraceSample jump = sampleAt(1250, 51.0f, false, 0x2001u);
+        ev = tj.add(jump);
+        check(tj.at(1).jump && tj.at(1).speed == 0.0f && (ev & se::kTrRideStart) == 0 && tj.rides == 0, "lift trace: a jump over 20 m is a rebase, not a ride");
+        // without a box the height is unknown and the ride is judged on the total speed
+        se::LiftTrace tn;
+        uint64_t u = 1000;
+        float zz = 0.0f;
+        unsigned nev = 0;
+        for (int i = 0; i < 4; ++i, u += 250) {
+            se::TraceSample q = sampleAt(u, zz, false, 0x2001u);
+            q.hOk = false;
+            zz += 0.8f;
+            nev |= tn.add(q);
+        }
+        check((nev & se::kTrRideStart) != 0, "lift trace: with no box a ride is judged on the total speed");
+        // formats
+        char line[900];
+        se::formatTraceSample(line, sizeof(line), tr, tr.at(tr.total - 1 - 7));
+        check(std::strstr(line, "optimized station: lift trace +") && std::strstr(line, "height +") && std::strstr(line, "PersonalLiftCab r=2.5 m") && std::strstr(line, "moving 3.00 m/s") &&
+                  std::strstr(line, "Flags 0x00000005 Flags2 0x00002001 (on foot 1, in hangar 1, social space 0)") && std::strstr(line, "[ride]") == nullptr,
+              "lift trace: a sample line names the camera, height, vertical and cross speed, the Status words and the holders");
+        check(std::strstr(startLine, "optimized station: lift trace EVENT +") && std::strstr(startLine, "ride 1 start") != nullptr, "lift trace: an event line says which event");
+        se::TraceSample nobox = sampleAt(5000, 2.0f, false, 0x2001u);
+        nobox.hOk = false;
+        nobox.nCand = 0;
+        nobox.candFresh = false;
+        se::formatTraceSample(line, sizeof(line), tr, nobox);
+        check(std::strstr(line, "height unknown (no box)") && std::strstr(line, "(no fresh gather)"), "lift trace: no box and no gather are stated, not hidden");
+        // the ring keeps the newest 160
+        se::LiftTrace big;
+        for (int i = 0; i < 400; ++i) big.add(sampleAt(1000 + 250u * static_cast<uint64_t>(i), 1.0f, false, 0x2001u));
+        check(big.total == 400 && big.at(399).ms == 1000 + 250u * 399u && big.at(399 - 159).ms == 1000 + 250u * 240u, "lift trace: the ring keeps the last 160 samples");
+    }
+    {
+        // Source pins: armed only docked and on foot; the callbacks read one bool; read-only; the tick calls it after the Status words are read.
+        std::string st;
+        if (FILE* f = std::fopen("src/d3d11/optimized_station.cpp", "rb")) {
+            char buf[8192];
+            size_t k;
+            while ((k = std::fread(buf, 1, sizeof(buf), f)) > 0) st.append(buf, k);
+            std::fclose(f);
+        }
+        check(!st.empty(), "lift trace pins: the source was read (run the rig from the repository root)");
+        if (!st.empty()) {
+            const size_t words = st.find("g_statusFlags2Now = journalStatusFlags2();");
+            const size_t call = st.find("liftTraceTick();   // TEMPORARY");
+            check(words != std::string::npos && call != std::string::npos && call > words, "lift trace pins: the tick runs the trace after this tick's Status words are read");
+            check(st.find("!g_aboardNow && (g_statusFlags2Now & sealed::kFlags2OnFoot) != 0") != std::string::npos && st.find("g_dockedNow.load(std::memory_order_acquire) && g_statusKnownNow") != std::string::npos,
+                  "lift trace pins: armed only docked, with the words known, not aboard, and on foot");
+            check(st.find("if (!on) return;") != std::string::npos && st.find("s.traceOn = g_traceOn;") != std::string::npos, "lift trace pins: off, the tick returns at once and the callbacks see traceOn false");
+            // the floor hold feeds the sun skip and the seal, runs after the Status words and before the inputs are made, and every reset path drops it
+            const size_t fcall = st.find("floorHoldTick();   // after the Status words");
+            const size_t sunIn = st.find("su.floorHold = g_floorHolding;");
+            const size_t sealIn = st.find("in.onFloor = g_floorHolding;");
+            check(fcall != std::string::npos && words != std::string::npos && fcall > words && sunIn != std::string::npos && sealIn != std::string::npos && fcall < sealIn && fcall < sunIn,
+                  "floor pins: the floor hold runs after the Status words and before the sun and seal inputs read it");
+            check(st.find("floorHoldDrop(\"undocked\", true);") != std::string::npos && st.find("floorHoldDrop(\"the hangar changed\", true);") != std::string::npos &&
+                      st.find("floorHoldDrop(\"the setting is off\", true);") != std::string::npos && st.find("floorHoldDrop(g_aboardNow ?") != std::string::npos,
+                  "floor pins: boarding, an undock, a hangar change and the setting going off all drop the floor");
+            check(st.find("if (s.traceOn && containsCam && radius < sealed::kTraceMaxRadiusM && tc.traceCands < 12)") != std::string::npos,
+                  "lift trace pins: the callbacks gather holders only behind traceOn, under 25 m, at most 12 a thread a pass");
+        }
     }
 
     // ---- Built v14.24 (2026-10-13, the review of the 013c6122 flight) -----------------------------------------------------------------------------
