@@ -79,6 +79,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "flat_hdr_crumbs.h"   // the flat HDR route's crash-safe breadcrumbs: the real Present's pair
 #include "format_support_log.h"   // the device capability log: the two hooks' reports and its closing tick
 #include "flat_temporal.h"   // flat profile discovery at owned Present
+#include "aa_compare.h"      // the AA comparison key's tick (hotkey.compare_aa)
 #include "intro_skip.h"      // the flat profile arms and closes the launch-movie skip from here (vScreen's State is not its owner there)
 #include "flat_shader_capture.h"
 #include "perf_monitor.h"
@@ -1231,6 +1232,7 @@ EDVR_BOUNDARY_TICK(tkVrRuntime, "vr_runtime");
 EDVR_BOUNDARY_TICK(tkOptimizedStation, "optimized_station");
 EDVR_BOUNDARY_TICK(tkLightGridCache, "light_grid_cache");
 EDVR_BOUNDARY_TICK(tkHotkeys, "hotkeys");
+EDVR_BOUNDARY_TICK(tkAaCompare, "aa_compare");   // hotkey.compare_aa: the AA comparison toggle (aa_compare.h); one key poll when idle
 EDVR_BOUNDARY_TICK(tkIntroSkipFlat, "intro_skip_flat");   // the flat profile's verdict for fix.intro_video = skip (intro_skip.h); one load outside flat
 EDVR_BOUNDARY_TICK(tkEliteBinds, "elite_binds");
 EDVR_BOUNDARY_TICK(tkJournalWatch, "journal_watch");
@@ -1597,6 +1599,7 @@ void presentFrameBoundary() {
     tkLightGridCache.run([] { lightGridCacheNoteFrame(g_state->frameCounter); });   // the frame count for the grid cache's 30 s line
     tkHotkeys.run(tickHotkeys);
     tkIntroSkipFlat.run([] { introSkipTickFlat(); });
+    tkAaCompare.run([] { aaCompareTick(); });
     tkEliteBinds.run(tickEliteBinds);
     // The game's own journal, polled about once a second: it states the
     // boundaries EDVR used to infer -- gameplay starting (LoadGame) and

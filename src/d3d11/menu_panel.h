@@ -217,6 +217,9 @@ void menuPanelTick(ID3D11Device* dev);
 bool menuPanelCompositeFlat(IDXGISwapChain* swap);
 bool menuPanelCompositeFlatTexture(ID3D11Texture2D* back);
 bool menuPanelFlatRasterReady();
+// How many rasters the panel has taken so far (wraps). A caller that submitted content and wants to know its raster is the live one
+// compares this with the value it read before the submit.
+uint32_t menuPanelRasterSerial();
 void menuPanelFlatResize();
 
 void menuPanelSetGeometry(const MenuGeometry& g);
