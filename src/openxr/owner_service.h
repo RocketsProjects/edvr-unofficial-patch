@@ -56,8 +56,14 @@ class OwnerService final {
     try { request = std::make_shared<Request>(std::move(callback)); }
     catch (...) { return false; }
     request->kind = kind;
-    const bool timed = invokeStats_ && invokeNow_;
-    if (timed) request->enqueuedUs = invokeNow_();
+    // The stats object belongs to whoever set it (the host), and a callback may destroy that host (a fixture's cleanup runs
+    // on the owner), so it is read under the lock here and read again, not trusted, after the request is done.
+    OwnerInvokeStats* stats = nullptr;
+    uint64_t (*now)() = nullptr;
+    { std::lock_guard<std::mutex> lock(mutex_); stats = invokeStats_; now = invokeNow_; }
+    const bool timed = stats && now;
+    request->now = timed ? now : nullptr;
+    if (timed) request->enqueuedUs = now();
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!running_ || stopping_ || queue_.size() >= kQueueCapacity) return false;
@@ -68,19 +74,23 @@ class OwnerService final {
     std::unique_lock<std::mutex> waitLock(request->mutex);
     request->cv.wait(waitLock, [&] { return request->done; });
     if (timed && request->startedUs) {
+      OwnerInvokeStats* current = nullptr;
+      { std::lock_guard<std::mutex> lock(mutex_); current = invokeStats_; }
+      if (current != stats) return request->success;   // the host went away (or was replaced) during the call
       // Written by the owner before it set done, read here under the same request mutex.
       OwnerInvokeStats::Sample sample;
       sample.kind = kind;
       sample.behindWait = request->behindWait;
       sample.queueUs = int64_t(request->startedUs) - int64_t(request->enqueuedUs);
       sample.runUs = int64_t(request->finishedUs) - int64_t(request->startedUs);
-      invokeStats_->note(sample);
+      current->note(sample);
     }
     return request->success;
   }
   // Optional per-kind accounting of invoke (owner_invoke_stats.h). Set before start(); now is the clock the instants use.
   // Without it invoke does not read the clock.
   void setInvokeStats(OwnerInvokeStats* stats, uint64_t (*now)()) {
+    std::lock_guard<std::mutex> lock(mutex_);
     invokeStats_ = stats;
     invokeNow_ = now;
   }
@@ -156,6 +166,7 @@ class OwnerService final {
     // startedUs and finishedUs before finish(). behindWait is the caller's, set under the service mutex at the push.
     OwnerCallKind kind = OwnerCallKind::Other;
     uint64_t enqueuedUs = 0, startedUs = 0, finishedUs = 0;
+    uint64_t (*now)() = nullptr;   // set by invoke before the push; null when this request is not timed
     bool behindWait = false;
   };
   static constexpr uint8_t kIdleKind = 0xFF;
@@ -192,11 +203,11 @@ class OwnerService final {
         else idle=bool(idle_);
       }
       if (request) {
-        const bool timed = invokeStats_ && invokeNow_;
-        if (timed) request->startedUs = invokeNow_();
+        const bool timed = request->now != nullptr;
+        if (timed) request->startedUs = request->now();
         bool success = true; try { request->callback(); } catch (...) { success = false; }
         request->callback={};
-        if (timed) request->finishedUs = invokeNow_();
+        if (timed) request->finishedUs = request->now();
         { std::lock_guard<std::mutex> lock(mutex_); currentKind_ = kIdleKind; }
         complete(request, success);
         finish(request, success);

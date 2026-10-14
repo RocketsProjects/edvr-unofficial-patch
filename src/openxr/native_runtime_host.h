@@ -193,7 +193,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
  public:
   NativeRuntimeHost(OwnerService& owner,RenderThreadDispatcher& dispatcher,RenderRoute& route,ID3D11Device* supplied=nullptr)
       :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied){
-    // Set before the first invoke: the owner reads the pointer while it runs requests (owner_service.h setInvokeStats).
+    // Set before the first invoke; cleared by the destructor, so a request that outlives this host never reaches its stats.
     service.setInvokeStats(&ownerInvoke,&NativeRuntimeHost::frameCycleUs);
   }
   OwnerService& service;
@@ -3020,7 +3020,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(found)++resetPolls;return found;
   }
   void unsupported(unsigned slot) noexcept override {nativeTracePrintf("system_unavailable,slot=%u\n",slot);}
-  ~NativeRuntimeHost() {close();}
+  ~NativeRuntimeHost() {close();service.setInvokeStats(nullptr,nullptr);}
   void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); fss.invalidate(); deferredEye={}; }
   void publishFatalFailure(XrResult error,const char* operation) noexcept {
     clearOverlapHandoff();
