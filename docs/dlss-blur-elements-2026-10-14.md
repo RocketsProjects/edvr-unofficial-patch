@@ -42,11 +42,15 @@
   (own blend, the game's depth view tested, nothing written to the game's targets, state restored), per eye, found by the scene depth it tests against; the pass binds
   it at t5 and the game's HDR target at t16 (probe.w bit 32768). Census every 30 s: `effect history: last 30 s ...`. No key. Inspector: `effect rule:` line,
   `HIDDEN(effect rule)`, magenta in path.png, CSV column `effect_hidden`. Tests: tools\effect_history_test (WARP, in build.bat).
-- **Build B captures (14:55-14:56, Frontier):** all three boxes missed their element (the box is head-forward, 180 px right of the view centre). Advert: no draw of
-  4654/95D0 and no `holo=` route in any capture, but the hologram depth census showed 117 world-marker draws/frame at 14:55:20 (the pass is live). Pad (cap2): the box
-  sat on pad floor; the lit HDR target there takes 17 overlapping B75A6FF2 halo sprites (listed) plus 1C506222/2519C905 (additive, 384 indices, reads only depth: a
-  hologram-volume candidate, NOT listed) and D005EBB1 alpha pairs. Railing (cap3): the rail is 18 px above the box; all box pixels kind 4 (a marker whose depth is
-  not the scene's: another draw owns the pixel), slot 354 MOVED; cap2 slots 749 (kind 4, 183 px) and 829 (exact, 73 px) are one object with equal pose deltas.
+- **Build B captures (14:55-14:56, Frontier):** all three boxes missed (head-forward, 180 px right of centre). Advert: no 4654/95D0 draw, no `holo=` route, but 117
+  world-marker draws/frame in the census (pass live). Pad (cap2): 17 overlapping B75A6FF2 sprites (listed) plus 1C506222/2519C905 (additive, 384 indices, depth-only:
+  a hologram-volume candidate, NOT listed). Railing: kind 4 on 256 of 256 box pixels (cap3, slot 354 MOVED) and 183 (cap2, slot 749; slot 829 exact, same pose delta).
+- **Flat comparison (Sean, test build D, flat + DLAA native): pad holograms and railings are fine; both blur in VR (HMD Quality 0.5, 2016 -> 4032, K).**
+  (2) The railing, from code: kind 4 = a marker whose depth is not the scene's. Flat's prep treats the same pixel differently (flat_mono_shader_source.h:142,
+  flat_mono_resolve.cpp:972 "steady detail"): it REFUSES history unless last frame's depth confirms the camera term (`historyDepthMatches`, both directions, 1%).
+  The VR mv shader gives kind 4 the camera term with no check; its `backgroundHistoryHidden` tests only a NEARER occluder that left, so a rail moving over
+  farther background keeps the background's history. Supports (2) for the railing; a port of the check to kind 4 is the proposed fix, NOT BUILT. Holograms:
+  nothing in flat's code treats them; (1) ratio and (3) placement (flat resolves HDR before post: flat_mono_shader_source.h route.x) stay open until Sean's HMD Quality 1.0 flight.
 - **Open:** a pad-hologram capture that names its draws; an advert capture with the box on it; the railing's owning draw (kind 4: which draw wrote the depth the
   marker lost to); weapons fire, flares (option A covers the two sprite pairs, NOT FLOWN); the force field.
 - **Ruled out:** railing motion mismatch (tool label bug, finding 1); the 2026-09-29 pad-into-layer rule as wired in 9122f31e; reactive bias or sharpening as
