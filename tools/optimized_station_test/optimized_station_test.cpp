@@ -1155,6 +1155,141 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- TEMPORARY: the lift trace (ride detection, holder tracking, line formats) ---------------------------------------------------------------------
+    {
+        se::LiftTrace tr;
+        auto cabAt = [](float z) {
+            se::TraceCand c;
+            c.rec = 0xCAB;
+            std::snprintf(c.name, sizeof(c.name), "PersonalLiftCab");
+            c.radius = 2.5f;
+            c.centre[0] = 10.0f;
+            c.centre[1] = 20.0f;
+            c.centre[2] = z;
+            return c;
+        };
+        auto sampleAt = [&](uint64_t ms, float z, bool inCab, uint32_t flags2) {
+            se::TraceSample smp;
+            smp.ms = ms;
+            smp.cam[0] = 10.0f;
+            smp.cam[1] = 20.0f;
+            smp.cam[2] = z;
+            smp.hOk = true;
+            smp.h = z;   // the shaft axis is the world z in this fixture
+            smp.known = true;
+            smp.flags = 5u;
+            smp.flags2 = flags2;
+            smp.candFresh = true;
+            if (inCab) {
+                smp.nCand = 1;
+                smp.cand[0] = cabAt(z);
+            } else {
+                smp.nCand = 1;
+                smp.cand[0] = cabAt(0.0f);
+                std::snprintf(smp.cand[0].name, sizeof(smp.cand[0].name), "HangarFloorTile");
+                smp.cand[0].rec = 0xF100;
+                smp.cand[0].radius = 6.0f;
+            }
+            return smp;
+        };
+        unsigned ev = 0, allEv = 0;
+        uint64_t t = 1000;
+        // standing in the hangar, then walking across it (1.4 m/s horizontal): no ride
+        for (int i = 0; i < 6; ++i, t += 250) allEv |= tr.add(sampleAt(t, 1.0f, false, 0x2001u));
+        check(!tr.riding && tr.rides == 0 && (allEv & se::kTrRideStart) == 0, "lift trace: standing is not a ride");
+        for (int i = 0; i < 6; ++i, t += 250) {
+            se::TraceSample w = sampleAt(t, 1.0f, false, 0x2001u);
+            w.cam[0] += 0.35f * static_cast<float>(i + 1);   // 1.4 m/s across at 4 Hz
+            allEv |= tr.add(w);
+        }
+        check(!tr.riding && tr.rides == 0, "lift trace: walking across the floor is not a ride");
+        // the ride: 3 m/s up, the cab holds the camera and moves with it
+        float z = 1.0f;
+        int startedAt = -1;
+        char startLine[900] = {};
+        for (int i = 0; i < 8; ++i, t += 250) {
+            z += 0.75f;
+            ev = tr.add(sampleAt(t, z, true, 0x2001u));
+            if ((ev & se::kTrRideStart) && startedAt < 0) {
+                startedAt = i;
+                se::formatTraceEvent(startLine, sizeof(startLine), tr, ev, tr.at(tr.total - 1));
+            }
+        }
+        check(startedAt == 2 && tr.riding && tr.rides == 1, "lift trace: two moving samples in a row start a ride");
+        const se::TraceSample& rideS = tr.at(tr.total - 1);
+        check(std::fabs(rideS.vz - 3.0f) < 0.05f && rideS.horiz < 0.05f && std::fabs(rideS.candSpeed[0] - 3.0f) < 0.05f && rideS.candFresh,
+              "lift trace: the ride reads 3 m/s up, none across, and the cab moves with the camera (same speed)");
+        // the stop, then the door: the holder changes to the concourse's floor and the Status words change
+        unsigned stopEv = 0;
+        for (int i = 0; i < 4; ++i, t += 250) stopEv |= tr.add(sampleAt(t, z, true, 0x2001u));
+        check((stopEv & se::kTrRideStop) != 0 && !tr.riding, "lift trace: three still samples stop the ride");
+        ev = tr.add(sampleAt(t, z, false, 0x4001u));
+        t += 250;
+        check((ev & se::kTrHolder) != 0 && (ev & se::kTrFlags) != 0, "lift trace: the holder changing and the Status words changing are events (the door)");
+        // a stale gather does not change the holder
+        se::TraceSample stale = sampleAt(t, z, false, 0x4001u);
+        stale.candFresh = false;
+        stale.nCand = 0;
+        ev = tr.add(stale);
+        check((ev & se::kTrHolder) == 0, "lift trace: a stale gather says nothing about the holder");
+        // an origin rebase (a 50 m jump) is flagged, has no speed, and starts no ride
+        se::LiftTrace tj;
+        tj.add(sampleAt(1000, 1.0f, false, 0x2001u));
+        se::TraceSample jump = sampleAt(1250, 51.0f, false, 0x2001u);
+        ev = tj.add(jump);
+        check(tj.at(1).jump && tj.at(1).speed == 0.0f && (ev & se::kTrRideStart) == 0 && tj.rides == 0, "lift trace: a jump over 20 m is a rebase, not a ride");
+        // without a box the height is unknown and the ride is judged on the total speed
+        se::LiftTrace tn;
+        uint64_t u = 1000;
+        float zz = 0.0f;
+        unsigned nev = 0;
+        for (int i = 0; i < 4; ++i, u += 250) {
+            se::TraceSample q = sampleAt(u, zz, false, 0x2001u);
+            q.hOk = false;
+            zz += 0.8f;
+            nev |= tn.add(q);
+        }
+        check((nev & se::kTrRideStart) != 0, "lift trace: with no box a ride is judged on the total speed");
+        // formats
+        char line[900];
+        se::formatTraceSample(line, sizeof(line), tr, tr.at(tr.total - 1 - 7));
+        check(std::strstr(line, "optimized station: lift trace +") && std::strstr(line, "height +") && std::strstr(line, "PersonalLiftCab r=2.5 m") && std::strstr(line, "moving 3.00 m/s") &&
+                  std::strstr(line, "Flags 0x00000005 Flags2 0x00002001 (on foot 1, in hangar 1, social space 0)") && std::strstr(line, "[ride]") == nullptr,
+              "lift trace: a sample line names the camera, height, vertical and cross speed, the Status words and the holders");
+        check(std::strstr(startLine, "optimized station: lift trace EVENT +") && std::strstr(startLine, "ride 1 start") != nullptr, "lift trace: an event line says which event");
+        se::TraceSample nobox = sampleAt(5000, 2.0f, false, 0x2001u);
+        nobox.hOk = false;
+        nobox.nCand = 0;
+        nobox.candFresh = false;
+        se::formatTraceSample(line, sizeof(line), tr, nobox);
+        check(std::strstr(line, "height unknown (no box)") && std::strstr(line, "(no fresh gather)"), "lift trace: no box and no gather are stated, not hidden");
+        // the ring keeps the newest 160
+        se::LiftTrace big;
+        for (int i = 0; i < 400; ++i) big.add(sampleAt(1000 + 250u * static_cast<uint64_t>(i), 1.0f, false, 0x2001u));
+        check(big.total == 400 && big.at(399).ms == 1000 + 250u * 399u && big.at(399 - 159).ms == 1000 + 250u * 240u, "lift trace: the ring keeps the last 160 samples");
+    }
+    {
+        // Source pins: armed only docked and on foot; the callbacks read one bool; read-only; the tick calls it after the Status words are read.
+        std::string st;
+        if (FILE* f = std::fopen("src/d3d11/optimized_station.cpp", "rb")) {
+            char buf[8192];
+            size_t k;
+            while ((k = std::fread(buf, 1, sizeof(buf), f)) > 0) st.append(buf, k);
+            std::fclose(f);
+        }
+        check(!st.empty(), "lift trace pins: the source was read (run the rig from the repository root)");
+        if (!st.empty()) {
+            const size_t words = st.find("g_statusFlags2Now = journalStatusFlags2();");
+            const size_t call = st.find("liftTraceTick();   // TEMPORARY");
+            check(words != std::string::npos && call != std::string::npos && call > words, "lift trace pins: the tick runs the trace after this tick's Status words are read");
+            check(st.find("!g_aboardNow && (g_statusFlags2Now & sealed::kFlags2OnFoot) != 0") != std::string::npos && st.find("g_dockedNow.load(std::memory_order_acquire) && g_statusKnownNow") != std::string::npos,
+                  "lift trace pins: armed only docked, with the words known, not aboard, and on foot");
+            check(st.find("if (!on) return;") != std::string::npos && st.find("s.traceOn = g_traceOn;") != std::string::npos, "lift trace pins: off, the tick returns at once and the callbacks see traceOn false");
+            check(st.find("if (s.traceOn && containsCam && radius < sealed::kTraceMaxRadiusM && tc.traceCands < 12)") != std::string::npos,
+                  "lift trace pins: the callbacks gather holders only behind traceOn, under 25 m, at most 12 a thread a pass");
+        }
+    }
+
     // ---- Built v14.24 (2026-10-13, the review of the 013c6122 flight) -----------------------------------------------------------------------------
     {
         // Item 1: a change of rig A's association forgets A's bounds and verdict only; rig B keeps its bound and its verdict (no whole-epoch bump).

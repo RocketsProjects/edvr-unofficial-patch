@@ -71,6 +71,7 @@ struct TlsCounters {
     uint64_t rigSeen = 0, rigVetoed = 0, rigMixed = 0, rigUnknown = 0, rigRefresh = 0;
     uint64_t rigHitVetoed = 0, rigHitKept = 0, rigHitMoved = 0, rigMiss = 0, rigStale = 0, rigAsked = 0;
     uint32_t sampleStore = 0, sampleProducer = 0, sampleRig = 0;   // the 1-in-32 sampling counters (the thread's own)
+    uint32_t traceCands = 0;   // TEMPORARY lift trace: cab candidates this thread pushed in this pass (capped)
 };
 thread_local TlsCounters tlsTc;
 void tcFlush(TlsCounters& t) noexcept;
@@ -427,6 +428,7 @@ struct PadSnapshot {
     float ownLiveRadius = 0.0f;
     bool lost = false;            // gathered entries were lost before this publication: the callbacks keep every record
     bool engagePending = false;   // built v14.31: an engage is pending: every pass gathers the near list, the own candidate and the tally
+    bool traceOn = false;         // TEMPORARY lift trace: docked and on foot, so full passes also gather the small records that hold the camera
 };
 sealed::SnapshotRing<PadSnapshot, 40, 32> g_snapRing;
 
@@ -450,7 +452,7 @@ private:
 
 // Built v14.26: what a callback gathers for the tick. Each callback appends to its own thread's slot (sealed::GatherBuffers); the tick drains the entries of
 // the previous pass in the order they were written, and applies them to its own tables.
-enum class GKind : uint8_t { kNone, kPad, kExplicit, kNear, kOwnCand, kTally, kLatch, kHangar, kRigNote, kRigAssoc, kCost };
+enum class GKind : uint8_t { kNone, kPad, kExplicit, kNear, kOwnCand, kTally, kLatch, kHangar, kRigNote, kRigAssoc, kCost, kTraceCand };
 constexpr uint8_t kFlagJob = 1;   // kRigNote: the store's bucket path (the rig comes from the bucket's collection, resolved on the tick)
 struct GatherEntry {
     GKind kind = GKind::kNone;
@@ -1584,6 +1586,143 @@ void characterCensusTick() noexcept {
     g_census.sample(g_censusSnap.n, g_censusSnap.end, largest);
 }
 
+// ---- TEMPORARY: the lift trace (optimized_station_core.h LiftTrace; docs/optimized-station-2026-10-12.md). Armed only while docked and on foot (Status), read-only. ----
+bool g_traceOn = false;                       // the tick's decision; published to the callbacks in the snapshot
+sealed::LiftTrace g_trace;                    // 160 samples; touched by the tick only
+sealed::TraceCand g_traceNext[sealed::kTraceCands], g_traceNow[sealed::kTraceCands];
+float g_traceNextDist[sealed::kTraceCands] = {};
+int g_traceNextN = 0, g_traceNowN = 0;
+bool g_traceDrainFresh = false;
+uint64_t g_traceNowMs = 0, g_traceNextMs = 0;
+uint32_t g_traceLines = 0, g_traceArms = 0;
+constexpr uint32_t kTraceLineCap = 2400;      // log lines a session
+
+// One holder candidate from this drain: kept sorted by radius, smallest first, at most kTraceCands.
+void traceCandAdd(const GatherEntry& e) noexcept {
+    if (!g_traceDrainFresh) {
+        g_traceDrainFresh = true;
+        g_traceNextN = 0;
+    }
+    int at = g_traceNextN;
+    for (int i = 0; i < g_traceNextN; ++i) {
+        if (g_traceNext[i].rec == e.record) return;   // the same record again (another thread's pass copy)
+        if (e.radius < g_traceNext[i].radius) { at = i; break; }
+    }
+    if (at >= sealed::kTraceCands) return;
+    const int last = g_traceNextN < sealed::kTraceCands ? g_traceNextN : sealed::kTraceCands - 1;
+    for (int i = last; i > at; --i) {
+        g_traceNext[i] = g_traceNext[i - 1];
+        g_traceNextDist[i] = g_traceNextDist[i - 1];
+    }
+    sealed::TraceCand& c = g_traceNext[at];
+    c = sealed::TraceCand{};
+    c.rec = e.record;
+    std::snprintf(c.name, sizeof(c.name), "%s", e.name);
+    c.radius = e.radius;
+    for (int k = 0; k < 3; ++k) c.centre[k] = e.centre[k];
+    g_traceNextDist[at] = e.dist;
+    if (g_traceNextN < sealed::kTraceCands) ++g_traceNextN;
+}
+
+void liftTraceNote(const char* line) noexcept {
+    if (g_traceLines >= kTraceLineCap) return;
+    ++g_traceLines;
+    Log::get().note("%s", line);
+}
+
+// The block: every sample since the last dump when a ride or an event happened in it, else one idle line. Called when a ride ends, every 30 s, and when the state is left.
+void liftTraceDump(const char* why, uint64_t t) noexcept {
+    sealed::LiftTrace& tr = g_trace;
+    const uint32_t n = tr.unflushed();
+    if (n == 0) return;
+    char line[900];
+    const bool interesting = tr.rides != tr.ridesAtDump || tr.eventsSinceDump != 0;
+    const uint32_t first = n > sealed::kTraceRing ? tr.total - sealed::kTraceRing : tr.dumped;
+    if (!interesting) {
+        float hMin = 1e9f, hMax = -1e9f, vMax = 0.0f;
+        bool anyH = false;
+        for (uint32_t i = first; i < tr.total; ++i) {
+            const sealed::TraceSample& s = tr.at(i);
+            if (s.hOk) { anyH = true; if (s.h < hMin) hMin = s.h; if (s.h > hMax) hMax = s.h; }
+            if (std::fabs(s.vz) > vMax) vMax = std::fabs(s.vz);
+        }
+        const sealed::TraceSample& l = tr.at(tr.total - 1);
+        char hs[80];
+        if (anyH) std::snprintf(hs, sizeof(hs), "height %+.2f to %+.2f m", hMin, hMax);
+        else std::snprintf(hs, sizeof(hs), "height unknown (no box)");
+        char fl[96];
+        std::snprintf(fl, sizeof(fl), "last Flags 0x%08x Flags2 0x%08x", l.flags, l.flags2);
+        std::snprintf(line, sizeof(line), "optimized station: lift trace idle (%s): %u samples, no ride, no change of holder; %s, largest vertical speed %.2f m/s; %s; camera (%.1f, %.1f, %.1f).", why, n, hs,
+                      vMax, fl, l.cam[0], l.cam[1], l.cam[2]);
+        liftTraceNote(line);
+    } else {
+        std::snprintf(line, sizeof(line), "optimized station: lift trace block (%s): %u samples (%u written), %u ride(s) this stay.", why, n, tr.total - first, tr.rides);
+        liftTraceNote(line);
+        for (uint32_t i = first; i < tr.total; ++i) {
+            sealed::formatTraceSample(line, sizeof(line), tr, tr.at(i));
+            liftTraceNote(line);
+        }
+    }
+    tr.dumped = tr.total;
+    tr.ridesAtDump = tr.rides;
+    tr.eventsSinceDump = 0;
+    tr.lastDumpMs = t;
+}
+
+void liftTraceTick() noexcept {
+    const bool on = g_dockedNow.load(std::memory_order_acquire) && g_statusKnownNow && !g_aboardNow && (g_statusFlags2Now & sealed::kFlags2OnFoot) != 0;
+    if (on != g_traceOn) {
+        g_traceOn = on;   // published to the callbacks by the next publishSnapshot
+        const uint64_t t = GetTickCount64();
+        if (!on) {
+            liftTraceDump("the on-foot docked state ended", t);
+            g_trace = sealed::LiftTrace{};
+            g_traceNowN = g_traceNextN = 0;
+        } else {
+            ++g_traceArms;
+            g_traceNextMs = 0;
+            g_trace.lastDumpMs = t;
+            if (g_traceArms <= 8) {
+                Log::get().note("optimized station: lift trace (temporary) armed: docked and on foot, ~4 samples a second of the camera's height along the pad's shaft, its vertical speed, the Status words and the small "
+                                "records whose sphere holds the camera; a block is written when a ride ends or every 30 s. Read-only.");
+            }
+        }
+    }
+    if (!on) return;
+    const uint64_t t = GetTickCount64();
+    if (t < g_traceNextMs) return;
+    g_traceNextMs = t + sealed::kTraceSampleMs;
+    if (!g_frameCamValid) return;
+    sealed::TraceSample s;
+    s.ms = t;
+    for (int k = 0; k < 3; ++k) s.cam[k] = g_frameCam[k];
+    if (g_pickCell.has && g_pickCell.box) {
+        float x[3] = {};
+        sealed::boxCoordsOf(g_pickCell, g_frameCam, x);
+        s.hOk = true;
+        s.h = x[2] + g_pickCell.boxHalf[2];
+    }
+    s.known = g_statusKnownNow;
+    s.flags = g_statusFlagsNow;
+    s.flags2 = g_statusFlags2Now;
+    s.candFresh = g_traceNowMs != 0 && t - g_traceNowMs <= 1000;
+    if (s.candFresh) {
+        s.nCand = g_traceNowN;
+        for (int i = 0; i < g_traceNowN; ++i) {
+            s.cand[i] = g_traceNow[i];
+            s.candDist[i] = sealed::distance(g_traceNow[i].centre, g_frameCam);
+        }
+    }
+    const unsigned ev = g_trace.add(s);
+    char line[900];
+    if (ev & (sealed::kTrRideStart | sealed::kTrRideStop | sealed::kTrHolder | sealed::kTrFlags)) {
+        sealed::formatTraceEvent(line, sizeof(line), g_trace, ev, s);
+        liftTraceNote(line);
+    }
+    if ((ev & sealed::kTrRideStop) != 0) liftTraceDump("a ride ended", t);
+    else if (t - g_trace.lastDumpMs >= sealed::kTraceDumpMs) liftTraceDump("30 s", t);
+}
+
 // The 30 s summary: what the station did in the window. A user's log shows the station's work here.
 void summaryLine(uint64_t now) noexcept {
     // Built v14.31: the lines are written for a window in which the commander was docked or sealed (a flight in space writes none); the window resets either way.
@@ -1965,6 +2104,9 @@ void applyEntry(const GatherEntry& e) {
         case GKind::kTally:
             tallyShipPrefix(e.name);
             break;
+        case GKind::kTraceCand:   // TEMPORARY lift trace: this drain's holders replace the last drain's (kept sorted by radius, smallest first)
+            traceCandAdd(e);
+            break;
         case GKind::kLatch:
             if (g_latchCandN < sealed::kLatchCandCap) {
                 sealed::LatchCand& cand = g_latchCands[g_latchCandN++];
@@ -2002,7 +2144,13 @@ void drainGather() {
     g_rigBucketCache = 0;
     g_rigBucketRig = 0;
     g_stickyPadInPass = false;
+    g_traceDrainFresh = false;
     const sealed::PassDrain d = g_gather.drain([](const GatherEntry& e) { applyEntry(e); });
+    if (g_traceDrainFresh) {   // TEMPORARY lift trace: this drain's holders are the current ones
+        g_traceNowN = g_traceNextN;
+        for (int i = 0; i < g_traceNextN; ++i) g_traceNow[i] = g_traceNext[i];
+        g_traceNowMs = GetTickCount64();
+    }
     g_winLost += d.lost;
     // Built v14.27: the verdict on the drained passes. Only a complete pass that held a store callback is evidence; an empty or unfinished one leaves the
     // pad, the camera, the latch samples and the rig publication as they were.
@@ -2196,6 +2344,7 @@ void publishSnapshot() noexcept {
     s.frameStamp = g_frameStamp.load(std::memory_order_relaxed);
     s.prodGen = g_prodGenA.load(std::memory_order_relaxed);
     s.held = g_heldValid;
+    s.traceOn = g_traceOn;
     s.camValid = g_frameCamValid;
     std::memcpy(s.cam, g_frameCam, sizeof(s.cam));
     s.cell = g_cellPrev;
@@ -2342,6 +2491,14 @@ void afterStoreJudge(uintptr_t bucket, uintptr_t record, bool judge) noexcept {
                 e.dist = dCam;
                 w.push(e);
             }
+        }
+        if (s.traceOn && containsCam && radius < sealed::kTraceMaxRadiusM && tc.traceCands < 12) {   // TEMPORARY lift trace: the small records that hold the camera
+            char tn[64] = {};
+            cachedNameOfNode(node, tn, sizeof(tn), &ni.validator);   // an unnamed record is still a holder
+            ++tc.traceCands;
+            GatherEntry e = gatherEntry(GKind::kTraceCand, record, centre, radius, stamp, tn);
+            e.dist = dCam;
+            w.push(e);
         }
         // The ship's part count by prefix (built v14.8). A name with no prefix counts for nothing, so a node without the prefix flag is not read.
         if (dCam <= sealed::kShipRecordsM && (ni.flags & sealed::kNodeShipPrefix) != 0) {
@@ -2583,6 +2740,7 @@ void optimizedStationFrameBody(uint32_t frame) {
             Log::get().note("optimized station: status flags changed (frame %u): %s; aboard %s; seal %s.", frame, text, g_aboardNow ? "yes" : "no", g_heldValid ? "held" : "not held");
         }
     }
+    liftTraceTick();   // TEMPORARY: zero work unless docked and on foot (after the Status words of this tick are read)
     // Built v14.20 (review 4): an undock is a lifecycle point: the rig and collection tables start afresh.
     if (g_dockedWasNow && !g_dockedNow.load(std::memory_order_acquire)) {
         bumpRigEpoch();
