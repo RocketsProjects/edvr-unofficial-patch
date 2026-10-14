@@ -137,6 +137,9 @@ ID3D11Texture2D* g_exposureOne = nullptr;
 // scene (measured, flat_hdr_energy.h), fixed (1.0) or auto (AutoExposure). A change remakes the flat HDR route's feature when
 // it flips AutoExposure; the VR world route never reads it.
 FlatDlssExposure g_hdrExposure = FlatDlssExposure::Scene;
+// The exposure scalars every evaluation hands NVIDIA (dlaaEvaluate), named so the scene inspector (dlaaEvalFacts) reports the ones in force.
+constexpr float kDlssPreExposure = 1.0f;
+constexpr float kDlssExposureScale = 1.0f;
 
 const char* presetName(unsigned p) {
     switch (p) {
@@ -732,8 +735,8 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ep.InReset = reset ? 1 : 0;
     ep.InMVScaleX = 1.0f;
     ep.InMVScaleY = 1.0f;
-    ep.InPreExposure = 1.0f;
-    ep.InExposureScale = 1.0f;
+    ep.InPreExposure = kDlssPreExposure;
+    ep.InExposureScale = kDlssExposureScale;
     const DlssExposureInput exposureInput = flatDlssExposureInput(hdr, runtimeFlatProfile(), g_hdrExposure);
     if (exposureInput != DlssExposureInput::None) {
         // scene: the texture EDVR measured this frame (flat_hdr_energy.h); on a frame it has none, 1.0, counted.
@@ -798,6 +801,20 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     if (reset) ++g_resets;
     return true;
 #endif
+}
+
+// What an evaluation hands NVIDIA beyond its textures, for the scene inspector: computed on demand, so the hot path stores nothing.
+DlaaEvalFacts dlaaEvalFacts(bool hdr, bool upscaling) {
+    DlaaEvalFacts f;
+#ifdef EDVR_HAVE_NGX
+    f.preset = upscaling ? g_preset : dlaaSafe(g_preset);
+    f.preExposure = kDlssPreExposure;
+    f.exposureScale = kDlssExposureScale;
+    f.exposureTexture = flatDlssExposureInput(hdr, runtimeFlatProfile(), g_hdrExposure) != DlssExposureInput::None;
+#else
+    (void)hdr; (void)upscaling;
+#endif
+    return f;
 }
 
 void dlaaSetPreset(unsigned preset) {

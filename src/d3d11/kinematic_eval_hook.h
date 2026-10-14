@@ -47,6 +47,9 @@ using EnginePrimaryEmitObserverFn = void (*)(const engine_velocity_emit::Primary
 void kinematicEvalSetPrimaryEmitObserver(EnginePrimaryEmitObserverFn fn) noexcept;
 const char* kinematicEvalPrimaryEmitStatus() noexcept;
 void kinematicEvalPrimaryEmitCounters(uint64_t& calls, uint64_t& unowned) noexcept;
+// Cumulative appended-record totals per producer for the scene inspector, without resetting anything: v[0..1] emit calls and items, v[2..3] the second direct producer
+// FUN_14369C9C0, v[4] the primary's relay calls. False when the direct hooks are not installed.
+bool kinematicEvalProducerTotals(uint64_t v[5]) noexcept;
 using EnginePoolCopyObserverFn = void (*)(uintptr_t mappedBase, uint32_t stride, uintptr_t source,
                                          uint64_t firstSlot, uint32_t count) noexcept;
 void kinematicEvalSetPoolCopyObserver(EnginePoolCopyObserverFn fn) noexcept;

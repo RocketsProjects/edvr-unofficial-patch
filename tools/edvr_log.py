@@ -19,6 +19,7 @@
     python tools/edvr_log.py --target frontier --vr-supersampling --expect-build HEAD
     python tools/edvr_log.py --target frontier --ui-composites --expect-build HEAD
     python tools/edvr_log.py --target frontier --terrain-checkerboard --expect-build HEAD
+    python tools/edvr_log.py --target frontier --inspect --expect-build HEAD
     python tools/edvr_log.py --target frontier --route-curve --expect-build HEAD
     python tools/edvr_log.py --target steam --map-bounce --expect-build HEAD
     python tools/edvr_log.py --target steam --freezes --expect-build HEAD
@@ -201,6 +202,14 @@ STOP, less a WARN), NAMED (a family named it and the layer did not take it: a WA
 game's frame` line says why), OVERFLOW (more different pairs than the table names) and TAKEN (every composite
 went into the layer). Its exit code carries the verdict: 0 for PASS or WARN, 1 for STOP, 3 when the log has
 no census line (main() answers 2 for a wrong build before this runs).
+
+--inspect reads the scene inspector's latest capture (docs/scene-inspector-2026-10-14.md; hotkey.scene_inspect): the `scene inspect`
+lines between `armed cap=N` and `complete cap=N` of the highest N in the log, merged by draw: the box, the frame's counts, the stack visible
+at the centre pixel, each draw that wrote inside the box with its state, EDVR's route for it and the rule that fired, the occluded ones, the
+centre pixel's DLSS inputs, the DLSS line, and the CSV and PNG files, which it checks are beside the log. It names how far a capture got:
+NOT BOUND / NEVER PRESSED / ARMED, NEVER COLLECTED / COLLECTED, NO REPORT / NO EYE PASS (not an empty box) / EMPTY BOX (the capture ran and
+nothing wrote the box) / COMPLETE. Exit 0 for COMPLETE or EMPTY BOX, 1 for any other state, 3 when the log has no scene inspect line.
+--full prints each verdict whole.
 
 --terrain-checkerboard reads a VR flight's Elite terrain checkerboard rendering notice (design doc section 84): the
 worker's start line, one line for the first read and each change (ON, OFF or unknown with its reason, read from the
@@ -5601,6 +5610,334 @@ def print_ui_composites(text):
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------------
+# --inspect: the scene inspector's latest capture (src/d3d11/scene_inspector.cpp and scene_inspector_core.h; docs/scene-inspector-2026-10-14.md). One
+# press of hotkey.scene_inspect writes a block of `scene inspect ...` lines between `armed cap=N` and `complete cap=N`, a CSV and PNGs beside the log.
+# This reads the block of the highest capture number in the log and prints what the capture established, so the first question about a capture --
+# did it run, and was the box empty -- has one answer. The states, in the order a capture goes through them, are what the log can show:
+#   NOT BOUND / NEVER PRESSED   only the install line: the key has no binding, or nobody pressed it
+#   ARMED, NEVER COLLECTED      `armed` and no `collecting`: no frame boundary followed (a menu, no VR session, a stalled frame loop)
+#   COLLECTED, NO REPORT        `collecting` and no `report`: the game ended or the module faulted before the report (the boundary's tick is on a fault budget)
+#   NO EYE PASS                 a report whose frame saw no eye draw: not an empty box
+#   EMPTY BOX                   a report that tested draws, none of which wrote a sample inside the box: the answer, not a failure
+#   COMPLETE                    a report with draws in the box
+# ---------------------------------------------------------------------------------------------------------------------------------------
+INSPECT_RE = re.compile(r"^(?:\[(?P<ts>[0-9:.]+)\] )?(?P<msg>scene inspect.*)$")
+INSPECT_CAP_RE = re.compile(r"\bcap=(?P<cap>\d+)")
+INSPECT_DRAW_RE = re.compile(r"^scene inspect (?P<kind>draw|route|verdict|unmeasured|occluded): #(?P<idx>\d+) ?(?P<rest>.*)$")
+
+
+def parse_inspect(text):
+    """{install: the install line text or None, caps: {n: capture dict}, order: [n...], loose: refusals outside any capture}. A capture dict:
+    {armed, collecting, report, complete: bool, trigger, ts, lines: {box, frame, empty, input, centre, stats, dlss, files, complete}, targets: [...],
+    stacks: [...], draws: {idx: {draw, route, verdict, code, text}}, occluded: [...], unmeasured: [...], refusals: [...], images: [...]}."""
+    out = {"install": None, "caps": {}, "order": [], "loose": []}
+    cur = None
+    for raw in text.splitlines():
+        m = INSPECT_RE.match(raw.rstrip("\r"))
+        if not m:
+            continue
+        msg = m.group("msg")
+        ts = m.group("ts") or ""
+        if msg.startswith("scene inspect: off;"):
+            out["install"] = msg
+            continue
+        cm = re.match(r"^scene inspect: armed cap=(\d+) \(trigger ([^)]*)\)", msg)
+        if cm:
+            n = int(cm.group(1))
+            cur = {"n": n, "armed": True, "collecting": False, "report": False, "complete": False, "trigger": cm.group(2), "ts": ts, "lines": {},
+                   "targets": [], "stacks": [], "draws": {}, "occluded": [], "unmeasured": [], "refusals": [], "images": [], "legend": False, "engine": []}
+            out["caps"][n] = cur
+            out["order"].append(n)
+            continue
+        if msg.startswith("scene inspect: refused ("):
+            (cur["refusals"] if cur is not None and cur["report"] and not cur["complete"] else out["loose"]).append(msg)
+            continue
+        if cur is None:
+            continue
+        if msg.startswith("scene inspect: collecting cap="):
+            cur["collecting"] = True
+        elif msg.startswith("scene inspect: report cap="):
+            cur["report"] = True
+        elif msg.startswith("scene inspect: complete cap="):
+            cur["complete"] = True
+            cur["lines"]["complete"] = msg
+        elif msg.startswith("scene inspect legend:"):
+            cur["legend"] = True
+        elif msg.startswith("scene inspect box:"):
+            cur["lines"]["box"] = msg
+        elif msg.startswith("scene inspect frame:"):
+            cur["lines"]["frame"] = msg
+        elif msg.startswith("scene inspect empty:"):
+            cur["lines"]["empty"] = msg
+        elif msg.startswith("scene inspect target:"):
+            cur["targets"].append(msg)
+        elif msg.startswith("scene inspect stack:"):
+            cur["stacks"].append(msg)
+        elif msg.startswith("scene inspect input:"):
+            cur["lines"]["input"] = msg
+        elif msg.startswith("scene inspect pixel centre:"):
+            cur["lines"]["centre"] = msg
+        elif msg.startswith("scene inspect box stats:"):
+            cur["lines"]["stats"] = msg
+        elif msg.startswith("scene inspect dlss:"):
+            cur["lines"]["dlss"] = msg
+        elif msg.startswith("scene inspect files:"):
+            cur["lines"]["files"] = msg
+        elif msg.startswith("scene inspect image:"):
+            cur["images"].append(msg)
+        elif msg.startswith("scene inspect engine legend:"):
+            pass
+        elif msg.startswith("scene inspect engine"):
+            cur["engine"].append(msg)
+        elif msg.startswith("scene inspect producers:"):
+            cur["lines"]["producers"] = msg
+        else:
+            dm = INSPECT_DRAW_RE.match(msg)
+            if not dm:
+                continue
+            idx = int(dm.group("idx"))
+            d = cur["draws"].setdefault(idx, {})
+            kind = dm.group("kind")
+            if kind == "occluded":
+                cur["occluded"].append(msg)
+            elif kind == "unmeasured":
+                cur["unmeasured"].append(msg)
+            elif kind == "verdict":
+                vm = re.match(r"^(?P<code>[A-Z_]+): (?P<text>.*)$", dm.group("rest"))
+                d["code"] = vm.group("code") if vm else "?"
+                d["text"] = vm.group("text") if vm else dm.group("rest")
+            else:
+                d[kind] = dm.group("rest")
+    return out
+
+
+def inspect_state(p, cap):
+    """(state, why) for the capture dict `cap` (None: no capture at all)."""
+    if cap is None:
+        inst = p["install"] or ""
+        if not inst:
+            return "NO SCENE INSPECT LINE", "the log has no scene inspect line: a build from before the tool, or a flat or non-graphics log"
+        if "NOT bound" in inst:
+            return "NOT BOUND", "hotkey.scene_inspect has no binding in the ini that session (the install line says how to bind it); nothing was captured"
+        if "VR only" in inst:
+            return "FLAT", "the flat profile: the inspector is VR only"
+        return "NEVER PRESSED", "the key is bound but no press was logged"
+    if not cap["collecting"]:
+        return "ARMED, NEVER COLLECTED", "`armed` is logged and no `collecting` line followed: no frame boundary ran after the press (a menu, no VR session, or a stalled frame loop)"
+    if not cap["report"]:
+        return "COLLECTED, NO REPORT", "`collecting` is logged and no report followed: the game ended, or the module faulted and was abandoned, before the report"
+    if any("no eye pass seen" in r for r in cap["refusals"]):
+        return "NO EYE PASS", "the captured frame saw no draw into an eye-sized target; this is NOT an empty box"
+    if not cap["complete"]:
+        return "REPORT INCOMPLETE", "the report began and the `complete` line is missing: the log ended inside it"
+    if "empty" in cap["lines"]:
+        return "EMPTY BOX", "the capture ran and tested the frame's draws; none wrote a sample inside the box"
+    return "COMPLETE", "the report is whole"
+
+
+def _inspect_short(s, n=230):
+    return s if len(s) <= n else s[: n - 3] + "..."
+
+
+def print_inspect(text, log_path=None, full=False):
+    """The --inspect report: the latest capture, merged by draw. Exit 0 for COMPLETE or EMPTY BOX, 1 for any other state of a capture, 3 when the log
+    has no scene inspect line at all."""
+    p = parse_inspect(text)
+    cap = p["caps"][max(p["order"])] if p["order"] else None
+    state, why = inspect_state(p, cap)
+    if cap is None and not p["install"] and not p["loose"]:
+        print("scene inspect: %s -- %s" % (state, why))
+        return 3
+    print("scene inspect: %s" % state)
+    print("  %s" % why)
+    if cap is None:
+        for r in p["loose"]:
+            print("  %s" % _inspect_short(r))
+        return 1
+    print("  capture %d, armed at %s by %s; %d capture(s) in this log" % (cap["n"], cap["ts"] or "?", cap["trigger"], len(p["order"])))
+    for r in cap["refusals"] + p["loose"][-3:]:
+        print("  %s" % _inspect_short(r, 400))
+    for key in ("box", "frame", "empty"):
+        if key in cap["lines"]:
+            print("  %s" % _inspect_short(cap["lines"][key].replace("scene inspect ", "", 1), 600))
+    for t in cap["targets"]:
+        print("  %s" % t.replace("scene inspect ", "", 1))
+    for s in cap["stacks"]:
+        print("  %s" % _inspect_short(s.replace("scene inspect ", "", 1), 500))
+    listed = [i for i in sorted(cap["draws"]) if "draw" in cap["draws"][i]]
+    if listed:
+        print("  draws that wrote inside the box (%d), in issue order, with the rule that fired:" % len(listed))
+        for i in listed:
+            d = cap["draws"][i]
+            dm = re.search(r"vs=(\w+) ps=(\w+) (\w) n=(\d+) inst=(\d+) topo=(\w+) cls=(\S+) status=(\S+) box=(\S+) ctr=(\S+)", d["draw"])
+            bm = re.search(r"blend=\[([^\]]*)\] depth=\[([^\]]*)\]", d["draw"])
+            rm = re.search(r"(verdict=\S+ ui=\S+ holo=\S+ mask=\S+ kf=\S+ eng=\S+ motion=\S+)", d.get("route", ""))
+            if dm:
+                print("   #%d  %s/%s  %s %s %s n=%s  box=%s ctr=%s" % (i, dm.group(1), dm.group(2), dm.group(7), dm.group(8), dm.group(6), dm.group(4), dm.group(9), dm.group(10)))
+            else:
+                print("   #%d  %s" % (i, _inspect_short(d["draw"])))
+            if bm:
+                print("        blend [%s]  depth [%s]" % (bm.group(1), bm.group(2)))
+            if rm:
+                print("        %s" % rm.group(1))
+            if "code" in d:
+                print("        -> %s: %s" % (d["code"], d["text"] if full else _inspect_short(d["text"], 330)))
+    if cap["occluded"]:
+        print("  occluded (%d), hidden at the centre pixel by a later opaque draw:" % len(cap["occluded"]))
+        for o in cap["occluded"]:
+            print("   %s" % o.replace("scene inspect occluded: ", "", 1))
+    if cap["unmeasured"]:
+        print("  unmeasured (%d): %s" % (len(cap["unmeasured"]), "; ".join(u.replace("scene inspect unmeasured: ", "", 1) for u in cap["unmeasured"][:5])))
+    for key, label in (("input", "input"), ("centre", "centre"), ("stats", "box"), ("dlss", "dlss")):
+        if key in cap["lines"]:
+            print("  %s: %s" % (label, _inspect_short(re.sub(r"^scene inspect (pixel centre|box stats|input|dlss): ", "", cap["lines"][key]), 900)))
+    for e in cap["engine"]:
+        print("  %s" % _inspect_short(e.replace("scene inspect ", "", 1), 700))
+    if "producers" in cap["lines"]:
+        print("  %s" % _inspect_short(cap["lines"]["producers"].replace("scene inspect ", "", 1), 700))
+    if "files" in cap["lines"]:
+        files = cap["lines"]["files"]
+        print("  %s" % _inspect_short(files.replace("scene inspect ", "", 1), 700))
+        if log_path:
+            base = os.path.dirname(log_path)
+            missing = []
+            for name in re.findall(r"(scene_inspect_[0-9A-Za-z_\-]+\.(?:csv|png))", files):
+                if not os.path.isfile(os.path.join(base, name)):
+                    missing.append(name)
+            if missing:
+                print("  NOT beside the log (%s): %s" % (base, ", ".join(missing)))
+    if "complete" in cap["lines"]:
+        print("  %s" % cap["lines"]["complete"].replace("scene inspect: ", "", 1))
+    return 0 if state in ("COMPLETE", "EMPTY BOX") else 1
+
+
+def self_test_inspect():
+    """--inspect on a capture built from the DLL's own text (tools\\scene_inspector_test pins the writer; this pins the reader against the header's string
+    literals, then reads good and broken logs). Returns ok."""
+    import contextlib
+    import io
+    ok = True
+
+    def fail(msg):
+        nonlocal ok
+        print("inspect: %s" % msg)
+        ok = False
+
+    def report(text, **kw):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = print_inspect(text, **kw)
+        return rc, buf.getvalue()
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for rel, needles in (
+            (os.path.join("src", "d3d11", "scene_inspector_core.h"),
+             ["scene inspect draw: #%u", "scene inspect route: #%u", "scene inspect verdict: #%u %s: %s", "scene inspect occluded: #%u", "scene inspect box: cap=%u",
+              "scene inspect frame: cap=%u", "scene inspect target: rt=#%u", "scene inspect pixel %s: input px", "scene inspect box stats:", "scene inspect dlss:",
+              "scene inspect files: cap=%u", "scene inspect: complete cap=%u", "scene inspect: armed cap=%u (trigger %s)", "scene inspect: collecting cap=%u",
+              "scene inspect empty: cap=%u", "NOT bound", "no eye pass seen", "scene inspect engine slot: slot=%d", "scene inspect producers:"]),
+            (os.path.join("src", "d3d11", "scene_inspector.cpp"),
+             ["scene inspect stack: rt=#%zu", "scene inspect: report cap=%u begin", "scene inspect unmeasured: #%u", "scene inspect input: DLSS input",
+              "scene inspect image: %s", "scene inspect: refused (", "scene inspect engine: %zu distinct slots"])):
+        path = os.path.join(root, rel)
+        try:
+            src = read_text(path)
+        except OSError:
+            fail("%s is not where the self-test looks for it" % rel)
+            continue
+        for needle in needles:
+            if needle not in src:
+                fail("%s has no text %r: this reader parses a line the DLL no longer writes" % (rel, needle))
+
+    stamp = "[10:22:14.%03d] "
+    good = [
+        "scene inspect: off; hotkey.scene_inspect is bound to F4",
+        "scene inspect: armed cap=1 (trigger hotkey.scene_inspect): the next frame boundary starts a one-frame capture of the left eye.",
+        "scene inspect: collecting cap=1 from game frame 103.",
+        "scene inspect: report cap=1 begin (trigger hotkey.scene_inspect)",
+        "scene inspect legend: draw = identity ...",
+        "scene inspect box: cap=1 centre=head-forward (no gaze source in this build) u=0.5385 v=0.5357 (101.2 px from the viewport centre) canting=0.00 deg inside_image=1 side=16px viewport=0,0 2016x2016 fixed_at_draw=3",
+        "scene inspect frame: cap=1 game frame 100: 7 eye draws seen (eye0 7, eye1 0, eye unknown 0); 7 tested; not tested: 0 over the 6000 cap, 0 on a UAV or stream-output target, 0 with no replay, 0 indirect; 0 answers missing; 5 draws wrote in the box (top 3, partial 0, buried 2, unmeasured 0) across 1 render targets; 3 listed, 0 beyond the listing cap",
+        "scene inspect target: rt=#0 R11G11B10_FLOAT 2016x2016 ds=D32_FLOAT viewport=0,0 2016x2016 box=[1092,1108)x[1076,1092) centre_px=1100,1084 draws=7 wrote_in_box=5",
+        "scene inspect stack: rt=#0 at the centre pixel, bottom to top: #2[opaque depth-write DEPTH-OWNER] < #3[additive no-depth-write]",
+        "scene inspect draw: #3 rt=#0 eye=0 order=3 gf=100 vs=B75A6FF2CA9FA5D6 ps=D56F859BE4781431 D n=6 inst=1 topo=TRIANGLESTRIP cls=additive status=top box=256 ctr=1 blend=[SRC_ALPHA,ONE,ADD/ONE,ZERO,ADD wm=F] depth=[test LESS_EQUAL write 0] stencil=[off] cull=NONE rts=1 rt0=R11G11B10_FLOAT 2016x2016 ds=D32_FLOAT 2016x2016 srv=[0:R8G8B8A8_UNORM 512x512]",
+        "scene inspect route: #3 verdict=none ui=-/none holo=- mask=- kf=- eng=plain motion=camera-row",
+        "scene inspect verdict: #3 TRANSLUCENT_NO_MASK: additive blend, writes no depth and has no reactive or coverage mask; inherits depth and motion of #2",
+        "scene inspect occluded: #0 rt=#0 vs=0000000000001000 ps=0000000000002000 cls=opaque box=256 ctr=1 under #2",
+        "scene inspect input: DLSS input 2016x2016, box [1092,1108)x[1076,1092) centre 1100,1084, crop 128x128 at 1036,1020 (same frame as the draws)",
+        "scene inspect pixel centre: input px 1100,1084 depth=0.250000 (2.000 m) mv_pass=(1.600,0.000) mv_dlss=(1.600,0.000) expect_world=(1.600,0.000) expect_ship=(0.000,0.000) mismatch=0.000 px vs the world camera term path=2(camera-world) engine_kind=0(none) coverage_mask=0 bias_mask=0",
+        "scene inspect box stats: 256 pixels read; depth min=0.250000 max=0.250000",
+        "scene inspect dlss: preset=K(11) input 2016x2016 -> output 4032x4032 jitter=(0.2500,-0.1250) px history_reset=0 exposure=pre 1.000 scale 1.000 texture=none hdr=0",
+        "scene inspect engine legend: a pixel's engine kind is 1 when ...",
+        "scene inspect engine: 1 distinct slots under the box; pool read (9216 records of 336 bytes)",
+        "scene inspect engine slot: slot=5 pixels=153 kinds=[other=153] record: rigid (base word 0) scale=1.0000 pos=(10.000,20.000,30.000) previous scale=1.0000 previous pos=(10.000,19.500,30.000) MOVED (the two pose blocks differ) marker=DEADBEEF",
+        "scene inspect producers: records appended to the pool -- in the captured frame: emit FUN_144312E00 calls 40 items 41, second producer FUN_14369C9C0 calls 3 items 7 (never stamped), primary FUN_1442B4130 calls 9; since launch: emit calls 100 items 1000, second producer calls 10 items 77, primary calls 500",
+        "scene inspect image: depth 128x128: grey = raw reversed-Z depth",
+        "scene inspect files: cap=1 draws_csv=scene_inspect_20261014-102214_cap1.csv box_csv=scene_inspect_20261014-102214_cap1_box.csv images=scene_inspect_20261014-102214_cap1_colour_in.png",
+        "scene inspect: complete cap=1: 5 draws wrote in the box (2 occluded), DLSS inputs read, DLSS outputs read.",
+    ]
+
+    def build(lines):
+        return "\n".join((stamp % i) + l for i, l in enumerate(lines)) + "\n"
+
+    text = build(good)
+    rc, out = report(text)
+    if rc != 0 or "scene inspect: COMPLETE" not in out:
+        fail("a good capture did not report COMPLETE (rc=%d):\n%s" % (rc, out))
+    for need in ("#3  B75A6FF2CA9FA5D6/D56F859BE4781431  additive top", "-> TRANSLUCENT_NO_MASK", "occluded (1)", "#0 rt=#0", "centre: input px 1100,1084",
+                 "dlss: preset=K(11)", "complete cap=1", "box: cap=1 centre=head-forward", "stack: rt=#0", "engine slot: slot=5 pixels=153", "MOVED", "producers: records appended"):
+        if need not in out:
+            fail("the COMPLETE report lacks %r:\n%s" % (need, out))
+    # Files beside the log are checked when the log's path is given.
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="edvr_inspect_")
+    try:
+        fake = os.path.join(tmp, "edvr_gfx_20261014_102200.log")
+        rc, out = report(text, log_path=fake)
+        if "NOT beside the log" not in out or "scene_inspect_20261014-102214_cap1.csv" not in out:
+            fail("files missing beside the log were not reported:\n%s" % out)
+        for n in ("scene_inspect_20261014-102214_cap1.csv", "scene_inspect_20261014-102214_cap1_box.csv", "scene_inspect_20261014-102214_cap1_colour_in.png"):
+            open(os.path.join(tmp, n), "w").close()
+        rc, out = report(text, log_path=fake)
+        if "NOT beside the log" in out:
+            fail("files that are there were reported missing:\n%s" % out)
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # The state ladder: each stage of a capture that did not finish has its own name.
+    cases = [
+        ("no line at all", [], "NO SCENE INSPECT LINE", 3),
+        ("unbound", ["scene inspect: off; hotkey.scene_inspect is NOT bound -- add \"scene_inspect = <a free key>\" under [hotkey] in edvr.ini to use it"], "NOT BOUND", 1),
+        ("flat", ["scene inspect: off; VR only, hotkey.scene_inspect does nothing in the flat profile"], "FLAT", 1),
+        ("bound, never pressed", good[:1], "NEVER PRESSED", 1),
+        ("armed, never collected", good[:2], "ARMED, NEVER COLLECTED", 1),
+        ("collected, no report", good[:3], "COLLECTED, NO REPORT", 1),
+        ("report cut off", good[:8], "REPORT INCOMPLETE", 1),
+        ("no eye pass", good[:4] + ["scene inspect: refused (no eye pass seen: not one draw into an eye-sized target reached the inspector in the captured frame (a menu). This is NOT an empty box)",
+                                    good[-1]], "NO EYE PASS", 1),
+        ("empty box", good[:4] + ["scene inspect box: cap=1 centre=head-forward u=0.5 v=0.5", "scene inspect frame: cap=1 game frame 100: 120 eye draws seen",
+                                  "scene inspect empty: cap=1 nothing wrote a sample inside the box (120 eye draws were tested and none reached it). The capture RAN; this is the answer, not a failure.",
+                                  "scene inspect: complete cap=1: 0 draws wrote in the box (0 occluded), DLSS inputs read, DLSS outputs read."], "EMPTY BOX", 0),
+    ]
+    for label, lines, want, wantRc in cases:
+        rc, out = report(build(lines) if lines else "nothing here\n")
+        if ("scene inspect: " + want) not in out or rc != wantRc:
+            fail("%s: wanted %s with exit %d, got exit %d:\n%s" % (label, want, wantRc, rc, out))
+    # Two captures: the later one is read.
+    second = [l.replace("cap=1", "cap=2") for l in good[1:]]
+    second[8] = second[8].replace("#3 ", "#9 ", 1)
+    rc, out = report(build(good + second))
+    if "capture 2," not in out or "2 capture(s) in this log" not in out:
+        fail("the later of two captures was not the one read:\n%s" % out)
+    # A refusal after a finished capture does not rewrite it.
+    rc, out = report(build(good + ["scene inspect: refused (a capture is already running; press again once it has reported): the capture is idle (trigger x)"]))
+    if rc != 0 or "COMPLETE" not in out:
+        fail("a loose refusal broke a finished capture:\n%s" % out)
+    return ok
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------------
 # --terrain-checkerboard: Elite's terrain checkerboard rendering in VR, read from the game's active graphics preset on a worker thread (design
 # doc section 84, the VR hint). The lines are src/common/terrain_checkerboard_notice.h's: the worker's start line, one line for the first read
 # and one for each change (ON, OFF or unknown with its reason), the bound's line, a failed start or a fault, and the menu's note that the
@@ -10134,6 +10471,14 @@ def main(argv=None):
                          "line's `frame work span: completed N, skipped S, invalid I, last X ms` field per window and a verdict "
                          "WORKING / NEVER RAN / FAILING / NOT APPLICABLE / NO FIELD; exit 0 for WORKING or NOT APPLICABLE, "
                          "1 otherwise, 3 when the log has no census line")
+    ap.add_argument("--inspect", action="store_true",
+                    help="report the scene inspector's latest capture (hotkey.scene_inspect; docs/scene-inspector-2026-10-14.md): the box, the "
+                         "frame's counts, the stack at the centre pixel, each draw that wrote inside the box with its state, EDVR's route and "
+                         "the rule that fired, the occluded draws, the centre pixel's DLSS inputs, the DLSS line and the files beside the log; "
+                         "names how far a capture got (NOT BOUND, NEVER PRESSED, ARMED NEVER COLLECTED, COLLECTED NO REPORT, NO EYE PASS, "
+                         "EMPTY BOX, COMPLETE); exit 0 for COMPLETE or EMPTY BOX, 1 otherwise, 3 when the log has no scene inspect line")
+    ap.add_argument("--full", action="store_true",
+                    help="with --inspect, print each verdict whole instead of cut at about 330 characters")
     ap.add_argument("--terrain-checkerboard", action="store_true",
                     help="report a VR flight's Elite-terrain-checkerboard-rendering notice (design doc section 84): the worker's "
                          "start line, one line for the first read and each change (ON, OFF or unknown with its reason, read from "
@@ -10303,6 +10648,8 @@ def main(argv=None):
         return print_ui_composites(text)
     if args.gpu_work_span:
         return print_gpu_work_span(text)
+    if args.inspect:
+        return print_inspect(text, path, args.full)
     if args.terrain_checkerboard:
         return print_terrain_checkerboard(text)
     if args.camera_census:
@@ -10983,6 +11330,8 @@ def self_test():
     if not self_test_slow_regime():
         ok = False
     if not self_test_freezes():
+        ok = False
+    if not self_test_inspect():
         ok = False
     if not self_test_terrain_checkerboard():
         ok = False

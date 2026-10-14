@@ -5,39 +5,46 @@
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
   path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
   docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
-- **State (2026-10-14):** triage done, no element root-caused, no fix tried. The log-only blend probe is BUILT, NOT FLOWN, on
-  `claude/blend-probe` (cut from `claude/flight-2026-10-14`, 57f5393e). Its rig is `tools\blend_probe_test`, in the build gate.
-- **The five elements:** (1) the hologram projected over the landing pad in the station (the user confirmed: not the cockpit docking
-  display); (2) the gantry railing while the pad moves; (3) the hologram adverts; (4) weapons fire; (5) the station "mail slot" force field.
-- **Environment:** DLSS preset K (`fix.temporal_aa_model = k`), 2016x2016 input to 4032x4032 output per eye (HMD Quality 0.50), Elite
-  supersampling held at 1.0. The 10-13 21:43 log names the runtime `steamvr-openxr/steamvr-openxr-aapvr`, not Pimax OpenXR.
-- **Finding 1 (PROVEN):** the bias-current-colour mask (the old `ui_depth_reactive = 0.5` setting, baked in by the 2026-10-09 key cull) does nothing on preset K (dlaa.cpp:711, "only preset F supports this input"). K's only
-  anti-ghost path is EDVR's post-DLSS UI resolve, which reads the coverage mask, and only the HUD, cockpit hologram and smoke families set it.
-- **Finding 2 (PROVEN):** no world-space transparent or additive family is in any coverage list except thruster smoke (`5E417E9D` /
-  `BD801F2F`) and the target reticle (`71DD8B8B`). The old `temporal_aa_hologram_families` extras (also culled) joined the cockpit list only, so no user-reachable way to add a world family existed.
-- **Finding 3 (PROVEN):** engine-record motion for movers is verified for settlements and landing ships only. The ini says stations and
-  ships in space are not verified.
-- **Mechanism (PROVEN for cockpit holograms, INFERRED here):** a pixel that writes no depth takes the depth, and so the motion vector, of
-  what is behind it. A head move makes that wrong for anything nearer than its background; at a 2x upscale a thin line is under one input
-  pixel wide, so DLSS leans on its history.
-- **Grouping:** G1 = elements 1, 3, 4, 5 (translucent or additive world effects with no depth or motion of their own). G2 = element 2 (an
-  opaque mover whose motion is probably the camera term alone). Elements 1 and 3 may share a hologram material.
-- **Candidates:** element 1 may be the additive six-vertex sprite pair VS `94D5C556DFD6D705` / PS `912477AEF6958379`, which the glare fix
-  and the UI layer both claim (log 10-13 21:43 and 21:55). NOT proven for the pad. The railing's pair is not known to be in `kFamilies`.
-  The adverts, the weapons and the force field have no hash in any doc.
-- **Temporary key:** `hotkey.blend_probe` (section `[hotkey]`, unbound; use a free key, for example F3 (avoid keys the game uses)). Remove it, `src\d3d11\blend_probe*`,
-  `tools\blend_probe_test`, the four small hooks in vscreen.cpp / temporal_pass.cpp / ui_depth / ui_layer, and its build.bat lines when
-  this arc closes (ship the winning behaviour, propose removing the key, quoted, as AGENTS.md Scope control says).
-- **Cannot be captured on this build:** `advanced.temporal_aa_debug` (the `motion_source`, `ui_layer`, `depth`, `motion` views) and
-  `advanced.temporal_aa_diagnostics` were removed by the 2026-10-09 key cull (53e6f047), on main too. The triage's zero-build views do
-  not exist. The grid's `p` (motion path) and `e` (engine kind) columns answer the same railing question per cell. Bringing a view back
-  would be a separate change; it is not folded in here.
-- **Confound:** AA off may not render the same pixels as DLSS. Check the AA-off render size before reading "worse than AA off" as a bug.
-- **Flight plan:** section "Flight plan" below. Set `fix.particle_billboard = stock` first.
-- **Next flight:** one session, five elements, two presses each (still, then head moving), the railing across a pad raise and lower. Read
-  the log with `python tools\edvr_log.py --target steam --expect-build HEAD`, then grep `blend probe`.
-- **Ruled out:** the 2026-09-29 pad-into-layer rule as wired in 9122f31e (docs/openxr-performance-review-2026-09-14.md:1660); reactive
-  bias or sharpening as a fix (docs/hologram-depth-2026-09-24.md "Ruled out"). Do not propose them again.
+- **State (2026-10-14, evening):** the scene inspector (`docs\scene-inspector-2026-10-14.md`, `hotkey.scene_inspect`) flew seven captures on
+  v0.20.0-rc.1-4-g66dfe94f (Frontier). It replaced the blend probe as the instrument; `claude/blur-fixes` carries the inspector, one fix, one
+  instrument and the decisions below, BUILT, NOT FLOWN. The blend probe and its key stay until the next flight confirms the inspector (it has not been
+  removed).
+- **The five elements:** (1) the hologram over the landing pad; (2) the gantry railing while the pad moves; (3) the hologram adverts; (4) weapons fire;
+  (5) the station "mail slot" force field. (The inspector's captures: cap1-2 railing, cap3 pad, cap4 force field, cap5 advert, cap6 weapons, cap7 another
+  ship's engine flares.)
+- **Environment:** DLSS preset K, 2016x2017 in, 4032x4034 out per eye, Elite supersampling 1.0, native OpenXR runtime, Frontier. K ignores the reactive mask
+  (dlaa.cpp:711); what K honours is depth and motion, plus EDVR's post-DLSS UI resolve, which replaces covered pixels with the current raster.
+- **Findings (PROVEN from the captures):**
+  1. **The railing's 2 px "mismatch" was a tool bug, not a pass fault.** The decision texture's path 2 is the WORLD camera term (temporal_shader_source.h:910,
+     `count15 ? 2 : 1`, count15 set only in the world branch), path 1 the head's. The inspector had them reversed, so a pixel that correctly took the world
+     term read as 2 px off the ship term. Fixed in the tool; the blend probe's legend has the same error.
+  2. **The railing is kind 3.** Its draws are keyed and substituted (DE545DC8EE4FBB87/E46E3E4832B2FDB0 rigid#3, EB5234DB6ADB491D/3434972DB5336AA4 rigid#0), yet
+     its pixels read engine kind 3: the pool record has no marker from this frame and none within 64, so the camera term is used. Cap2: 153 of 256 box pixels
+     (99 m); the 103 beside them, 115-125 m, are exact. The true error is likely small (about 0.2 px per m/s of elevator speed at 99 m); thin rails at a 2x
+     upscale are sensitive to it.
+  3. **0357BBB2DEE43C1F/81812EF97FB4A361, 8289669D93A18C1D/C6E6E419DA9F6FAD, A1B7CFCD0BE7493E/2DB678B6B558B604 are the deferred light volumes** (a 14-index
+     box, an 84-index sphere or cone, smaller instanced volumes; gpu_pass_profile.cpp:68): lighting, not the force field or the flares. Never route them.
+  4. **B75A6FF2CA9FA5D6/D56F859BE4781431 is a generic anchor billboard with a depth-occlusion sample** (flat doc line 1899), present at the view centre in
+     caps 3, 5, 6 and 7 (7-9 overlapping sprites): a light halo or flare layer, not the pad hologram.
+  5. **68DDDEF04D9894AF/06332CA168B6DA63 is a stretched, age-ramped lit particle billboard** (docs\shaders\particle-stretched-vs.asm), in caps 5 and 6: not
+     weapon-specific.
+  6. The force field in cap4 is most likely 124D7F3F649138D4/8085AE8DD1906CDC, an alpha quad over the G-buffer (rt0) above the hull, with no depth write; no
+     draw in cap3 is identified as the pad hologram.
+- **Built on `claude/blur-fixes`:**
+  - *Railing, instrument only.* The inspector now reads back, per slot under the box, the pool record the pass indexed (rigid or skinned, STATIC or MOVED, the
+    marker word, pose and previous pose), and prints the kinematic producers' appended-record totals per captured frame (emit FUN_144312E00, the second
+    producer FUN_14369C9C0 which is counted and never stamped, the primary). One capture of the railing mid-cycle settles whether it is a mover no hook reaches.
+  - *Adverts.* 46546443FD3C3F88 and 95D01BA609BF7500 joined the hologram depth pass's world markers (holo_families.h): their own depth, so the camera term
+    gives them parallax. Mechanism: the pass stamps depth into the AA depth copy; it writes no mask.
+  - *Decided against, from the evidence:* the force field (a G-buffer draw: the pass compares its light contribution with the lit frame, which an albedo write
+    breaks), the light volumes, `B75A6FF2`, and the particle pair (no velocity source, and a post-DLSS take would lose scene occlusion).
+- **Open:** the pad hologram (no draw named), the force field, weapons fire and the engine flares (no route gives a thin fast mover its own motion).
+- **Ruled out:** railing motion mismatch (tool label bug, finding 1); the 2026-09-29 pad-into-layer rule as wired in 9122f31e; reactive bias or sharpening as
+  a fix (docs/hologram-depth-2026-09-24.md "Ruled out"); the light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (finding 4).
+- **Next flight:** the same session on the new build. Railing mid-cycle: read the `engine slot` lines (MOVED + kind 3 = a mover EDVR never stamped; STATIC =
+  the camera term is right and the blur is elsewhere) and the `producers` line (second producer items > 0 in the captured frame names its producer). Advert:
+  `holo=world`, verdict HOLO_PASS, a finite `metres` at the box instead of the far plane, `world markers N draws/frame` above 0 in the 30 s census. Pad
+  hologram and force field: aim at the effect's brightest part and capture again; read each target's `role=` first.
 
 ## Triage
 
@@ -150,3 +157,13 @@ arrived (a menu, no VR), none was a candidate, or none reached the window.
   motion dispatch (and releases the 65 MB decision texture once no eye run or capture wants it); ui_depth.cpp `uiDepthDrawProbe` and
   ui_layer.cpp `uiLayerDecisionCount` expose per-draw state read-only. The full build is green with the rig in its gate; nothing was
   installed or flown. The probe is VR only; a flat press is refused with a reason.
+
+- **2026-10-14, first inspector flight and the fixes.** Seven captures, read against the draws, the pass's shader and the earlier engine-motion arc.
+  The railing's "mismatch" was the tool's reversed path labels. The railing's pixels are engine kind 3 (see finding 2). docs\kinematic-motion-injection-2026-09-19.md
+  (2026-09-28, "061832 braces") met the same signature on the Coriolis station's crossbraces and added the primary producer (FUN_1442B4130) and the private-pool
+  certificates; the 13:23-13:25 windows of this flight show the primary running (relay calls 11573-20266, joined, moving 0-1) and the emit's masked-for-gap
+  counts in the tens of thousands, so the railing's records are neither: the open candidate is the third producer FUN_14369C9C0, hooked and counted by
+  `directBracket` but, unlike producer 0, given no emit observer. That is a hypothesis; the instrument above names the producer in one capture.
+  The adverts were added as world markers on the evidence that the two pairs cover the whole box over bare sky in the HDR target that shares the scene depth,
+  with no route, and sit with the target sprite and the reticle in flat_projection_recipes.h's dp4 b0 4..7 group. Their log signature after the fix:
+  `holo=world`, `HOLO_PASS`, a finite depth under the box. Decisions without code are in the Status block (findings 3-6).

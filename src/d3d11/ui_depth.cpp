@@ -1083,8 +1083,8 @@ SmokeDepth* smokeDepthFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_
 // canopy the pass refuses are holo_families.h's -- the depth pass's eleven,
 // radius-clip and all. The crisp take's family rule reads the same header
 // but its own shorter list (kHoloFamiliesTake, eight); these eleven are
-// this pass's alone. The world-marker list stays fixed, never extended -- see
-// holoWorldMarkerList below.
+// this pass's alone. The world-marker list is holo_families.h's: the target reticle and, since 2026-10-14, the station's hologram advert pairs
+// (each extension needs a capture that names the draw; see holoWorldMarkerList below).
 uint64_t g_holoFamilies[kMaxHashes];
 uint32_t g_holoFamilyCount = 0;
 float    g_holoFloor = 0.05f;    // display brightness floor, 0..1
@@ -2181,7 +2181,7 @@ uint32_t holoBuildFamilyList(uint64_t* out, uint32_t cap) {
     return count;
 }
 
-// The world-marker list (kHoloWorldMarkers, above): fixed and separate
+// The world-marker list (kHoloWorldMarkers, above): separate
 // from the cockpit families -- a world marker's whole point is that it is
 // not one of the (radius-clipped) cockpit families. Pure, like
 // holoBuildFamilyList, so the rig can drive it directly.

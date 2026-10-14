@@ -73,6 +73,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "exposure_fix.h"
 #include "menu.h"
 #include "kinematic_eval_probe.h"
+#include "kinematic_eval_hook.h"   // kinematicEvalProducerTotals, for the scene inspector's environment
 #include "engine_velocity.h"
 #include "scheduler_stack_probe.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
@@ -84,6 +85,9 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "perf_monitor.h"
 #include "gpu_pass_profile.h"   // TEMPORARY hotkey.gpu_pass_profile: the GPU pass profiler's request
 #include "blend_probe.h"       // TEMPORARY hotkey.blend_probe: the blend probe's install and request
+#include "scene_inspector.h"   // hotkey.scene_inspect: the scene inspector's install and request
+#include "ui_depth.h"          // uiDepthEyeOfTargetReadOnly, for the inspector's environment
+#include "vr_camera_census.h"  // nativeTemporalEyeGeometry / nativeTemporalEyeToHead, for the inspector's environment
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
@@ -270,13 +274,14 @@ struct State {
     Hotkey censusKey;
     Hotkey gpuPassKey;   // TEMPORARY (GPU pass profile, 2026-10-12): hotkey.gpu_pass_profile, default unbound
     Hotkey blendProbeKey;   // TEMPORARY (blend probe, 2026-10-14): hotkey.blend_probe, default unbound
+    Hotkey sceneInspectKey; // the scene inspector (2026-10-14): hotkey.scene_inspect, default unbound; a developer tool, not in the F8 menu
     // The eye dump key: both eyes as the headset receives them, to
     // edvr_logs\eyes as BMP (temporalPassArmEyeDump). Unbound by default.
     Hotkey eyesKey;
     // What each of those three was last bound from (the ini text), so a reload
     // that changes one re-resolves it and one that does not says nothing: the
     // settings menu's Hotkeys page writes them while the game runs.
-    std::string dumpKeyText, censusKeyText, eyesKeyText, gpuPassKeyText, blendProbeKeyText;
+    std::string dumpKeyText, censusKeyText, eyesKeyText, gpuPassKeyText, blendProbeKeyText, sceneInspectKeyText;
     bool        diagnosticKeysBound = false;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings; they give the FSS mode latch its frame-exact edges.
@@ -1343,6 +1348,7 @@ void tickHotkeys() {
     }
     if (g_state->gpuPassKey.pressed()) gpuPassProfileRequest();
     if (g_state->blendProbeKey.pressed()) blendProbeRequest("hotkey.blend_probe");   // TEMPORARY (blend_probe.h)
+    if (g_state->sceneInspectKey.pressed()) sceneInspectRequest("hotkey.scene_inspect");   // scene_inspector.h: a key poll is all it costs until pressed
     // The eye dump key: the next treated frame's two eyes to disk.
     if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
     if (g_state->missedCensusNotes < kMissedDumpNotes &&
@@ -2007,6 +2013,30 @@ std::string hotkeyDescribe(const Hotkey& k) {
     return out;
 }
 
+// The scene inspector's view of the rest of the DLL (scene_inspector.h): handed over once at install, so the module itself links alone into its
+// test rig (tools\scene_inspector_test).
+bool sceneInspectEyeGeometry(uint32_t eye, float frustum[4], float eyeToHead[9]) {
+    uint64_t sequence = 0;
+    float shift[2] = {};
+    if (!nativeTemporalEyeGeometry(eye, &sequence, frustum, shift)) return false;
+    float rotation[9];
+    if (nativeTemporalEyeToHead(eye, rotation)) std::memcpy(eyeToHead, rotation, sizeof(rotation));
+    return true;
+}
+std::wstring sceneInspectLogDir() { return Config::get().logDir(); }
+bool sceneInspectProducerTotals(uint64_t v[5]) { return kinematicEvalProducerTotals(v); }
+const char* sceneInspectIniName() { return Config::get().iniName(); }
+SceneInspectEnv sceneInspectEnv() {
+    SceneInspectEnv e;
+    e.eyeOfTarget = &uiDepthEyeOfTargetReadOnly;
+    e.eyeGeometry = &sceneInspectEyeGeometry;
+    e.setBlendRaw = &vScreenOMSetBlendStateRaw;
+    e.logDir = &sceneInspectLogDir;
+    e.producerTotals = &sceneInspectProducerTotals;
+    e.iniName = &sceneInspectIniName;
+    return e;
+}
+
 // The three diagnostic keys, bound at launch and RE-bound whenever the ini says
 // something else: the settings menu's Hotkeys page writes these while the game
 // runs, so (like hotkey.menu and hotkey.explorer_cam) they re-resolve live. A
@@ -2057,6 +2087,12 @@ void configureDiagnosticHotkeys() {
          "hotkey.blend_probe", "blend probe",
          "hotkey: blend_probe is set but bound nothing, so the blend probe cannot be armed this session.",
          " Captures 3 frames (the draws that blend or write no depth at the view centre, and the temporal pass's motion grid) to the log. Costs nothing until pressed."},
+        // The scene inspector (2026-10-14; scene_inspector.h, docs/scene-inspector-2026-10-14.md), a developer tool: default unbound; one press captures one frame of
+        // the left eye: every draw that wrote the pixels at the view centre, what EDVR did with each, what DLSS was handed there, and a verdict per draw.
+        {&s.sceneInspectKey, &s.sceneInspectKeyText, Config::get().getString("hotkey.scene_inspect", ""),
+         "hotkey.scene_inspect", "scene inspector",
+         "hotkey: scene_inspect is set but bound nothing, so the scene inspector cannot be armed this session.",
+         " One frame of the left eye (every draw that wrote the view centre, EDVR's decision for each, DLSS's inputs there) to the log, a CSV and PNGs in edvr_logs. Costs nothing until pressed; VR only."},
         // The eye dump key: both eyes as the headset receives them, to edvr_logs\eyes as BMP --
         // what the player sees, readable off the desk (asked for 2026-09-09, with a debug view
         // up). The census key's shape: empty is off, and a bind is said.
@@ -2959,6 +2995,8 @@ void hookDevice(ID3D11Device* device) {
             optimizedStationInstall(runtimeFlatProfile());
             // The blend probe (TEMPORARY, blend_probe.cpp): armed by key only; nothing is observed until then. One line: whether the key is bound.
             blendProbeInstall(runtimeFlatProfile(), g_state->blendProbeKey.bound(), g_state->blendProbeKeyText.c_str());
+            // The scene inspector (scene_inspector.cpp): the same, armed by key only; one line saying whether the key is bound.
+            sceneInspectInstall(runtimeFlatProfile(), g_state->sceneInspectKey.bound(), g_state->sceneInspectKeyText.c_str(), sceneInspectEnv());
 
             // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
             // own commit writes two dozen entries of this table in the shared
