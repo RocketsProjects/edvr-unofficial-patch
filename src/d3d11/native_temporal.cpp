@@ -611,6 +611,15 @@ bool nativeTemporalEyeGeometry(uint32_t eye, uint64_t* sequence, float frustum[4
   if (shift) { shift[0] = s.shift[eye][0]; shift[1] = s.shift[eye][1]; }
   return true;
 }
+bool nativeTemporalEyeToHead(uint32_t eye, float rotation[9]) {
+  if (t_insideTreat || !rotation) return false;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!current || !current->active || !current->begun || eye > 1) return false;
+  const float* m = current->eyes[eye];   // 3x4 row-major, translation in the last column
+  for (int r = 0; r < 3; ++r)
+    for (int c = 0; c < 3; ++c) rotation[r * 3 + c] = m[r * 4 + c];
+  return true;
+}
 // The omission counters the close() summary prints, for the current channel (temporal_pass.h): skipped counts one per
 // omitted EYE per omitted frame; history_kept (spared) counts once per resolved omission RUN per eye. FOR TESTS and the
 // glue rig: a flight is judged on unjudged_resets == 0 and on runs per eye, not on held frames == history_kept.

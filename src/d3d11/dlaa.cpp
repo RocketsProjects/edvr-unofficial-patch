@@ -129,6 +129,9 @@ uint64_t g_presetGen = 1;
 // The flat HDR route's exposure input (section 106): NVIDIA's "1x1 texture containing the final exposure scale",
 // R32_FLOAT 1.0, made on the first such evaluation. H is pre-tonemap radiance the game's own tone pass exposes later.
 ID3D11Texture2D* g_exposureOne = nullptr;
+// The exposure scalars every evaluation hands NVIDIA (dlaaEvaluate), named so the scene inspector (dlaaEvalFacts) reports the ones in force.
+constexpr float kDlssPreExposure = 1.0f;
+constexpr float kDlssExposureScale = 1.0f;
 
 const char* presetName(unsigned p) {
     switch (p) {
@@ -716,8 +719,8 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ep.InReset = reset ? 1 : 0;
     ep.InMVScaleX = 1.0f;
     ep.InMVScaleY = 1.0f;
-    ep.InPreExposure = 1.0f;
-    ep.InExposureScale = 1.0f;
+    ep.InPreExposure = kDlssPreExposure;
+    ep.InExposureScale = kDlssExposureScale;
     if (flatDlssFixedExposure(hdr, runtimeFlatProfile())) {
         if (!g_exposureOne) {
             ID3D11Device* exposureDev = nullptr;
@@ -772,6 +775,20 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     if (reset) ++g_resets;
     return true;
 #endif
+}
+
+// What an evaluation hands NVIDIA beyond its textures, for the scene inspector: computed on demand, so the hot path stores nothing.
+DlaaEvalFacts dlaaEvalFacts(bool hdr, bool upscaling) {
+    DlaaEvalFacts f;
+#ifdef EDVR_HAVE_NGX
+    f.preset = upscaling ? g_preset : dlaaSafe(g_preset);
+    f.preExposure = kDlssPreExposure;
+    f.exposureScale = kDlssExposureScale;
+    f.exposureTexture = flatDlssFixedExposure(hdr, runtimeFlatProfile());
+#else
+    (void)hdr; (void)upscaling;
+#endif
+    return f;
 }
 
 void dlaaSetPreset(unsigned preset) {

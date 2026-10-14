@@ -43,6 +43,7 @@ namespace edvr { void temporalPassDumpHistory(const char* trigger); }
 #include <cstddef>
 #include <cstdint>
 
+struct ID3D11Buffer;
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
@@ -236,6 +237,10 @@ bool temporalPassPlanes(float* nearZ, float* farZ);
 float temporalPassDepthAt(float metres);
 
 void temporalPassShutdown();
+
+// The pass's statistics buffer and the byte offset of Stats[40], where the motion shader keeps its running count of the pixels the effect rule hid
+// (effect_history.h reads it for its census). Null before the buffer exists or after shutdown; the pointer is valid on the render thread.
+ID3D11Buffer* temporalPassEffectCounter(uint32_t* byteOffset);
 
 }  // namespace edvr
 
