@@ -3,6 +3,7 @@
 #include "optimized_station.h"   // the station's sun skip while sealed (optimized_station.cpp)
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
+#include "gpu_busy_sampler.h" // gpuBusyShutdown: the OS GPU busy sampler (2026-10-14)
 #include "gpu_pass_profile.h" // TEMPORARY GPU pass profiler (hotkey.gpu_pass_profile): one bool read per hook unarmed
 #include "blend_probe.h"      // TEMPORARY blend probe (hotkey.blend_probe): one relaxed load per eye draw unarmed
 #include "scene_inspector.h"  // the scene inspector (hotkey.scene_inspect): one relaxed load per eye draw unarmed
@@ -7254,6 +7255,7 @@ void shutdownVScreenFixes() {
     fssPanelRectShutdown();
     fssRevealShutdown();
     gpuCensusShutdown();
+    gpuBusyShutdown();   // the OS GPU busy sampler's thread (gpu_busy_sampler.cpp, 2026-10-14)
     gpuPassProfileShutdown();
     billboardShutdown();
     // Both halves of the intro. Neither was on this roll-call, so a session

@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -610,6 +611,11 @@ GpuIntervals<kFrameSpanSlots> g_frameSpan;
 std::atomic<bool> g_frameWorkOpenFlag{false};   // a pair is open (begun, not yet ended)
 uint64_t g_frameSpanCompleted = 0;   // pairs read back, all time
 double g_frameSpanLastMs = 0.0;      // the last pair read back
+// The same pairs' running totals, published for another thread (gpu_busy_sampler.cpp logs the span beside its busy figure on its
+// own clock): written by the render thread after each read-back, read by the sampler thread. Two relaxed stores; a read that
+// lands between them is one pair off, which a mean over thirty seconds does not see.
+std::atomic<double> g_frameSpanSumPub{0.0};
+std::atomic<uint64_t> g_frameSpanCountPub{0};
 
 namespace detail {
 std::atomic<bool> g_frameWorkArmed{false};
@@ -643,6 +649,8 @@ void frameSpanPoll(ID3D11DeviceContext* ctx) {
     if (got == 0) return;
     g_frameSpanLastMs = (g_frameSpan.totals.ms - beforeMs) / static_cast<double>(got);
     g_frameSpanCompleted += got;
+    g_frameSpanSumPub.store(g_frameSpan.totals.ms, std::memory_order_relaxed);
+    g_frameSpanCountPub.store(g_frameSpanCompleted, std::memory_order_relaxed);
 }
 
 void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept {
@@ -704,6 +712,11 @@ void gpuCensusFrameWorkStats(unsigned long long* completed, unsigned long long* 
     if (skipped) *skipped = g_frameSpan.totals.skipped;
     if (invalid) *invalid = g_frameSpan.totals.invalid;
     if (lastMs) *lastMs = g_frameSpanLastMs;
+}
+
+void gpuCensusFrameSpanTotals(double* sumMs, uint64_t* count) noexcept {
+    if (sumMs) *sumMs = g_frameSpanSumPub.load(std::memory_order_relaxed);
+    if (count) *count = g_frameSpanCountPub.load(std::memory_order_relaxed);
 }
 
 bool gpuCensusFrameSpan(double* ms, unsigned* samples) noexcept {
