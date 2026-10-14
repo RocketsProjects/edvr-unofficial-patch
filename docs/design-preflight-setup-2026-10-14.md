@@ -3,8 +3,8 @@
 ## Status
 
 - **State (2026-10-14):** P1 is being built on `claude/vibrant-maxwell-9gehb1`.
-  Nothing has flown. Sean answered Q1-Q6 on 2026-10-14 (section 10); Q7 and Q8
-  are open.
+  Nothing has flown. Sean answered Q1-Q8 on 2026-10-14 (section 10). Nothing is
+  open for Sean.
 - **Goal (Sean, 2026-10-14):** help users set up the mod and Elite's settings
   so they get a good experience on the first launch. Make it as simple and user
   friendly as possible.
@@ -12,7 +12,8 @@
   - One new installer tab, **Pre-flight**: a short checklist and one
     button, **Set up for me**.
   - A first install lands on it.
-  - No wizard, no questions, no new `edvr.ini` key.
+  - No wizard and nothing to answer: every choice comes pre-filled. No new
+    `edvr.ini` key.
 - **Decided (Sean, 2026-10-14):**
   - Q1: the installer may write Elite's graphics files.
   - Q2: the render size scales with the headset and the graphics card
@@ -24,6 +25,11 @@
     back".
   - Q6: Detect my headset is offered on SteamVR too, and says first that it
     starts SteamVR.
+  - Q7: `fix.openxr_resolution` is written in two cases only: DLSS's 8192
+    limit, and a card short even at 0.5.
+  - Q8: flat's frame-rate target is detected from Elite's own settings and the
+    monitor. It is shown pre-filled, with one dropdown to change it (section
+    4).
 - **Phases:**
   - P1: the rig card, the checks and the EDVR keys. Elite's rows show as
     advice, without a checkbox, until P2.
@@ -41,7 +47,7 @@
   - Writes happen only with the game closed, after a backup, and with an
     undo that restores values one at a time.
   - The runtime DLL keeps its never-write rule (`vr-supersampling-gate`).
-- **Open hypotheses:** H1-H12 (section 9). Nothing is ruled out yet. Section 8
+- **Open hypotheses:** H1-H13 (section 9). Nothing is ruled out yet. Section 8
   lists what was considered and left out.
 - **Next flight:** none until P2 is built. Then one sitting per headset on the
   5090, Quest 3 over VDXR and Pimax over PiOpenXR (section 9).
@@ -263,9 +269,9 @@ play:
   renders before the upscaler fills in the rest.
 
 Elite's cost follows the input. The output sets the upscaler's own cost and how
-sharp the result is. The proposal is for Pre-flight to write a width for the
-headset's key (`runtime/system`, the same normalisation the runtime uses; P4
-shares that code) in two cases only:
+sharp the result is. Pre-flight writes a width for the headset's key
+(`runtime/system`, the same normalisation the runtime uses; P4 shares that
+code) in two cases only:
 
 - **DLSS's limit.** NGX fails above 8192 per axis, and a Pimax 8KX with
   Parallel Projection on asks for 8268 (anti-aliasing.md:2370-2391). The entry
@@ -288,6 +294,37 @@ screen; at 1.0, DLSS runs as DLAA. The same model applies with:
 - a frame-rate target in place of the headset's refresh (Q8).
 
 The flight summary's `profile` key keeps flat flights apart from VR ones.
+
+**Flat's frame-rate target: detected, then shown with one dropdown (Q8).**
+`DisplaySettings.xml` already records what the player asked Elite for. It holds
+`LimitFrameRate`, `MaxFramesPerSecond`, `VSync`, `PresentInterval` and
+`DX11_RefreshRateNumerator/Denominator` (vr-supersampling-gate:151-163; H13).
+The default target is the first of these that applies:
+
+1. **Elite's own frame-rate limit:** when `LimitFrameRate` is on, the target is
+   `MaxFramesPerSecond`. The row says "from your frame-rate limit in Elite".
+2. **VSync:** when it is on, the target is the refresh rate divided by
+   `PresentInterval`. The row says "from VSync at 144 Hz".
+3. **The monitor's refresh, capped at 120.** In fullscreen that is Elite's
+   saved refresh rate. Windowed or borderless, it is the current mode of the
+   monitor Elite uses (`EnumDisplaySettings`), else the primary monitor. Above
+   120, a smaller render size costs more picture than the extra frames are
+   worth. The row says "from your monitor's refresh".
+
+How the target behaves:
+
+- **Shown and changeable.** The flat render-size row shows the target and one
+  dropdown, "Aim for: 90 fps", pre-filled with the default. The options are 30,
+  60, 90, 120, 144 and the monitor's refresh, without duplicates.
+- **What it can't see.** A limit set outside Elite, such as the NVIDIA control
+  panel or RivaTuner, is invisible to these files. The dropdown is how the
+  player says so.
+- **Stored by the installer.** The choice is kept in `state.ini` `[preflight]
+  flat_target_fps` and mirrored. It is the installer's own record, not an
+  `edvr.ini` key: the runtime never reads it.
+- **Changing it** re-runs the estimate at once.
+- **Ceiling.** Supersampling never goes above 1.0: the flat pass needs native
+  supersampling for DLAA. So a low target simply keeps 1.0.
 
 ## 5. Writing Elite's settings (P2)
 
@@ -481,6 +518,11 @@ The flight summary's `profile` key keeps flat flights apart from VR ones.
 - **H12 open:** Elite's menu offers HMD Image Quality and Supersampling in
   fixed steps. A written value on one of those steps is kept and shown by the
   menu. The steps are read from the game's own menu before P2 writes anything.
+- **H13 open:** `DisplaySettings.xml`'s `LimitFrameRate`, `MaxFramesPerSecond`,
+  `VSync`, `PresentInterval` and `DX11_RefreshRate*` hold what their names say.
+  The names come from the writer's disassembly, not from a file. Every Save
+  logs bundle carries the file under `game_graphics/`. One from a player with
+  the limit on, and one with it off, settles this without a flight.
 - **The sitting, per headset** (Quest 3 over VDXR and Pimax over PiOpenXR, both
   on the 5090), each flight a fixed 3-minute route that passes a station:
   1. Press **Detect my headset** and note what it reports (H4, H9).
@@ -507,9 +549,9 @@ The flight summary's `profile` key keeps flat flights apart from VR ones.
   settings back".
 - **Q6 decided (Sean, 2026-10-14):** allow Detect my headset on SteamVR; the
   button says first that it starts SteamVR.
-- **Q7 open:** should Pre-flight write `fix.openxr_resolution` only in the two
-  cases of section 4 (recommended), or always to a target size per headset?
-  "Always" needs a table of panel sizes per headset. It also overrides the
-  user's streaming-quality choice.
-- **Q8 open:** the frame-rate target for sizing flat Supersampling.
-  Recommended: 60 fps, or the monitor's refresh when that is lower.
+- **Q7 decided (Sean, 2026-10-14):** `fix.openxr_resolution` is written only in
+  the two cases of section 4.
+- **Q8 decided (Sean, 2026-10-14):** the flat frame-rate target is detected
+  (Elite's limit, then VSync, then the monitor's refresh) and offered as a
+  pre-filled dropdown (section 4). The 120 cap on the default is this design's
+  choice; it is a number in code, open to change after flat flights.
