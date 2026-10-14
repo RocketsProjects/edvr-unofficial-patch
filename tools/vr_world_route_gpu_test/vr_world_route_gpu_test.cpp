@@ -224,6 +224,12 @@ bool engineVelocitySourceViews(ID3D11Texture2D* depth, EngineVelocityViews* out)
 ID3D11ShaderResourceView* weaponMotionView() { return g_weaponMapSrv.Get(); }
 bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
+// The energy instrument (flat_hdr_energy.h, TEMPORARY, design doc section 107): the route calls it around its resolve; it takes no
+// sample here, so the route's behaviour is what these scenarios already pin.
+bool flatHdrEnergyBegin(ID3D11DeviceContext*, ID3D11ShaderResourceView*, uint32_t, uint32_t, const char*) { return false; }
+void flatHdrEnergyEnd(ID3D11DeviceContext*, ID3D11ShaderResourceView*, const char*, unsigned, const char*) {}
+void flatHdrEnergyAbandon() {}
+void flatHdrEnergyPoll(ID3D11DeviceContext*) {}
 bool dlaaAvailable(ID3D11Device*, const char**) { return true; }
 bool fsr3Available(ID3D11Device*, const char**) { return true; }
 bool xessAvailable(ID3D11Device*, const char**) { return false; }
