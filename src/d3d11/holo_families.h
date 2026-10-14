@@ -4,8 +4,8 @@
 //   - ui_depth.cpp's generic hologram/icon depth pass
 //     (the hologram depth pass -- the contribution and
 //     element-depth re-issues, whose family lists these seed) covers ALL
-//     ELEVEN: kHoloFamiliesBuiltIn's ten cockpit families plus
-//     kHoloWorldMarkers, radius-clipping the cockpit ones.
+//     THIRTEEN: kHoloFamiliesBuiltIn's ten cockpit families plus
+//     the three kHoloWorldMarkers, radius-clipping the cockpit ones.
 //   - the crisp-HUD half of fix.ui_quality (ui_layer_math.h's
 //     uiLayerFamilyFor, Phase 3 of docs/cockpit-hud-layer-design-2026-09-27.md)
 //     admits kHoloFamiliesTake's eight proven-safe families, through
@@ -55,6 +55,16 @@ constexpr uint64_t kHoloContactE     = 0x94D5C556DFD6D705ull;
 // families above -- eye dump eye_163515: sky MV (+0.59,-0.89) against the
 // bracketed ship's (+0.14,+0.27) at 1.65 km, going indistinct with speed.
 constexpr uint64_t kHoloWorldMarkerReticle = 0x71DD8B8B09060A81ull;
+// The station's hologram adverts (scene inspector captures of 2026-10-14, flight v0.20.0-rc.1-4, cap 5, docs/dlss-blur-elements-2026-10-14.md): two pairs that
+// draw the whole 16x16 box at the view centre over bare sky, in the lit HDR target that shares the scene depth, with no depth write and no EDVR route:
+//   46546443FD3C3F88 / AD050E528C0E8B17  alpha blend, three draws of 336..480 indices, 512x512 and 512x256 BC7 textures
+//   95D01BA609BF7500 / 067CBE05E7EF7F32  premultiplied, two draws of 336 indices, a 1024x512 texture
+// Both vertex shaders form clip position by dp4 against b0 rows 4..7 (flat_projection_recipes.h: the same neighbourhood as the target sprite
+// E508648660A352B2 and the reticle), so the raster z the depth pass reads is the quad's real depth. They are WORLD-FIXED (the station's), unlike the
+// reticle, so the camera term at their own depth is the motion they should have: with no depth of their own DLSS gave them the sky's (path 2, far plane,
+// rotation only) and a head move showed no parallax on them. World markers, not cockpit families: an advert 300 m away must not be radius-clipped.
+constexpr uint64_t kHoloWorldAdvertAlpha = 0x46546443FD3C3F88ull;
+constexpr uint64_t kHoloWorldAdvertPremult = 0x95D01BA609BF7500ull;
 
 // The built-in cockpit list: the ten short-range panel/icon/hologram
 // families above.
@@ -67,7 +77,7 @@ constexpr uint64_t kHoloFamiliesBuiltIn[10] = {kHoloIconCore, kHoloCoronaFamily,
 // families above are all short-range panel/icon geometry; a world marker
 // tracks something that can be kilometres out). Fixed -- see
 // holoWorldMarkerList in ui_depth.cpp.
-constexpr uint64_t kHoloWorldMarkers[1] = {kHoloWorldMarkerReticle};
+constexpr uint64_t kHoloWorldMarkers[3] = {kHoloWorldMarkerReticle, kHoloWorldAdvertAlpha, kHoloWorldAdvertPremult};
 constexpr uint32_t kHoloWorldMarkerCount = static_cast<uint32_t>(sizeof(kHoloWorldMarkers) / sizeof(kHoloWorldMarkers[0]));
 
 // The canopy sits in front of the whole sky; covering it would smear the
