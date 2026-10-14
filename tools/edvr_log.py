@@ -10098,7 +10098,8 @@ def parse_cpu_profile(text):
         line = raw[i:].rstrip()
         if line.startswith("cpu profile: start "):
             cur = {"lines": [line], "start": None, "pick": None, "pacing": None, "threads": {}, "leaves": [],
-                   "wait": None, "wait_off": None, "end": None}
+                   "wait": None, "wait_off": None, "end": None, "per_frame": {}, "wait_split": {}, "busy_split": {},
+                   "edvr_fn": {}, "elite_fn": {}, "producer": None, "critical": None, "windows": [], "frames_csv": None}
             m = _CPU_START_RE.match(line)
             if m:
                 cur["start"] = {"thread": m.group(1), "trigger": m.group(2), "window_s": float(m.group(3)),
@@ -10120,6 +10121,33 @@ def parse_cpu_profile(text):
                                  "wall_ms": float(m.group(6)), "suspended_ms": float(m.group(7)),
                                  "suspended_pct": float(m.group(8)), "suspend_mean_us": float(m.group(9)),
                                  "suspend_max_us": int(m.group(10)), "timer": m.group(11), "threads": int(m.group(12))}
+        elif line.startswith("cpu profile: producer thread="):
+            cur["producer"] = _cpu_kv(line)
+            cur["producer"]["_thread"] = line.split("thread=", 1)[1].split(" ", 1)[0]
+        elif line.startswith("cpu profile: critical "):
+            cur["critical"] = _cpu_kv(line)
+        elif line.startswith("cpu profile: window frames="):
+            w = _cpu_kv(line)
+            m = re.match(r"cpu profile: window frames=(\d+)-(\d+) ", line)
+            w["_first"], w["_last"] = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+            m = re.search(r"crit=(\S+)", line)
+            w["_crit"] = m.group(1) if m else ""
+            cur["windows"].append(w)
+        elif line.startswith("cpu profile: frames_csv="):
+            m = re.match(r"cpu profile: frames_csv=(\S+) rows=(\d+)", line)
+            if m:
+                cur["frames_csv"] = (m.group(1), int(m.group(2)))
+        elif line.startswith("cpu profile: thread=") and any(
+                (" %s " % k) in line for k in ("per_frame", "wait_split", "busy_split")):
+            label = line.split("thread=", 1)[1].split(" ", 1)[0]
+            for k in ("per_frame", "wait_split", "busy_split"):
+                if (" %s " % k) in line:
+                    cur[k][label] = _cpu_kv(line)
+        elif line.startswith("cpu profile: thread=") and (" edvr_fn " in line or " elite_fn " in line):
+            m = re.match(r"cpu profile: thread=(\S+) (edvr_fn|elite_fn)\s+(\d+) incl ([\d.]+) excl ([\d.]+) ms_per_frame (\S+)", line)
+            if m:
+                cur[m.group(2)].setdefault(m.group(1), []).append(
+                    {"rank": int(m.group(3)), "incl": float(m.group(4)), "excl": float(m.group(5)), "label": m.group(6)})
         elif " role=" in line and line.startswith("cpu profile: thread="):
             m = _CPU_THREAD_RE.match(line)
             if m:
@@ -10183,6 +10211,117 @@ def _cpu_verdict(b):
     return text
 
 
+def _cpu_kv(line):
+    """The numeric key=value pairs of a cpu profile line, as floats (a value that is not a number is skipped)."""
+    return {k: float(v) for k, v in re.findall(r"(\w+)=(-?\d+(?:\.\d+)?)(?![\w.])", line)}
+
+
+# What is known about EliteDangerous64.exe (build 332841) by the start of its .pdata function. The profile prints RVAs; this
+# names the ones the arc has read. Offline analysis of anything else: tools\elite_hotspots.py --samples <csv> --disasm 0xRVA.
+ELITE_KNOWN = {
+    0x5d6d20: "frame handshake: condition-variable wait/signal on the producer's frame (10 ms timeout)",
+    0x5d40e0: "caller of the handshake (render thread chain)",
+    0x5d6750: "caller of the handshake (render thread chain)",
+    0x55cb20: "thread entry of the render/job threads",
+    0x58b150: "fragment-culling cluster builder (light grid cache hooks it)",
+    0x58b474: "cluster builder, cold chunk",
+    0x58b530: "cluster builder, cold chunk (4.4% of the render thread on 2026-10-11)",
+    0x58ba2f: "cluster builder, cold chunk",
+    0x58bdd7: "cluster builder, cold chunk",
+}
+
+
+def _cpu_annotate(label):
+    """'EliteDangerous64.exe+0x5d6d20..0x5d6de2' -> its ELITE_KNOWN note, or ''."""
+    name, begin, _ = _cpu_label(label)
+    if begin is None or not name.lower().startswith("elitedangerous64"):
+        return ""
+    return ELITE_KNOWN.get(begin, "")
+
+
+def _cpu_ranked_rows(b):
+    """(ms_per_frame, text) for every contributor of a capture's frame accounting, unsorted. Waits are the render thread's;
+    EDVR rows are inside the busy rows above them."""
+    rows = []
+    pf, ws = b["per_frame"], b["wait_split"]
+    for label, d in pf.items():
+        t = b["threads"].get(label, {})
+        role = t.get("role", "?")
+        rows.append((d.get("busy_ms", 0.0), "%s thread (%s): running" % (label, role)))
+        edvr = d.get("edvr_d3d11_ms", 0.0) + d.get("edvr_openvr_ms", 0.0)
+        if edvr > 0.0:
+            rows.append((edvr, "%s thread: EDVR code (leaf; inside its running time)" % label))
+    r = ws.get("render")
+    if r:
+        for k, what in (("handshake", "Elite's frame handshake (waiting for the producer)"),
+                        ("xr", "the OpenXR runtime (xrWaitFrame, owner hops)"),
+                        ("gpu", "the GPU or the graphics driver"),
+                        ("lock", "a lock or condition variable (not the handshake)"),
+                        ("event", "a kernel object (event, semaphore, message)"),
+                        ("sleep", "a Sleep or yield")):
+            if r.get(k, 0.0) > 0.0:
+                rows.append((r[k], "render thread: waiting on %s" % what))
+    return rows
+
+
+def print_cpu_ranked(b):
+    """The frame accounting of one capture, ranked: the per-thread ms per frame, the render thread's waits, the producer's top
+    exe functions with the arc's annotations, EDVR's functions, the critical path and the 30-frame trend. 0 when the capture
+    has the accounting, 3 when it does not (an older build)."""
+    if not b["per_frame"]:
+        print("[edvr] RANKED: this capture has no per_frame lines (an older build, before the frame accounting)")
+        return 3
+    r = b["per_frame"].get("render", {})
+    print("[edvr] RANKED (milliseconds per frame; frame_ms=%.3f over %d Presents)" % (r.get("frame_ms", 0.0), int(r.get("frames", 0))))
+    print("[edvr]   rank  ms/frame  share  what")
+    frame_ms = r.get("frame_ms", 0.0) or 1.0
+    rows = sorted(_cpu_ranked_rows(b), key=lambda x: -x[0])
+    for i, (ms, what) in enumerate(rows):
+        print("[edvr]   %4d  %8.3f  %4.0f%%  %s" % (i + 1, ms, 100.0 * ms / frame_ms, what))
+    prod = b["producer"]
+    if prod is not None:
+        print("[edvr] PRODUCER (inferred: the busiest thread besides render and owner): %s, running %.3f ms of a %.3f ms frame "
+              "(%.0f%%), cpu %.3f ms per frame" % (prod["_thread"], prod.get("busy_ms", 0.0), prod.get("frame_ms", 0.0),
+                                                   prod.get("busy_pct_of_frame", 0.0), prod.get("cpu_ms", 0.0)))
+        for f in b["elite_fn"].get(prod["_thread"], []):
+            note = _cpu_annotate(f["label"])
+            print("[edvr]   exe fn %2d  incl %7.3f  excl %7.3f ms  %s%s" % (f["rank"], f["incl"], f["excl"], f["label"],
+                                                                              ("  <- " + note) if note else ""))
+    else:
+        print("[edvr] PRODUCER: none was read")
+    for f in b["elite_fn"].get("render", [])[:10]:
+        note = _cpu_annotate(f["label"])
+        print("[edvr]   render exe fn %2d  incl %7.3f  excl %7.3f ms  %s%s" % (f["rank"], f["incl"], f["excl"], f["label"],
+                                                                                 ("  <- " + note) if note else ""))
+    for label in sorted(b["edvr_fn"]):
+        for f in b["edvr_fn"][label][:5]:
+            print("[edvr]   EDVR fn on %s %2d  incl %7.3f  excl %7.3f ms  %s" % (label, f["rank"], f["incl"], f["excl"], f["label"]))
+    c = b["critical"]
+    if c and c.get("frames", 0):
+        n = c["frames"]
+        known = n - c.get("unknown", 0)
+        parts = ["%s %d (%.0f%%)" % (k, c.get(k, 0), 100.0 * c.get(k, 0) / known if known else 0.0)
+                 for k in ("producer", "render", "xr", "gpu", "sync")]
+        print("[edvr] CRITICAL PATH over %d frames (%d with a render sample): %s" % (n, known, ", ".join(parts)))
+    else:
+        print("[edvr] CRITICAL PATH: no complete frame (no Present timestamps in the window)")
+    if b["windows"]:
+        print("[edvr] 30-frame windows: frames, frame_ms, render busy, waits (handshake/xr/gpu/sync), producer busy, owner busy, "
+              "render EDVR, critical")
+        for w in b["windows"]:
+            print("[edvr]   %4d-%-4d %6.2f  %6.2f  %5.2f/%5.2f/%5.2f/%5.2f  %6.2f  %6.2f  %5.2f  %s" % (
+                w["_first"], w["_last"], w.get("frame_ms", 0.0), w.get("render_busy", 0.0), w.get("wait_handshake", 0.0),
+                w.get("wait_xr", 0.0), w.get("wait_gpu", 0.0), w.get("wait_sync", 0.0), w.get("producer_busy", 0.0),
+                w.get("owner_busy", 0.0), w.get("render_edvr", 0.0), w["_crit"]))
+    if b["frames_csv"]:
+        print("[edvr] per-frame CSV: edvr_logs\\%s (%d rows); raw samples: edvr_logs\\%s" % (
+            b["frames_csv"][0], b["frames_csv"][1], b["start"]["csv"] if b["start"] else "?"))
+        if prod is not None:
+            print("[edvr] offline: python tools\\elite_hotspots.py --samples edvr_logs\\%s --thread %s --top 30 [--disasm 0xRVA]"
+                  % (b["start"]["csv"] if b["start"] else "<csv>", prod["_thread"]))
+    return 0
+
+
 def print_cpu_profile(text):
     """The latest capture in a graphics log, verbatim, with a VERDICT line. 0 when it is complete, 4 when the log stops
     during it, 3 when the log has no capture (the notes say why: idle, or armed and never started, or no lines at all)."""
@@ -10207,6 +10346,7 @@ def print_cpu_profile(text):
         print("[edvr] VERDICT: the capture ended with no valid sample: no thread was read")
         return 0
     print("[edvr] " + _cpu_verdict(b))
+    print_cpu_ranked(b)
     return 0
 
 
@@ -10367,6 +10507,27 @@ def self_test_cpu_profile():
         "[10:00:10.106] cpu profile: thread=main role=main start=ntdll.dll+0x1234 cpu_ms=0.1 cpu_pct=0.00% valid=1 "
         "failures=0 rate_hz=100.0\n"
         "[10:00:10.107] cpu profile: thread=main fn  1 incl       1 100.00% excl       1 100.00% ntdll.dll+0x1000..0x1100\n"
+        "[10:00:10.1075] cpu profile: thread=render per_frame frames=800 frame_ms=12.500 busy_ms=6.000 wait_ms=6.500 cpu_ms=6.100 "
+        "edvr_d3d11_ms=0.700 edvr_openvr_ms=0.100 edvr_stack_ms=2.000\n"
+        "[10:00:10.1076] cpu profile: thread=render wait_split frame_ms=12.500 busy=6.000 handshake=5.100 xr=0.700 gpu=0.500 "
+        "lock=0.100 event=0.050 sleep=0.050 samples=2400\n"
+        "[10:00:10.1077] cpu profile: thread=render busy_split elite=3.000 d3d_driver=1.500 edvr_d3d11=0.700 edvr_openvr=0.100 "
+        "vendor=0.100 system=0.400 other=0.200\n"
+        "[10:00:10.1078] cpu profile: thread=render edvr_fn  1 incl 1.200 excl 0.400 ms_per_frame d3d11.dll+0x1000..0x1200\n"
+        "[10:00:10.1079] cpu profile: thread=render elite_fn  1 incl 0.800 excl 0.500 ms_per_frame "
+        "EliteDangerous64.exe+0x58b150..0x58b474\n"
+        "[10:00:10.1080] cpu profile: thread=t99 per_frame frames=800 frame_ms=12.500 busy_ms=11.900 wait_ms=0.600 cpu_ms=11.800 "
+        "edvr_d3d11_ms=0.000 edvr_openvr_ms=0.000 edvr_stack_ms=0.000\n"
+        "[10:00:10.1081] cpu profile: thread=t99 elite_fn  1 incl 4.000 excl 3.000 ms_per_frame "
+        "EliteDangerous64.exe+0x5d6d20..0x5d6de2\n"
+        "[10:00:10.1082] cpu profile: producer thread=t99 start=EliteDangerous64.exe+0x55cb20 "
+        "inferred=busiest_thread_besides_render_and_owner busy_ms=11.900 frame_ms=12.500 busy_pct_of_frame=95.2 cpu_ms=11.800\n"
+        "[10:00:10.1083] cpu profile: critical frames=790 producer=500 render=100 xr=50 gpu=40 sync=10 unknown=90 "
+        "rule=render_waited_25pct_or_more_and_its_longest_wait_names_the_path\n"
+        "[10:00:10.1084] cpu profile: window frames=0-29 n=30 frame_ms=12.40 render_busy=6.00 wait_handshake=5.00 wait_xr=0.70 "
+        "wait_gpu=0.50 wait_sync=0.20 producer_busy=11.90 owner_busy=1.00 render_edvr=0.80 render_n=90 producer_n=90 "
+        "crit=producer:20,render:4,xr:2,gpu:2,sync:0,unknown:2\n"
+        "[10:00:10.1085] cpu profile: frames_csv=cpu_frames_20261010_100000.csv rows=790\n"
         "[10:00:10.108] cpu profile: end samples=4 valid=4 csv=cpu_profile_20261010_100000.csv\n"
     )
     parsed = parse_cpu_profile(log + "[10:01:00.000] cpu profile: capture requested by hotkey.profile_cpu\n")
@@ -10385,6 +10546,14 @@ def self_test_cpu_profile():
     if b and (b["wait"] is None or b["wait"]["frames"] != 40 or abs(b["wait"]["ms_per_frame"] - 0.5) > 1e-9):
         print("cpu profile: the producer wait line did not parse: %r" % (b and b["wait"],))
         ok = False
+    if b and (b["per_frame"].get("render", {}).get("busy_ms") != 6.0 or b["wait_split"]["render"]["handshake"] != 5.1
+              or b["busy_split"]["render"]["d3d_driver"] != 1.5 or b["edvr_fn"]["render"][0]["label"] != "d3d11.dll+0x1000..0x1200"
+              or b["elite_fn"]["t99"][0]["rank"] != 1 or b["producer"]["_thread"] != "t99"
+              or b["producer"]["busy_pct_of_frame"] != 95.2 or b["critical"]["producer"] != 500
+              or len(b["windows"]) != 1 or b["windows"][0]["_crit"].split(",")[0] != "producer:20"
+              or b["windows"][0]["render_n"] != 90 or b["frames_csv"] != ("cpu_frames_20261010_100000.csv", 790)):
+        print("cpu profile: the frame accounting lines did not parse: %r" % (b and (b["per_frame"], b["producer"], b["windows"]),))
+        ok = False
     if not parsed["notes"] or "requested" not in parsed["notes"][0]:
         print("cpu profile: the note after the end line was not kept as a note")
         ok = False
@@ -10397,6 +10566,30 @@ def self_test_cpu_profile():
     if rc != 0 or "VERDICT: render thread 2 valid samples" not in out.getvalue() or \
             "producer wait 0.500 ms per frame" not in out.getvalue():
         print("cpu profile: a complete capture printed rc=%d" % rc)
+        ok = False
+    shown = out.getvalue()
+    for want in ("RANKED (milliseconds per frame; frame_ms=12.500 over 800 Presents)",
+                 "render thread: waiting on Elite's frame handshake (waiting for the producer)",
+                 "PRODUCER (inferred", "t99, running 11.900 ms of a 12.500 ms frame (95%)",
+                 "<- frame handshake: condition-variable wait/signal", "<- fragment-culling cluster builder",
+                 "EDVR fn on render", "CRITICAL PATH over 790 frames (700 with a render sample): producer 500 (71%), render 100 (14%)",
+                 "30-frame windows", "per-frame CSV: edvr_logs\\cpu_frames_20261010_100000.csv (790 rows)",
+                 "python tools\\elite_hotspots.py --samples edvr_logs\\cpu_profile_20261010_100000.csv --thread t99"):
+        if want not in shown:
+            print("cpu profile: the ranked table lacks %r" % want)
+            ok = False
+    ranked = [ln for ln in shown.splitlines() if ln.startswith("[edvr]   ") and " thread" in ln and "ms/frame" not in ln]
+    if not ranked or "render thread: waiting on Elite's frame handshake" not in ranked[0] and \
+            "t99 thread" not in ranked[0]:
+        print("cpu profile: the ranked table is not ordered by ms per frame: %r" % (ranked[:2],))
+        ok = False
+    old_log = "\n".join(ln for ln in log.splitlines()
+                        if not any(k in ln for k in ("per_frame", "wait_split", "busy_split", "edvr_fn", "elite_fn", "producer thread",
+                                                     "critical frames", "window frames", "frames_csv"))) + "\n"
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        rc = print_cpu_profile(old_log)
+    if rc != 0 or "no per_frame lines" not in out.getvalue():
+        print("cpu profile: a capture from an older build should say it has no frame accounting (rc %d)" % rc)
         ok = False
     partial = log.split("[10:00:10.108]")[0]
     with contextlib.redirect_stdout(io.StringIO()) as out:

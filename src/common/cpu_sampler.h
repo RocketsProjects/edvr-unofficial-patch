@@ -120,9 +120,216 @@ inline Class classify(const char* name, bool edvr) noexcept {
     return Class::Other;
 }
 
+// The upscalers and frame generators: a wait inside one is the GPU's, not a runtime's.
+inline bool isUpscalerName(const char* name) noexcept {
+    static const char* const kNames[] = {"nvngx", "amd_fidelity", "libxess", "xess", "ffx", "fsr"};
+    for (const char* p : kNames) {
+        if (startsNoCase(name, p)) return true;
+    }
+    return false;
+}
+
 // The Elite handshake's gate: the game's own PE stamp and image size are the build this function's range was read from.
 inline bool eliteBuildGate(uint32_t stamp, uint32_t size) noexcept {
     return stamp == kEliteStamp && size == kEliteImageSize;
+}
+
+// ---- busy or waiting, and waiting on what (docs/cpu-frametime-2026-10-14.md) --------------------------------------------
+// A stopped thread is WAITING when its leaf sits in an OS wait stub (a named export of ntdll, kernelbase or win32u whose name
+// says it waits, found by the export table, so no symbols are needed); anything else is BUSY, including a thread that spins in
+// the graphics driver. A waiting sample is then attributed by its stack, strongest evidence first: the game's frame handshake
+// function (gated on the game's build), EDVR's OpenXR runtime or a vendor runtime (the xrWaitFrame and owner hops), the
+// graphics driver or the D3D/DXGI front ends (the GPU), then by the kind of stub (a park is a lock or a condition variable).
+enum class WaitKind : uint8_t { Busy = 0, Handshake, Xr, Gpu, Lock, Event, Sleep, Count };
+constexpr unsigned kKinds = static_cast<unsigned>(WaitKind::Count);
+
+inline const char* waitKindName(WaitKind k) noexcept {
+    switch (k) {
+        case WaitKind::Busy: return "busy";
+        case WaitKind::Handshake: return "handshake";
+        case WaitKind::Xr: return "xr";
+        case WaitKind::Gpu: return "gpu";
+        case WaitKind::Lock: return "lock";
+        case WaitKind::Event: return "event";
+        case WaitKind::Sleep: return "sleep";
+        default: return "?";
+    }
+}
+
+// What an OS stub does, from its export name. None is a stub (or any function) that does not wait.
+enum class StubKind : uint8_t { None = 0, Park, Event, Sleep };
+
+inline bool nameHas(const char* name, const char* part) noexcept {
+    return name && part && std::strstr(name, part) != nullptr;
+}
+
+// The names are the syscall stubs and their kernel32/user32 wrappers: NtWaitForAlertByThreadId is what SRW locks, critical
+// sections, WaitOnAddress and condition variables park in; the WaitFor family and message waits are kernel-object waits.
+inline StubKind stubKindOfExport(const char* name) noexcept {
+    if (!name || !name[0]) return StubKind::None;
+    if (nameHas(name, "WaitForAlertByThreadId") || nameHas(name, "WaitOnAddress") || nameHas(name, "SleepConditionVariable"))
+        return StubKind::Park;
+    if (nameHas(name, "DelayExecution") || nameHas(name, "YieldExecution")) return StubKind::Sleep;
+    if (nameHas(name, "WaitFor") || nameHas(name, "SignalAndWait") || nameHas(name, "WaitMessage") ||
+        nameHas(name, "MsgWait") || nameHas(name, "RemoveIoCompletion") || nameHas(name, "WaitHighEventPair") ||
+        nameHas(name, "WaitLowEventPair"))
+        return StubKind::Event;
+    return StubKind::None;
+}
+
+struct ExportRec {
+    uint32_t rva = 0;
+    StubKind kind = StubKind::None;
+};
+constexpr uint32_t kStubSpan = 0x60;   // a leaf this close above an export's start is inside that stub
+
+// The module's named exports, by RVA, with what each one does. Forwarded exports (an RVA inside the export directory) are
+// skipped. Empty when the image has no export directory.
+inline void loadExports(uintptr_t base, std::vector<ExportRec>& out) {
+    out.clear();
+    __try {
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) return;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + static_cast<uintptr_t>(dos->e_lfanew));
+        if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return;
+        const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if (!dir.VirtualAddress || dir.Size < sizeof(IMAGE_EXPORT_DIRECTORY)) return;
+        const auto* ed = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + dir.VirtualAddress);
+        const auto* funcs = reinterpret_cast<const DWORD*>(base + ed->AddressOfFunctions);
+        const auto* names = reinterpret_cast<const DWORD*>(base + ed->AddressOfNames);
+        const auto* ords = reinterpret_cast<const WORD*>(base + ed->AddressOfNameOrdinals);
+        for (DWORD i = 0; i < ed->NumberOfNames; ++i) {
+            const WORD o = ords[i];
+            if (o >= ed->NumberOfFunctions) continue;
+            const DWORD rva = funcs[o];
+            if (rva >= dir.VirtualAddress && rva < dir.VirtualAddress + dir.Size) continue;   // a forwarder
+            const char* name = reinterpret_cast<const char*>(base + names[i]);
+            out.push_back({rva, stubKindOfExport(name)});
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out.clear();
+    }
+    std::sort(out.begin(), out.end(), [](const ExportRec& a, const ExportRec& b) {
+        return a.rva != b.rva ? a.rva < b.rva : static_cast<unsigned>(a.kind) > static_cast<unsigned>(b.kind);
+    });
+}
+
+// What the function that holds `rva` does: the nearest export at or below it, if the leaf is within a stub's span of it.
+inline StubKind stubKindAt(const std::vector<ExportRec>& exports, uint32_t rva) noexcept {
+    auto it = std::upper_bound(exports.begin(), exports.end(), rva,
+                               [](uint32_t v, const ExportRec& e) { return v < e.rva; });
+    if (it == exports.begin()) return StubKind::None;
+    --it;
+    // Several exports share one RVA (Nt* and Zw*): the sort put the one that waits first, so look at the run's first element.
+    auto first = it;
+    while (first != exports.begin() && (first - 1)->rva == it->rva) --first;
+    if (rva - it->rva >= kStubSpan) return StubKind::None;
+    return first->kind;
+}
+
+// The attribution of one sample, pure so the rig can drive it. `stub` is what the leaf's function does; the flags say what
+// the walked stack holds. A sample whose leaf is not a wait stub is busy whatever its stack holds.
+inline WaitKind attributeSample(StubKind stub, bool handshakeFrame, bool xrFrame, bool gpuFrame) noexcept {
+    if (stub == StubKind::None) return WaitKind::Busy;
+    if (handshakeFrame) return WaitKind::Handshake;
+    if (xrFrame) return WaitKind::Xr;
+    if (gpuFrame) return WaitKind::Gpu;
+    return stub == StubKind::Park ? WaitKind::Lock : stub == StubKind::Sleep ? WaitKind::Sleep : WaitKind::Event;
+}
+
+// ---- the frame, from the render thread's Presents ---------------------------------------------------------------------
+// A frame is the interval between two of the render thread's Presents. Each sample falls in one; per frame and per target
+// the model counts the samples and how many were busy, and for the render thread how many sat in each wait kind. A frame's
+// critical path is named from the render thread's samples alone: the render thread presents last, so what it spent the frame
+// waiting on is what finished last before the frame could go. Under kRenderBound of its samples waiting, the render thread
+// itself was the critical path.
+enum class Crit : uint8_t { Unknown = 0, Producer, Render, Xr, Gpu, Sync, Count };
+constexpr unsigned kCrits = static_cast<unsigned>(Crit::Count);
+
+inline const char* critName(Crit c) noexcept {
+    switch (c) {
+        case Crit::Producer: return "producer";
+        case Crit::Render: return "render";
+        case Crit::Xr: return "xr";
+        case Crit::Gpu: return "gpu";
+        case Crit::Sync: return "sync";
+        default: return "unknown";
+    }
+}
+
+constexpr unsigned kMaxFrames = 4096;
+constexpr unsigned kFrameBlock = 30;   // the summary line covers this many frames
+constexpr double kRenderBoundWaitShare = 0.25;
+
+// One sample, reduced to what the frame model needs.
+struct FrameSample {
+    uint32_t tUs = 0;                  // from the window's start
+    uint8_t target = 0;
+    uint8_t kind = 0;                  // WaitKind
+    uint8_t edvrLeaf = 0;              // 1: leaf in EDVR's d3d11 DLL, 2: leaf in EDVR's OpenXR runtime, 0: neither
+    uint8_t edvrStack = 0;             // 1: an EDVR frame anywhere on the stack
+};
+
+struct FrameRow {
+    uint32_t index = 0;                // 0-based among the complete frames of the window
+    double startMs = 0.0;              // from the window's start
+    double frameMs = 0.0;
+    uint16_t n[kMaxTargets] = {};      // samples in this frame, by target
+    uint16_t busy[kMaxTargets] = {};   // of those, busy
+    uint16_t edvr[kMaxTargets] = {};   // of the busy ones, the leaf in EDVR code
+    uint16_t renderKind[kKinds] = {};  // the render thread's samples by WaitKind
+    Crit crit = Crit::Unknown;
+};
+
+// The critical path of a frame: from the render thread's wait counts. Pure.
+inline Crit classifyFrame(const FrameRow& r, unsigned renderTarget) noexcept {
+    const unsigned n = renderTarget < kMaxTargets ? r.n[renderTarget] : 0;
+    if (!n) return Crit::Unknown;
+    unsigned waits = 0;
+    for (unsigned k = 1; k < kKinds; ++k) waits += r.renderKind[k];
+    if (waits < kRenderBoundWaitShare * n) return Crit::Render;
+    const unsigned producer = r.renderKind[static_cast<unsigned>(WaitKind::Handshake)];
+    const unsigned xr = r.renderKind[static_cast<unsigned>(WaitKind::Xr)];
+    const unsigned gpu = r.renderKind[static_cast<unsigned>(WaitKind::Gpu)];
+    const unsigned sync = r.renderKind[static_cast<unsigned>(WaitKind::Lock)] +
+                          r.renderKind[static_cast<unsigned>(WaitKind::Event)] +
+                          r.renderKind[static_cast<unsigned>(WaitKind::Sleep)];
+    // The largest wait names the path; a tie goes to the producer, then the GPU, then the runtime.
+    Crit best = Crit::Producer;
+    unsigned top = producer;
+    if (gpu > top) { best = Crit::Gpu; top = gpu; }
+    if (xr > top) { best = Crit::Xr; top = xr; }
+    if (sync > top) { best = Crit::Sync; top = sync; }
+    return best;
+}
+
+// Builds the frames of a window. `presentUs` are the render thread's Present times from the window's start, ascending; the
+// frames are the intervals between neighbours that lie wholly inside [0, wallUs). `samples` are ascending in tUs. Pure.
+inline void buildFrames(const FrameSample* samples, unsigned ns, unsigned nTargets, unsigned renderTarget,
+                        const double* presentUs, unsigned np, double wallUs, std::vector<FrameRow>& out) {
+    out.clear();
+    unsigned si = 0;
+    for (unsigned p = 0; p + 1 < np && out.size() < kMaxFrames; ++p) {
+        const double a = presentUs[p], b = presentUs[p + 1];
+        if (a < 0.0 || b > wallUs || b <= a) continue;
+        while (si < ns && samples[si].tUs < a) ++si;
+        FrameRow row;
+        row.index = static_cast<uint32_t>(out.size());
+        row.startMs = a / 1000.0;
+        row.frameMs = (b - a) / 1000.0;
+        for (unsigned j = si; j < ns && samples[j].tUs < b; ++j) {
+            const FrameSample& s = samples[j];
+            if (s.target >= nTargets || s.target >= kMaxTargets) continue;
+            ++row.n[s.target];
+            if (s.kind == static_cast<uint8_t>(WaitKind::Busy)) {
+                ++row.busy[s.target];
+                if (s.edvrLeaf) ++row.edvr[s.target];
+            }
+            if (s.target == renderTarget && s.kind < kKinds) ++row.renderKind[s.kind];
+        }
+        row.crit = classifyFrame(row, renderTarget);
+        out.push_back(row);
+    }
 }
 
 // The pacing as a pure function so the rig can drive it. `dueUs` is when this sample was due, `nowUs` the clock when it was
@@ -149,6 +356,9 @@ struct Sample {
     uintptr_t pc[kFrames] = {};        // the leaf, then the return addresses, innermost first
     int16_t mod[kFrames] = {};         // module index, or -1 when no module holds the address
     uint32_t rva[kFrames] = {};        // the RVA in that module (the low 32 bits of the address when -1)
+    uint8_t kind = 0;                  // WaitKind, set by Session::resolve (0 is busy)
+    uint8_t edvrLeaf = 0;              // 1: the leaf is in EDVR's d3d11 DLL, 2: in EDVR's OpenXR runtime
+    uint8_t edvrStack = 0;             // 1: an EDVR frame is anywhere on the walked stack
 };
 
 struct ModuleRec {
@@ -157,6 +367,8 @@ struct ModuleRec {
     Class cls = Class::Unknown;
     const RUNTIME_FUNCTION* fns = nullptr;   // the module's .pdata, read in place (the module is loaded for the process)
     uint32_t nfns = 0;
+    std::vector<ExportRec> exports;    // the OS images' named exports, read the first time a leaf lands in one
+    bool exportsLoaded = false;
 };
 
 // A location (module+RVA of a leaf) or a function (module+begin of a .pdata entry), counted once per key.
@@ -290,6 +502,18 @@ public:
             }
         }
         ++dropped_;
+        return nullptr;
+    }
+    // The record for `key` if it is there; never creates.
+    const R* find(uint64_t key) const noexcept {
+        if (!n_) return nullptr;
+        const unsigned mask = n_ - 1;
+        unsigned i = static_cast<unsigned>((key * 0x9E3779B97F4A7C15ull) >> 40) & mask;
+        for (unsigned probe = 0; probe < n_; ++probe, i = (i + 1) & mask) {
+            const R& r = recs_[i];
+            if (r.key == key) return &r;
+            if (r.key == 0) return nullptr;
+        }
         return nullptr;
     }
     template <typename F>
@@ -622,6 +846,7 @@ struct RunInfo {
     double dutyPct = kMaxStoppedFraction * 100.0;
     const char* csvName = "none";      // the file's name in the log directory, or "none"
     const char* build = "?";           // the EDVR build that took the samples (the CSV's header comment)
+    const char* framesCsvName = "none"; // the per-frame CSV's name in the log directory, or "none"
     unsigned threads = 0;              // how many targets the window stopped
 };
 
@@ -648,7 +873,8 @@ public:
         cap_ = samples_ ? maxSamples : 0;
         if (!samples_ || !mods_ || !aggs_) return false;
         for (unsigned t = 0; t < kMaxTargets; ++t) {
-            if (!aggs_[t].fns.create(kFnSlots) || !aggs_[t].locs.create(kFnSlots)) return false;
+            if (!aggs_[t].fns.create(kFnSlots) || !aggs_[t].busyFns.create(kFnSlots) || !aggs_[t].locs.create(kFnSlots))
+                return false;
         }
         return true;
     }
@@ -679,12 +905,29 @@ public:
         LARGE_INTEGER f{}, t0{}, t{};
         QueryPerformanceFrequency(&f);
         QueryPerformanceCounter(&t0);
+        t0Qpc_ = static_cast<uint64_t>(t0.QuadPart);
+        freqQpc_ = static_cast<double>(f.QuadPart);
         const double freq = static_cast<double>(f.QuadPart);
         const double periodUs = 1e6 / targetHz;
         const double windowUs = windowS * 1e6;
         double dueUs = 0.0;
         unsigned slot = 0;
         uintptr_t pcs[kFrames] = {};
+        // The round-robin order: every target once, and the render thread and the busiest non-owner thread (the likeliest
+        // producer) twice, so a frame holds three or four of each of their samples instead of two.
+        unsigned sched[2 * kMaxTargets] = {};
+        unsigned nSched = 0;
+        {
+            int heavy = -1;
+            for (unsigned i = 0; i < nTargets_; ++i) {
+                if (targets_[i].render || std::strcmp(targets_[i].role, "owner") == 0) continue;
+                if (heavy < 0 || targets_[i].preCpu > targets_[heavy].preCpu) heavy = static_cast<int>(i);
+            }
+            for (unsigned i = 0; i < nTargets_; ++i) {
+                sched[nSched++] = i;
+                if (targets_[i].render || static_cast<int>(i) == heavy) sched[nSched++] = i;
+            }
+        }
         for (;;) {
             QueryPerformanceCounter(&t);
             double nowUs = static_cast<double>(t.QuadPart - t0.QuadPart) * 1e6 / freq;
@@ -699,7 +942,7 @@ public:
                 nowUs = static_cast<double>(t.QuadPart - t0.QuadPart) * 1e6 / freq;
                 if (nowUs >= windowUs) break;
             }
-            const unsigned who = slot % nTargets_;
+            const unsigned who = sched[slot % nSched];
             ++slot;
             const Target& tg = targets_[who];
             // ---- the thread is stopped inside captureThread, and only there ----
@@ -725,6 +968,56 @@ public:
     // The presents (the frame count) over the window, from the glue; the render thread's wait is per frame.
     void setPresents(unsigned long long frames) noexcept { presents_ = frames; }
 
+    // The render thread's Present times over the window, as QueryPerformanceCounter ticks, ascending. Call after sample(); times
+    // before the window's start are dropped. The frame model (analyze) reads them.
+    void setPresentStamps(const uint64_t* qpc, unsigned n) {
+        presentUs_.clear();
+        if (!qpc || freqQpc_ <= 0.0) return;
+        for (unsigned i = 0; i < n; ++i) {
+            if (qpc[i] < t0Qpc_) continue;
+            const double us = static_cast<double>(qpc[i] - t0Qpc_) * 1e6 / freqQpc_;
+            if (!presentUs_.empty() && us <= presentUs_.back()) continue;
+            presentUs_.push_back(us);
+        }
+    }
+
+    // After resolve: the producer (inferred) and the frames. The producer is the busiest target that is neither the render
+    // thread nor the owner, by the share of its samples that were running: the thread the render thread's handshake waits on
+    // is a thread the job system keeps busy, and this does not claim more than that. The frames come from the Present times.
+    void analyze() {
+        producer_ = -1;
+        frames_.clear();
+        if (!resolved_) return;
+        double bestShare = 0.0;
+        for (unsigned t = 0; t < nTargets_; ++t) {
+            if (targets_[t].render || std::strcmp(targets_[t].role, "owner") == 0 || !aggs_[t].valid) continue;
+            const double share = static_cast<double>(aggs_[t].kindCount[0]) / aggs_[t].valid;
+            if (share > bestShare) {
+                bestShare = share;
+                producer_ = static_cast<int>(t);
+            }
+        }
+        const int r = targetIndex("render");
+        if (r < 0 || presentUs_.size() < 2) return;
+        std::vector<FrameSample> fs;
+        fs.reserve(count_);
+        for (unsigned i = 0; i < count_; ++i) {
+            const Sample& s = samples_[i];
+            if (!s.frames) continue;
+            FrameSample f;
+            f.tUs = s.tUs;
+            f.target = s.target;
+            f.kind = s.kind;
+            f.edvrLeaf = s.edvrLeaf;
+            f.edvrStack = s.edvrStack;
+            fs.push_back(f);
+        }
+        buildFrames(fs.data(), static_cast<unsigned>(fs.size()), nTargets_, static_cast<unsigned>(r), presentUs_.data(),
+                    static_cast<unsigned>(presentUs_.size()), wallUs_, frames_);
+    }
+    int producerTarget() const noexcept { return producer_; }
+    const std::vector<FrameRow>& frames() const noexcept { return frames_; }
+
     // After the window, on the worker: each frame's module and RVA, each target's function and location tables, the class
     // counts, the render thread's handshake wait (gated on the game's build). Takes the loader's locks; threads are running.
     void resolve() {
@@ -748,10 +1041,10 @@ public:
             }
             ++valid_;
             ++a.valid;
-            uint64_t seenFn[kFrames] = {};
-            unsigned seenFns = 0;
+            int mods[kFrames] = {};
+            uint64_t keys[kFrames] = {};
+            bool handshakeFrame = false, xrFrame = false, gpuFrame = false, edvrStack = false;
             uint32_t classBits = 0;
-            bool waitHit = false;
             for (unsigned j = 0; j < s.frames; ++j) {
                 uintptr_t base = 0;
                 const int m = findModule(s.pc[j], base);
@@ -765,24 +1058,17 @@ public:
                     begin = kNoFunction;
                     end = 0;
                 }
-                if (m >= 0 && stall::equalsNoCase(mods_[m].name, "EliteDangerous64.exe") && rva >= kEliteWaitBegin &&
-                    rva < kEliteWaitEnd)
-                    waitHit = true;
-                const uint64_t fk = fnKey(m, begin, s.pc[j]);
-                if (FnRec* fr = a.fns.add(fk)) {
-                    if (fr->incl == 0 && fr->excl == 0) {   // a new record: name it once
-                        fr->mod = static_cast<int16_t>(m);
-                        fr->begin = m < 0 ? static_cast<uint32_t>(s.pc[j]) : begin;
-                        fr->end = m < 0 ? 0 : end;
-                    }
-                    bool dup = false;
-                    for (unsigned k = 0; k < seenFns; ++k) dup = dup || seenFn[k] == fk;
-                    if (!dup) {
-                        seenFn[seenFns++] = fk;
-                        ++fr->incl;
-                    }
-                    if (j == 0) ++fr->excl;
+                mods[j] = m;
+                keys[j] = fnKey(m, begin, s.pc[j]);
+                if (m >= 0) {
+                    const ModuleRec& mr = mods_[m];
+                    if (mr.cls == Class::Elite && rva >= kEliteWaitBegin && rva < kEliteWaitEnd) handshakeFrame = true;
+                    if (mr.cls == Class::EdvrOpenvr || (mr.cls == Class::Vendor && !isUpscalerName(mr.name))) xrFrame = true;
+                    if ((mr.cls == Class::Vendor && isUpscalerName(mr.name)) || mr.cls == Class::D3dDriver) gpuFrame = true;
+                    if (mr.cls == Class::EdvrD3d11 || mr.cls == Class::EdvrOpenvr) edvrStack = true;
                 }
+                // The function table of every sample, then (below) of the busy ones.
+                if (FnRec* fr = a.fns.add(keys[j])) nameFn(*fr, m, begin, end, s.pc[j]);
                 if (m >= 0) classBits |= 1u << static_cast<unsigned>(mods_[m].cls);
                 else classBits |= 1u << static_cast<unsigned>(Class::Unknown);
                 if (j == 0) {
@@ -794,10 +1080,46 @@ public:
                     a.leafClass[static_cast<unsigned>(m >= 0 ? mods_[m].cls : Class::Unknown)]++;
                 }
             }
+            countFunctions(a.fns, keys, s.frames);
+            exclusiveFunction(a.fns, keys[0]);
             for (unsigned c = 0; c < static_cast<unsigned>(Class::Count); ++c) {
                 if (classBits & (1u << c)) a.stackClass[c]++;
             }
-            if (waitHit) ++a.waitSamples;
+            if (handshakeFrame) ++a.waitSamples;
+            // Busy or waiting: the leaf's function, by the OS image's export table.
+            StubKind stub = StubKind::None;
+            const int leafMod = mods[0];
+            if (leafMod >= 0 && mods_[leafMod].cls == Class::NtdllKernel) {
+                ModuleRec& lm = mods_[leafMod];
+                if (!lm.exportsLoaded) {
+                    loadExports(lm.base, lm.exports);
+                    lm.exportsLoaded = true;
+                }
+                stub = stubKindAt(lm.exports, s.rva[0]);
+            }
+            const WaitKind kind = attributeSample(stub, handshakeFrame && eliteGateOk_, xrFrame, gpuFrame);
+            s.kind = static_cast<uint8_t>(kind);
+            s.edvrStack = edvrStack ? 1 : 0;
+            const Class leafCls = leafMod >= 0 ? mods_[leafMod].cls : Class::Unknown;
+            s.edvrLeaf = leafCls == Class::EdvrD3d11 ? 1 : leafCls == Class::EdvrOpenvr ? 2 : 0;
+            ++a.kindCount[static_cast<unsigned>(kind)];
+            if (kind == WaitKind::Busy) {
+                ++a.busyLeafClass[static_cast<unsigned>(leafCls)];
+                if (s.edvrLeaf == 1) ++a.edvrLeafD3d;
+                if (s.edvrLeaf == 2) ++a.edvrLeafOpenvr;
+                if (edvrStack) ++a.edvrStackBusy;
+                // The busy functions: the same walk, into the table of the samples that were running.
+                for (unsigned j = 0; j < s.frames; ++j) {
+                    if (FnRec* fr = a.busyFns.add(keys[j])) {
+                        if (fr->incl == 0 && fr->excl == 0) {
+                            const FnRec* all = a.fns.find(keys[j]);
+                            if (all) { fr->mod = all->mod; fr->begin = all->begin; fr->end = all->end; }
+                        }
+                    }
+                }
+                countFunctions(a.busyFns, keys, s.frames);
+                exclusiveFunction(a.busyFns, keys[0]);
+            }
         }
         resolved_ = true;
     }
@@ -846,8 +1168,12 @@ public:
                     "suspended_ms=%.2f (%.2f%% of wall) suspend_mean_us=%.1f suspend_max_us=%u timer=%s threads=%u",
                     count_, valid_, failures_, bufferFull_ ? 1 : 0, achievedHz(), wallMs, suspendTotalUs_ / 1000.0,
                     suspendPct, meanUs, suspendMaxUs_, timer_highres_ ? "high_res" : "sleep_1ms", nTargets_);
-        for (unsigned t = 0; t < nTargets_; ++t) emitThread(sink, user, t, wallMs);
+        for (unsigned t = 0; t < nTargets_; ++t) {
+            emitThread(sink, user, t, wallMs);
+            emitAccounting(sink, user, t, wallMs);
+        }
         emitWait(sink, user, info);
+        emitFrameSummary(sink, user, info);
         detail::put(sink, user, "cpu profile: end samples=%u valid=%u csv=%s%s", count_, valid_, info.csvName,
                     valid_ ? "" : " (no sample read a thread: the tables are empty)");
     }
@@ -902,14 +1228,68 @@ public:
         return std::ferror(f) == 0;
     }
 
+    // The per-frame CSV, one row per complete frame. Counts are samples that fell in the frame; the *_ms columns scale a
+    // thread's share of its samples in the frame to the frame's length (blank when the thread had none in it).
+    bool writeFramesCsv(FILE* f) const {
+        if (!f || !resolved_) return false;
+        const int r = targetIndex("render"), o = targetIndex("owner"), m = targetIndex("main");
+        std::fprintf(f, "# edvr cpu profile frames: one row per complete Present-to-Present frame; counts are samples; ms columns "
+                        "are share_of_samples * frame_ms. crit: producer render xr gpu sync unknown. producer=%s\n",
+                     producer_ >= 0 ? targets_[producer_].label : "none");
+        std::fprintf(f, "frame,start_ms,frame_ms,crit,render_n,render_busy,render_handshake,render_xr,render_gpu,render_lock,"
+                        "render_event,render_sleep,render_edvr,producer_n,producer_busy,owner_n,owner_busy,main_n,main_busy,"
+                        "render_busy_ms,render_wait_ms,producer_busy_ms,owner_busy_ms,render_edvr_ms\n");
+        auto cnt = [&](int t, const uint16_t* arr) { return t >= 0 ? arr[t] : 0; };
+        auto ms = [&](double frameMs, unsigned n, unsigned d) {
+            char buf[32];
+            if (!d) { buf[0] = 0; return std::string(buf); }
+            std::snprintf(buf, sizeof(buf), "%.3f", frameMs * n / d);
+            return std::string(buf);
+        };
+        for (const FrameRow& fr : frames_) {
+            const unsigned rn = cnt(r, fr.n), rb = cnt(r, fr.busy), pn = cnt(producer_, fr.n), pb = cnt(producer_, fr.busy);
+            const unsigned on = cnt(o, fr.n), ob = cnt(o, fr.busy), mn = cnt(m, fr.n), mb = cnt(m, fr.busy);
+            std::fprintf(f, "%u,%.3f,%.3f,%s,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%s,%s,%s,%s,%s\n", fr.index, fr.startMs,
+                         fr.frameMs, critName(fr.crit), rn, rb, fr.renderKind[static_cast<unsigned>(WaitKind::Handshake)],
+                         fr.renderKind[static_cast<unsigned>(WaitKind::Xr)], fr.renderKind[static_cast<unsigned>(WaitKind::Gpu)],
+                         fr.renderKind[static_cast<unsigned>(WaitKind::Lock)], fr.renderKind[static_cast<unsigned>(WaitKind::Event)],
+                         fr.renderKind[static_cast<unsigned>(WaitKind::Sleep)], cnt(r, fr.edvr), pn, pb, on, ob, mn, mb,
+                         ms(fr.frameMs, rb, rn).c_str(), ms(fr.frameMs, rn - rb, rn).c_str(), ms(fr.frameMs, pb, pn).c_str(),
+                         ms(fr.frameMs, ob, on).c_str(), ms(fr.frameMs, cnt(r, fr.edvr), rn).c_str());
+        }
+        return std::ferror(f) == 0;
+    }
+
 private:
     struct Agg {
         Table<FnRec> fns;
+        Table<FnRec> busyFns;              // the same, over the samples that were running (not waiting)
         Table<LocRec> locs;
+        uint32_t kindCount[kKinds] = {};   // samples by WaitKind
+        uint32_t busyLeafClass[static_cast<unsigned>(Class::Count)] = {};
+        uint32_t edvrLeafD3d = 0, edvrLeafOpenvr = 0, edvrStackBusy = 0;
         uint32_t valid = 0, failures = 0, waitSamples = 0;
         uint32_t leafClass[static_cast<unsigned>(Class::Count)] = {};
         uint32_t stackClass[static_cast<unsigned>(Class::Count)] = {};
     };
+
+    static void nameFn(FnRec& fr, int m, uint32_t begin, uint32_t end, uintptr_t pc) noexcept {
+        fr.mod = static_cast<int16_t>(m);
+        fr.begin = m < 0 ? static_cast<uint32_t>(pc) : begin;
+        fr.end = m < 0 ? 0 : end;
+    }
+    // Inclusive: each distinct function of the walked stack once.
+    static void countFunctions(Table<FnRec>& t, const uint64_t* keys, unsigned n) noexcept {
+        for (unsigned j = 0; j < n; ++j) {
+            bool dup = false;
+            for (unsigned k = 0; k < j; ++k) dup = dup || keys[k] == keys[j];
+            if (dup) continue;
+            if (FnRec* fr = t.add(keys[j])) ++fr->incl;
+        }
+    }
+    static void exclusiveFunction(Table<FnRec>& t, uint64_t key) noexcept {
+        if (FnRec* fr = t.add(key)) ++fr->excl;
+    }
 
     // The index of the module holding `pc`, adding it to the table the first time it is seen. -1 when none holds it.
     int findModule(uintptr_t pc, uintptr_t& base) noexcept {
@@ -994,6 +1374,129 @@ private:
         }
     }
 
+    // Milliseconds per frame that `count` of a thread's `valid` samples stand for: the share of the window, over the Presents.
+    double perFrameMs(uint32_t count, uint32_t valid) const noexcept {
+        if (!valid || !presents_) return 0.0;
+        return static_cast<double>(count) / valid * (wallUs_ / 1000.0) / static_cast<double>(presents_);
+    }
+
+    // One thread's frame accounting, in milliseconds per frame: busy against waiting and what it waited on, where the busy
+    // time sat by module class, EDVR's share (leaf and stack) and its top functions; for the render thread and the inferred
+    // producer, the game executable's top functions among the samples that were running.
+    void emitAccounting(LineSink sink, void* user, unsigned t, double wallMs) const {
+        const Target& tg = targets_[t];
+        const Agg& a = aggs_[t];
+        if (!a.valid) return;
+        const double frameMs = presents_ ? wallMs / static_cast<double>(presents_) : 0.0;
+        const double cpuMs = tg.cpuEnd >= tg.cpuStart ? (tg.cpuEnd - tg.cpuStart) / 10000.0 : 0.0;
+        const uint32_t busy = a.kindCount[static_cast<unsigned>(WaitKind::Busy)];
+        detail::put(sink, user,
+                    "cpu profile: thread=%s per_frame frames=%llu frame_ms=%.3f busy_ms=%.3f wait_ms=%.3f cpu_ms=%.3f "
+                    "edvr_d3d11_ms=%.3f edvr_openvr_ms=%.3f edvr_stack_ms=%.3f",
+                    tg.label, static_cast<unsigned long long>(presents_), frameMs, perFrameMs(busy, a.valid),
+                    perFrameMs(a.valid - busy, a.valid), presents_ ? cpuMs / static_cast<double>(presents_) : 0.0,
+                    perFrameMs(a.edvrLeafD3d, a.valid), perFrameMs(a.edvrLeafOpenvr, a.valid),
+                    perFrameMs(a.edvrStackBusy, a.valid));
+        auto k = [&](WaitKind w) { return perFrameMs(a.kindCount[static_cast<unsigned>(w)], a.valid); };
+        detail::put(sink, user,
+                    "cpu profile: thread=%s wait_split frame_ms=%.3f busy=%.3f handshake=%.3f xr=%.3f gpu=%.3f lock=%.3f "
+                    "event=%.3f sleep=%.3f samples=%u%s",
+                    tg.label, frameMs, k(WaitKind::Busy), k(WaitKind::Handshake), k(WaitKind::Xr), k(WaitKind::Gpu),
+                    k(WaitKind::Lock), k(WaitKind::Event), k(WaitKind::Sleep), a.valid,
+                    eliteGateOk_ ? "" : " handshake=unavailable(game build is not 332841)");
+        auto c = [&](Class cl) { return perFrameMs(a.busyLeafClass[static_cast<unsigned>(cl)], a.valid); };
+        detail::put(sink, user,
+                    "cpu profile: thread=%s busy_split elite=%.3f d3d_driver=%.3f edvr_d3d11=%.3f edvr_openvr=%.3f "
+                    "vendor=%.3f system=%.3f other=%.3f",
+                    tg.label, c(Class::Elite), c(Class::D3dDriver), c(Class::EdvrD3d11), c(Class::EdvrOpenvr),
+                    c(Class::Vendor), c(Class::NtdllKernel), c(Class::Other) + c(Class::Unknown));
+        auto top = [&](const char* tag, bool edvrOnly, unsigned limit) {
+            std::vector<const FnRec*> v;
+            a.busyFns.each([&](const FnRec& r) {
+                if (r.mod < 0 || r.begin == kNoFunction) return;
+                const Class cl = mods_[r.mod].cls;
+                if (edvrOnly ? (cl == Class::EdvrD3d11 || cl == Class::EdvrOpenvr) : cl == Class::Elite) v.push_back(&r);
+            });
+            std::sort(v.begin(), v.end(), [](const FnRec* x, const FnRec* y) {
+                return x->incl != y->incl ? x->incl > y->incl : x->key < y->key;
+            });
+            for (unsigned i = 0; i < std::min<size_t>(limit, v.size()); ++i) {
+                char where[96];
+                fnName(*v[i], where, sizeof(where));
+                detail::put(sink, user, "cpu profile: thread=%s %s %2u incl %.3f excl %.3f ms_per_frame %s", tg.label, tag,
+                            i + 1, perFrameMs(v[i]->incl, a.valid), perFrameMs(v[i]->excl, a.valid), where);
+            }
+        };
+        top("edvr_fn", true, 10);
+        if (tg.render || static_cast<int>(t) == producer_) top("elite_fn", false, kTopN);
+    }
+
+    // The producer, the critical path over the window's frames, and the 30-frame summaries.
+    void emitFrameSummary(LineSink sink, void* user, const RunInfo& info) const {
+        const double wallMs = wallUs_ / 1000.0;
+        if (producer_ < 0) {
+            detail::put(sink, user, "cpu profile: producer thread=none (no thread other than the render thread and the owner "
+                                    "was read with samples)");
+        } else {
+            const Target& tg = targets_[producer_];
+            const Agg& a = aggs_[producer_];
+            const double share = a.valid ? static_cast<double>(a.kindCount[0]) / a.valid : 0.0;
+            const double frameMs = presents_ ? wallMs / static_cast<double>(presents_) : 0.0;
+            const double cpuMs = tg.cpuEnd >= tg.cpuStart ? (tg.cpuEnd - tg.cpuStart) / 10000.0 : 0.0;
+            detail::put(sink, user,
+                        "cpu profile: producer thread=%s start=%s inferred=busiest_thread_besides_render_and_owner "
+                        "busy_ms=%.3f frame_ms=%.3f busy_pct_of_frame=%.1f cpu_ms=%.3f",
+                        tg.label, tg.start, share * frameMs, frameMs, 100.0 * share,
+                        presents_ ? cpuMs / static_cast<double>(presents_) : 0.0);
+        }
+        if (frames_.empty()) {
+            detail::put(sink, user, "cpu profile: critical frames=0 (no Present timestamps, or no complete frame in the window)");
+            detail::put(sink, user, "cpu profile: frames_csv=%s rows=0", info.framesCsvName);
+            return;
+        }
+        unsigned crit[kCrits] = {};
+        for (const FrameRow& f : frames_) ++crit[static_cast<unsigned>(f.crit)];
+        detail::put(sink, user,
+                    "cpu profile: critical frames=%u producer=%u render=%u xr=%u gpu=%u sync=%u unknown=%u "
+                    "rule=render_waited_25pct_or_more_and_its_longest_wait_names_the_path",
+                    static_cast<unsigned>(frames_.size()), crit[static_cast<unsigned>(Crit::Producer)],
+                    crit[static_cast<unsigned>(Crit::Render)], crit[static_cast<unsigned>(Crit::Xr)],
+                    crit[static_cast<unsigned>(Crit::Gpu)], crit[static_cast<unsigned>(Crit::Sync)],
+                    crit[static_cast<unsigned>(Crit::Unknown)]);
+        const int r = targetIndex("render"), o = targetIndex("owner");
+        for (size_t at = 0; at < frames_.size(); at += kFrameBlock) {
+            const size_t end = std::min(frames_.size(), at + kFrameBlock);
+            if (end - at < kFrameBlock / 3 && at > 0) break;   // a short tail is not a summary
+            double frameSum = 0.0;
+            unsigned rn = 0, rbusy = 0, redvr = 0, pn = 0, pbusy = 0, on = 0, obusy = 0, rk[kKinds] = {}, cc[kCrits] = {};
+            for (size_t i = at; i < end; ++i) {
+                const FrameRow& f = frames_[i];
+                frameSum += f.frameMs;
+                if (r >= 0) { rn += f.n[r]; rbusy += f.busy[r]; redvr += f.edvr[r]; }
+                if (producer_ >= 0) { pn += f.n[producer_]; pbusy += f.busy[producer_]; }
+                if (o >= 0) { on += f.n[o]; obusy += f.busy[o]; }
+                for (unsigned k = 0; k < kKinds; ++k) rk[k] += f.renderKind[k];
+                ++cc[static_cast<unsigned>(f.crit)];
+            }
+            const double fm = frameSum / static_cast<double>(end - at);
+            auto share = [&](unsigned n, unsigned d) { return d ? fm * n / d : 0.0; };
+            detail::put(sink, user,
+                        "cpu profile: window frames=%u-%u n=%u frame_ms=%.2f render_busy=%.2f wait_handshake=%.2f wait_xr=%.2f "
+                        "wait_gpu=%.2f wait_sync=%.2f producer_busy=%.2f owner_busy=%.2f render_edvr=%.2f render_n=%u producer_n=%u "
+                        "crit=producer:%u,render:%u,xr:%u,gpu:%u,sync:%u,unknown:%u",
+                        static_cast<unsigned>(at), static_cast<unsigned>(end - 1), static_cast<unsigned>(end - at), fm,
+                        share(rbusy, rn), share(rk[static_cast<unsigned>(WaitKind::Handshake)], rn),
+                        share(rk[static_cast<unsigned>(WaitKind::Xr)], rn), share(rk[static_cast<unsigned>(WaitKind::Gpu)], rn),
+                        share(rk[static_cast<unsigned>(WaitKind::Lock)] + rk[static_cast<unsigned>(WaitKind::Event)] +
+                                  rk[static_cast<unsigned>(WaitKind::Sleep)], rn),
+                        share(pbusy, pn), share(obusy, on), share(redvr, rn), rn, pn, cc[static_cast<unsigned>(Crit::Producer)],
+                        cc[static_cast<unsigned>(Crit::Render)], cc[static_cast<unsigned>(Crit::Xr)],
+                        cc[static_cast<unsigned>(Crit::Gpu)], cc[static_cast<unsigned>(Crit::Sync)],
+                        cc[static_cast<unsigned>(Crit::Unknown)]);
+        }
+        detail::put(sink, user, "cpu profile: frames_csv=%s rows=%u", info.framesCsvName, static_cast<unsigned>(frames_.size()));
+    }
+
     // The render thread's time in the producer handshake, per frame: the samples whose stack holds the handshake's
     // function, scaled to the window's wall time and divided by the presents. Measured only on the gated build.
     void emitWait(LineSink sink, void* user, const RunInfo& info) const {
@@ -1035,6 +1538,11 @@ private:
     double suspendTotalUs_ = 0.0;
     uint32_t suspendMaxUs_ = 0;
     unsigned long long presents_ = 0;
+    uint64_t t0Qpc_ = 0;               // QueryPerformanceCounter at the window's start
+    double freqQpc_ = 0.0;
+    std::vector<double> presentUs_;    // the render thread's Presents, from the window's start
+    std::vector<FrameRow> frames_;
+    int producer_ = -1;
 
     unsigned nTargets_ = 0;
     Target targets_[kMaxTargets];

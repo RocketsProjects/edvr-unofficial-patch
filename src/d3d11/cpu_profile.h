@@ -7,7 +7,10 @@
 //                        the shared scene flag; flat has none, so `on` waits there and says so).
 //
 // Off costs no thread and no sample: the frame tick is one branch and the Present hook one relaxed load. Every capture
-// writes "cpu profile:" lines to the graphics log (start, the report, end) and edvr_logs\cpu_profile_<stamp>.csv.
+// writes "cpu profile:" lines to the graphics log (start, the report, end), edvr_logs\cpu_profile_<stamp>.csv (the raw samples)
+// and edvr_logs\cpu_frames_<stamp>.csv (one row per Present-to-Present frame). While a capture runs the Present hook also
+// stamps each Present (one QueryPerformanceCounter, into static storage), which is what the per-frame accounting reads
+// (docs\cpu-frametime-2026-10-14.md).
 #pragma once
 
 namespace edvr {

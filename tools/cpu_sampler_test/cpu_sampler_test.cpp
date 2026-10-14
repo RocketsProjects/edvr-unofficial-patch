@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -80,6 +81,9 @@ struct Busy {
     LoopFn loop = nullptr;
     LONG loopStop = 0;
     unsigned calls = 0;
+    // The render role's Presents: a QueryPerformanceCounter stamp about every 8 ms, in a fixed array the worker reads by count.
+    std::vector<uint64_t> stamps = std::vector<uint64_t>(65536);
+    std::atomic<unsigned> stampCount{0};
 };
 
 // The render-role thread: registers its own stack, then calls hot_outer, sleeping a few milliseconds every 64th call (a
@@ -91,9 +95,21 @@ void renderMain(Busy* b) {
     b->lo = lo;
     b->hi = hi;
     b->ready.store(true);
+    LARGE_INTEGER freq{}, last{}, now{};
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&last);
     while (!b->stop.load()) {
         b->outer();
         if ((++b->calls % 64u) == 0) Sleep(3);
+        QueryPerformanceCounter(&now);
+        if ((now.QuadPart - last.QuadPart) * 1000 >= 8 * freq.QuadPart) {
+            last = now;
+            const unsigned n = b->stampCount.load(std::memory_order_relaxed);
+            if (n < 65536) {
+                b->stamps[n] = static_cast<uint64_t>(now.QuadPart);
+                b->stampCount.store(n + 1, std::memory_order_release);
+            }
+        }
     }
 }
 
@@ -313,6 +329,179 @@ bool testSourceWindow(const std::string& root) {
     return ok;
 }
 
+// A number after `key` in a log line, or -1.
+double kv(const std::string& line, const char* key) {
+    const size_t at = line.find(key);
+    return at == std::string::npos ? -1.0 : std::atof(line.c_str() + at + std::strlen(key));
+}
+
+const std::string* findLine(const std::vector<std::string>& lines, const std::string& prefix, const char* also = nullptr) {
+    for (const std::string& l : lines) {
+        if (l.find(prefix) == 0 && (!also || l.find(also) != std::string::npos)) return &l;
+    }
+    return nullptr;
+}
+
+// The operating system's own wait stubs, found by export table: what stops a sample counting as running.
+bool testStubs() {
+    using edvr::cpu::StubKind;
+    bool ok = edvr::cpu::stubKindOfExport("NtWaitForSingleObject") == StubKind::Event &&
+              edvr::cpu::stubKindOfExport("ZwWaitForMultipleObjects") == StubKind::Event &&
+              edvr::cpu::stubKindOfExport("NtWaitForAlertByThreadId") == StubKind::Park &&
+              edvr::cpu::stubKindOfExport("NtDelayExecution") == StubKind::Sleep &&
+              edvr::cpu::stubKindOfExport("NtUserMsgWaitForMultipleObjectsEx") == StubKind::Event &&
+              edvr::cpu::stubKindOfExport("NtClose") == StubKind::None && edvr::cpu::stubKindOfExport("memcpy") == StubKind::None &&
+              edvr::cpu::stubKindOfExport("") == StubKind::None && edvr::cpu::stubKindOfExport(nullptr) == StubKind::None;
+    check(ok, "export names: waits by kind (event, park, sleep), everything else None");
+    // The real ntdll: the stubs found by address, inside their span, and a neighbour that does not wait.
+    HMODULE nt = GetModuleHandleA("ntdll.dll");
+    std::vector<edvr::cpu::ExportRec> exports;
+    edvr::cpu::loadExports(reinterpret_cast<uintptr_t>(nt), exports);
+    auto rvaOf = [&](const char* n) {
+        return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(GetProcAddress(nt, n)) - reinterpret_cast<uintptr_t>(nt));
+    };
+    const uint32_t wso = rvaOf("NtWaitForSingleObject"), alert = rvaOf("NtWaitForAlertByThreadId"),
+                   delay = rvaOf("NtDelayExecution"), close = rvaOf("NtClose");
+    check(exports.size() > 500, "ntdll's export table is read (hundreds of named exports)");
+    check(edvr::cpu::stubKindAt(exports, wso) == StubKind::Event && edvr::cpu::stubKindAt(exports, wso + 0x12) == StubKind::Event,
+          "a leaf in NtWaitForSingleObject's stub is an event wait");
+    check(edvr::cpu::stubKindAt(exports, alert + 0x12) == StubKind::Park, "a leaf in NtWaitForAlertByThreadId is a park (lock)");
+    check(edvr::cpu::stubKindAt(exports, delay + 0x12) == StubKind::Sleep, "a leaf in NtDelayExecution is a sleep");
+    check(edvr::cpu::stubKindAt(exports, close + 0x12) == StubKind::None, "a leaf in NtClose is not a wait");
+    check(edvr::cpu::stubKindAt(exports, 0) == StubKind::None, "an RVA below every export is not a wait");
+    using edvr::cpu::WaitKind;
+    using edvr::cpu::attributeSample;
+    const bool attr = attributeSample(StubKind::None, true, true, true) == WaitKind::Busy &&
+                      attributeSample(StubKind::Event, true, true, true) == WaitKind::Handshake &&
+                      attributeSample(StubKind::Park, false, true, true) == WaitKind::Xr &&
+                      attributeSample(StubKind::Event, false, false, true) == WaitKind::Gpu &&
+                      attributeSample(StubKind::Park, false, false, false) == WaitKind::Lock &&
+                      attributeSample(StubKind::Event, false, false, false) == WaitKind::Event &&
+                      attributeSample(StubKind::Sleep, false, false, false) == WaitKind::Sleep;
+    check(attr, "a sample is busy unless its leaf waits; a wait is named by the handshake, then the runtime, then the GPU, then the stub");
+    return ok && attr;
+}
+
+// The frame model on a window written by hand: frames are the Present intervals wholly inside the window, each sample lands in
+// one, and a frame's critical path comes from what the render thread was waiting on.
+bool testFrameModel() {
+    using namespace edvr::cpu;
+    // Targets: 0 render, 1 producer. Presents at 0, 10, 20, 30, 40 ms; the window ends at 45 ms, so four frames, 10 ms each, and
+    // the stretch after 40 ms is not a frame.
+    const double presents[] = {0, 10000, 20000, 30000, 40000};
+    std::vector<FrameSample> s;
+    auto add = [&](uint32_t us, uint8_t target, WaitKind k, uint8_t edvr = 0) {
+        FrameSample f;
+        f.tUs = us;
+        f.target = target;
+        f.kind = static_cast<uint8_t>(k);
+        f.edvrLeaf = edvr;
+        s.push_back(f);
+    };
+    // Frame 0: the render thread never waits (three busy samples, one in EDVR); the producer is busy twice.
+    add(1000, 0, WaitKind::Busy); add(2000, 1, WaitKind::Busy); add(3000, 0, WaitKind::Busy, 1); add(5000, 1, WaitKind::Busy);
+    add(8000, 0, WaitKind::Busy);
+    // Frame 1: three of four render samples wait in the handshake.
+    add(11000, 0, WaitKind::Handshake); add(12000, 0, WaitKind::Handshake); add(14000, 0, WaitKind::Handshake);
+    add(18000, 0, WaitKind::Busy); add(13000, 1, WaitKind::Busy);
+    // Frame 2: the render thread waits on the runtime (two) and on a lock (one), busy once: the runtime is the longest wait.
+    add(21000, 0, WaitKind::Xr); add(23000, 0, WaitKind::Xr); add(25000, 0, WaitKind::Lock); add(28000, 0, WaitKind::Busy);
+    // Frame 3: the GPU, two of two.
+    add(31000, 0, WaitKind::Gpu); add(35000, 0, WaitKind::Gpu);
+    // After the last Present: not in any frame.
+    add(42000, 0, WaitKind::Handshake);
+    std::stable_sort(s.begin(), s.end(), [](const FrameSample& a, const FrameSample& b) { return a.tUs < b.tUs; });
+    std::vector<FrameRow> rows;
+    buildFrames(s.data(), static_cast<unsigned>(s.size()), 2, 0, presents, 5, 45000.0, rows);
+    bool ok = rows.size() == 4;
+    ok = ok && rows[0].n[0] == 3 && rows[0].busy[0] == 3 && rows[0].edvr[0] == 1 && rows[0].n[1] == 2 && rows[0].crit == Crit::Render;
+    ok = ok && rows[1].n[0] == 4 && rows[1].renderKind[static_cast<unsigned>(WaitKind::Handshake)] == 3 && rows[1].crit == Crit::Producer;
+    ok = ok && rows[2].crit == Crit::Xr && rows[3].crit == Crit::Gpu;
+    ok = ok && rows[3].frameMs > 9.99 && rows[3].frameMs < 10.01 && rows[3].startMs > 29.99 && rows[3].startMs < 30.01;
+    check(ok, "frames: the Present intervals, each sample in one, the sample after the last Present in none");
+    // A frame the render thread has no sample in is unknown, not render-bound; a window cutting a frame drops it.
+    std::vector<FrameRow> cut;
+    buildFrames(s.data(), static_cast<unsigned>(s.size()), 2, 0, presents, 5, 35000.0, cut);
+    FrameRow empty;
+    const bool edge = cut.size() == 3 && classifyFrame(empty, 0) == Crit::Unknown;
+    check(edge, "frames: a frame that runs past the window is dropped; a frame with no render sample is unknown");
+    FrameRow tie;
+    tie.n[0] = 4;
+    tie.renderKind[static_cast<unsigned>(WaitKind::Handshake)] = 2;
+    tie.renderKind[static_cast<unsigned>(WaitKind::Gpu)] = 2;
+    FrameRow low;
+    low.n[0] = 8;
+    low.renderKind[static_cast<unsigned>(WaitKind::Handshake)] = 1;
+    const bool crit = classifyFrame(tie, 0) == Crit::Producer && classifyFrame(low, 0) == Crit::Render;
+    check(crit, "critical path: a tie goes to the producer; one wait in eight is still the render thread's own frame");
+    return ok && edge && crit;
+}
+
+// The accounting lines of the live window: each thread's per-frame, wait and busy split; the producer; the critical path.
+void checkAccounting(const std::vector<std::string>& lines, const Session& session, unsigned picked, unsigned presents,
+                     const char* busyLabel, const std::string& outDir) {
+    unsigned perFrame = 0, waitSplit = 0, busySplit = 0;
+    for (const std::string& l : lines) {
+        if (l.find(" per_frame frames=") != std::string::npos) ++perFrame;
+        if (l.find(" wait_split frame_ms=") != std::string::npos) ++waitSplit;
+        if (l.find(" busy_split elite=") != std::string::npos) ++busySplit;
+    }
+    check(perFrame == picked && waitSplit == picked && busySplit == picked,
+          "every thread has its per_frame, wait_split and busy_split line");
+    const std::string* pf = findLine(lines, "cpu profile: thread=render per_frame");
+    const std::string* ws = findLine(lines, "cpu profile: thread=render wait_split");
+    check(pf && ws, "the render thread's per_frame and wait_split lines are there");
+    if (pf && ws) {
+        const double frameMs = kv(*pf, "frame_ms="), busyMs = kv(*pf, "busy_ms="), waitMs = kv(*pf, "wait_ms=");
+        std::printf("  render per frame: frame %.3f ms, busy %.3f, wait %.3f; Present stamps in the window: %u\n", frameMs, busyMs,
+                    waitMs, presents);
+        check(presents >= 50 && frameMs > 4.0 && frameMs < 40.0, "the render role stamped Presents about every 8 ms");
+        check(std::fabs(busyMs + waitMs - frameMs) < 0.01 * frameMs + 0.002, "busy plus waiting is the frame");
+        check(kv(*ws, " sleep=") > 0.5, "the render thread's Sleep calls are counted as sleep waits (NtDelayExecution)");
+        check(kv(*ws, " busy=") > 1.0, "and its hot loop as busy time");
+        check(kv(*pf, "edvr_stack_ms=") > 0.0, "an EDVR-class frame on the render stack (the rig exe stands in for EDVR) is counted");
+    }
+    const std::string* prod = findLine(lines, "cpu profile: producer thread=");
+    check(prod && prod->find(std::string("thread=") + busyLabel + " ") != std::string::npos,
+          "the producer is the busiest thread besides render and owner (the spinning one)");
+    if (prod) check(kv(*prod, "busy_pct_of_frame=") > 80.0, "the producer line reports it busy for most of the frame");
+    const std::string* crit = findLine(lines, "cpu profile: critical frames=");
+    unsigned frames = 0, sum = 0;
+    if (crit) {
+        frames = static_cast<unsigned>(kv(*crit, "frames="));
+        sum = static_cast<unsigned>(kv(*crit, " producer=") + kv(*crit, " render=") + kv(*crit, " xr=") + kv(*crit, " gpu=") +
+                                    kv(*crit, " sync=") + kv(*crit, " unknown="));
+    }
+    check(crit && frames >= 50 && sum == frames, "the critical line counts every complete frame once");
+    check(session.frames().size() == frames, "the report's frame count is the model's");
+    unsigned windows = 0;
+    for (const std::string& l : lines) {
+        if (l.find("cpu profile: window frames=") == 0) ++windows;
+    }
+    check(windows >= 1 && windows <= (frames + 29) / 30, "30-frame summary lines: one per full block");
+    const std::string* csvLine = findLine(lines, "cpu profile: frames_csv=");
+    check(csvLine && static_cast<unsigned>(kv(*csvLine, "rows=")) == frames, "the frames_csv line names the file and its rows");
+    // The frames CSV: one row per frame, a fixed column count, written and read back.
+    const std::string path = outDir + "\\cpu_frames_rig.csv";
+    bool wrote = false;
+    if (FILE* f = std::fopen(path.c_str(), "wb")) {
+        wrote = session.writeFramesCsv(f);
+        std::fclose(f);
+    }
+    check(wrote, "the frames CSV writes");
+    std::istringstream in(readFile(path));
+    std::string row;
+    unsigned rows = 0, headerCols = 0, badCols = 0;
+    while (std::getline(in, row)) {
+        if (row.empty() || row[0] == '#') continue;
+        const unsigned cols = static_cast<unsigned>(std::count(row.begin(), row.end(), ',')) + 1;
+        if (!headerCols) { headerCols = cols; continue; }
+        ++rows;
+        if (cols != headerCols) ++badCols;
+    }
+    check(rows == frames && headerCols == 24 && badCols == 0, "the frames CSV has its header and one 24-column row per frame");
+}
+
 bool testSelectAndCapture(const std::string& outDir, bool& wroteOutput) {
     HMODULE dll = nullptr;
     const std::string dllPath = exeDirectory() + "\\hot_target.dll";
@@ -364,6 +553,7 @@ bool testSelectAndCapture(const std::string& outDir, bool& wroteOutput) {
     info.build = "cpu_sampler_test (no EDVR build)";
     char how[480] = {};
     unsigned picked = 0;
+    unsigned windowPresents = 0;
     bool sampled = false;
     std::thread worker([&] {
         Target targets[edvr::cpu::kMaxTargets];
@@ -372,9 +562,15 @@ bool testSelectAndCapture(const std::string& outDir, bool& wroteOutput) {
         info.threads = picked;
         if (!session.prepare()) return;
         session.emitStart(&collect, &lines, info);
+        const unsigned stamps0 = render.stampCount.load(std::memory_order_acquire);
         session.sample(targets, picked, info.windowS, edvr::cpu::kTargetHz, edvr::cpu::kMaxStoppedFraction);
-        session.setPresents(0);
+        const unsigned stamps1 = render.stampCount.load(std::memory_order_acquire);
+        windowPresents = stamps1 - stamps0;
+        session.setPresents(windowPresents);
+        session.setPresentStamps(render.stamps.data() + stamps0, stamps1 - stamps0);
         session.resolve();
+        session.analyze();
+        info.framesCsvName = "cpu_frames_rig.csv";
         session.emitReport(&collect, &lines, info);
         for (unsigned i = 0; i < picked; ++i) {
             if (targets[i].handle) CloseHandle(targets[i].handle);
@@ -432,7 +628,7 @@ bool testSelectAndCapture(const std::string& outDir, bool& wroteOutput) {
         everyValid = everyValid && v > 0;
     }
     std::printf("  samples per thread: min %u, max %u of %u valid\n", lo, hi, session.valid());
-    check(everyValid && hi <= 2 * lo + 2, "every chosen thread is read, and the round-robin is balanced");
+    check(everyValid && hi <= 2 * lo + lo / 4 + 4, "every chosen thread is read, and the weighted round-robin is balanced (render and the busiest other get two slots)");
 
     // The stack registration of the busy thread comes from its TEB, not from its own call: its samples must not all fail.
     if (bIdx >= 0) {
@@ -541,6 +737,8 @@ bool testSelectAndCapture(const std::string& outDir, bool& wroteOutput) {
     }
     check(hotOracle && hotInTable, "hot_spin_hot's range from the render table equals the OS's (oracle)");
 
+    checkAccounting(lines, session, picked, windowPresents, busyLabel, outDir);
+
     // The CSV, written and read back as edvr_log.py reads it.
     const std::string csvPath = outDir + "\\cpu_profile_rig.csv";
     if (FILE* f = std::fopen(csvPath.c_str(), "wb")) {
@@ -599,6 +797,8 @@ int main(int argc, char** argv) {
     testClassify();
     testPacer();
     testGate();
+    testStubs();
+    testFrameModel();
     testSourceWindow(root);
     bool wrote = false;
     testSelectAndCapture(outDir, wrote);
