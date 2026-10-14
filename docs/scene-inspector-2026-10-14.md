@@ -40,6 +40,14 @@
   module linked in: every state the duplicate touches is restored (rasterizer, scissor, blend + factor + mask, depth-stencil + reference; shaders,
   layout, topology, targets, viewports, constant buffers untouched), the target's pixels are byte-identical to a control run, counts are exact, the
   debug layer reports no error. `edvr_log.py --inspect` has its own self-test, in the build gate.
+- **Targets and the DLSS inputs (2026-10-14, after the first flight):** each render target is labelled from the temporal pass's word: `DLSS colour input`
+  (the texture the game submits), `DLSS depth target` (shares the scene depth the pass reads), both, or `intermediate pass, not a DLSS input`. Verdicts
+  apply only to draws in the first three; the others get `INTERMEDIATE` and no route, stack or occluded line, and are listed after the DLSS ones. The
+  depth owner is the last draw that wrote depth at the centre into the scene depth, whichever colour target it wrote (Elite's opaque pass and its
+  effects write different colour targets over one depth). The PNG crops carry a 1-pixel magenta ring just outside the box.
+- **Path numbers, corrected:** in the decision texture path 2 is the WORLD camera term (pixels beyond the ship split, and the far plane) and path 1 the
+  head's delta (temporal_shader_source.h: `decisionPath = count15 ? 2 : 1`, count15 set only in the world branch). The first build had them the other
+  way round, which made every distant camera-path pixel read as a 2 px mismatch against the ship term. `blend_probe_core.h`'s legend has the same error.
 - **Limits:** VR only (flat: refused, said; the flat runtime would need its own capture, not cheap). Left eye only. Depth-only draws (no colour
   target) are not seen. NVIDIA DLSS only for the pixel inputs (FSR/XeSS: refused with the reason; the draw half still reports). A draw on a UAV or
   stream-output target, and indirect draws, are `unmeasured`/counted, never duplicated. Clears of a target between draws are honoured
@@ -139,3 +147,7 @@ these (S7).
 - **2026-10-14, build.** Pure core, device module, rig, hooks (vscreen.cpp draw offer, clears and ticks; temporal_pass.cpp inputs and outputs;
   native_temporal.cpp `nativeTemporalEyeToHead`; dlaa.cpp `dlaaEvalFacts`; device_hook.cpp key and environment), `edvr_log.py --inspect`, build.bat
   rig and compile lines, edvr.ini comment. Nothing installed or flown.
+- **2026-10-14, first flight (v0.20.0-rc.1-4-g66dfe94f, Frontier).** Seven captures. The inspector worked as built; two tool faults surfaced and were fixed
+  (the path labels above, and verdicts on intermediate lighting and bloom targets). Railing (cap 1, 2): the railing's draws are keyed and substituted
+  (`DE545DC8EE4FBB87`/`E46E3E4832B2FDB0` rigid#3, `EB5234DB6ADB491D`/`3434972DB5336AA4` rigid#0) but their pixels read engine kind 3, a pool record with
+  no marker from this frame or the last 64, so the pass falls back to the world camera term. See the coordinator report for the proposed fix.

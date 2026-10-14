@@ -4223,6 +4223,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         si.w = w;
                         si.h = h;
                         si.sceneFrame = g_rowsFrame;
+                        si.colourSource = src;                           // what the game submitted: DLSS's colour input
+                        si.sceneDepth = depthSrv ? e.depthRes : nullptr;  // the scene depth this pass reads
                         std::memcpy(si.tanNow, p.tanNow, sizeof(si.tanNow));
                         std::memcpy(si.tanPrev, p.tanPrev, sizeof(si.tanPrev));
                         std::memcpy(si.worldRows[0], p.cand[2][0], sizeof(si.worldRows[0]));

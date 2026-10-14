@@ -5855,7 +5855,7 @@ def self_test_inspect():
         "scene inspect verdict: #3 TRANSLUCENT_NO_MASK: additive blend, writes no depth and has no reactive or coverage mask; inherits depth and motion of #2",
         "scene inspect occluded: #0 rt=#0 vs=0000000000001000 ps=0000000000002000 cls=opaque box=256 ctr=1 under #2",
         "scene inspect input: DLSS input 2016x2016, box [1092,1108)x[1076,1092) centre 1100,1084, crop 128x128 at 1036,1020 (same frame as the draws)",
-        "scene inspect pixel centre: input px 1100,1084 depth=0.250000 (2.000 m) mv_pass=(1.600,0.000) mv_dlss=(1.600,0.000) expect_world=(1.600,0.000) expect_ship=(0.000,0.000) mismatch=0.000 px vs the world camera term path=1(camera-world) engine_kind=0(none) coverage_mask=0 bias_mask=0",
+        "scene inspect pixel centre: input px 1100,1084 depth=0.250000 (2.000 m) mv_pass=(1.600,0.000) mv_dlss=(1.600,0.000) expect_world=(1.600,0.000) expect_ship=(0.000,0.000) mismatch=0.000 px vs the world camera term path=2(camera-world) engine_kind=0(none) coverage_mask=0 bias_mask=0",
         "scene inspect box stats: 256 pixels read; depth min=0.250000 max=0.250000",
         "scene inspect dlss: preset=K(11) input 2016x2016 -> output 4032x4032 jitter=(0.2500,-0.1250) px history_reset=0 exposure=pre 1.000 scale 1.000 texture=none hdr=0",
         "scene inspect image: depth 128x128: grey = raw reversed-Z depth",

@@ -306,11 +306,12 @@ void testMotion() {
     PixelFacts p;
     p.haveWorld = p.haveHead = true;
     p.expWx = 1.0f; p.expWy = 0.0f; p.expHx = 5.0f; p.expHy = 0.0f;
-    p.flags.path = 1;
-    float ex = 0, ey = 0;
-    check(expectedForPath(p, &ex, &ey) && ex == 1.0f, "path 1 compares to the world term");
     p.flags.path = 2;
-    check(expectedForPath(p, &ex, &ey) && ex == 5.0f, "path 2 compares to the ship term");
+    float ex = 0, ey = 0;
+    check(expectedForPath(p, &ex, &ey) && ex == 1.0f, "path 2 (the shader's world branch) compares to the world term");
+    p.flags.path = 1;
+    check(expectedForPath(p, &ex, &ey) && ex == 5.0f, "path 1 (the head's delta) compares to the ship term");
+    check(std::strcmp(pathName(2), "camera-world") == 0 && std::strcmp(pathName(1), "camera-ship") == 0, "path names: 2 is the world, 1 the ship");
     p.flags.path = 11;
     p.mvx = 4.5f;
     check(expectedForPath(p, &ex, &ey) && ex == 5.0f, "another path compares to the nearer term");
@@ -327,7 +328,7 @@ VerdictIn baseIn() {
     v.routeNone = true;
     v.havePixel = true;
     v.px.valid = true;
-    v.px.flags.path = 1;
+    v.px.flags.path = 2;
     v.px.haveWorld = v.px.haveHead = true;
     return v;
 }
@@ -376,7 +377,7 @@ void testVerdicts() {
     check(std::strcmp(o.code, "OK") == 0, "the same surface with a keyed pair and substituted shaders is fine");
     // Motion mismatch.
     v = baseIn(); v.cls = Cls::Opaque; v.depthWrite = true; v.isDepthOwner = true; v.keyed = true; v.routeNone = false;
-    v.px.mvx = 3.0f; v.px.mvy = 0.0f; v.px.expWx = 1.0f; v.px.expWy = 0.0f; v.px.flags.path = 1;
+    v.px.mvx = 3.0f; v.px.mvy = 0.0f; v.px.expWx = 1.0f; v.px.expWy = 0.0f; v.px.flags.path = 2;
     verdictFor(v, &o);
     check(std::strcmp(o.code, "MV_MISMATCH") == 0 && has(o.text, "2.00 px"), "the pass wrote 3 and the camera term says 1: 2.00 px apart");
     v.px.mvx = 1.2f;
@@ -407,6 +408,39 @@ void testVerdicts() {
     check(std::strcmp(o.code, "OK") == 0, "no finding is OK, in words");
     verdictFor(v, nullptr);
     check(true, "a null out is tolerated");
+}
+
+void testRolesAndOutline() {
+    check(roleOf(false, true, true) == Role::Unknown, "without the pass's word every role is unknown");
+    check(roleOf(true, true, true) == Role::ColourAndDepth && roleOf(true, true, false) == Role::Colour && roleOf(true, false, true) == Role::Depth &&
+              roleOf(true, false, false) == Role::Intermediate, "colour source, shared scene depth, both, neither");
+    check(roleIsDlssInput(Role::Unknown) && roleIsDlssInput(Role::Depth) && !roleIsDlssInput(Role::Intermediate), "only an intermediate pass is not a DLSS input");
+    check(roleHasSceneDepth(Role::Depth) && roleHasSceneDepth(Role::ColourAndDepth) && !roleHasSceneDepth(Role::Colour), "scene depth roles");
+    check(std::strcmp(roleText(Role::Intermediate), "intermediate pass, not a DLSS input") == 0, "the label the coordinator asked for, word for word");
+    VerdictIn v = baseIn();
+    v.role = Role::Intermediate; v.cls = Cls::Additive; v.depthWrite = false; v.aboveOwner = true; v.depthOwnerIdx = 3;
+    VerdictOut o;
+    verdictFor(v, &o);
+    check(std::strcmp(o.code, "INTERMEDIATE") == 0 && has(o.text, "not a DLSS input") && !has(o.text, "TRANSLUCENT") && !has(o.text, "no reactive"),
+          "an additive draw in an intermediate pass gets no DLSS rule");
+    v.role = Role::Depth;
+    verdictFor(v, &o);
+    check(std::strcmp(o.code, "TRANSLUCENT_NO_MASK") == 0, "the same draw in a DLSS depth target does");
+    // The outline: a ring of magenta just outside [1,3)x[1,3) of a 6x5 image; the box's own pixels untouched; clipped at the image edge.
+    std::vector<uint8_t> img(6 * 5 * 3, 7);
+    drawBoxOutline(img.data(), 6, 5, 1, 1, 3, 3);
+    auto px = [&](int x, int y, int c) { return img[(static_cast<size_t>(y) * 6 + static_cast<size_t>(x)) * 3 + static_cast<size_t>(c)]; };
+    bool ring = true;
+    for (int x = 0; x <= 3; ++x) ring = ring && px(x, 0, 0) == 255 && px(x, 0, 1) == 0 && px(x, 3, 0) == 255;
+    for (int y = 1; y < 3; ++y) ring = ring && px(0, y, 0) == 255 && px(3, y, 2) == 255;
+    check(ring, "the ring is the box grown by one pixel");
+    check(px(1, 1, 0) == 7 && px(2, 2, 1) == 7 && px(1, 2, 2) == 7 && px(2, 1, 0) == 7, "the box's own pixels are untouched");
+    check(px(4, 0, 0) == 7 && px(0, 4, 0) == 7 && px(5, 4, 1) == 7, "nothing outside the ring changed");
+    std::vector<uint8_t> tiny(2 * 2 * 3, 7);
+    drawBoxOutline(tiny.data(), 2, 2, 0, 0, 2, 2);
+    check(tiny[0] == 7 && tiny[11] == 7, "a box that fills the image has its ring off the image: nothing is drawn, nothing overruns");
+    drawBoxOutline(nullptr, 2, 2, 0, 0, 1, 1);
+    check(true, "a null image is tolerated");
 }
 
 void testText() {
@@ -443,6 +477,7 @@ void testText() {
     r.rt0W = r.rt0H = r.dsW = r.dsH = 99999;
     std::memset(r.ds, 'g', sizeof(r.ds) - 1);
     std::memset(r.srv, 'v', sizeof(r.srv) - 1);
+    std::memset(r.role, 'o', sizeof(r.role) - 1);
     std::memset(r.verdict, 'x', sizeof(r.verdict) - 1);
     std::memset(r.uiFamily, 'x', sizeof(r.uiFamily) - 1);
     std::memset(r.uiDecision, 'x', sizeof(r.uiDecision) - 1);
@@ -463,7 +498,7 @@ void testText() {
     // The real worst verdict: every finding at once.
     VerdictIn vin = baseIn();
     vin.cls = Cls::Additive; vin.depthWrite = false; vin.aboveOwner = true; vin.depthOwnerIdx = 2000000000; vin.box = 1; vin.ctr = 1; vin.topology = 2;
-    vin.px.flags.path = 1; vin.px.mvx = 99.0f; vin.px.expWx = -99.0f; vin.px.flags.hidden = true; vin.status = Status::Partial;
+    vin.px.flags.path = 2; vin.px.mvx = 99.0f; vin.px.expWx = -99.0f; vin.px.flags.hidden = true; vin.status = Status::Partial;
     verdictFor(vin, &v);
     n = formatVerdictLine(b, sizeof(b), 4294967295u, v);
     checkf(n > 0 && static_cast<size_t>(n) < kLineMax && std::strlen(v.text) < sizeof(v.text) - 2, "the longest verdict (%zu text bytes) fits its buffer and the line", std::strlen(v.text));
@@ -489,10 +524,10 @@ void testText() {
 
     PixelFacts p;
     p.valid = true; p.depth = 0.25f; p.metres = 2.0f; p.far = false; p.mvx = 1.5f; p.mvy = -0.5f; p.haveDlss = true; p.dlx = 1.5f; p.dly = -0.5f;
-    p.haveWorld = p.haveHead = true; p.expWx = 1.6f; p.expWy = 0.0f; p.expHx = 0.0f; p.expHy = 0.0f; p.flags.path = 1; p.coverage = 0; p.bias = 0;
+    p.haveWorld = p.haveHead = true; p.expWx = 1.6f; p.expWy = 0.0f; p.expHx = 0.0f; p.expHy = 0.0f; p.flags.path = 2; p.coverage = 0; p.bias = 0;
     n = formatPixelLine(b, sizeof(b), "centre", 31, 32, p);
     check(n > 0 && static_cast<size_t>(n) < kLineMax && has(b, "(2.000 m)") && has(b, "mv_pass=(1.500,-0.500)") && has(b, "mv_dlss=(1.500,-0.500)") &&
-              has(b, "mismatch=0.51") && has(b, "path=1(camera-world)") && has(b, "coverage_mask=0"), "the pixel line carries depth, both motions, the expectation and the masks");
+              has(b, "mismatch=0.51") && has(b, "path=2(camera-world)") && has(b, "coverage_mask=0"), "the pixel line carries depth, both motions, the expectation and the masks");
     PixelFacts np;
     formatPixelLine(b, sizeof(b), "centre", 1, 2, np);
     check(has(b, "not read"), "an unread pixel says so");
@@ -505,7 +540,7 @@ void testText() {
     accumulate(&ss, bs);
     bs.px.depth = 0.5f; bs.px.mvx = -2.0f; bs.px.flags.hidden = true; bs.px.flags.path = 11; bs.px.coverage = 5;
     accumulate(&ss, bs);
-    check(ss.n == 2 && near(ss.depthMin, 0.25f) && near(ss.depthMax, 0.5f) && near(ss.mvxMin, -2.0f) && near(ss.mvxMax, 1.5f) && ss.path[1] == 1 && ss.path[11] == 1 &&
+    check(ss.n == 2 && near(ss.depthMin, 0.25f) && near(ss.depthMax, 0.5f) && near(ss.mvxMin, -2.0f) && near(ss.mvxMax, 1.5f) && ss.path[2] == 1 && ss.path[11] == 1 &&
               ss.hidden == 1 && ss.coverageSet == 1 && ss.coverageMax == 5, "box stats: ranges, paths, hidden and mask counts");
     n = formatBoxStatsLine(b, sizeof(b), ss);
     check(n > 0 && static_cast<size_t>(n) < kLineMax && has(b, "2 pixels read"), "box stats line");
@@ -745,6 +780,7 @@ void runPure() {
     testStatus();
     testMotion();
     testVerdicts();
+    testRolesAndOutline();
     testText();
     testCsv();
     testImages();
@@ -1146,7 +1182,9 @@ struct Synth {
     edvr::SceneInputsIn in;
     edvr::SceneOutputsIn out;
 };
-void makeSynth(Rig& r, Synth& s, float mvx, float dlx) {
+// roles: 1 the inputs name the rig's own target and depth as DLSS's (the real case), 2 name textures nothing drew into (every target is then an
+// intermediate pass), 0 name nothing (the roles are unknown).
+void makeSynth(Rig& r, Synth& s, float mvx, float dlx, int roles = 1) {
     const UINT n = kSize * kSize;
     std::vector<uint8_t> col(n * 4);
     for (UINT y = 0; y < kSize; ++y)
@@ -1161,7 +1199,7 @@ void makeSynth(Rig& r, Synth& s, float mvx, float dlx) {
     }
     std::vector<float> depth(n, 0.25f), dec(n * 4);
     for (UINT i = 0; i < n; ++i) {
-        dec[i * 4] = mvx; dec[i * 4 + 1] = 0.0f; dec[i * 4 + 2] = 2.0f; dec[i * 4 + 3] = 1.0f;   // path 1 (camera on the world)
+        dec[i * 4] = mvx; dec[i * 4 + 1] = 0.0f; dec[i * 4 + 2] = 2.0f; dec[i * 4 + 3] = 2.0f;   // path 2 (camera on the world: the shader's count15 branch)
     }
     std::vector<uint8_t> zero(n, 0);
     s.colour = makeTex(r, kSize, kSize, DXGI_FORMAT_R8G8B8A8_UNORM, col.data(), kSize * 4);
@@ -1178,6 +1216,8 @@ void makeSynth(Rig& r, Synth& s, float mvx, float dlx) {
     s.in.coverage = s.coverage.Get(); s.in.bias = s.bias.Get();
     s.in.w = s.in.h = kSize;
     s.in.sceneFrame = 4242;
+    s.in.colourSource = roles == 1 ? static_cast<const void*>(r.rt.Get()) : roles == 2 ? static_cast<const void*>(s.colour.Get()) : nullptr;
+    s.in.sceneDepth = roles == 1 ? static_cast<const void*>(r.ds.Get()) : roles == 2 ? static_cast<const void*>(s.depth.Get()) : nullptr;
     const float t[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
     std::memcpy(s.in.tanNow, t, sizeof(t));
     std::memcpy(s.in.tanPrev, t, sizeof(t));
@@ -1280,10 +1320,12 @@ void runDevice() {
     check(!lineWith(c1.logFrom, "scene inspect box: cap=1 ").empty() && has(lineWith(c1.logFrom, "scene inspect box: cap=1 "), "u=0.5000 v=0.5000"), "the box is at the centre of a symmetric view");
     const std::string tline = lineWith(c1.logFrom, "scene inspect target: rt=#0");
     check(has(tline, "box=[24,40)x[24,40)") && has(tline, "centre_px=32,32"), "S3: the target's box and centre pixel");
+    check(has(tline, "role=DLSS colour input and depth target"), "the target says it is DLSS's colour input and depth target");
+    check(has(d2, "role=colour+depth") && has(d3, "role=colour+depth"), "and so do its draw lines");
     check(has(lineWith(c1.logFrom, "scene inspect frame:"), "7 eye draws seen") && has(lineWith(c1.logFrom, "scene inspect frame:"), "7 tested"), "the frame line counts the draws");
     // S6: pixels and DLSS.
     const std::string px = lineWith(c1.logFrom, "scene inspect pixel centre:");
-    check(has(px, "input px 32,32") && has(px, "depth=0.250000 (2.000 m)") && has(px, "mv_pass=(1.600,0.000)") && has(px, "mv_dlss=(1.600,0.000)") && has(px, "path=1(camera-world)"),
+    check(has(px, "input px 32,32") && has(px, "depth=0.250000 (2.000 m)") && has(px, "mv_pass=(1.600,0.000)") && has(px, "mv_dlss=(1.600,0.000)") && has(px, "path=2(camera-world)"),
           "S6: the centre pixel: depth and metres, both motions, the path");
     check(has(px, "expect_world=(1.600,0.000)"), "S6: the camera-term expectation at 2 m is 1.6 px, as computed by hand");
     check(has(px, "mismatch=0.000 px"), "S6: agreeing motion: no mismatch");
@@ -1341,7 +1383,19 @@ void runDevice() {
         else check(w == 64 && h == 64, "S6: an input crop is the 128 window clamped to the 64 test image");
         if (std::strcmp(p, "final") == 0) check(rgb[0] == 200, "S6: the final crop holds the final texture's pixels");
         if (std::strcmp(p, "dlss_out") == 0) check(rgb[0] == 90, "S6: the DLSS crop holds the DLSS texture's pixels");
-        if (std::strcmp(p, "colour_in") == 0) check(rgb[0] == 0 && rgb[2] == 128 && rgb[3] == 4, "S6: the colour crop is the colour input (gradient)");
+        if (std::strcmp(p, "colour_in") == 0) {
+            check(rgb[0] == 0 && rgb[2] == 128 && rgb[3] == 4, "S6: the colour crop is the colour input (gradient)");
+            auto at = [&](int x, int y, int c) { return rgb[(static_cast<size_t>(y) * w + static_cast<size_t>(x)) * 3 + static_cast<size_t>(c)]; };
+            check(at(23, 30, 0) == 255 && at(23, 30, 1) == 0 && at(23, 30, 2) == 255 && at(40, 30, 0) == 255 && at(30, 23, 0) == 255 && at(30, 40, 2) == 255,
+                  "the box [24,40)x[24,40) is outlined by a magenta ring just outside it");
+            check(at(24, 30, 0) == 96 && at(24, 30, 1) == 120 && at(39, 39, 0) == 156 && at(39, 39, 1) == 156 && at(22, 30, 0) == 88,
+                  "the box's own pixels, and those outside the ring, are the colour input unchanged");
+        }
+        if (std::strcmp(p, "final") == 0 || std::strcmp(p, "dlss_out") == 0) {
+            auto at = [&](int x, int y, int c) { return rgb[(static_cast<size_t>(y) * w + static_cast<size_t>(x)) * 3 + static_cast<size_t>(c)]; };
+            check(at(47, 70, 0) == 255 && at(47, 70, 1) == 0 && at(80, 70, 2) == 255 && at(70, 47, 0) == 255 && at(70, 80, 0) == 255 && at(60, 60, 1) != 0,
+                  "on the 2x output crop the ring surrounds the box scaled to [48,80)");
+        }
         if (std::strcmp(p, "motion") == 0) check(rgb[0] == 255 || rgb[0] > 128, "S6: the motion crop encodes +x motion above 128");
     }
 
@@ -1442,6 +1496,33 @@ void runDevice() {
         edvr::sceneInspectFrameBoundary(++frame);
         pump(r, &frame, from, "complete cap=7");
     }
+    // ---- capture 9: inputs that name other textures: every target is an intermediate pass, and no DLSS rule is applied to its draws ----
+    {
+        Synth syn9;
+        makeSynth(r, syn9, 1.6f, 1.6f, 2);
+        Capture c9 = capture(r, &syn9, &frame);
+        check(!lineWith(c9.logFrom, "complete cap=8").empty(), "capture 8 completes (wrong roles)");
+        const std::string t9 = lineWith(c9.logFrom, "scene inspect target: rt=#0");
+        check(has(t9, "role=intermediate pass, not a DLSS input"), "the target is labelled an intermediate pass, not a DLSS input");
+        check(has(lineWith(c9.logFrom, "scene inspect draw: #3 "), "role=intermediate"), "its draw lines say so");
+        const std::string v9 = lineWith(c9.logFrom, "scene inspect verdict: #3 ");
+        check(has(v9, "INTERMEDIATE") && !has(v9, "TRANSLUCENT") && !has(v9, "NO_ROUTE"), "its verdicts are INTERMEDIATE: no translucent or route finding");
+        check(lineWith(c9.logFrom, "scene inspect route: #3 ").empty(), "and carry no route line");
+        check(lineWith(c9.logFrom, "scene inspect occluded:").empty() && lineWith(c9.logFrom, "scene inspect stack:").empty(),
+              "an intermediate pass has no occluded or stack lines");
+        check(has(lineWith(c9.logFrom, "scene inspect frame:"), "0 of them in DLSS input targets"), "the frame line counts none in DLSS input targets");
+        check(!lineWith(c9.logFrom, "no draw wrote the texture the game submitted").empty(), "and notes that no draw wrote the submitted texture");
+    }
+    // ---- capture 10: inputs that name nothing: the roles are unknown and the rules apply as before ----
+    {
+        Synth syn10;
+        makeSynth(r, syn10, 1.6f, 1.6f, 0);
+        Capture c10 = capture(r, &syn10, &frame);
+        check(!lineWith(c10.logFrom, "complete cap=9").empty(), "capture 9 completes (unknown roles)");
+        check(has(lineWith(c10.logFrom, "scene inspect target: rt=#0"), "role unknown"), "unknown roles are said");
+        check(has(lineWith(c10.logFrom, "scene inspect verdict: #3 "), "TRANSLUCENT_NO_MASK"), "with the roles unknown the draw rules still apply");
+    }
+
     // ---- capture 8: a draw EDVR withholds (verdict skip) is never drawn, so it buries nothing ----
     {
         const size_t from = edvr::g_lines.size();
@@ -1458,8 +1539,8 @@ void runDevice() {
             check(i == 0 || a.draws == 0, "a withheld draw is not duplicated");
             if (i == 0) r.g.ctx->Draw(4, 0);   // the skipped draw is not issued
         }
-        pump(r, &frame, from, "complete cap=8");
-        check(!lineWith(from, "complete cap=8").empty(), "capture 8 completes");
+        pump(r, &frame, from, "complete cap=10");
+        check(!lineWith(from, "complete cap=10").empty(), "capture 10 completes");
         check(lineWith(from, "scene inspect occluded:").empty(), "a withheld opaque draw buries nothing");
         check(has(lineWith(from, "scene inspect draw: #0 "), "status=top"), "the draw under it stays on top");
         check(has(lineWith(from, "scene inspect frame:"), "1 withheld by EDVR"), "and the frame line counts the withheld draw");

@@ -101,8 +101,8 @@ struct Target {
     Rect box;
     int32_t cx = 0, cy = 0;
     uint32_t draws = 0, wrote = 0;
-    uint32_t lastClear = 0;        // index into g_cands of the first draw AFTER the latest clear of this target
-    bool cleared = false;
+    const void* dsRes = nullptr;   // the depth view's texture, compared with the scene depth the temporal pass reads
+    Role role = Role::Unknown;     // set in the report, once the pass has said which textures DLSS sees
 };
 
 struct BoxFix {
@@ -420,6 +420,7 @@ void drawImpl(ID3D11DeviceContext* ctx, const SceneDrawInfo& info, SceneReplayFn
             t.dsFmt = static_cast<uint32_t>(dvd.Format);
             Com<ID3D11Resource> dres;
             dsv->GetResource(dres.put());
+            t.dsRes = dres.get();   // an address to compare; the texture outlives the draw that bound it
             Com<ID3D11Texture2D> dtex;
             if (dres.get() && SUCCEEDED(dres->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(dtex.put()))) && dtex.get()) {
                 D3D11_TEXTURE2D_DESC dd{};
@@ -953,10 +954,35 @@ void writeReport() {
         }
     }
 
-    // The scene target: the one with a depth view that took the most draws into the box.
+    // The roles: which targets DLSS sees. Known only when the temporal pass offered its inputs, which name the texture the game submitted and the
+    // scene depth it reads; without them no target is called an intermediate pass.
+    const bool rolesKnown = g_in.staged && (g_in.meta.colourSource || g_in.meta.sceneDepth);
+    bool colourSeen = false;
+    for (Target& tg : g_targets) {
+        const bool isColour = rolesKnown && g_in.meta.colourSource && tg.res == g_in.meta.colourSource;
+        const bool sharesDepth = rolesKnown && g_in.meta.sceneDepth && tg.dsRes == g_in.meta.sceneDepth;
+        tg.role = roleOf(rolesKnown, isColour, sharesDepth);
+        colourSeen = colourSeen || isColour;
+    }
+    for (size_t i = 0; i < g_cands.size(); ++i) {
+        const Role role = g_targets[g_cands[i].row.rt].role;
+        copyText(g_cands[i].row.role, sizeof(g_cands[i].row.role), roleName(role));
+        const Status st2 = status[i].status;
+        if ((st2 == Status::Top || st2 == Status::Partial || st2 == Status::Buried) && roleIsDlssInput(role)) ++c.inDlssTargets;
+    }
+
+    // The scene target (the pixel rules and the depth owner apply to its draws): the targets that share the scene depth DLSS reads; with the roles
+    // unknown, the one with a depth view that took the most draws into the box.
     int scene = -1;
-    for (size_t t = 0; t < g_targets.size(); ++t)
-        if (g_targets[t].dsFmt != 0 && (scene < 0 || g_targets[t].wrote > g_targets[static_cast<size_t>(scene)].wrote)) scene = static_cast<int>(t);
+    if (!rolesKnown)
+        for (size_t t = 0; t < g_targets.size(); ++t)
+            if (g_targets[t].dsFmt != 0 && (scene < 0 || g_targets[t].wrote > g_targets[static_cast<size_t>(scene)].wrote)) scene = static_cast<int>(t);
+    auto sceneLike = [&](uint32_t rt) { return rolesKnown ? roleHasSceneDepth(g_targets[rt].role) : static_cast<int>(rt) == scene; };
+    // The depth owner is the LAST draw that wrote depth at the centre pixel into the scene depth, whichever colour target it wrote: Elite's
+    // opaque pass and its effects write different colour targets over one depth.
+    int32_t depthOwner = -1;
+    for (size_t i = 0; i < g_cands.size(); ++i)
+        if (sceneLike(g_cands[i].row.rt) && facts[i].ctr > 0 && g_cands[i].depthWrite) depthOwner = static_cast<int32_t>(i);
 
     // The stacks, per target.
     std::vector<std::vector<int32_t>> stacks(g_targets.size());
@@ -1040,11 +1066,14 @@ void writeReport() {
         const Target& tg = g_targets[t];
         char f1[24], f2[24];
         formatTargetLine(line, sizeof(line), static_cast<uint32_t>(t), fmtName(tg.fmt, f1, sizeof(f1)), tg.w, tg.h,
-                         tg.dsFmt ? fmtName(tg.dsFmt, f2, sizeof(f2)) : "none", tg.vpX, tg.vpY, tg.vpW, tg.vpH, tg.box, tg.cx, tg.cy, tg.draws, tg.wrote);
+                         tg.dsFmt ? fmtName(tg.dsFmt, f2, sizeof(f2)) : "none", tg.vpX, tg.vpY, tg.vpW, tg.vpH, tg.box, tg.cx, tg.cy, tg.draws, tg.wrote,
+                         tg.role);
         say(line);
     }
+    if (rolesKnown && !colourSeen)
+        say("scene inspect note: no draw wrote the texture the game submitted to DLSS (it is composed outside the eye-sized draws); the DLSS targets named are the ones sharing the scene depth.");
     for (size_t t = 0; t < g_targets.size(); ++t) {
-        if (stacks[t].empty()) continue;
+        if (stacks[t].empty() || g_targets[t].role == Role::Intermediate) continue;
         std::string s;
         char item[96];
         for (size_t k = 0; k < stacks[t].size(); ++k) {
@@ -1058,14 +1087,17 @@ void writeReport() {
         say(line);
     }
 
-    // Per involved draw.
+    // Per involved draw. The verdicts and the CSV in issue order; the lines in two groups, the draws in DLSS input targets first (all three lines),
+    // then the intermediate passes' (draw and verdict only), so the cap never hides a draw DLSS sees behind the lighting and bloom passes.
     std::string csv = drawsCsvHeader();
-    uint32_t listed = 0, occluded = 0, unmeasuredListed = 0;
+    uint32_t occluded = 0, unmeasuredListed = 0;
+    std::vector<VerdictOut> verdicts(g_cands.size());
     for (size_t i = 0; i < g_cands.size(); ++i) {
         Cand& cd = g_cands[i];
         const Status stt = status[i].status;
         if (stt == Status::Outside) continue;
         VerdictIn vin;
+        vin.role = g_targets[cd.row.rt].role;
         vin.cls = cd.cls;
         vin.status = stt;
         vin.buriedBy = status[i].by;
@@ -1082,50 +1114,48 @@ void writeReport() {
         vin.keyed = cd.keyed;
         vin.engineSub = cd.engineSub;
         const uint32_t rt = cd.row.rt;
-        const bool sceneRt = static_cast<int>(rt) == scene;
-        if (sceneRt) {
-            vin.isDepthOwner = static_cast<int32_t>(i) == owner[rt];
-            bool inStack = false;
-            size_t pos = 0, ownerPos = static_cast<size_t>(-1);
-            for (size_t k = 0; k < stacks[rt].size(); ++k) {
-                if (stacks[rt][k] == static_cast<int32_t>(i)) {
-                    inStack = true;
-                    pos = k;
-                }
-                if (stacks[rt][k] == owner[rt]) ownerPos = k;
-            }
-            vin.aboveOwner = inStack && !vin.isDepthOwner && !cd.depthWrite && (owner[rt] < 0 || (ownerPos != static_cast<size_t>(-1) && pos > ownerPos));
-            vin.depthOwnerIdx = owner[rt];
+        if (sceneLike(rt)) {
+            vin.isDepthOwner = static_cast<int32_t>(i) == depthOwner;
+            vin.aboveOwner = !vin.isDepthOwner && !cd.depthWrite && cd.row.ctr > 0 && (depthOwner < 0 || static_cast<int32_t>(i) > depthOwner);
+            vin.depthOwnerIdx = depthOwner;
             vin.havePixel = centrePx.valid;
             vin.px = centrePx;
         }
-        VerdictOut v;
-        verdictFor(vin, &v);
-        csv += drawsCsvRow(capId, cd.row, status[i].by, v);
+        verdictFor(vin, &verdicts[i]);
+        csv += drawsCsvRow(capId, cd.row, status[i].by, verdicts[i]);
         if (stt == Status::Unmeasured) {
             if (unmeasuredListed++ < 30) {
                 std::snprintf(line, sizeof(line), "scene inspect unmeasured: #%u rt=#%u vs=%016llX ps=%016llX why=%s", cd.row.idx, cd.row.rt,
                               static_cast<unsigned long long>(cd.row.vs), static_cast<unsigned long long>(cd.row.ps), cd.untested[0] ? cd.untested : "query unanswered");
                 say(line);
             }
-            continue;
-        }
-        if (stt == Status::Buried) {
+        } else if (stt == Status::Buried && roleIsDlssInput(vin.role)) {
             ++occluded;
-            continue;   // listed in the occluded section below
         }
-        if (listed >= kMaxListed) continue;
-        ++listed;
-        if (formatDrawLine(line, sizeof(line), cd.row) < 0) std::snprintf(line, sizeof(line), "scene inspect draw: #%u (the draw text did not fit)", cd.row.idx);
-        say(line);
-        if (formatRouteLine(line, sizeof(line), cd.row) < 0) std::snprintf(line, sizeof(line), "scene inspect route: #%u (the route text did not fit)", cd.row.idx);
-        say(line);
-        if (formatVerdictLine(line, sizeof(line), cd.row.idx, v) < 0) std::snprintf(line, sizeof(line), "scene inspect verdict: #%u %s", cd.row.idx, v.code);
-        say(line);
+    }
+    uint32_t listed = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool intermediatePass = pass == 1;
+        for (size_t i = 0; i < g_cands.size(); ++i) {
+            Cand& cd = g_cands[i];
+            const Status stt = status[i].status;
+            if (stt != Status::Top && stt != Status::Partial) continue;
+            if ((g_targets[cd.row.rt].role == Role::Intermediate) != intermediatePass) continue;
+            if (listed >= kMaxListed) continue;
+            ++listed;
+            if (formatDrawLine(line, sizeof(line), cd.row) < 0) std::snprintf(line, sizeof(line), "scene inspect draw: #%u (the draw text did not fit)", cd.row.idx);
+            say(line);
+            if (!intermediatePass) {
+                if (formatRouteLine(line, sizeof(line), cd.row) < 0) std::snprintf(line, sizeof(line), "scene inspect route: #%u (the route text did not fit)", cd.row.idx);
+                say(line);
+            }
+            if (formatVerdictLine(line, sizeof(line), cd.row.idx, verdicts[i]) < 0) std::snprintf(line, sizeof(line), "scene inspect verdict: #%u %s", cd.row.idx, verdicts[i].code);
+            say(line);
+        }
     }
     if (c.truncated) Log::get().note("scene inspect: %u more involved draws were not listed (cap %u); the CSV has them all.", c.truncated, kMaxListed);
     for (size_t i = 0; i < g_cands.size(); ++i) {
-        if (status[i].status != Status::Buried) continue;
+        if (status[i].status != Status::Buried || g_targets[g_cands[i].row.rt].role == Role::Intermediate) continue;
         if (formatOccludedLine(line, sizeof(line), g_cands[i].row, status[i].by) > 0) say(line);
     }
 
@@ -1180,18 +1210,32 @@ void writeReport() {
             if (writeFile(dir + L"\\" + widen(boxName), bc.data(), bc.size())) std::snprintf(files.boxCsv, sizeof(files.boxCsv), "%s", boxName.c_str());
             // The crops.
             const uint32_t cw = g_in.crop.width(), ch = g_in.crop.height();
-            auto addPng = [&](const std::string& suffix, const uint8_t* rgb, uint32_t w, uint32_t h, const char* note) {
+            // The box, in each crop's own pixels: a 1-pixel magenta ring just outside it is drawn on a copy, so the box's pixels stay as read.
+            const Rect inBox{ib.x0 - g_in.crop.x0, ib.y0 - g_in.crop.y0, ib.x1 - g_in.crop.x0, ib.y1 - g_in.crop.y0};
+            Rect outBox = inBox;
+            if (g_out.read && g_out.offered && g_out.meta.w) {
+                const double sx = static_cast<double>(g_out.meta.outW ? g_out.meta.outW : g_out.meta.w) / static_cast<double>(g_out.meta.w);
+                const double sy = static_cast<double>(g_out.meta.outH ? g_out.meta.outH : g_out.meta.h) / static_cast<double>(g_out.meta.h);
+                outBox.x0 = static_cast<int32_t>(std::lround(ib.x0 * sx)) - g_out.crop.x0;
+                outBox.x1 = static_cast<int32_t>(std::lround(ib.x1 * sx)) - g_out.crop.x0;
+                outBox.y0 = static_cast<int32_t>(std::lround(ib.y0 * sy)) - g_out.crop.y0;
+                outBox.y1 = static_cast<int32_t>(std::lround(ib.y1 * sy)) - g_out.crop.y0;
+            }
+            auto addPng = [&](const std::string& suffix, const uint8_t* rgb, uint32_t w, uint32_t h, const char* note, const Rect& box) {
                 const std::string name = base + "_" + suffix + ".png";
-                if (writePng(dir + L"\\" + widen(name), rgb, w, h)) {
+                std::vector<uint8_t> marked(rgb, rgb + static_cast<size_t>(w) * h * 3);
+                drawBoxOutline(marked.data(), w, h, box.x0, box.y0, box.x1, box.y1);
+                if (writePng(dir + L"\\" + widen(name), marked.data(), w, h)) {
                     std::string cur = files.pngs;
                     if (!cur.empty()) cur += ",";
                     cur += name;
                     std::snprintf(files.pngs, sizeof(files.pngs), "%s", cur.c_str());
-                    if (note && note[0]) Log::get().note("scene inspect image: %s %ux%u: %s", suffix.c_str(), w, h, note);
+                    Log::get().note("scene inspect image: %s %ux%u: %s%sthe magenta ring just outside the %ux%u box is drawn on the file; the box's own pixels are untouched (box at %d,%d..%d,%d in the image)",
+                                    suffix.c_str(), w, h, note ? note : "", note && note[0] ? "; " : "", kBox, kBox, box.x0, box.y0, box.x1, box.y1);
                 }
             };
             const size_t n = static_cast<size_t>(cw) * ch;
-            if (!g_in.rgb.empty()) addPng("colour_in", g_in.rgb.data(), cw, ch, "the colour DLSS was handed (the crop's top-left is the 'crop' x,y in the input line)");
+            if (!g_in.rgb.empty()) addPng("colour_in", g_in.rgb.data(), cw, ch, "the colour DLSS was handed (the crop's top-left is the 'crop' x,y in the input line)", inBox);
             if (!g_in.depth.empty()) {
                 float lo = std::numeric_limits<float>::max(), hi = std::numeric_limits<float>::lowest();
                 for (float d : g_in.depth)
@@ -1203,7 +1247,7 @@ void writeReport() {
                 for (size_t i = 0; i < n; ++i) img[i * 3] = img[i * 3 + 1] = img[i * 3 + 2] = depthToGrey(g_in.depth[i], lo, hi);
                 char note[96];
                 std::snprintf(note, sizeof(note), "grey = raw reversed-Z depth stretched over %.6f (black)..%.6f (white, nearer)", static_cast<double>(lo), static_cast<double>(hi));
-                addPng("depth", img.data(), cw, ch, note);
+                addPng("depth", img.data(), cw, ch, note, inBox);
             }
             if (!g_in.mv.empty()) {
                 float mx = 0.0f;
@@ -1215,16 +1259,16 @@ void writeReport() {
                 char note[220];
                 std::snprintf(note, sizeof(note), "the motion DLSS was handed; scale %.3f per px (largest component %.3f px); %s", static_cast<double>(scale),
                               static_cast<double>(mx), motionImageLegend());
-                addPng("motion", img.data(), cw, ch, note);
+                addPng("motion", img.data(), cw, ch, note, inBox);
             }
             if (!g_in.dec.empty()) {
                 std::vector<uint8_t> img(n * 3);
                 for (size_t i = 0; i < n; ++i) pathToRgb(blend::decodeFlags(g_in.dec[i * 4 + 3]), &img[i * 3]);
-                addPng("path", img.data(), cw, ch, pathImageLegend());
+                addPng("path", img.data(), cw, ch, pathImageLegend(), inBox);
             }
             if (g_out.read) {
-                if (g_out.decoded[0]) addPng("dlss_out", g_out.rgb[0].data(), g_out.cw, g_out.ch, "DLSS's output over the same area, before the UI resolve");
-                if (g_out.decoded[1]) addPng("final", g_out.rgb[1].data(), g_out.cw, g_out.ch, "the frame as it goes to the headset, after the UI resolve");
+                if (g_out.decoded[0]) addPng("dlss_out", g_out.rgb[0].data(), g_out.cw, g_out.ch, "DLSS's output over the same area, before the UI resolve", outBox);
+                if (g_out.decoded[1]) addPng("final", g_out.rgb[1].data(), g_out.cw, g_out.ch, "the frame as it goes to the headset, after the UI resolve", outBox);
                 if (!g_out.decoded[0] && g_out.tex[0]) Log::get().note("scene inspect image: dlss_out not written (format %u is not converted)", g_out.fmt[0]);
             }
         }

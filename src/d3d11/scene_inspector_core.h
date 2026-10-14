@@ -413,14 +413,17 @@ struct PixelFacts {
     int coverage = -1, bias = -1;
 };
 
-// The motion the camera term predicts for the path the pixel took (1 world, 2 ship), else the nearer of the two.
+// The motion the camera term predicts for the path the pixel took, else the nearer of the two. The decision texture's path 2 is the WORLD
+// camera term (the camera rows, the pixel farther than the ship split or at the far plane) and path 1 the head's delta ("ship");
+// temporal_shader_source.h sets decisionPath = count15 ? 2 : 1 and count15 only in the world branch. (blend_probe_core.h's legend says the
+// opposite; it is wrong.)
 inline bool expectedForPath(const PixelFacts& p, float* x, float* y) noexcept {
-    if (p.flags.path == 1 && p.haveWorld) {
+    if (p.flags.path == 2 && p.haveWorld) {
         *x = p.expWx;
         *y = p.expWy;
         return true;
     }
-    if (p.flags.path == 2 && p.haveHead) {
+    if (p.flags.path == 1 && p.haveHead) {
         *x = p.expHx;
         *y = p.expHy;
         return true;
@@ -445,8 +448,8 @@ inline bool expectedForPath(const PixelFacts& p, float* x, float* y) noexcept {
 }
 inline const char* pathName(uint32_t p) noexcept {
     switch (p) {
-        case 1: return "camera-world";
-        case 2: return "camera-ship";
+        case 1: return "camera-ship";
+        case 2: return "camera-world";
         case 8: return "cockpit-hologram";
         case 10: return "screen";
         case 11: return "engine-record";
@@ -455,9 +458,44 @@ inline const char* pathName(uint32_t p) noexcept {
     }
 }
 
+// ---- which targets DLSS sees --------------------------------------------------------------------------------------------------------------
+
+// A render target a draw wrote, as DLSS relates to it. The temporal pass says which texture the game submitted (DLSS's colour input) and which
+// texture is the scene depth it reads; a target that is neither, and does not share that depth, is an intermediate pass (lighting, bloom, a
+// shadow or a mask): its draws are listed but no DLSS rule is applied to them.
+enum class Role : uint8_t { Unknown, Colour, Depth, ColourAndDepth, Intermediate };
+inline Role roleOf(bool pass_known, bool isColourSource, bool sharesSceneDepth) noexcept {
+    if (!pass_known) return Role::Unknown;
+    if (isColourSource && sharesSceneDepth) return Role::ColourAndDepth;
+    if (isColourSource) return Role::Colour;
+    if (sharesSceneDepth) return Role::Depth;
+    return Role::Intermediate;
+}
+inline bool roleIsDlssInput(Role r) noexcept { return r != Role::Intermediate; }
+inline bool roleHasSceneDepth(Role r) noexcept { return r == Role::Depth || r == Role::ColourAndDepth; }
+inline const char* roleName(Role r) noexcept {
+    switch (r) {
+        case Role::Colour: return "colour";
+        case Role::Depth: return "depth";
+        case Role::ColourAndDepth: return "colour+depth";
+        case Role::Intermediate: return "intermediate";
+        default: return "unknown";
+    }
+}
+inline const char* roleText(Role r) noexcept {
+    switch (r) {
+        case Role::Colour: return "DLSS colour input (the texture the game submits)";
+        case Role::Depth: return "DLSS depth target (shares the scene depth DLSS reads)";
+        case Role::ColourAndDepth: return "DLSS colour input and depth target";
+        case Role::Intermediate: return "intermediate pass, not a DLSS input";
+        default: return "role unknown (the temporal pass offered no inputs, so the DLSS targets are not known)";
+    }
+}
+
 // ---- the verdict rules ------------------------------------------------------------------------------------------------------------------
 
 struct VerdictIn {
+    Role role = Role::Unknown;    // Intermediate: no DLSS rule applies
     Cls cls = Cls::Opaque;
     Status status = Status::Top;
     int32_t buriedBy = -1;
@@ -507,7 +545,10 @@ inline void verdictFor(const VerdictIn& in, VerdictOut* out) noexcept {
         text += t;
     };
     char b[200];
-    if (in.status == Status::Unmeasured) {
+    if (in.role == Role::Intermediate) {
+        add("INTERMEDIATE", "intermediate pass, not a DLSS input: this target is neither the texture the game submits nor the scene depth DLSS reads, so "
+                            "no DLSS rule is applied to the draw");
+    } else if (in.status == Status::Unmeasured) {
         add("UNMEASURED", "coverage not measured (a UAV or stream-output target, an unanswered query or none to make): cannot say what it does here");
     } else if (in.status == Status::Buried) {
         std::snprintf(b, sizeof(b), "hidden at the centre pixel by the opaque draw #%d drawn after it: not what DLSS sees there", in.buriedBy);
@@ -621,6 +662,7 @@ struct DrawRow {
     char keyed[28] = {};
     char engine[12] = {};
     char motion[24] = {};       // engine-record | self-marking | camera-row
+    char role[16] = {};         // roleName(): the draw's render target as DLSS relates to it
 };
 inline void countText(char* out, size_t cap, int64_t v) noexcept {
     if (v < 0) std::snprintf(out, cap, "?");
@@ -633,10 +675,10 @@ inline int formatDrawLine(char* out, size_t cap, const DrawRow& r) noexcept {
     countText(ctr, sizeof(ctr), r.ctr);
     const int n = std::snprintf(out, cap,
         "scene inspect draw: #%u rt=#%u eye=%d order=%u gf=%u vs=%016llX ps=%016llX %c n=%u inst=%u topo=%s cls=%s status=%s box=%s ctr=%s "
-        "blend=[%s] depth=[%s] stencil=[%s] cull=%s rts=%u rt0=%s %ux%u ds=%s %ux%u srv=[%s]",
+        "blend=[%s] depth=[%s] stencil=[%s] cull=%s rts=%u rt0=%s %ux%u ds=%s %ux%u role=%s srv=[%s]",
         r.idx, r.rt, r.eye, r.order, r.gameFrame, static_cast<unsigned long long>(r.vs), static_cast<unsigned long long>(r.ps), r.kind,
         r.count, r.instances, topologyName(r.topology), r.cls, r.status, box, ctr, r.blend, r.depth, r.stencil, r.cull, r.rtCount, r.rt0,
-        r.rt0W, r.rt0H, r.ds, r.dsW, r.dsH, r.srv);
+        r.rt0W, r.rt0H, r.ds, r.dsW, r.dsH, r.role, r.srv);
     if (n < 0 || static_cast<size_t>(n) >= cap) return -1;
     return n;
 }
@@ -734,14 +776,15 @@ struct FrameCounts {
     uint32_t withheld = 0;   // draws EDVR's verdict skips: never drawn, so never on screen and never duplicated
     uint32_t involved = 0, top = 0, partial = 0, buried = 0, unmeasured = 0;
     uint32_t targets = 0, listed = 0, truncated = 0;
+    uint32_t inDlssTargets = 0;   // of the involved draws, those in a DLSS input target (all of them when the roles are unknown)
 };
 inline int formatFrameLine(char* out, size_t cap, uint32_t capId, const FrameCounts& c) noexcept {
     return std::snprintf(out, cap,
         "scene inspect frame: cap=%u game frame %u: %u eye draws seen (eye0 %u, eye1 %u, eye unknown %u); %u tested; not tested: %u over the %u cap, "
         "%u on a UAV or stream-output target, %u with no replay, %u indirect, %u withheld by EDVR (verdict skip: never drawn); %u answers missing; "
-        "%u draws wrote in the box (top %u, partial %u, buried %u, unmeasured %u) across %u render targets; %u listed, %u beyond the listing cap",
+        "%u draws wrote in the box (top %u, partial %u, buried %u, unmeasured %u; %u of them in DLSS input targets) across %u render targets; %u listed, %u beyond the listing cap",
         capId, c.gameFrame, c.eyeDraws, c.eye0, c.eye1, c.eyeUnknown, c.tested, c.overCap, kMaxDraws, c.untestedState, c.noReplay, c.indirect,
-        c.withheld, c.unanswered, c.involved, c.top, c.partial, c.buried, c.unmeasured, c.targets, c.listed, c.truncated);
+        c.withheld, c.unanswered, c.involved, c.top, c.partial, c.buried, c.unmeasured, c.inDlssTargets, c.targets, c.listed, c.truncated);
 }
 inline int formatEmptyBoxLine(char* out, size_t cap, uint32_t capId, uint32_t tested) noexcept {
     return std::snprintf(out, cap,
@@ -749,11 +792,11 @@ inline int formatEmptyBoxLine(char* out, size_t cap, uint32_t capId, uint32_t te
         capId, tested);
 }
 inline int formatTargetLine(char* out, size_t cap, uint32_t rt, const char* fmt, uint32_t w, uint32_t h, const char* ds, float vpX, float vpY, float vpW,
-                            float vpH, const Rect& box, int32_t cx, int32_t cy, uint32_t draws, uint32_t covering) noexcept {
+                            float vpH, const Rect& box, int32_t cx, int32_t cy, uint32_t draws, uint32_t covering, Role role = Role::Unknown) noexcept {
     return std::snprintf(out, cap,
-        "scene inspect target: rt=#%u %s %ux%u ds=%s viewport=%.0f,%.0f %.0fx%.0f box=[%d,%d)x[%d,%d) centre_px=%d,%d draws=%u wrote_in_box=%u", rt, fmt, w, h,
+        "scene inspect target: rt=#%u %s %ux%u ds=%s viewport=%.0f,%.0f %.0fx%.0f box=[%d,%d)x[%d,%d) centre_px=%d,%d draws=%u wrote_in_box=%u role=%s", rt, fmt, w, h,
         ds, static_cast<double>(vpX), static_cast<double>(vpY), static_cast<double>(vpW), static_cast<double>(vpH), box.x0, box.x1, box.y0, box.y1, cx, cy,
-        draws, covering);
+        draws, covering, roleText(role));
 }
 
 // The box in the DLSS input.
@@ -829,7 +872,7 @@ inline int formatPixelLine(char* out, size_t cap, const char* which, int x, int 
     char mism[64];
     if (expectedForPath(p, &ex, &ey))
         std::snprintf(mism, sizeof(mism), "%.3f px vs the %s camera term", static_cast<double>(dist2(p.mvx, p.mvy, ex, ey)),
-                      p.flags.path == 2 ? "ship" : (p.flags.path == 1 ? "world" : "nearer"));
+                      p.flags.path == 1 ? "ship" : (p.flags.path == 2 ? "world" : "nearer"));
     else std::snprintf(mism, sizeof(mism), "n/a");
     return std::snprintf(out, cap,
         "scene inspect pixel %s: input px %d,%d depth=%s mv_pass=(%.3f,%.3f) mv_dlss=%s expect_world=%s expect_ship=%s mismatch=%s path=%u(%s)%s%s "
@@ -843,7 +886,7 @@ inline int formatBoxStatsLine(char* out, size_t cap, const SampleStats& s) noexc
         "world=%u ship=%u hologram=%u screen=%u engine=%u planet=%u other=%u; engine kinds none=%u exact=%u masked=%u stale-slot=%u bad-code=%u "
         "stale-pose=%u; hidden=%u ui=%u; coverage mask set=%u max=%d; bias mask set=%u max=%d",
         s.n, static_cast<double>(s.depthMin), static_cast<double>(s.depthMax), static_cast<double>(s.mvxMin), static_cast<double>(s.mvxMax),
-        static_cast<double>(s.mvyMin), static_cast<double>(s.mvyMax), static_cast<double>(s.deltaMax), s.path[1], s.path[2], s.path[8], s.path[10],
+        static_cast<double>(s.mvyMin), static_cast<double>(s.mvyMax), static_cast<double>(s.deltaMax), s.path[2], s.path[1], s.path[8], s.path[10],
         s.path[11], s.path[12], s.n - (s.path[1] + s.path[2] + s.path[8] + s.path[10] + s.path[11] + s.path[12]), s.kind[0], s.kind[1], s.kind[2],
         s.kind[4], s.kind[5], s.kind[6], s.hidden, s.ui, s.coverageSet, s.coverageMax, s.biasSet, s.biasMax);
 }
@@ -943,7 +986,7 @@ inline void csvHex(std::string* line, uint64_t v) {
 
 inline const char* drawsCsvHeader() noexcept {
     return "cap,idx,rt,eye,order,game_frame,vs,ps,kind,count,instances,topology,class,status,box,centre,blend,depth,stencil,cull,rt0_format,rt0_w,rt0_h,"
-           "ds_format,ds_w,ds_h,srv,edvr_verdict,ui_family,ui_decision,holo,mask,keyed,engine,motion_source,occluded_by,verdict_code,verdict_text\n";
+           "ds_format,ds_w,ds_h,target_role,srv,edvr_verdict,ui_family,ui_decision,holo,mask,keyed,engine,motion_source,occluded_by,verdict_code,verdict_text\n";
 }
 inline std::string drawsCsvRow(uint32_t capId, const DrawRow& r, int32_t by, const VerdictOut& v) {
     std::string l;
@@ -974,6 +1017,7 @@ inline std::string drawsCsvRow(uint32_t capId, const DrawRow& r, int32_t by, con
     csvField(&l, r.ds);
     csvNumber(&l, r.dsW);
     csvNumber(&l, r.dsH);
+    csvField(&l, r.role);
     csvField(&l, r.srv);
     csvField(&l, r.verdict);
     csvField(&l, r.uiFamily);
@@ -1103,6 +1147,27 @@ inline bool encodePngRgb(const uint8_t* rgb, uint32_t w, uint32_t h, std::vector
     return true;
 }
 
+// A 1-pixel magenta ring drawn just OUTSIDE the half-open box [x0,x1) x [y0,y1) of an RGB image, so every pixel of the box itself stays as read. Parts
+// of the ring that fall off the image are left out. The crops carry it so the box is found on them without arithmetic.
+inline void drawBoxOutline(uint8_t* rgb, uint32_t w, uint32_t h, int32_t x0, int32_t y0, int32_t x1, int32_t y1) noexcept {
+    if (!rgb || w == 0 || h == 0) return;
+    auto put = [&](int32_t x, int32_t y) {
+        if (x < 0 || y < 0 || x >= static_cast<int32_t>(w) || y >= static_cast<int32_t>(h)) return;
+        uint8_t* p = rgb + (static_cast<size_t>(y) * w + static_cast<size_t>(x)) * 3;
+        p[0] = 255;
+        p[1] = 0;
+        p[2] = 255;
+    };
+    for (int32_t x = x0 - 1; x <= x1; ++x) {
+        put(x, y0 - 1);
+        put(x, y1);
+    }
+    for (int32_t y = y0; y < y1; ++y) {
+        put(x0 - 1, y);
+        put(x1, y);
+    }
+}
+
 inline float halfToFloat(uint16_t h) noexcept {
     const uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 31u, m = h & 1023u;
     float v;
@@ -1177,7 +1242,7 @@ inline const char* motionImageLegend() noexcept {
     return "red = 128 + scale*mv_x, green = 128 + scale*mv_y (input pixels, current to previous), blue 0; 128,128 is no motion";
 }
 inline const char* pathImageLegend() noexcept {
-    return "blue = camera on the world, green = camera on the ship, red = engine record, yellow = cockpit hologram, violet = screen, pink = planet patch, "
+    return "blue = camera on the ship (the head's delta, path 1), green = camera on the world (path 2), red = engine record, yellow = cockpit hologram, violet = screen, pink = planet patch, "
            "white = NVIDIA history hidden, black = no decision";
 }
 

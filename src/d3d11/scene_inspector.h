@@ -81,6 +81,10 @@ struct SceneInputsIn {
     ID3D11Texture2D* bias = nullptr;        // R8_UNORM: the bias-current-colour mask; null when not built
     uint32_t w = 0, h = 0;                  // the inputs' size
     uint32_t sceneFrame = 0;                // the pass's own frame number
+    // Which game resources DLSS relates to, for naming the draws' targets: the texture the game submitted (DLSS's colour input) and the scene
+    // depth texture the pass reads. Compared by address only. Both null: not known, and no target is called an intermediate pass.
+    const void* colourSource = nullptr;
+    const void* sceneDepth = nullptr;
     // The pass's camera term (the constant buffer's rows): tanNow/tanPrev {l r down up}, the world path's rotation rows and translation
     // (tvCam.w 1 = on), the head's, and the depth encoding (knobs.x, knobs.z). The jitter is the output's (SceneOutputsIn).
     float tanNow[4] = {}, tanPrev[4] = {};
