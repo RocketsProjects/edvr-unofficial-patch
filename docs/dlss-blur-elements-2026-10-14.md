@@ -2,6 +2,9 @@
 
 ## Status
 
+- **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
+  path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
+  docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
 - **State (2026-10-14, evening):** the scene inspector (`docs\scene-inspector-2026-10-14.md`, `hotkey.scene_inspect`) flew seven captures on
   v0.20.0-rc.1-4-g66dfe94f (Frontier). It replaced the blend probe as the instrument; `claude/blur-fixes` carries the inspector, one fix, one
   instrument and the decisions below, BUILT, NOT FLOWN. The blend probe and its key stay until the next flight confirms the inspector (it has not been
