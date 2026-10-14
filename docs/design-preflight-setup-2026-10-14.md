@@ -3,7 +3,7 @@
 ## Status
 
 - **State (2026-10-14):** design only. Nothing is built, and nothing has flown.
-  It waits on Sean's answers to Q1-Q5 (section 9).
+  Sean answered Q1-Q5 on 2026-10-14 (section 10). Q6 is open.
 - **Goal (Sean, 2026-10-14):** help users set up the mod and Elite's settings
   so they get a good experience on the first launch. Make it as simple and user
   friendly as possible.
@@ -12,22 +12,33 @@
     button, **Set up for me**.
   - A first install lands on it.
   - No wizard, no questions, no new `edvr.ini` key.
+- **Decided (Sean, 2026-10-14):**
+  - Q1: the installer may write Elite's graphics files.
+  - Q2: the render size scales with the headset and the graphics card
+    (section 4).
+  - Q3: DLSS on NVIDIA, FSR on AMD, XeSS on Intel.
+  - Q4: after a flight it suggests the next step and never applies one by
+    itself.
+  - Q5: the names "Pre-flight", "Set up for me" and "Put my old settings
+    back".
 - **Phases:**
-  - P1: the read-only rig card and checks, plus the EDVR keys.
-  - P2: Elite's own graphics files (needs Q1).
-  - P3: learn from the last flight, through `edvr_logs\flight_summary.ini`
-    written by the runtime.
+  - P1: the rig card, the checks and the EDVR keys.
+  - P2: Elite's own graphics files.
+  - P3: `edvr_logs\flight_summary.ini` from the runtime, and the suggestion
+    after a flight.
+  - P4: the render size estimated from headset and card, through Detect my
+    headset and the card speed table. It needs P3's GPU frame time to
+    calibrate.
 - **New ground:**
-  - The installer would write Elite's `Options\Graphics` files for the first
-    time: `Settings.xml` (`<PresetName>` only) and the Custom `.fxcfg`.
-  - It never writes `DisplaySettings.xml`.
+  - The installer writes `Settings.xml` (`<PresetName>` only) and the
+    Custom `.fxcfg`, and never `DisplaySettings.xml`.
   - Writes happen only with the game closed, after a backup, and with an
     undo that restores values one at a time.
   - The runtime DLL keeps its never-write rule (`vr-supersampling-gate`).
-- **Open hypotheses:** H1-H7 (section 8). Nothing is ruled out yet. Section 7
+- **Open hypotheses:** H1-H11 (section 9). Nothing is ruled out yet. Section 8
   lists what was considered and left out.
-- **Next flight:** none until P2 is built. Then one sitting per rig, Quest 3
-  over VDXR and Pimax over PiOpenXR, covering H1-H5 (section 8).
+- **Next flight:** none until P2 is built. Then one sitting per headset on the
+  5090, Quest 3 over VDXR and Pimax over PiOpenXR (section 9).
 - **Temporary keys:** none.
 
 ## 1. Why: what goes wrong today
@@ -70,11 +81,12 @@ between Setup and Settings:
   YOUR RIG
   ●  Graphics card         NVIDIA GeForce RTX 4070 Ti · 12 GB
   ●  VR runtime            Virtual Desktop  (change it in Virtual Desktop)
-  ○  Headset               known after your first flight
+  ●  Headset               Meta Quest 3 · 3072×3264 per eye  [Detect my headset]
 
   BEFORE YOU FLY                                    now        after
   [x] Upscaler             DLSS, sharper and faster   off     →  DLSS
-  [x] Render size          Elite's HMD Image Quality  1.00    →  0.75
+  [x] Render size          Elite's HMD Image Quality  1.00    →  0.70
+                           sized for this card and headset at 90 Hz
   [x] Anti-aliasing        Elite's own, not needed    SMAA    →  Off
   [x] Terrain checkerboard shimmers in VR             On      →  Off
   ▲  RivaTuner is running. It has crashed Elite with EDVR: close it first.
@@ -93,7 +105,8 @@ between Setup and Settings:
   4. The same default-No confirm as Install (gui.cpp:928-941).
   5. Apply.
 
-  That is two clicks after Install.
+  That is two clicks after Install. **Detect my headset** is optional: it
+  sharpens the render-size estimate (section 4).
 - **Existing installs:** the Setup tab's status card gets one more row,
   "Pre-flight". It reads "Ready to fly" (Good) or "2 things to set" (Warn), and
   clicking it switches tab.
@@ -107,10 +120,9 @@ between Setup and Settings:
 - **When Elite is running,** the Elite rows are greyed out with the line "Close
   Elite first: it saves its settings over ours when it exits." The installer
   already knows (`gameRunState`, detect.cpp:414-460).
-- **After a flight (P3),** a "Your last flight" card replaces the headset
-  placeholder. It shows the measured result and at most one suggestion (section
-  5).
-- **Put my old settings back** undoes the last Set up for me (section 4).
+- **After a flight (P3),** a "Your last flight" card shows the measured result
+  and at most one suggestion (section 6).
+- **Put my old settings back** undoes the last Set up for me (section 5).
 
 ## 3. The checklist
 
@@ -118,38 +130,121 @@ The written rows (ticked by default, under the rule above):
 
 | Row | When it shows | After | Writes | Evidence |
 |---|---|---|---|---|
-| Upscaler (VR) | scope has VR | `dlss` on an RTX card with `nvngx_dlss.dll` placed; `xess` on Intel Arc; otherwise Q3 | `edvr.ini` `fix.temporal_aa` | README:139-161; ini 321-346 |
-| Render size | upscaler row is on | 0.75 (Q2); never under 0.5 | fxcfg `HMDRenderTargetMultiplier` | DLSS floor 0.5 (anti-aliasing.md Status); field values 0.5-0.75; #90 |
+| Upscaler (VR) | scope has VR | `dlss` on NVIDIA, `fsr` on AMD, `xess` on Intel (Q3) | `edvr.ini` `fix.temporal_aa` | README:139-161; ini 321-346 |
+| Render size | upscaler row is on | sized for the headset and card (section 4); 0.75 when either is unknown | fxcfg `HMDRenderTargetMultiplier` | DLSS floor 0.5 (anti-aliasing.md Status); field values 0.5-0.75; #90 |
 | Anti-aliasing | upscaler row is on | Off | fxcfg `AAMode` | README:153-154 |
 | Terrain checkerboard | scope has VR | Off | fxcfg `TerrainCheckerboardRenderingEnabled` | every stock VR preset ships it on and it shimmers under DLSS (`terrain_checkerboard_reader.h`) |
-| Upscaler (flat) | scope has flat | same rule as VR | `edvr-flat.ini` `fix.temporal_aa` | release/README.txt |
+| Upscaler (flat) | scope has flat | same vendor rule | `edvr-flat.ini` `fix.temporal_aa` | release/README.txt |
 | Supersampling | flat upscaler row is on | 1.0 | fxcfg `SSAAMultiplier` | "DLAA requires native SS"; VR holds 1.0 anyway (`vr-supersampling-gate`) |
 
+- **Which card the vendor rule reads:** the card the headset is on. That is the
+  probe's adapter LUID when Detect my headset has run, and otherwise the
+  high-performance adapter. A laptop's Intel iGPU never decides for its NVIDIA
+  card.
+- **Fallbacks are safe:**
+  - On an NVIDIA card without NGX (a GTX), `dlss` falls back to EDVR's own
+    TAA and logs it (ini 321-323).
+  - `xess` without `libxess.dll` falls back to spatial recovery.
 - **Shared settings.** Elite has one graphics configuration for both 3D modes,
   so AA Off and Supersampling 1.0 apply to flat and VR alike. Both profiles
   want those values, so there is no conflict.
-- **RTX test.** The test is the DXGI adapter name containing "RTX". A wrong
-  guess costs quality, not a crash: without NGX, EDVR falls back to its own TAA
-  and logs it (ini 321-323).
 
 The advice rows have no checkbox and write nothing:
 
 | Row | Tone | Says | Detected by |
 |---|---|---|---|
-| Graphics card | info | name, VRAM, vendor; drives the upscaler row | DXGI: vendor id, `Description`, `DedicatedVideoMemory` |
+| Graphics card | info | name, VRAM, vendor | DXGI: vendor id, `Description`, `DedicatedVideoMemory`, LUID |
 | VR runtime | Good, or Bad if missing | the active OpenXR runtime's name, and where to change it: the runtime's own app | `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` (64-bit view), or `XR_RUNTIME_JSON` when set; name from the manifest's `runtime.name`; Bad when unset or the manifest is missing |
+| Headset | info | system name and per-eye size, or "known after your first flight" | section 4 |
 | RivaTuner | Warn | "It has crashed Elite with EDVR: close it before you start Elite." | `RTSS.exe` in a process snapshot |
 
-These are the post-flight rows (P3, read from `flight_summary.ini`, section 5):
+These are the post-flight rows (P3, read from `flight_summary.ini`, section 6):
 
 | Row | Tone | Says |
 |---|---|---|
 | Startup guard | Bad | "Elite crashed while EDVR was starting, so EDVR switched its fixes off for safety. Press Save logs and ask on Discord." |
-| Render size step | Warn or info | "Last flight: 61 fps of 90, 31% of frames late. Lower the render size to 0.65?" One click, one step. |
+| Render size | Warn or info | "Last flight: 61 fps of 90, 31% of frames late. Lower the render size to 0.60?" or "Room to spare: sharper at 0.85?" One click. |
+| CPU limit | info | "Frames were late while the graphics card had time to spare: the processor is the limit, so a smaller render size will not help." |
 | Flat post chain | Warn | Only when the flat pass refused frames for the post chain. It offers Bloom, Depth of Field or AA off, whichever the stand-down named. This is the same evidence gate `flat_elite_settings.h` uses. |
 | Pimax Parallel Projection | info | "Turn Parallel Projection off in Pimax Play: it cut GPU time by up to 30%." (README:50-57) |
 
-## 4. Writing Elite's settings (P2)
+## 4. Render size from the headset and the graphics card (P4)
+
+**It is possible**, from three measured numbers and two fitted constants:
+
+- W×H, the per-eye size the VR runtime asks for: what EDVR renders at HMD Image
+  Quality 1.0, scaled by `openxr_resolution` when that is set;
+- Hz, the headset's refresh rate;
+- S, the card's speed relative to an RTX 5090;
+- a and b, Elite's fixed and per-pixel GPU cost on the 5090, fitted from the
+  calibration sitting (section 9).
+
+The model gives the GPU frame time at render size q (the per-axis scale) as:
+
+`t(q) = (a + b · 2·W·H·q²) / S`
+
+The estimate is the largest q, in steps of 0.05 within [0.5, 1.0], for which
+`t(q) ≤ 0.85 × 1000 / Hz`. The 0.85 leaves headroom for stations and
+settlements. It is a constant in code and part of H8.
+
+**Where each number comes from**, best source first:
+
+- **W×H and the headset's name:**
+  1. This PC's last EDVR flight, from `flight_summary.ini` (section 6).
+     `vscreen_auto_state.h` is the precedent: the runtime already saves
+     the last per-eye width in `edvr_logs\`.
+  2. **Detect my headset.** The installer asks the runtime through the
+     OpenXR loader it already carries (payload 105):
+     - `xrCreateInstance`, `xrGetSystem`, `xrGetSystemProperties`,
+       `xrEnumerateViewConfigurationViews`, and
+       `xrGetD3D11GraphicsRequirementsKHR` for the adapter LUID.
+     - It creates no session, so nothing appears in the headset.
+     - It runs in a child process (`edvr-installer.exe --probe-headset`),
+       never elevated and killed after 20 s, so a runtime that hangs or
+       crashes cannot take the installer with it.
+     - It needs the headset connected and its runtime ready. A failure
+       says what to do, for example "Connect your headset in Virtual
+       Desktop, then press again".
+     - On SteamVR the click starts SteamVR, and the button says so (Q6).
+  3. Neither: 0.75, which the first flight's suggestion corrects.
+- **Why the runtime's number and not a table of headset models:** the same
+  Quest 3 asks for 1824×1968 over Link and 3072×3264 over Virtual Desktop
+  (openxr-resolution-per-headset). Streaming apps also let users pick their own
+  size. The runtime's number already includes those choices.
+- **Hz:** the last flight's. The runtime already reads
+  `xrGetDisplayRefreshRateFB` (native_runtime_host.h:3286), but that call needs
+  a session, so the probe cannot read it. With no flight on record, the
+  estimate assumes 90 and says "at 90 Hz" on the row.
+- **S:** a table of relative speed per card in the installer, `gpu_speed.inc`.
+  - It is generated from `tools\gpu_speed.csv` by a tool with its own
+    `--self-test`, added to the `build.bat` gate.
+  - Entries match the DXGI adapter name, with Laptop variants listed apart
+    from desktop cards.
+  - The seed figures come from public relative-performance benchmarks.
+  - An unknown card gets no estimate: the row uses 0.75 and the suggestion
+    after a flight corrects it.
+- **a and b:** fitted on the 5090 with both headsets. The upscaler's own cost
+  differs (DLSS 2.9-3.6 ms, FSR 1.6-2.1 ms on the 5090, `fsr-upscaler-design`),
+  so a is kept per upscaler.
+
+**When even 0.5 is too slow,** the row says so and names the lever outside
+EDVR. It computes the refresh rate that fits at 0.5, for example: "This card is
+short of this headset at 90 Hz, even at 0.5. Set Virtual Desktop to 72 Hz, or
+expect reprojection."
+
+**How good the estimate is:**
+
+- It is a starting point.
+- The first flight measures the real frame time, and the suggestion corrects
+  the estimate using the same model with the measured time in place of the
+  table's.
+- Every Save logs bundle carries the flight summary: card, headset, size, Hz, q
+  and frame time. So the speed table can be checked card by card as supporters
+  fly (H10).
+- A wrong guess costs one flight at a sub-optimal size, not a lasting bad
+  setup.
+
+## 5. Writing Elite's settings (P2)
 
 - **Files:** only `Settings.xml` (`<PresetName>`) and the highest
   `Custom.<major>.<minor>.fxcfg`, found the way `elite_graphics_folder.h` finds
@@ -194,18 +289,16 @@ These are the post-flight rows (P3, read from `flight_summary.ini`, section 5):
   (unified-install H5). When it is absent, the Elite rows say "Elite's settings
   were not found", and nothing is written.
 
-## 5. Learning from the first flight (P3)
-
-The installer cannot know the headset or its per-eye size before a flight. The
-runtime learns both, and the installer can read them afterwards.
+## 6. Learning from each flight (P3)
 
 - **The runtime writes `edvr_logs\flight_summary.ini`** atomically, every 30 s
   and at shutdown, one `key=value` per line. It holds:
-  - `version`, `build`, `profile`, `headset_key`, `eye_size`,
-    `refresh_hz`;
-  - `frames`, `late_frames`, `fps`;
-  - `upscaler` (and any fallback reason), `hmd_quality_read`,
-    `terrain_checkerboard_read`;
+  - `version`, `build`, `profile`;
+  - the card: `gpu_name`, `gpu_vram_mb`;
+  - the headset: `headset_key`, `eye_size`, `refresh_hz`;
+  - the frames: `frames`, `late_frames`, `gpu_ms_p50`, `gpu_ms_p90`;
+  - what EDVR read and ran: `hmd_quality_read`, `upscaler` (and any
+    fallback reason), `terrain_checkerboard_read`;
   - `startup_guard_tripped`, `flat_standdown`.
 - **Why a file and not log parsing.** The installer is C++ and `edvr_log.py` is
   Python. AGENTS.md wants a parser that drifts from its format to fail in the
@@ -213,34 +306,43 @@ runtime learns both, and the installer can read them afterwards.
   - the runtime's rig writes it;
   - the installer's rig reads it;
   - `tools\edvr_log.py` gains a reader under its `--self-test`.
+
+  The log records the adapter's LUID but not its name, so `gpu_name` is new.
 - **Right build first.** A summary from another build than the one installed
   shows "Your last flight was before this update" and offers nothing. A stale
   log is not evidence.
 - **If the writer never ran,** there is no file, and the card says "No flight
   with this build yet". That is distinct from a flight that went well.
-- **The suggestion rule (Q4):**
-  - one step of 0.05 or 0.1 per flight, toward most frames on time at the
-    headset's refresh;
-  - never below 0.5 and never above 1.0 (DLAA);
-  - constants live in code, not in the ini.
+- **The suggestion (Q4)** is offered and never applied by itself:
+  - **Late frames with the GPU over budget:** the section 4 model, fed the
+    measured `gpu_ms_p90` at the q that flew, gives the largest q in
+    budget.
+  - **Late frames with the GPU under budget:** the CPU-limit row, with no
+    render-size change.
+  - **No late frames and a step of room or more:** "sharper at …?".
 
-  It is a hypothesis (H6) until a flight shows that the late-frame share tracks
-  the judder a pilot sees. Which existing trace lines carry fps and late frames
-  in a default-settings log (`native_frame_cycle_window`,
-  `native_pacing_summary`) is checked with `edvr_log.py` before the writer is
-  built.
-- The rig card then shows the headset, e.g. "Quest 3 via Virtual Desktop,
-  3072×3264 per eye".
+  These rules are H6. Which instrument gives the whole frame's GPU time by
+  default (`native_producer_gpu_summary`'s timer is the candidate) is checked
+  with `edvr_log.py` before the writer is built (H11).
 
-## 6. Implementation map
+## 7. Implementation map
 
 - **`detect.cpp`:**
-  - `gpuAdapters()` replaces `nvidiaAdapterPresent`, keeping the
-    `nvngx_dlss.dll` decision intact.
-  - `activeOpenXrRuntime()`.
+  - `gpuAdapters()` (vendor, name, VRAM, LUID; software adapters skipped)
+    replaces `nvidiaAdapterPresent`, keeping the `nvngx_dlss.dll` decision
+    intact;
+  - the high-performance adapter via `EnumAdapterByGpuPreference`;
+  - `activeOpenXrRuntime()`;
   - `processRunning(L"RTSS.exe")`.
 - **New `elite_settings.{h,cpp}`:** locate the files and read the values. Pure
   `setElement(text, tag, value) -> optional<text>`.
+- **New `headset_probe.{h,cpp}`:**
+  - the `--probe-headset` child, which loads the installed
+    `openxr_loader.dll`, or before an install a copy extracted to a temp
+    folder and deleted afterwards;
+  - the parent's launch, timeout and parse.
+- **New `render_size.{h,cpp}`:** the pure model, the table lookup and the
+  suggestion rules. `gpu_speed.inc` is generated from `tools\gpu_speed.csv`.
 - **New `preflight.{h,cpp}`:**
   - pure `recommend(survey, rig, elite, flight, scope) -> rows`;
   - `planPreflight(rows, ticked) -> Plan`;
@@ -248,36 +350,43 @@ runtime learns both, and the installer can read them afterwards.
 - **`gui.cpp`:**
   - the third tab, whose rows reuse the status-row drawing and the
     settings list's checks;
+  - Detect my headset;
   - the switch to the tab after a first install;
   - the Setup status row.
   - The checklist must fit the fixed 720x688 window without scrolling,
-    about 8 rows.
+    about 9 rows.
 - **`app.cpp`:**
   - `--preflight` prints the checklist;
   - `--preflight --apply [--dry-run]`;
-  - `--preflight --undo`.
+  - `--preflight --undo`;
+  - `--probe-headset`.
 - **`state.cpp`:** the `[preflight]` section.
 - **The runtime (P3):** the `flight_summary.ini` writer, plus one shared header
   with the key names.
 - **Gates:**
-  - a rig for the pure functions (edit rule, recommend, plan, undo,
-    dry-run writes nothing), added to `build.bat`;
+  - a rig for the pure functions (edit rule, recommend, render size,
+    plan, undo, dry-run writes nothing), added to `build.bat`;
+  - the `gpu_speed` generator's self-test;
   - the summary fixture in `edvr_log.py --self-test`.
 - **Docs:**
   - a section in `installer.md`;
   - a short "First flight" section in README pointing at the tab.
 
-## 7. Considered and left out
+## 8. Considered and left out
 
-- **A GPU-tier to render-size table.** There is no evidence across tiers; most
-  field data is from 5090s. The headset's per-eye size varies by roughly 3x for
-  the same Quest (Link against Virtual Desktop), so the flight measures it
-  instead.
+- **A table of headset models.** The per-eye size varies about 3x for the same
+  Quest between Link and Virtual Desktop. The runtime's own number is used
+  instead (section 4).
 - **Asking the user "smooth or sharp?".** That is one more decision for a new
-  user, and the post-flight step reaches the same place with evidence. It can
-  be added later as a slider.
-- **Starting the OpenXR runtime from the installer** to learn the headset
-  before a flight. It would start SteamVR or Link unasked.
+  user, and the suggestion after a flight reaches the same place with evidence.
+  It can be added later as a slider.
+- **Probing the runtime without a click.** That would start SteamVR or wake a
+  Link session unasked.
+- **Creating an OpenXR session in the probe** to read the refresh rate. It
+  would show something in the headset, and the first flight reads the rate
+  anyway.
+- **A synthetic GPU benchmark in the installer.** It would not measure Elite's
+  load, which is what the flight measures.
 - **Switching the system's active OpenXR runtime.** That is system-wide,
   changes every other VR game and needs admin. The runtime's own app is the
   right place, and the row says where.
@@ -293,7 +402,7 @@ runtime learns both, and the installer can read them afterwards.
 - **A USB wheel (#45) or SteamVR already running (#15).** Each has a single
   report and no confirmed mechanism.
 
-## 8. Hypotheses, and the sitting that settles them
+## 9. Hypotheses, and the sitting that settles them
 
 - **H1 open:** Elite keeps values written into a Custom fxcfg while it is
   closed, across a launch and exit. Evidence: the file after exit carries them;
@@ -306,41 +415,49 @@ runtime learns both, and the installer can read them afterwards.
 - **H3 open:** `<PresetName>Custom` written to `Settings.xml` survives a launch
   and exit.
 - **H4 open:** `ActiveRuntime` names the same runtime as the log's
-  `headset_key`, on Quest 3 over VDXR and Pimax over PiOpenXR.
-- **H5 open:** the starting point runs at least as many frames on time as stock
-  settings. The starting point is the upscaler on, 0.75, AA off and
-  checkerboard off. Evidence: the frame-cycle fps and late frames of both
-  launches.
-- **H6 open (P3):** the late-frame share tracks the judder the pilot sees.
+  `headset_key`.
+- **H5 open:** the Set up for me result runs at least as many frames on time as
+  stock settings.
+- **H6 open:** late frames together with `gpu_ms_p90` tell a GPU limit from a
+  CPU limit.
 - **H7 open:** where the `Options\Graphics` folder lives on Epic, Frontier and
   Proton. This is the same question as unified-install H5.
-- **The sitting, per rig:**
-  1. Launch on stock settings and fly a fixed route for 3 minutes, then
-     exit.
-  2. Press **Set up for me**.
-  3. Launch, fly the same route for 3 minutes, then exit and read both
-     logs.
-  4. Press **Put my old settings back** and diff the files.
+- **H8 open:** frame time is `a + b·pixels` to within one 0.05 step for q from
+  0.5 to 1.0. That must hold on both headsets with the same card and the same a
+  and b, and the 0.85 headroom must keep stations and settlements on time.
+- **H9 open:** the probe, with no session, returns the same system and per-eye
+  size as the flight's `headset_key` and eye size. It shows nothing in the
+  headset.
+- **H10 open:** the speed table puts a supporter's card within one step of what
+  their flight measures. This is checked card by card from Save logs bundles,
+  and it is what P4's accuracy rests on.
+- **H11 open:** a default-settings log already carries the whole frame's GPU
+  time.
+- **The sitting, per headset** (Quest 3 over VDXR and Pimax over PiOpenXR, both
+  on the 5090), each flight a fixed 3-minute route that passes a station:
+  1. Press **Detect my headset** and note what it reports (H4, H9).
+  2. Launch on stock settings, fly, exit.
+  3. Press **Set up for me**, then launch, fly, exit (H1-H3, H5).
+  4. Launch at 0.5, then at 1.0, set from Elite's menu, flying each. All
+     four flights give `gpu_ms_p90` at four sizes, which fits a and b and
+     tests H8.
+  5. Press **Put my old settings back** and diff the files.
 
-  One sitting per rig covers H1-H5.
+  That is four launches per headset. H6, H10 and H11 are read from the same
+  logs.
 
-## 9. Decisions for Sean
+## 10. Decisions for Sean
 
-- **Q1:** may the installer write Elite's `Options\Graphics` files
-  (`Settings.xml` `<PresetName>` and the Custom fxcfg)? The conditions are the
-  game closed, a backup first and an undo that restores values. Recommended:
-  yes; the runtime's never-write rule stays as it is.
-- **Q2:** the starting render size with an upscaler:
-  - 0.75 for everyone (recommended);
-  - a GPU-tier table;
-  - leave Elite's value alone.
-- **Q3:** the upscaler on GPUs other than NVIDIA. Intel Arc gets `xess`. For
-  AMD and the rest:
-  - `fsr` (recommended), with the row noting it is not yet checked on AMD
-    (`fsr-upscaler-design` Status);
-  - `on`, EDVR's own TAA.
-- **Q4:** after a flight:
-  - suggest one step with one click (recommended);
-  - or apply it automatically at the next install.
-- **Q5:** the names. The tab is "Pre-flight", the button "Set up for me", and
-  the undo "Put my old settings back".
+- **Q1 decided (Sean, 2026-10-14):** yes. The installer may write
+  `Settings.xml` `<PresetName>` and the Custom fxcfg under the section 5 rules.
+- **Q2 decided (Sean, 2026-10-14):** the render size scales with the headset
+  and card combination (section 4).
+- **Q3 decided (Sean, 2026-10-14):** DLSS for NVIDIA, FSR for AMD, XeSS for
+  Intel.
+- **Q4 decided (Sean, 2026-10-14):** after a flight, suggest the next step.
+- **Q5 decided (Sean, 2026-10-14):** "Pre-flight", "Set up for me", "Put my old
+  settings back".
+- **Q6 open:** when SteamVR is the active runtime, Detect my headset starts
+  SteamVR, and the button says so beforehand. Recommended: allow it, labelled;
+  the alternative is to hide the button on SteamVR and rely on the first
+  flight.
