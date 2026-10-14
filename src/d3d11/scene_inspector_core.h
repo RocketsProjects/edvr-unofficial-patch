@@ -620,7 +620,8 @@ inline void verdictFor(const VerdictIn& in, VerdictOut* out) noexcept {
             add("THIN", b);
         }
         if (in.havePixel && in.px.valid && in.px.flags.hidden) {
-            if (in.px.flags.effect) add("HISTORY_HIDDEN", "NVIDIA's history is hidden (restarted) at the centre pixel by the effect rule: a listed glow supplies the share of its light");
+            if (in.px.flags.kind4Depth) add("HISTORY_HIDDEN", "NVIDIA's history is hidden (restarted) at the centre pixel by the kind-4 depth check: its marker's depth is not the scene's and last frame's depth does not confirm the camera term there (a mover EDVR cannot follow)");
+            else if (in.px.flags.effect) add("HISTORY_HIDDEN", "NVIDIA's history is hidden (restarted) at the centre pixel by the effect rule: a listed glow supplies the share of its light");
             else add("HISTORY_HIDDEN", "NVIDIA's history is hidden (restarted) at the centre pixel");
         }
         if (in.status == Status::Partial) {
@@ -831,6 +832,7 @@ struct SampleStats {
     uint32_t kind[8] = {};
     uint32_t hidden = 0, ui = 0, coverageSet = 0, biasSet = 0;
     uint32_t effectHidden = 0;   // of `hidden`: the pixels the effect rule hid (decision bit 15)
+    uint32_t kind4Hidden = 0;    // of `hidden`: the pixels the stale-marker depth check hid (decision value 65536)
     int coverageMax = -1, biasMax = -1;
 };
 
@@ -863,6 +865,7 @@ inline void accumulate(SampleStats* s, const BoxSample& b) noexcept {
     ++s->kind[p.flags.engineKind & 7u];
     if (p.flags.hidden) ++s->hidden;
     if (p.flags.hidden && p.flags.effect) ++s->effectHidden;
+    if (p.flags.hidden && p.flags.kind4Depth) ++s->kind4Hidden;
     if (p.flags.ui) ++s->ui;
     if (p.coverage > 0) ++s->coverageSet;
     if (p.bias > 0) ++s->biasSet;
@@ -899,18 +902,18 @@ inline int formatPixelLine(char* out, size_t cap, const char* which, int x, int 
         "scene inspect pixel %s: input px %d,%d depth=%s mv_pass=(%.3f,%.3f) mv_dlss=%s expect_world=%s expect_ship=%s mismatch=%s path=%u(%s)%s%s "
         "engine_kind=%u(%s) coverage_mask=%s bias_mask=%s",
         which, x, y, dep, static_cast<double>(p.mvx), static_cast<double>(p.mvy), dl, ew, eh, mism, p.flags.path, pathName(p.flags.path),
-        p.flags.hidden ? (p.flags.effect ? " HIDDEN(effect rule)" : " HIDDEN") : "", p.flags.ui ? " UI" : "", p.flags.engineKind,
+        p.flags.hidden ? (p.flags.kind4Depth ? " HIDDEN(kind4 depth)" : (p.flags.effect ? " HIDDEN(effect rule)" : " HIDDEN")) : "", p.flags.ui ? " UI" : "", p.flags.engineKind,
         blend::engineKindName(p.flags.engineKind), cov, bia);
 }
 inline int formatBoxStatsLine(char* out, size_t cap, const SampleStats& s) noexcept {
     return std::snprintf(out, cap,
         "scene inspect box stats: %u pixels read; depth min=%.6f max=%.6f; mv x %.3f..%.3f y %.3f..%.3f; max |mv - camera term| = %.3f px; paths "
         "world=%u ship=%u hologram=%u screen=%u engine=%u planet=%u other=%u; engine kinds none=%u exact=%u masked=%u stale-slot=%u bad-code=%u "
-        "stale-pose=%u; hidden=%u (by the effect rule %u) ui=%u; coverage mask set=%u max=%d; bias mask set=%u max=%d",
+        "stale-pose=%u; hidden=%u (by the effect rule %u, by the kind-4 depth check %u) ui=%u; coverage mask set=%u max=%d; bias mask set=%u max=%d",
         s.n, static_cast<double>(s.depthMin), static_cast<double>(s.depthMax), static_cast<double>(s.mvxMin), static_cast<double>(s.mvxMax),
         static_cast<double>(s.mvyMin), static_cast<double>(s.mvyMax), static_cast<double>(s.deltaMax), s.path[2], s.path[1], s.path[8], s.path[10],
         s.path[11], s.path[12], s.n - (s.path[1] + s.path[2] + s.path[8] + s.path[10] + s.path[11] + s.path[12]), s.kind[0], s.kind[1], s.kind[2],
-        s.kind[4], s.kind[5], s.kind[6], s.hidden, s.effectHidden, s.ui, s.coverageSet, s.coverageMax, s.biasSet, s.biasMax);
+        s.kind[4], s.kind[5], s.kind[6], s.hidden, s.effectHidden, s.kind4Hidden, s.ui, s.coverageSet, s.coverageMax, s.biasSet, s.biasMax);
 }
 
 struct DlssFacts {
@@ -1057,7 +1060,7 @@ inline std::string drawsCsvRow(uint32_t capId, const DrawRow& r, int32_t by, con
 }
 inline const char* boxCsvHeader() noexcept {
     return "cap,x,y,depth,metres,mv_pass_x,mv_pass_y,mv_dlss_x,mv_dlss_y,expect_world_x,expect_world_y,expect_ship_x,expect_ship_y,path,hidden,ui,"
-           "engine_kind,coverage_mask,bias_mask,engine_slot,effect_hidden\n";
+           "engine_kind,coverage_mask,bias_mask,engine_slot,effect_hidden,kind4_hidden\n";
 }
 inline void csvFloat(std::string* line, float v) {
     char b[40];
@@ -1089,6 +1092,7 @@ inline std::string boxCsvRow(uint32_t capId, const BoxSample& s) {
     csvNumber(&l, p.bias);
     csvNumber(&l, p.slot);
     csvNumber(&l, p.flags.effect ? 1 : 0);
+    csvNumber(&l, p.flags.kind4Depth ? 1 : 0);
     l += '\n';
     return l;
 }
@@ -1394,13 +1398,14 @@ inline void pathToRgb(const DecisionFlags& f, uint8_t rgb[3]) noexcept {
     rgb[0] = t[0]; rgb[1] = t[1]; rgb[2] = t[2];
     if (f.hidden) { rgb[0] = 255; rgb[1] = 255; rgb[2] = 255; }
     if (f.hidden && f.effect) { rgb[0] = 255; rgb[1] = 0; rgb[2] = 255; }
+    if (f.hidden && f.kind4Depth) { rgb[0] = 255; rgb[1] = 140; rgb[2] = 0; }
 }
 inline const char* motionImageLegend() noexcept {
     return "red = 128 + scale*mv_x, green = 128 + scale*mv_y (input pixels, current to previous), blue 0; 128,128 is no motion";
 }
 inline const char* pathImageLegend() noexcept {
     return "blue = camera on the ship (the head's delta, path 1), green = camera on the world (path 2), red = engine record, yellow = cockpit hologram, violet = screen, pink = planet patch, "
-           "white = NVIDIA history hidden, magenta = hidden by the effect rule (a listed glow), black = no decision";
+           "white = NVIDIA history hidden, magenta = hidden by the effect rule (a listed glow), orange = hidden by the kind-4 depth check, black = no decision";
 }
 
 }  // namespace edvr::inspect

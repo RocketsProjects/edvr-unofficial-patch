@@ -42,20 +42,20 @@
   (own blend, the game's depth view tested, nothing written to the game's targets, state restored), per eye, found by the scene depth it tests against; the pass binds
   it at t5 and the game's HDR target at t16 (probe.w bit 32768). Census every 30 s: `effect history: last 30 s ...`. No key. Inspector: `effect rule:` line,
   `HIDDEN(effect rule)`, magenta in path.png, CSV column `effect_hidden`. Tests: tools\effect_history_test (WARP, in build.bat).
-- **Build B captures (14:55-14:56, Frontier):** all three boxes missed (head-forward, 180 px right of centre). Advert: no 4654/95D0 draw, no `holo=` route, but 117
-  world-marker draws/frame in the census (pass live). Pad (cap2): 17 overlapping B75A6FF2 sprites (listed) plus 1C506222/2519C905 (additive, 384 indices, depth-only:
-  a hologram-volume candidate, NOT listed). Railing: kind 4 on 256 of 256 box pixels (cap3, slot 354 MOVED) and 183 (cap2, slot 749; slot 829 exact, same pose delta).
+- **Build B captures (14:55-14:56):** all three boxes missed. Advert: no 4654/95D0 draw, but 117 world-marker draws/frame in the census (pass live). Pad (cap2): 17
+  overlapping B75A6FF2 sprites (listed) plus 1C506222/2519C905 (additive, depth-only: a hologram-volume candidate, NOT listed). Railing: kind 4 on 256/256 (cap3) and 183 (cap2) box pixels.
 - **Flat comparison (Sean, test build D, flat + DLAA native): pad holograms and railings are fine; both blur in VR (HMD Quality 0.5, 2016 -> 4032, K).**
   (2) The railing, from code: kind 4 = a marker whose depth is not the scene's. Flat's prep treats the same pixel differently (flat_mono_shader_source.h:142,
   flat_mono_resolve.cpp:972 "steady detail"): it REFUSES history unless last frame's depth confirms the camera term (`historyDepthMatches`, both directions, 1%).
   The VR mv shader gives kind 4 the camera term with no check; its `backgroundHistoryHidden` tests only a NEARER occluder that left, so a rail moving over
   farther background keeps the background's history. Supports (2) for the railing; a port of the check to kind 4 is the proposed fix, NOT BUILT. Holograms:
   nothing in flat's code treats them; (1) ratio and (3) placement (flat resolves HDR before post: flat_mono_shader_source.h route.x) stay open until Sean's HMD Quality 1.0 flight.
-- **Open:** a pad-hologram capture that names its draws; an advert capture with the box on it; the railing's owning draw (kind 4: which draw wrote the depth the
-  marker lost to); weapons fire, flares (option A covers the two sprite pairs, NOT FLOWN); the force field.
-- **Ruled out:** railing motion mismatch (tool label bug, finding 1); the 2026-09-29 pad-into-layer rule as wired in 9122f31e; reactive bias or sharpening as
-  a fix (docs/hologram-depth-2026-09-24.md "Ruled out"); the light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (finding 4); the second
-  producer FUN_14369C9C0 as the railing's writer, because its hook (kinematic-build-14369c9c0) was installed and counted 0 calls since launch in all three captures.
+- **Kind-4 depth check (flat parity, NOT FLOWN):** a kind-4 pixel keeps its history only where last frame's depth at the camera term's position confirms the
+  predicted depth within 1% (4 texels, either way); else hidden. Kinds 1, 2, 3, 5, 6 untouched. Expect on the railing: box stats `by the kind-4 depth check N` > 0,
+  `HIDDEN(kind4 depth)`, orange in path.png; the 30 s `kind-4 depth check:` line tens of px per eye-frame with a moving pad, near none still (high on a still scene = refusing real surfaces).
+- **Open:** a pad-hologram capture that names its draws; an advert capture with the box on it; weapons fire, flares (option A, NOT FLOWN); the force field.
+- **Ruled out:** railing motion mismatch (tool label bug); the 2026-09-29 pad-into-layer rule (9122f31e); reactive bias or sharpening (docs/hologram-depth-2026-09-24.md);
+  light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (4); FUN_14369C9C0 as the railing's writer (hooked, 0 calls since launch).
 - **Next flight:** `effect history:` census line (hidden px per eye-frame, covered px per draw, GPU ms per replica, `HDR target ... readable`); on a glow
   capture the box stats' `by the effect rule N` and the `effect rule:` line. A census saying the HDR target COULD NOT BE READ means the game's HDR target could not be bound
   or was not the eye's size at the pass. Aim: press the inspector key once (a "+" shows at the head-forward point), then again within 3 s; the box is 48 px.
@@ -198,3 +198,16 @@ arrived (a menu, no VR), none was a candidate, or none reached the window.
   Not verified offline: that the game's HDR target still holds the lit frame when the pass runs. The census says `COULD NOT BE READ` only for a bind failure; a
   wrong-content target would hide every pixel with any glow. The first flight's `pixels hidden` figure against `covered pixels` shows it (hidden near covered =
   the share test is not thinning).
+
+- **2026-10-14, the kind-4 depth check.** Sean's flat/DLAA comparison (pad holograms and railings fine in flat, blurred in VR) led to the flat resolver's rule for a
+  stale marker (flat_mono_shader_source.h:142 `engineBefore`; flat_mono_resolve.cpp "steady detail", `historyDepthMatches`): a pixel whose marker's depth is not the
+  scene's takes the camera term only where last frame's depth confirms it, else its history is refused. The VR motion shader returned kind 4 with the camera
+  term and no check (`backgroundHistoryHidden` only catches a nearer occluder that left). Ported as `staleMarkerDepthHidden` (temporal_shader_source.h), applied
+  to `engineKind == 4u` pixels off the foreground and UI paths: the four ZP texels around the previous raster position (`p + motion - holoJitter.xy`), expected depth
+  `knobs.x + knobs.z / zPred`, tolerance `max(1e-6, (expected - knobs.x) * 1%)`. A pixel it cannot judge (no previous depth, no predicted depth, off the image)
+  is left as it was, where flat refuses: a deliberate difference, so the VR change cannot hide more than the flat rule would. The pure rule is stale_depth_core.h;
+  the shader carries a literal copy and the rig fails if it differs (the tools that read the shader's raw literals cannot follow a macro). Counted in a group
+  atomic to Stats[41], read with Stats[40] by effect_history.cpp's reader: the `kind-4 depth check:` line every 30 s, and `by the kind-4 depth check` in the
+  inspector's box stats (decision value 65536, CSV column `kind4_hidden`). Tests: effect_history_test (the rule against its HLSL on 1024 cases; the production
+  wrapper extracted from the shader and run over a real previous-depth texture: confirming keeps, non-confirming hides, three cannot-judge cases keep). No shader
+  golden was re-pinned by this change; the stale-marker rule is new text, and the only pin touched is the terrain A/B rig's reading of the shader, if the build shows one.

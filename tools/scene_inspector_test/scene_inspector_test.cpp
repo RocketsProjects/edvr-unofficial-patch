@@ -829,7 +829,32 @@ void testImages() {
     check(std::strlen(motionImageLegend()) > 10 && std::strlen(pathImageLegend()) > 10, "the image legends exist");
 }
 
+void testKind4Reading() {
+    // A pixel the stale-marker depth check hid (decision value 65536, with the hidden bit 16): the flag, the stats, the pixel line, the CSV, the image colour.
+    const DecisionFlags f = edvr::blend::decodeFlags(static_cast<float>(65536u + 16u + 2u + (4u << 12)));
+    check(f.hidden && f.kind4Depth && !f.effect && f.path == 2 && f.engineKind == 4, "the decision word's 65536 is the kind-4 depth check, with hidden and the engine kind beside it");
+    BoxSample bs;
+    bs.valid = true;
+    bs.px.valid = true;
+    bs.px.depth = 0.5f;
+    bs.px.flags = f;
+    SampleStats ss;
+    accumulate(&ss, bs);
+    check(ss.hidden == 1 && ss.kind4Hidden == 1 && ss.effectHidden == 0, "the box stats count it as hidden, by the kind-4 check, not by the effect rule");
+    char b[kLineBuf];
+    check(formatBoxStatsLine(b, sizeof(b), ss) > 0 && has(b, "hidden=1 (by the effect rule 0, by the kind-4 depth check 1)"), "the box stats line says so");
+    check(formatPixelLine(b, sizeof(b), "centre", 1, 2, bs.px) > 0 && has(b, "HIDDEN(kind4 depth)") && has(b, "engine_kind=4(stale-slot)"), "the pixel line reads HIDDEN(kind4 depth) beside the engine kind");
+    const std::string hdr = boxCsvHeader(), row = boxCsvRow(1, bs);
+    check(hdr.size() > 14 && hdr.compare(hdr.size() - 14, 14, ",kind4_hidden\n") == 0, "the box CSV's last column is kind4_hidden");
+    check(row.size() > 5 && row.compare(row.size() - 5, 5, ",0,1\n") == 0, "...and its row says 1");
+    uint8_t rgb[3] = {};
+    pathToRgb(f, rgb);
+    check(rgb[0] == 255 && rgb[1] == 140 && rgb[2] == 0, "the path image paints it orange");
+    check(has(pathImageLegend(), "orange = hidden by the kind-4 depth check"), "and the legend says what orange is");
+}
+
 void testAim() {
+    testKind4Reading();
     char b[kLineBuf];
     int n = formatAimLine(b, sizeof(b), 3000, 48, true);
     check(n > 0 && static_cast<size_t>(n) < kLineMax && has(b, "scene inspect: aiming:") && has(b, "3000 ms") && has(b, "48x48 px") && has(b, "no second press cancels"), "the aiming line");

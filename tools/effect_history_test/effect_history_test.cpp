@@ -39,6 +39,7 @@
 #include "../../src/d3d11/effect_history.h"
 #include "../../src/d3d11/effect_history_core.h"
 #include "../../src/d3d11/effect_history_pairs.h"
+#include "../../src/d3d11/stale_depth_core.h"
 #include "../../src/d3d11/temporal_shader_source.h"
 
 using Microsoft::WRL::ComPtr;
@@ -204,7 +205,44 @@ void testShaderText() {
     check(t5 == 1 && t16 == 1, "t5 and t16 are declared once");
 }
 
+void testKind4() {
+    // The rule on the four previous-depth samples: raw depth, A + B / z, here A = 0 and an expectation of 0.001 (tolerance 1% = 1e-5).
+    const float same[4] = {0.001f, 0.001f, 0.001f, 0.001f};
+    check(staleDepthConfirms(same, 0.001f, 0.0f), "kind 4: a previous depth equal to the prediction confirms the camera term");
+    const float near9[4] = {0.001009f, 0.001009f, 0.001009f, 0.001009f}, far9[4] = {0.000991f, 0.000991f, 0.000991f, 0.000991f};
+    check(staleDepthConfirms(near9, 0.001f, 0.0f) && staleDepthConfirms(far9, 0.001f, 0.0f), "...within 1% either way (nearer and farther)");
+    const float near2[4] = {0.00102f, 0.00102f, 0.00102f, 0.00102f}, far2[4] = {0.00098f, 0.00098f, 0.00098f, 0.00098f};
+    check(!staleDepthConfirms(near2, 0.001f, 0.0f) && !staleDepthConfirms(far2, 0.001f, 0.0f), "kind 4: 2% off, nearer or farther, does not: the history is some other surface's");
+    const float one[4] = {0.0002f, 0.0002f, 0.001f, 0.0002f};
+    check(staleDepthConfirms(one, 0.001f, 0.0f), "one of the four samples confirming is enough (the 2x2 around the previous raster position)");
+    const float sky[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    check(!staleDepthConfirms(sky, 0.001f, 0.0f), "a rail over bare sky last frame (previous depth 0): not confirmed, so history is refused");
+    const float tiny[4] = {1.05e-5f, 1.05e-5f, 1.05e-5f, 1.05e-5f};
+    check(staleDepthConfirms(tiny, 1.0e-5f, 0.0f), "the absolute floor (1e-6) keeps a very far surface's rounding from refusing it");
+    const float off[4] = {0.500502f, 0.500502f, 0.500502f, 0.500502f}, off2[4] = {0.50051f, 0.50051f, 0.50051f, 0.50051f};
+    check(staleDepthConfirms(off, 0.5005f, 0.5f) && !staleDepthConfirms(off2, 0.5005f, 0.5f), "the tolerance is 1% of the encoded depth B / z, not of A + B / z");
+    check(kStaleDepthRel == 0.01f && kStaleDepthFloor == 1e-6f && kStaleDepthDecisionBit == 65536u, "the constants are flat's (1%, 1e-6) and the decision bit is the shader's");
+    // The census line.
+    StaleDepthWindow w;
+    w.frames = 2700;
+    w.hiddenPixels = 123456;
+    w.passEyeFrames = 5400;
+    w.counterReads = 80;
+    char line[800];
+    int n = formatStaleDepthCensus(line, sizeof(line), w, 30);
+    check(n > 0 && n < 1100 && has(line, "kind-4 depth check: last 30 s, 2700 frames: 22.9 pixels hidden per eye-frame (5400 eye-frames counted)") && has(line, "within 1%"), "the kind-4 census line");
+    n = formatStaleDepthCensus(line, sizeof(line), StaleDepthWindow(), 30);
+    check(n > 0 && has(line, "not measured this window"), "an unmeasured window says so");
+    // The shader's wiring, as text.
+    const std::string src(kTemporalCsHlsl);
+    check(src.find(kStaleDepthHlsl) != std::string::npos, "the shader carries stale_depth_core.h's HLSL text for text (a literal copy: the rig fails if it drifts)");
+    check(has(src, "bool kind4Hidden = engineKind == 4u && !trackedForeground && !uiHere && staleMarkerDepthHidden(p, motion, zPred);"), "the rule applies to engine kind 4 only (kinds 1, 2, 3, 5, 6 untouched), off the foreground and UI paths");
+    check(has(src, "bool hidden = engineMasked || kind4Hidden || (!trackedForeground"), "a kind-4 pixel the check refuses is hidden like a masked one");
+    check(has(src, "(kind4Hidden?65536u:0u)") && has(src, "InterlockedAdd(Stats[41], gKind4Hidden)"), "the trace variant flags it and the census total is flushed to Stats[41]");
+}
+
 void runPure() {
+    testKind4();
     testList();
     testDecision();
     testCensus();
@@ -780,6 +818,178 @@ void testParity(Rig& r) {
     check(hides > 100 && hides < n - 100, "the parity table has both outcomes in quantity");
 }
 
+// ---- the stale-marker depth check on a GPU: the table (HLSL against C++), and the shader's own wrapper over a real previous-depth texture -------------
+ComPtr<ID3D11Buffer> makeStructured(Rig& r, const std::vector<float>& v, UINT stride, bool uav) {
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = static_cast<UINT>(v.size() * 4);
+    bd.BindFlags = uav ? D3D11_BIND_UNORDERED_ACCESS : D3D11_BIND_SHADER_RESOURCE;
+    bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    bd.StructureByteStride = stride;
+    D3D11_SUBRESOURCE_DATA init{v.data(), 0, 0};
+    ComPtr<ID3D11Buffer> b;
+    hr(r.g.dev->CreateBuffer(&bd, uav ? nullptr : &init, b.GetAddressOf()));
+    return b;
+}
+std::vector<uint32_t> readBuffer(Rig& r, ID3D11Buffer* src, UINT bytes) {
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = bytes;
+    bd.Usage = D3D11_USAGE_STAGING;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> st;
+    hr(r.g.dev->CreateBuffer(&bd, nullptr, st.GetAddressOf()));
+    r.g.ctx->CopyResource(st.Get(), src);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    hr(r.g.ctx->Map(st.Get(), 0, D3D11_MAP_READ, 0, &m));
+    std::vector<uint32_t> out(bytes / 4);
+    std::memcpy(out.data(), m.pData, bytes);
+    r.g.ctx->Unmap(st.Get(), 0);
+    return out;
+}
+
+void testStaleDepth(Rig& r) {
+    ID3D11DeviceContext* c = r.g.ctx.Get();
+    {
+        // The table: 1024 pseudo-random cases around the tolerance against the C++ rule.
+        const std::string src = std::string(kStaleDepthHlsl) + R"HLSL(
+StructuredBuffer<float4> A : register(t0);   // the four previous depths
+StructuredBuffer<float4> B : register(t1);   // expected, offset
+RWStructuredBuffer<uint> Out : register(u0);
+[numthreads(64, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID) { Out[id.x] = staleDepthConfirms(A[id.x], B[id.x].x, B[id.x].y) ? 1u : 0u; }
+)HLSL";
+        const UINT n = 1024;
+        std::vector<float> a(n * 4), b(n * 4);
+        uint32_t seed = 777;
+        auto rnd = [&]() {
+            seed = seed * 1664525u + 1013904223u;
+            return static_cast<float>(seed >> 8) / static_cast<float>(1u << 24);
+        };
+        std::vector<int> want(n);
+        for (UINT i = 0; i < n; ++i) {
+            const float off = rnd() < 0.5f ? 0.0f : 0.5f;
+            const float expected = off + std::pow(10.0f, rnd() * 2.0f - 3.0f);   // an encoded depth of 1e-3 .. 1e-1, where the 1% tolerance (not the floor) decides
+            for (int k = 0; k < 4; ++k) a[i * 4 + k] = off + (expected - off) * (1.0f + (rnd() - 0.5f) * 0.05f);   // +-2.5% about the encoded depth
+            b[i * 4] = expected;
+            b[i * 4 + 1] = off;
+            want[i] = staleDepthConfirms(&a[i * 4], expected, off) ? 1 : 0;
+        }
+        ComPtr<ID3D11Buffer> ba = makeStructured(r, a, 16, false), bb = makeStructured(r, b, 16, false);
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+        vd.Format = DXGI_FORMAT_UNKNOWN;
+        vd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        vd.Buffer.NumElements = n;
+        ComPtr<ID3D11ShaderResourceView> sa, sb;
+        hr(r.g.dev->CreateShaderResourceView(ba.Get(), &vd, sa.GetAddressOf()));
+        hr(r.g.dev->CreateShaderResourceView(bb.Get(), &vd, sb.GetAddressOf()));
+        ComPtr<ID3D11Buffer> out = makeStructured(r, std::vector<float>(n, 0.0f), 4, true);
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_UNKNOWN;
+        ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = n;
+        ComPtr<ID3D11UnorderedAccessView> uav;
+        hr(r.g.dev->CreateUnorderedAccessView(out.Get(), &ud, uav.GetAddressOf()));
+        ComPtr<ID3DBlob> blob = compile(src, "cs_5_0");
+        ComPtr<ID3D11ComputeShader> cs;
+        hr(r.g.dev->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, cs.GetAddressOf()));
+        ID3D11ShaderResourceView* srvs[2] = {sa.Get(), sb.Get()};
+        c->CSSetShader(cs.Get(), nullptr, 0);
+        c->CSSetShaderResources(0, 2, srvs);
+        ID3D11UnorderedAccessView* u = uav.Get();
+        c->CSSetUnorderedAccessViews(0, 1, &u, nullptr);
+        c->Dispatch(n / 64, 1, 1);
+        ID3D11ShaderResourceView* ns[2] = {};
+        ID3D11UnorderedAccessView* nu = nullptr;
+        c->CSSetShaderResources(0, 2, ns);
+        c->CSSetUnorderedAccessViews(0, 1, &nu, nullptr);
+        c->CSSetShader(nullptr, nullptr, 0);
+        const std::vector<uint32_t> res = readBuffer(r, out.Get(), n * 4);
+        unsigned mismatches = 0, yes = 0;
+        for (UINT i = 0; i < n; ++i) {
+            yes += res[i] ? 1u : 0u;
+            mismatches += (static_cast<int>(res[i]) != want[i]) ? 1u : 0u;
+        }
+        checkf(mismatches <= 2, "the stale-depth HLSL and the C++ rule disagree on %u of %u cases (rounding edge allowed: 2)", mismatches, n);
+        check(yes > 100 && yes < n - 100, "the stale-depth table has both outcomes in quantity");
+    }
+    // The shader's own wrapper, extracted from the production text, over a real previous-depth texture.
+    const std::string full(kTemporalCsHlsl);
+    const size_t at = full.find("bool staleMarkerDepthHidden(");
+    check(at != std::string::npos, "the production text has the wrapper");
+    const size_t end = full.find("\n}\n", at);
+    check(end != std::string::npos, "...and it ends");
+    const std::string wrapper = full.substr(at, end + 3 - at);
+    const std::string src = std::string(R"HLSL(
+Texture2D<float> ZP : register(t3);
+cbuffer P : register(b0) { int2 size; int2 pad0; float4 knobs; float4 holoJitter; float4 args; float4 zp; };
+RWStructuredBuffer<uint> Out : register(u0);
+)HLSL") + kStaleDepthHlsl + wrapper + R"HLSL(
+[numthreads(1, 1, 1)]
+void main() { Out[0] = staleMarkerDepthHidden(args.xy, args.zw, zp.x) ? 1u : 0u; }
+)HLSL";
+    ComPtr<ID3DBlob> blob = compile(src, "cs_5_0");
+    ComPtr<ID3D11ComputeShader> cs;
+    hr(r.g.dev->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, cs.GetAddressOf()));
+    // Last frame's depth: 0.001 (10 m) left of column 12, 0.0002 (50 m) from it on: a rail at 10 m in front of a wall at 50 m.
+    std::vector<float> depth(16 * 16);
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x) depth[static_cast<size_t>(y) * 16 + x] = x >= 12 ? 0.0002f : 0.001f;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = td.Height = 16;
+    td.MipLevels = td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R32_FLOAT;
+    td.SampleDesc.Count = 1;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA tinit{depth.data(), 16 * 4, 0};
+    ComPtr<ID3D11Texture2D> zpTex;
+    hr(r.g.dev->CreateTexture2D(&td, &tinit, zpTex.GetAddressOf()));
+    ComPtr<ID3D11ShaderResourceView> zpSrv;
+    hr(r.g.dev->CreateShaderResourceView(zpTex.Get(), nullptr, zpSrv.GetAddressOf()));
+    ComPtr<ID3D11Buffer> out = makeStructured(r, std::vector<float>(1, 0.0f), 4, true);
+    D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+    ud.Format = DXGI_FORMAT_UNKNOWN;
+    ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    ud.Buffer.NumElements = 1;
+    ComPtr<ID3D11UnorderedAccessView> uav;
+    hr(r.g.dev->CreateUnorderedAccessView(out.Get(), &ud, uav.GetAddressOf()));
+    // One pixel through the wrapper: p, motion, the predicted depth in metres, and whether last frame's depth is valid (holoJitter.w).
+    auto hiddenFor = [&](float px, float py, float mx, float my, float zPred, float prevValid) {
+        struct Cb {
+            int32_t size[2], pad0[2];
+            float knobs[4], holoJitter[4], args[4], zp[4];
+        } cbv = {{16, 16}, {0, 0}, {0.0f, 1.0f, 0.01f, 0.0f} /* knobs: A 0, depth bound, B 0.01 */, {0.0f, 0.0f, 3.0f, prevValid} /* z treated frames, w valid */, {px, py, mx, my}, {zPred, 0, 0, 0}};
+        D3D11_BUFFER_DESC cbd{};
+        cbd.ByteWidth = sizeof(cbv);
+        cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA ci{&cbv, 0, 0};
+        ComPtr<ID3D11Buffer> cb;
+        hr(r.g.dev->CreateBuffer(&cbd, &ci, cb.GetAddressOf()));
+        c->CSSetShader(cs.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[4] = {nullptr, nullptr, nullptr, zpSrv.Get()};
+        c->CSSetShaderResources(0, 4, srvs);
+        ID3D11UnorderedAccessView* u = uav.Get();
+        c->CSSetUnorderedAccessViews(0, 1, &u, nullptr);
+        ID3D11Buffer* cbp = cb.Get();
+        c->CSSetConstantBuffers(0, 1, &cbp);
+        c->Dispatch(1, 1, 1);
+        ID3D11ShaderResourceView* ns[4] = {};
+        ID3D11UnorderedAccessView* nu = nullptr;
+        c->CSSetShaderResources(0, 4, ns);
+        c->CSSetUnorderedAccessViews(0, 1, &nu, nullptr);
+        c->CSSetShader(nullptr, nullptr, 0);
+        return readBuffer(r, out.Get(), 4)[0] != 0;
+    };
+    // The camera term predicts 10 m (depth 0.001) for a rail pixel. Left of column 12, that is what was there last frame.
+    check(!hiddenFor(4, 4, 0, 0, 10.0f, 1.0f), "kind 4, the previous depth confirms the camera term: history KEPT");
+    check(hiddenFor(13, 4, 0, 0, 10.0f, 1.0f), "kind 4, last frame held the far wall (50 m) where the camera term sends the rail (10 m): history HIDDEN");
+    check(!hiddenFor(13, 4, 0, 0, 50.0f, 1.0f), "...but a surface the camera term puts at the wall's own depth there is confirmed: KEPT");
+    check(!hiddenFor(13, 4, -2, 0, 10.0f, 1.0f), "one of the four texels around the previous position confirming is enough (previous position 11.0: columns 11 and 12): KEPT");
+    check(hiddenFor(13, 4, 0.6f, 0, 10.0f, 1.0f), "previous position 13.6: columns 13 and 14, both the wall: HIDDEN");
+    check(!hiddenFor(13, 4, 0, 0, 10.0f, 0.0f), "no valid previous depth (holoJitter.w = 0): the pixel cannot be judged, left as it was");
+    check(!hiddenFor(13, 4, 0, 0, 0.0f, 1.0f), "no predicted depth (zPred = 0, the far plane): left as it was");
+    check(!hiddenFor(13, 4, -100, 0, 10.0f, 1.0f), "a previous position off the image: left as it was");
+    std::printf("effect_history_test: the stale-marker depth check matches the C++ rule, and the shader's own wrapper decides as flat does\n");
+}
+
 void pumpFrames(int n, ID3D11DeviceContext* ctx) {
     for (int i = 0; i < n; ++i) {
         ctx->Flush();
@@ -801,6 +1011,7 @@ void runDevice() {
     ID3D11DeviceContext* ctx = r.g.ctx.Get();
 
     testParity(r);
+    testStaleDepth(r);
     std::printf("effect_history_test: HLSL decision matches the C++ rule on the table\n");
 
     // A counter buffer for the hidden-pixel total: 16 uints, the counter at byte 8.
@@ -810,9 +1021,10 @@ void runDevice() {
         bd.Usage = D3D11_USAGE_DEFAULT;
         hr(r.g.dev->CreateBuffer(&bd, nullptr, g_counterBuf.GetAddressOf()));
     }
-    auto setCounter = [&](uint32_t v) {
+    auto setCounter = [&](uint32_t v, uint32_t k4 = 0) {
         uint32_t words[16] = {};
-        words[2] = v;
+        words[2] = v;   // Stats[40]: the pixels the effect rule hid
+        words[3] = k4;  // Stats[41]: the pixels the stale-marker depth check hid
         ctx->UpdateSubresource(g_counterBuf.Get(), 0, nullptr, words, 0, 0);
     };
     setCounter(1000);
@@ -1013,7 +1225,7 @@ void runDevice() {
     effectHistorySetNvidia(true);
     g_lines.clear();
     beginFrame(r, 0.1f);
-    setCounter(1000);
+    setCounter(1000, 5000);
     for (int i = 0; i < 3; ++i) effectDraw(r, {{16, 16, 32, 32, 0.5f, {0.25f, 0.25f, 0.25f, 1.0f}}, 1, 1});          // 3 draws of pair 0, each 16x16 = 256 pixels
     effectDraw(r, {{16, 16, 32, 32, 0.5f, {0.25f, 0.25f, 0.25f, 1.0f}}, 1, 1}, kVs1, kPs1);                       // 1 of pair 1
     {
@@ -1024,7 +1236,8 @@ void runDevice() {
     for (int round = 0; round < 2; ++round) {
         // 30 frames to the next counter read; the second round has the shader's total grown by 5000 over one more eye-frame.
         if (round == 1) {
-            setCounter(6000);
+            setCounter(6000, 5300);
+            for (int k = 0; k < 3; ++k) effectHistorySetNvidia(true);   // three more eye-frames of the pass
             beginFrame(r, 0.1f);
             effectDraw(r, {{16, 16, 32, 32, 0.5f, {0.25f, 0.25f, 0.25f, 1.0f}}, 1, 1});
             ID3D11ShaderResourceView *l = nullptr, *f = nullptr;
@@ -1040,6 +1253,9 @@ void runDevice() {
            "E6: the covered pixels per draw are exact on a pixel-aligned quad (%s)", census.c_str());
     checkf(has(census, "pixels hidden: 5000 per eye-frame with a listed draw"), "E6: the hidden-pixel counter's growth over the eye-frames it was counted for (%s)", census.c_str());
     checkf(has(census, "replica GPU 0.250 ms per replicated draw"), "E6: the GPU timing (%s)", census.c_str());
+    const std::string census4 = lineWith(0, "kind-4 depth check: last");
+    checkf(has(census4, "100.0 pixels hidden per eye-frame (3 eye-frames counted)"), "E6: the kind-4 census: the second counter's growth (300) over the pass's eye-frames (3): %s", census4.c_str());
+    check(has(census4, "within 1%"), "E6: the kind-4 line says the tolerance");
     check(has(census, "private targets 0.0 MiB") || has(census, "private targets 0.") || has(census, "private targets 1."), "E6: the memory held is said");
     // The lapse: the pass stops saying NVIDIA's path.
     effectHistorySetNvidia(true);

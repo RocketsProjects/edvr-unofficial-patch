@@ -29,8 +29,9 @@ struct EffectHistoryEnv {
     bool (*timerBegin)(ID3D11DeviceContext* ctx) = nullptr;
     void (*timerEnd)(ID3D11DeviceContext* ctx) = nullptr;
     void (*timerPoll)(ID3D11DeviceContext* ctx, double* ms, uint32_t* samples, uint32_t* skipped, uint32_t* invalid) = nullptr;
-    // The buffer holding the motion shader's running count of the pixels it hid (a uint at *byteOffset, which wraps; the pass's Stats buffer, element 40),
-    // or null before the pass has made it. Read a few times a minute through a 4-byte staging copy, never waited on.
+    // The buffer holding the motion shader's running counts (two uints from *byteOffset, which wrap; the pass's Stats buffer, elements 40 and 41): the pixels the
+    // effect rule hid, then the pixels the kind-4 depth check hid (stale_depth_core.h; its census line shares this reader). Null before the pass has made it.
+    // Read a few times a minute through an 8-byte staging copy, never waited on.
     ID3D11Buffer* (*hiddenCounter)(uint32_t* byteOffset) = nullptr;
 };
 

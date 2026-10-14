@@ -12,6 +12,7 @@
 
 #include "../common/log.h"
 #include "effect_history_core.h"
+#include "stale_depth_core.h"
 
 namespace edvr {
 namespace detail {
@@ -74,7 +75,10 @@ Module* const g_mod = new Module;
 constexpr uint64_t kCounterEvery = 30, kCounterWait = 3;
 bool g_counterPending = false;
 uint64_t g_counterCopyFrame = 0, g_viewedTotal = 0, g_viewedAtCopy = 0, g_viewedAtLast = 0;
-uint32_t g_counterLast = 0;
+uint32_t g_counterLast[2] = {};   // Stats[40] (the effect rule) and Stats[41] (the stale-marker depth check)
+uint64_t g_passAtCopy = 0, g_passAtLast = 0;
+std::atomic<uint64_t> g_passTotal{0};   // eye-frames of NVIDIA's pass (effectHistorySetNvidia(true) once per eye-frame)
+StaleDepthWindow g_win4;
 bool g_counterHaveLast = false;
 constexpr uint64_t kMaxHiddenPerEyeFrame = 1ull << 24;   // 16.7 M pixels: more than any eye has
 
@@ -317,24 +321,35 @@ void sampleCounter(ID3D11DeviceContext* ctx) {
         if (h == DXGI_ERROR_WAS_STILL_DRAWING) return;   // try again next frame
         g_counterPending = false;
         if (FAILED(h) || !m.pData) return;
-        uint32_t cur = 0;
-        std::memcpy(&cur, m.pData, sizeof(cur));
+        uint32_t cur[2] = {};
+        std::memcpy(cur, m.pData, sizeof(cur));
         ctx->Unmap(g_mod->counterStage.Get(), 0);
         if (g_counterHaveLast) {
-            const uint32_t grew = cur - g_counterLast;   // modulo 2^32
+            // The effect rule's total (Stats[40]) over the eye-frames handed the views, the stale-marker check's (Stats[41]) over the eye-frames of the pass.
+            const uint32_t grew = cur[0] - g_counterLast[0];   // modulo 2^32
             const uint64_t eyeFrames = g_viewedAtCopy - g_viewedAtLast;
             if (grew <= eyeFrames * kMaxHiddenPerEyeFrame) {
                 g_win.hiddenPixels += grew;
                 g_win.hiddenEyeFrames += eyeFrames;
                 ++g_win.counterReads;
             }
+            const uint32_t grew4 = cur[1] - g_counterLast[1];
+            const uint64_t passFrames = g_passAtCopy - g_passAtLast;
+            if (grew4 <= passFrames * kMaxHiddenPerEyeFrame) {
+                g_win4.hiddenPixels += grew4;
+                g_win4.passEyeFrames += passFrames;
+                ++g_win4.counterReads;
+            }
         }
-        g_counterLast = cur;
+        g_counterLast[0] = cur[0];
+        g_counterLast[1] = cur[1];
         g_counterHaveLast = true;
         g_viewedAtLast = g_viewedAtCopy;
+        g_passAtLast = g_passAtCopy;
         return;
     }
-    if (g_frame % kCounterEvery != 0 || g_viewedTotal == g_viewedAtLast) return;   // nothing handed to the shader since the last read
+    const uint64_t passTotal = g_passTotal.load(std::memory_order_relaxed);
+    if (g_frame % kCounterEvery != 0 || (g_viewedTotal == g_viewedAtLast && passTotal == g_passAtLast)) return;   // nothing counted since the last read
     uint32_t offset = 0;
     ID3D11Buffer* counter = g_env.hiddenCounter(&offset);
     if (!counter) return;
@@ -342,16 +357,17 @@ void sampleCounter(ID3D11DeviceContext* ctx) {
         ComPtr<ID3D11Device> dev;
         ctx->GetDevice(dev.GetAddressOf());
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = sizeof(uint32_t);
+        bd.ByteWidth = 2 * sizeof(uint32_t);
         bd.Usage = D3D11_USAGE_STAGING;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         if (!dev || FAILED(dev->CreateBuffer(&bd, nullptr, g_mod->counterStage.GetAddressOf()))) return;
     }
-    const D3D11_BOX box = {offset, 0, 0, offset + static_cast<UINT>(sizeof(uint32_t)), 1, 1};
+    const D3D11_BOX box = {offset, 0, 0, offset + static_cast<UINT>(2 * sizeof(uint32_t)), 1, 1};
     ctx->CopySubresourceRegion(g_mod->counterStage.Get(), 0, 0, 0, 0, counter, 0, &box);
     g_counterPending = true;
     g_counterCopyFrame = g_frame;
     g_viewedAtCopy = g_viewedTotal;
+    g_passAtCopy = passTotal;
 }
 
 void sayCensus() {
@@ -362,7 +378,11 @@ void sayCensus() {
     char line[1400];
     if (formatEffectCensus(line, sizeof(line), g_win, kCensusSeconds) > 0) Log::get().note("%s", line);
     else Log::get().note("effect history: the census line did not fit");
+    g_win4.frames = g_win.frames;
     g_win = EffectWindow();
+    char line4[700];
+    if (formatStaleDepthCensus(line4, sizeof(line4), g_win4, kCensusSeconds) > 0) Log::get().note("%s", line4);
+    g_win4 = StaleDepthWindow();
 }
 
 }  // namespace
@@ -379,6 +399,9 @@ void effectHistoryInstall(const EffectHistoryEnv& env) {
     g_counterPending = false;
     g_counterHaveLast = false;
     g_viewedTotal = g_viewedAtCopy = g_viewedAtLast = 0;
+    g_passTotal.store(0, std::memory_order_relaxed);
+    g_passAtCopy = g_passAtLast = 0;
+    g_win4 = StaleDepthWindow();
     for (QuerySlot& q : g_mod->ring) q.pending = false;
     for (EyeSlot& s : g_mod->eye) s.armed = false;
     g_censusAt = GetTickCount64();
@@ -405,6 +428,7 @@ void effectHistoryShutdown() {
 }
 
 void effectHistorySetNvidia(bool on) noexcept {
+    if (on) g_passTotal.fetch_add(1, std::memory_order_relaxed);
     if (on) g_idleFrames = 0;   // read and written on the pass's thread and the boundary's, a stale value only delays the lapse by a frame
     detail::g_effectNvidia.store(on, std::memory_order_relaxed);
 }
