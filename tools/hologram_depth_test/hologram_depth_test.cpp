@@ -1260,11 +1260,14 @@ int main() {
 
         uint64_t world[kMaxHashes];
         const uint32_t worldCount = holoWorldMarkerList(world, kMaxHashes);
-        check(worldCount == 1, "family builder: one world marker");
+        // The reticle and, since 2026-10-14 (docs/dlss-blur-elements-2026-10-14.md), the station's two hologram-advert pairs.
+        check(worldCount == 3, "family builder: three world markers (the reticle and the two advert pairs)");
         check(inList(world, worldCount, kHoloWorldMarkerReticle),
-              "family builder: the target reticle is the world marker");
-        check(!inList(fam, famCount, kHoloWorldMarkerReticle),
-              "family builder: the world marker is not one of the cockpit families");
+              "family builder: the target reticle is a world marker");
+        check(inList(world, worldCount, kHoloWorldAdvertAlpha) && inList(world, worldCount, kHoloWorldAdvertPremult),
+              "family builder: both hologram-advert pairs are world markers");
+        check(!inList(fam, famCount, kHoloWorldMarkerReticle) && !inList(fam, famCount, kHoloWorldAdvertAlpha) && !inList(fam, famCount, kHoloWorldAdvertPremult),
+              "family builder: the world markers are not among the cockpit families");
     }
 
     // World markers, unlisted: kHoloUnlistedMarker never appears in

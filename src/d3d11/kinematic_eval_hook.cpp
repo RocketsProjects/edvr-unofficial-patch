@@ -61,6 +61,7 @@ alignas(8) std::atomic<uintptr_t> primaryGate{0};
 std::atomic<uintptr_t> g_primaryReturn{0};
 std::atomic<const char*> g_primaryStatus{"not requested"};
 std::atomic<uint64_t> g_primaryCalls{0},g_primaryUnowned{0};
+std::atomic<uint64_t> g_primaryCallsTotal{0};   // never reset: the scene inspector reads it (the one above is taken by the 30 s summary)
 alignas(8) std::atomic<EnginePoolCopyObserverFn> poolCopyObserver{nullptr};
 std::atomic<const char*> g_poolCopyStatus{"not requested"};
 alignas(8) std::atomic<EngineMergeBeginFn> mergeBeginObserver{nullptr};
@@ -656,6 +657,7 @@ __declspec(noinline) uintptr_t __fastcall primaryBuildObserved(uintptr_t model,u
     emcpu::Token engineMotion;   // EDVR's own work only (engine_motion_cpu.h); a POD token, the function has __try
     emcpu::enter(engineMotion,emcpu::kRigid);
     g_primaryCalls.fetch_add(1,std::memory_order_relaxed);
+    g_primaryCallsTotal.fetch_add(1,std::memory_order_relaxed);
     const auto identity=t_primaryIdentity;
     const auto observe=primaryEmitObserver.load(std::memory_order_acquire);
     const bool eligible=observe && identity.record &&
@@ -1265,6 +1267,17 @@ const char* kinematicEvalPrimaryEmitStatus() noexcept {
 void kinematicEvalPrimaryEmitCounters(uint64_t& calls,uint64_t& unowned) noexcept {
     calls=g_primaryCalls.exchange(0,std::memory_order_relaxed);
     unowned=g_primaryUnowned.exchange(0,std::memory_order_relaxed);
+}
+// The appended-record totals the scene inspector reports (scene_inspector.h): v[0..1] the emit FUN_144312E00 (producer 0) calls and items, v[2..3] the second
+// direct producer FUN_14369C9C0 (producer 1), v[4] the primary FUN_1442B4130's relay calls. Cumulative since the hooks were installed, read without
+// resetting anything. False when the direct hooks are not installed (then the counters are zero because nothing ran, not because nothing appended).
+bool kinematicEvalProducerTotals(uint64_t v[5]) noexcept {
+    if(!v)return false;
+    const bool live=g_directEntries[0].ready.load(std::memory_order_acquire);
+    v[0]=kinematicEvalProbe.directCalls(0);v[1]=kinematicEvalProbe.directItems(0);
+    v[2]=kinematicEvalProbe.directCalls(1);v[3]=kinematicEvalProbe.directItems(1);
+    v[4]=g_primaryCallsTotal.load(std::memory_order_relaxed);
+    return live;
 }
 void kinematicEvalSetPoolCopyObserver(EnginePoolCopyObserverFn fn) noexcept {
     poolCopyObserver.store(fn,std::memory_order_release);

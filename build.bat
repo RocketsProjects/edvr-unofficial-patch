@@ -572,7 +572,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\map_wait.cpp" ^
     "src\d3d11\native_render_settings.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    "src\d3d11\gpu_census.cpp" "src\d3d11\gpu_pass_profile.cpp" "src\d3d11\blend_probe.cpp" ^
+    "src\d3d11\gpu_census.cpp" "src\d3d11\gpu_pass_profile.cpp" "src\d3d11\blend_probe.cpp" "src\d3d11\scene_inspector.cpp" "src\d3d11\effect_history.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\format_support_log.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
@@ -2364,6 +2364,37 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: blend probe test build failed & exit /b 1 )
 "%OBJ%\blendprobe\blend_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_scene_inspector_test
+REM The scene inspector (2026-10-14; src\d3d11\scene_inspector.cpp and scene_inspector_core.h): the pure rules (the box and its mapping to eye pixels
+REM for symmetric, asymmetric and canted eyes, which draws own the centre, the verdicts, the line lengths, the CSV, the PNG writer) and, on a real
+REM D3D11 WARP device with the production module linked in as a source, the proof that a duplicate restores every state it touches, writes no pixel, and
+REM counts exactly. The rig takes System32's device through src\common\system_d3d11.h, so it links without d3d11.lib.
+if not exist "%OBJ%\sceneinspector" mkdir "%OBJ%\sceneinspector"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\sceneinspector\\" /Fe"%OBJ%\sceneinspector\scene_inspector_test.exe" ^
+    "tools\scene_inspector_test\scene_inspector_test.cpp" "src\d3d11\scene_inspector.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: scene_inspector_test build failed & exit /b 1 )
+"%OBJ%\sceneinspector\scene_inspector_test.exe" --dry-run || exit /b 1
+"%OBJ%\sceneinspector\scene_inspector_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_effect_history_test
+REM The effect-history rule (2026-10-14; src\d3d11\effect_history.cpp, effect_history_core.h, effect_history_pairs.h): the list (by pair; the deferred light volumes
+REM and the force field are not on it), the threshold decision on its boundaries, the census line, the motion shader's wiring as text and, on a real D3D11 WARP
+REM device with the production module linked in as a source, the HLSL decision against the C++ one on a table, the proof that a replica restores every state it
+REM touches and writes nothing the game sees, the private target's content (behind the game's depth: nothing), the views and the decision over them, what is left
+REM alone, and the census. The rig takes System32's device through src\common\system_d3d11.h, so it links without d3d11.lib.
+if not exist "%OBJ%\effecthistory" mkdir "%OBJ%\effecthistory"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\effecthistory\\" /Fe"%OBJ%\effecthistory\effect_history_test.exe" ^
+    "tools\effect_history_test\effect_history_test.cpp" "src\d3d11\effect_history.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: effect_history_test build failed & exit /b 1 )
+"%OBJ%\effecthistory\effect_history_test.exe" --dry-run || exit /b 1
+"%OBJ%\effecthistory\effect_history_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_vr_world_mips_test

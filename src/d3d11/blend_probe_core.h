@@ -259,9 +259,11 @@ inline uint32_t gridCell(uint32_t col, uint32_t row) noexcept { return row * kGr
 //   bit 4       hidden: NVIDIA is told to start this pixel's history afresh
 //   bit 6       a UI pixel by the coverage mask
 //   bits 12..14 the engine-record kind (0 none, 1 exact motion, 2 masked, 4 stale slot, 5 bad slot code, 6 stale pose)
+//   bit 15      hidden by the effect rule (effect_history_core.h): a listed glow supplies the share of the pixel's light; bit 4 is set with it
 struct DecisionFlags {
     uint32_t path = 0;
     bool hidden = false, ui = false;
+    bool effect = false;
     uint32_t engineKind = 0;
 };
 inline DecisionFlags decodeFlags(float w) noexcept {
@@ -270,6 +272,7 @@ inline DecisionFlags decodeFlags(float w) noexcept {
     f.path = bits & 15u;
     f.hidden = (bits & 16u) != 0;
     f.ui = (bits & 64u) != 0;
+    f.effect = (bits & 32768u) != 0;
     f.engineKind = (bits >> 12) & 7u;
     return f;
 }

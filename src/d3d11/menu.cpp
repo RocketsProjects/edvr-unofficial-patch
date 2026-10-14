@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <condition_variable>
@@ -90,6 +91,8 @@ constexpr uint64_t kNotDrawnCloseMs = 1500;
 // A toast's life, and the pitch it sits below the look direction.
 constexpr uint64_t kToastMs = 2500;
 constexpr float    kToastPitchDeg = -12.0f;
+// The aiming reticle's end, on the menu's millisecond clock (menuShowReticle writes it, the menu tick reads it); 0 is none.
+std::atomic<uint64_t> g_reticleUntilMs{0};
 // The Status page's live values are refreshed at this cadence while shown;
 // the Monitor page's at four a second, so its digits read as a gauge and
 // not a flicker.
@@ -317,6 +320,10 @@ struct State {
     float    overlayPitch = -16.0f;
     bool     overlayUp = false;
     float    overlayAlpha = 0.0f;
+    // The aiming reticle (menuShowReticle: the scene inspector's first press): the same head-locked overlay panel, a "+" at yaw 0, pitch 0 (the head-forward
+    // point), while g_reticleUntilMs lies ahead. It takes the overlay's place for that time and hands it back.
+    bool     reticleUp = false;
+    bool     reticleBuilt = false;
     uint64_t overlayTextMs = 0;
     std::string overlayText;
     float    overlayTextDeg = 0.0f;
@@ -4605,11 +4612,40 @@ void menuTick(ID3D11Device* dev) {
                     s.contentDirty = true;   // the menu's content must be re-sent after a toast
                 }
             }
+            // The aiming reticle (menuShowReticle): the head-locked overlay panel carrying a "+" at the head-forward point, for as long as the request
+            // lasts. Never while a toast has the panel. It composites after the temporal pass (native_runtime_host.h: after_temporal_before_menu), so
+            // it is never in a capture's inputs. When it ends the overlay (if it is on) rebuilds its own text.
+            {
+                const bool reticleWanted = !s.toastUp && now < g_reticleUntilMs.load(std::memory_order_relaxed);
+                if (reticleWanted) {
+                    float rpose[12];
+                    if (headPose(rpose)) {
+                        if (!s.reticleBuilt) {
+                            MenuContent c;
+                            if (menuPanelBuildOverlayContent(c, "+", s.textDeg, nullptr)) {
+                                menuPanelSubmit(c);
+                                s.reticleBuilt = true;
+                            }
+                        }
+                        if (s.reticleBuilt) {
+                            if (!s.reticleUp) s.overlayAlpha = 0.0f;
+                            s.reticleUp = true;
+                            s.overlayUp = true;
+                        }
+                    }
+                } else if (s.reticleUp || s.reticleBuilt) {
+                    s.reticleUp = false;
+                    s.reticleBuilt = false;
+                    s.overlayUp = false;       // the readout (when on) rebuilds its own content next
+                    s.overlayAlpha = 0.0f;
+                    s.contentDirty = true;
+                }
+            }
             // The head-locked readout: the door anchors it to each frame's
             // own pose (setMenuHeadLock below), so it rides the look with no
             // lag, the toolkit's way; its text is refreshed twice a second.
             // Never while a toast has the panel.
-            if (s.overlay && !s.toastUp) {
+            if (s.overlay && !s.toastUp && !s.reticleUp) {
                 float pose[12];
                 s.anchorValid = headPose(pose);
                 if (s.anchorValid) {
@@ -4629,7 +4665,7 @@ void menuTick(ID3D11Device* dev) {
                         s.overlayUp = true;
                     }
                 }
-            } else if (s.overlayUp && !s.overlay) {
+            } else if (s.overlayUp && !s.overlay && !s.reticleUp) {
                 s.overlayUp = false;
                 s.overlayAlpha = 0.0f;
             }
@@ -4645,6 +4681,8 @@ void menuTick(ID3D11Device* dev) {
             s.toastAlpha = 0.0f;
             s.overlayUp = false;
             s.overlayAlpha = 0.0f;
+            s.reticleUp = false;      // the menu has the panel: the reticle starts over when it is down (if its time is not up)
+            s.reticleBuilt = false;
         }
 
         // The gate, then content, geometry, visibility. The gate is decided
@@ -4704,7 +4742,8 @@ void menuTick(ID3D11Device* dev) {
             inputGateSetPrivate(false);
         }
         menuPanelSetGeometry(g);
-        setMenuHeadLock(showingOverlay, s.overlayYaw, s.overlayPitch);
+        // The reticle sits at the head-forward point (yaw 0, pitch 0); the readout at its configured place.
+        setMenuHeadLock(showingOverlay, s.reticleUp ? 0.0f : s.overlayYaw, s.reticleUp ? 0.0f : s.overlayPitch);
         setMenuVisible(g.alpha);
         inputGateTick();
         if (dev) menuPanelTick(dev);
@@ -4716,6 +4755,15 @@ void menuTick(ID3D11Device* dev) {
         setMenuVisible(0.0f);
     }
 }
+
+bool menuShowReticle(uint32_t ms) {
+    // Only where the panel can be seen: the menu is configured and a compositor consumer (or the native menu) is there to draw it.
+    if (!g_s.configured || (!glitchConsumerPresent() && !nativeMenuAvailable())) return false;
+    g_reticleUntilMs.store(nowMs() + ms, std::memory_order_relaxed);
+    return true;
+}
+
+void menuHideReticle() { g_reticleUntilMs.store(0, std::memory_order_relaxed); }
 
 void menuShutdown() {
     inputGateSetPrivate(false);

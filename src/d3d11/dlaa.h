@@ -208,6 +208,15 @@ void dlaaSetPreset(unsigned preset);
 // in the texture the evaluation hands over. The VR world route never reads it.
 void dlaaSetHdrExposure(FlatDlssExposure mode);
 
+// The preset in force and the exposure inputs an evaluation carries (the scene inspector's DLSS line; computed on demand, the hot path
+// stores nothing). `upscaling` is output larger than input: DLAA and the Quality modes never run L or M. preset 0 = none (no NGX in this build).
+struct DlaaEvalFacts {
+    unsigned preset = 0;
+    float preExposure = 1.0f, exposureScale = 1.0f;
+    bool exposureTexture = false;   // a 1x1 exposure texture is bound (the flat HDR route only)
+};
+DlaaEvalFacts dlaaEvalFacts(bool hdr, bool upscaling);
+
 // The measured price, for the totals line: evaluations, the mean
 // milliseconds by timestamp query, and how many evaluations carried the
 // reset. False when nothing has run.

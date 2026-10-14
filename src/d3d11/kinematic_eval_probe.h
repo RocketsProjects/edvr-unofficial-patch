@@ -288,6 +288,11 @@ private:
         std::atomic<uint32_t> maxItems{0};
     };
     DirectBuildStat direct_[kDirectProducerCount];
+public:
+    // Cumulative direct-producer totals, read without the probe's mutex and without resetting anything (the scene inspector).
+    uint64_t directCalls(uint32_t producer) const noexcept { return producer<kDirectProducerCount?direct_[producer].calls.load(std::memory_order_relaxed):0; }
+    uint64_t directItems(uint32_t producer) const noexcept { return producer<kDirectProducerCount?direct_[producer].items.load(std::memory_order_relaxed):0; }
+private:
 
     void clearLocked();
     void noteVtableLocked(uint64_t rva,uint32_t frame) noexcept;

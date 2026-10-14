@@ -62,5 +62,8 @@ void vrCameraCensusEyeDraw(ID3D11DeviceContext* ctx, uint32_t eye);
 // {left, right, down, up} tangents the host was given and the tangent shift the eye jitter moved it by. The render thread,
 // outside treat(); false when there is no frame to describe.
 bool nativeTemporalEyeGeometry(uint32_t eye, uint64_t* sequence, float frustum[4], float shift[2]);
+// The same frame's eye-to-head rotation for `eye` (row-major 3x3, the upper-left of the runtime's 3x4; identity for a parallel display, turned
+// outward by the cant on a canted one): the scene inspector finds where the head's forward direction lands in the eye's image with it.
+bool nativeTemporalEyeToHead(uint32_t eye, float rotation[9]);
 
 }  // namespace edvr
