@@ -58,8 +58,7 @@
   producer FUN_14369C9C0 as the railing's writer, because its hook (kinematic-build-14369c9c0) was installed and counted 0 calls since launch in all three captures.
 - **Next flight:** `effect history:` census line (hidden px per eye-frame, covered px per draw, GPU ms per replica, `HDR target ... readable`); on a glow
   capture the box stats' `by the effect rule N` and the `effect rule:` line. A census saying the HDR target COULD NOT BE READ means the game's HDR target could not be bound
-  or was not the eye's size at the pass. Aim with the reticle: press the inspector key once (a "+" shows at the head-forward point), put it on the element,
-  press again within 3 s; the box is now 48 px (docs\scene-inspector-2026-10-14.md, journal).
+  or was not the eye's size at the pass. Aim: press the inspector key once (a "+" shows at the head-forward point), then again within 3 s; the box is 48 px.
 
 ## Triage
 
