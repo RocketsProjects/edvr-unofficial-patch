@@ -11442,9 +11442,150 @@ def self_test():
         ok = False
     if not self_test_switches():
         ok = False
+    if not self_test_wait_lead():
+        ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1
+
+
+# The runtime's per-window pacing lines (src/openxr/wait_lead_stats.h: formatWaitLeadLine and formatLongCycle1xLine, written on
+# the frame-cycle window; docs/render-thread-cpu-2026-10-10.md reads them). A value is milliseconds, or None where the line says na.
+WAIT_LEAD_NAME = "native_wait_lead"
+LONG_CYCLE_1X_NAME = "native_long_cycle_1x"
+
+
+def _wl_value(text):
+    return None if text == "na" else float(text)
+
+
+def _wl_triple(text):
+    parts = text.split("/")
+    if len(parts) != 3:
+        raise ValueError(text)
+    return tuple(_wl_value(p) for p in parts)
+
+
+def parse_wait_lead(msg):
+    """The fields of a native_wait_lead line, or None when msg is not one or a field is missing or not a number."""
+    f = _fz_fields(msg)
+    if f["_name"] != WAIT_LEAD_NAME:
+        return None
+    try:
+        return {"window": int(f["window"]), "lead": _wl_triple(f["lead_p5/p50/p95"]), "work": _wl_triple(f["work_p50/p95/p99"]),
+                "late": int(f["late"]), "late_short_lead": int(f["late_short_lead"]), "late_long_work": int(f["late_long_work"]),
+                "period_ms": float(f["period_ms"]), "frames": int(f["frames"]), "dropped": int(f["dropped"])}
+    except (KeyError, ValueError):
+        return None
+
+
+def parse_long_cycle_1x(msg):
+    """The fields of a native_long_cycle_1x line, or None when msg is not one or a field is missing or not a number."""
+    f = _fz_fields(msg)
+    if f["_name"] != LONG_CYCLE_1X_NAME:
+        return None
+    try:
+        return {"window": int(f["window"]), "period_ms": float(f["period_ms"]), "count": int(f["count"]),
+                "cycle_p50": _wl_value(f["cycle_p50"]), "work_p50": _wl_value(f["work_p50"]),
+                "work_ge_period": int(f["work_ge_period"]), "work_lt_period": int(f["work_lt_period"])}
+    except (KeyError, ValueError):
+        return None
+
+
+# native_owner_invoke: one line per OwnerService kind per frame-cycle window (src/openxr/owner_invoke_stats.h formatOwnerInvokeLine):
+# the caller's wait for a hop to the owner thread, split into queue and run. ms, or None where the line says na.
+OWNER_INVOKE_NAME = "native_owner_invoke"
+
+
+def parse_owner_invoke(msg):
+    """The fields of a native_owner_invoke line, or None when msg is not one or a field is missing or not a number."""
+    f = _fz_fields(msg)
+    if f["_name"] != OWNER_INVOKE_NAME:
+        return None
+    try:
+        return {"window": int(f["window"]), "kind": f["kind"], "calls": int(f["calls"]),
+                "per_frame": _wl_value(f["per_frame"]), "queue": _wl_pair(f["queue_p50/p95"]), "run": _wl_pair(f["run_p50/p95"]),
+                "behind_wait": int(f["behind_wait"]), "dropped": int(f["dropped"])}
+    except (KeyError, ValueError):
+        return None
+
+
+def _wl_pair(text):
+    parts = text.split("/")
+    if len(parts) != 2:
+        raise ValueError(text)
+    return tuple(_wl_value(p) for p in parts)
+
+
+def self_test_owner_invoke():
+    ok = True
+    got = parse_owner_invoke("native_owner_invoke,window=4,kind=waitPoses,calls=3,per_frame=0.300,queue_p50/p95=1.000/3.000,"
+                             "run_p50/p95=9.000/9.500,behind_wait=1,dropped=0\n")
+    want = {"window": 4, "kind": "waitPoses", "calls": 3, "per_frame": 0.3, "queue": (1.0, 3.0), "run": (9.0, 9.5),
+            "behind_wait": 1, "dropped": 0}
+    if got != want:
+        print("parse_owner_invoke steady -> %r" % (got,))
+        ok = False
+    got = parse_owner_invoke("native_owner_invoke,window=5,kind=locateHead,calls=0,per_frame=na,queue_p50/p95=na/na,"
+                             "run_p50/p95=na/na,behind_wait=0,dropped=0")
+    if got is None or got["per_frame"] is not None or got["queue"] != (None, None) or got["calls"] != 0:
+        print("parse_owner_invoke empty kind -> %r" % (got,))
+        ok = False
+    for bad in ("native_owner_invoke,window=5,kind=poll,calls=1,per_frame=0.1,queue_p50/p95=1.0/2.0,run_p50/p95=1.0,"
+                "behind_wait=0,dropped=0",
+                "native_owner_invoke,window=5,kind=poll,calls=1,per_frame=0.1,queue_p50/p95=1.0/2.0,run_p50/p95=1.0/2.0,behind_wait=0",
+                "native_wait_lead,window=5,lead_p5/p50/p95=na/na/na"):
+        if parse_owner_invoke(bad) is not None:
+            print("parse_owner_invoke accepted %r" % (bad,))
+            ok = False
+    return ok
+
+
+def self_test_wait_lead():
+    ok = True
+    if not self_test_owner_invoke():
+        ok = False
+    # The lines formatWaitLeadLine and formatLongCycle1xLine write (tools\openxr_native_test\wait_lead_cases.h runs the same shapes).
+    got = parse_wait_lead("native_wait_lead,window=7,lead_p5/p50/p95=8.000/8.000/8.000,work_p50/p95/p99=1.000/1.000/1.000,late=0,"
+                          "late_short_lead=0,late_long_work=0,period_ms=11.111,frames=39,dropped=0\n")
+    want = {"window": 7, "lead": (8.0, 8.0, 8.0), "work": (1.0, 1.0, 1.0), "late": 0, "late_short_lead": 0, "late_long_work": 0,
+            "period_ms": 11.111, "frames": 39, "dropped": 0}
+    if got != want:
+        print("parse_wait_lead steady -> %r" % (got,))
+        ok = False
+    got = parse_wait_lead("native_wait_lead,window=6,lead_p5/p50/p95=na/na/na,work_p50/p95/p99=na/na/na,late=0,"
+                          "late_short_lead=0,late_long_work=0,period_ms=0.000,frames=0,dropped=0")
+    if got is None or got["lead"] != (None, None, None) or got["work"] != (None, None, None) or got["frames"] != 0:
+        print("parse_wait_lead empty window -> %r" % (got,))
+        ok = False
+    got = parse_wait_lead("native_wait_lead,window=9,lead_p5/p50/p95=-1.250/0.500/9.000,work_p50/p95/p99=1.000/12.000/12.000,late=1,"
+                          "late_short_lead=1,late_long_work=0,period_ms=11.111,frames=33,dropped=0")
+    if got is None or got["lead"] != (-1.25, 0.5, 9.0) or got["late_short_lead"] != 1 or got["late_long_work"] != 0:
+        print("parse_wait_lead signed lead -> %r" % (got,))
+        ok = False
+    for bad in ("native_frame_cycle_phase,window=1,name=cycle,mean=1.0,p50=1.0,p95=1.0,p99=1.0,max=1.0,units=wall_ms,nested=0",
+                "native_wait_lead,window=2,lead_p5/p50/p95=1.0/2.0,work_p50/p95/p99=1.0/2.0/3.0,late=0,late_short_lead=0,"
+                "late_long_work=0,period_ms=11.111,frames=1,dropped=0",
+                "native_wait_lead,window=2,lead_p5/p50/p95=1.0/2.0/3.0,work_p50/p95/p99=1.0/2.0/3.0,late=0,late_short_lead=0,"
+                "late_long_work=0,period_ms=11.111,frames=1"):
+        if parse_wait_lead(bad) is not None:
+            print("parse_wait_lead accepted %r" % (bad,))
+            ok = False
+    got = parse_long_cycle_1x("native_long_cycle_1x,window=3,period_ms=11.111,count=2,cycle_p50=12.111,work_p50=1.000,"
+                              "work_ge_period=1,work_lt_period=1")
+    if got != {"window": 3, "period_ms": 11.111, "count": 2, "cycle_p50": 12.111, "work_p50": 1.0, "work_ge_period": 1,
+               "work_lt_period": 1}:
+        print("parse_long_cycle_1x -> %r" % (got,))
+        ok = False
+    got = parse_long_cycle_1x("native_long_cycle_1x,window=4,period_ms=11.111,count=0,cycle_p50=na,work_p50=na,"
+                              "work_ge_period=0,work_lt_period=0")
+    if got is None or got["cycle_p50"] is not None or got["count"] != 0:
+        print("parse_long_cycle_1x empty -> %r" % (got,))
+        ok = False
+    if parse_long_cycle_1x("native_wait_lead,window=3,lead_p5/p50/p95=na/na/na") is not None:
+        print("parse_long_cycle_1x accepted another line")
+        ok = False
+    return ok
 
 
 FLATU_FIXTURE = "flat_upscale_fixture.log"

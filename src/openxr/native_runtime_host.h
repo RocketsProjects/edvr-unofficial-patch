@@ -40,6 +40,7 @@
 #include "native_timing_client.h"
 #include "device_gpu_timing.h"
 #include "producer_gpu_timing.h"
+#include "wait_lead_stats.h"
 #include "submission_stats.h"
 #include "frame_cycle_stats.h"
 #include "long_cycle_line.h"
@@ -139,6 +140,7 @@ struct Api {
   PFN_xrQueryPerformanceMetricsCounterMETA perfMetricsQueryCounter=nullptr;
   PFN_xrPathToString pathToString=nullptr;
   PFN_xrConvertWin32PerformanceCounterToTimeKHR convertTime=nullptr;
+  PFN_xrConvertTimeToWin32PerformanceCounterKHR convertTimeToCounter=nullptr; // wait_lead_stats.h; optional
   PFN_xrEnumerateViewConfigurations configurations=nullptr;
   PFN_xrEnumerateViewConfigurationViews viewSizes=nullptr;
   PFN_xrEnumerateEnvironmentBlendModes blends=nullptr;
@@ -190,7 +192,10 @@ inline uint64_t nextRenderSizingGeneration() {
 class NativeRuntimeHost : public SystemSource, public FrameSink, public CompositorSource, public AuxiliarySource, public RuntimeBackend {
  public:
   NativeRuntimeHost(OwnerService& owner,RenderThreadDispatcher& dispatcher,RenderRoute& route,ID3D11Device* supplied=nullptr)
-      :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied){}
+      :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied){
+    // Set before the first invoke: the owner reads the pointer while it runs requests (owner_service.h setInvokeStats).
+    service.setInvokeStats(&ownerInvoke,&NativeRuntimeHost::frameCycleUs);
+  }
   OwnerService& service;
   RenderRoute& renderRoute;
   CountedGraphics graphicsCalls;
@@ -275,6 +280,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   SubmissionStats submitStats;
   SubmissionStats::Sample submitSample;
   FrameCycleStats frameCycles;
+  // Wait lead and frame work per frame-cycle window (native_wait_lead, native_long_cycle_1x). Owner thread writes it
+  // at each game wait return and at each xrEndFrame; reportFrameCycles (caller, after the owner invoke) drains it.
+  WaitLeadStats waitLead;
+  // Caller-side wait of each OwnerService::invoke, split into queue and run (native_owner_invoke, owner_invoke_stats.h).
+  OwnerInvokeStats ownerInvoke;
+  std::mutex waitLeadMutex; // uncontended in the normal path; covers a drain that races a not-dispatched owner job
   std::atomic<bool> frameCycleEnabledNoted{false},frameCycleFirstNoted{false},postSubmitFirstNoted{false};
   std::atomic<uint64_t> frameCycleWaitToken{0},frameCycleSubmitToken{0},frameCycleSequence{0};
   // Phase-0 timing (src/common/periodic_work.h) of the 30 s frame-cycle report: built by makeReport's sorts
@@ -1192,7 +1203,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         cycleShape.sceneReady=featureFrameKnown&&featureFrame.sceneReady?1u:0u;
         for(unsigned i=0;i<2;++i){const auto submitted=fovTrim.lastSubmitted(i);cycleShape.width[i]=submitted.width;cycleShape.height[i]=submitted.height;cycleShape.outputWidth[i]=sizes[i].recommendedImageRectWidth;cycleShape.outputHeight[i]=sizes[i].recommendedImageRectHeight;}
         frameCycles.waitOwnerEnd(cycleToken,frameCycleUs());frameCycleWaitToken.store(0,std::memory_order_release);
-      });
+      },OwnerCallKind::WaitPoses);
       // Start after the route returns so the dispatch/rendezvous is outside
       // the application interval. Direct owner calls have no producer-side
       // route return and therefore do not claim this interval.
@@ -1292,8 +1303,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         pacing==FramePacing::Deferred?"deferred":"runtime",
         (unsigned long long)(frameSequenceOffset+compositorWaits),(unsigned long long)pacingChanges);}
     lastCompositorResult=boundary.waitAndBegin(pacing);
+    const int64_t waitReturnUs=int64_t(frameCycleUs());
     if(lastCompositorResult!=XR_SUCCESS&&lastCompositorResult!=XR_FRAME_DISCARDED&&lastCompositorResult!=XR_SESSION_LOSS_PENDING)
       return fail(lastCompositorResult);
+    // A synthesized deferred frame carries no runtime prediction yet, so only a real begin is a lead sample.
+    if(!boundary.deferred())noteWaitLead(waitReturnUs,boundary.frame());
     loading.sceneWaited();
     Frame frame=boundary.frame();
     if(!applyFrameSequence(frame)){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}
@@ -1792,7 +1806,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         return accepted;
       }
       bool result=false;
-      const bool dispatched=service.invoke([&]{result=handoff(generation);});
+      const bool dispatched=service.invoke([&]{result=handoff(generation);},OwnerCallKind::Submit);
       frameCycles.noteHandoff(began,frameCycleUs(),sequence,caller,dispatched&&result);
       return dispatched&&result;
     }
@@ -2100,6 +2114,39 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   static uint64_t frameCycleUs() noexcept {
     return edvrNativeTraceNowUs();
   }
+  // Owner thread, once per real game wait return. The lead is the predicted display time, converted to the QPC-us
+  // clock by the runtime's own xrConvertTimeToWin32PerformanceCounterKHR, minus this return. Without that entry
+  // point the lead is unknown and the frame still counts toward late and the cycle census.
+  void noteWaitLead(int64_t returnUs,const Frame& frame) {
+    int64_t leadUs=0;
+    const bool known=api.convertTimeToCounter&&measureWaitLeadUs([this](int64_t ns,int64_t& us)->bool{
+        LARGE_INTEGER counter{};
+        if(XR_FAILED(api.convertTimeToCounter(instance,ns,&counter)))return false;
+        const uint64_t micros=edvrNativeTraceUs(counter.QuadPart);
+        us=int64_t(micros);
+        return micros>0;
+      },frame.predictedDisplayTime,returnUs,leadUs);
+    std::lock_guard<std::mutex> lock(waitLeadMutex);
+    waitLead.noteWait(returnUs,known,leadUs,frame.predictedDisplayTime,frame.predictedDisplayPeriod);
+  }
+  // Called from reportFrameCycles at each frame-cycle window (caller thread, after the owner's invoke has returned).
+  void emitWaitLead(uint64_t window) {
+    WaitLeadStats::Report report{};
+    {std::lock_guard<std::mutex> lock(waitLeadMutex);waitLead.takeWindow(report);}
+    report.window=window;
+    char lead[256]{},census[256]{};
+    if(formatWaitLeadLine(report,lead,sizeof lead))nativeTracePrintf("%s",lead);
+    if(formatLongCycle1xLine(report,census,sizeof census))nativeTracePrintf("%s",census);
+  }
+  // Caller-side owner hops, one native_owner_invoke line per kind at each frame-cycle window. frames is the window's valid cycles.
+  void emitOwnerInvoke(uint64_t window,unsigned frames) {
+    OwnerInvokeStats::KindReport rows[OwnerInvokeStats::kinds]{};
+    ownerInvoke.takeWindow(rows);
+    for(unsigned k=0;k<OwnerInvokeStats::kinds;++k){
+      char line[320]{};
+      if(formatOwnerInvokeLine(window,OwnerCallKind(k),rows[k],frames,line,sizeof line))nativeTracePrintf("%s",line);
+    }
+  }
   // One line per completed cycle longer than twice the runtime's last real
   // predicted period: the outlier a 30-second window's mean/p95 hides. The
   // phases are this one cycle's, not a window's. sequence is the timing
@@ -2258,6 +2305,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // our treatments, each measured where the runtime calls it. A loading frame, or the empty end of a frame the game
   // never submitted, has none of the eyes' work: its figures are zero and not the last scene frame's.
   void endFrameReturned(const EndFrameInfo& info) override {
+    // The call began info.ms before this return (holdEndFrame time is inside info.ms, so this is the call's start, to within it).
+    if(!info.background) {
+      const int64_t callUs=int64_t(frameCycleUs())-int64_t(info.ms*1000.0);
+      std::lock_guard<std::mutex> lock(waitLeadMutex);waitLead.noteEndCall(callUs);
+    }
     const uint64_t nowMs=GetTickCount64();
     const double periodMs=double(info.periodNs)/1000000.0;
     const bool scene=info.layers&&!info.background;
@@ -2303,6 +2355,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     maybeLongCycleCounts();
     if(!frameCycleFirstNoted&&frameCycles.firstComplete()) {frameCycleFirstNoted=true;nativeTracePrintf("native_frame_cycle,first_complete=1\n");}
     FrameCycleStats::Report r{};if(!frameCycles.takeReport(r))return;
+    emitWaitLead(r.window);
+    emitOwnerInvoke(r.window,r.valid);
     const uint64_t writeBegan=frameCycleUs();
     const auto& c=r.cycle;const double validSum=c.mean*double(r.valid);
     nativeTracePrintf("native_frame_cycle_window,window=%llu,boundary=host_wait_return_to_next_host_wait_return,admitted=%llu,valid=%u,first=%llu,last=%llu,elapsed_ms=%llu,valid_cycle_sum_ms=%.3f,caller_wait_fps=%.3f,valid_sample_fps=%.3f,caller_thread=%u,wait_thread=%u,thread_consistent=%u,input=%ux%u/%ux%u,output=%ux%u/%ux%u,pacing=%u,should_render=%u,scene_ready=%u,generation=%llu,feature_epoch=%llu,missing_clock=%llu,missing_reentrant=%llu,missing_thread=%llu,missing_sequence=%llu,missing_partial=%llu,missing_duplicate_eye=%llu,missing_direct_owner=%llu,missing_scope=%llu,missing_overflow=%llu,late_frames=%llu,frame_end_overlap=%u\n",
@@ -2448,7 +2502,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.note(sample);
   }
   bool locateHeadFor(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out) override {
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=locateHeadFor(generation,origin,prediction,call,out);})&&result;}
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=locateHeadFor(generation,origin,prediction,call,out);},OwnerCallKind::LocateHead)&&result;}
     PoseGapStats::Sample sample{};sample.thread=call.thread;sample.rva=call.rva;sample.predictionSec=prediction;
     const bool located=locateHeadOwned(generation,origin,prediction,call,out,sample);
     sample.located=located;
@@ -2954,7 +3008,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return true;
   }
   bool pollEvent(uint64_t generation,vr::ETrackingUniverseOrigin origin,vr::VREvent_t& event,vr::TrackedDevicePose_t& pose) override {
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=pollEvent(generation,origin,event,pose);})&&result;}
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=pollEvent(generation,origin,event,pose);},OwnerCallKind::PollEvent)&&result;}
     if(generation!=geometryGeneration)return false;
     if(quitEventPending&&quitEventGeneration==generation) {
       event={};event.eventType=vr::VREvent_Quit;
@@ -3222,6 +3276,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     LOAD("xrDestroyInstance",destroyInstance); LOAD("xrGetInstanceProperties",instanceProperties);
     LOAD("xrGetSystem",getSystem); LOAD("xrEnumerateViewConfigurations",configurations);
     LOAD("xrGetSystemProperties",systemProperties);LOAD("xrConvertWin32PerformanceCounterToTimeKHR",convertTime);
+    // Same extension as the LOAD above; optional so a runtime that lacks the reverse entry point still starts (native_wait_lead then reports na).
+    if(!load(api,instance,"xrConvertTimeToWin32PerformanceCounterKHR",api.convertTimeToCounter))api.convertTimeToCounter=nullptr;
     LOAD("xrEnumerateViewConfigurationViews",viewSizes); LOAD("xrEnumerateEnvironmentBlendModes",blends);
     LOAD("xrGetD3D11GraphicsRequirementsKHR",requirements);
     LOAD("xrDestroySession",destroySession); LOAD("xrCreateSession",createSession);
