@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -105,6 +106,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -128,6 +130,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -273,6 +276,7 @@ int main(int argc, char** argv) {
         se::SunState sun;
         se::SunInputs si;
         si.setting = true;
+        si.aboard = true;
         si.docked = true;
         si.ownKnown = true;
         si.r0Fresh = true;
@@ -295,6 +299,29 @@ int main(int argc, char** argv) {
         check(se::sunStep(si, &sun, &why) && sun.off, "v14.23 sun: moving again turns it off");
         si.docked = false;
         check(se::sunStep(si, &sun, &why) && !sun.off && std::strcmp(why, "undocked") == 0, "v14.23 sun: undock turns it on");
+    }
+    {
+        // 2026-10-14: the sun skip follows the seat like the seal. Flight log edvr_gfx_20261014_144320.log: the skip went on at 14:56:20 and stayed on, with Status docked and the
+        // pad's r1 still 1, for the whole walk on foot through the lift and the concourse (sun draws skipped in every 30 s window for minutes).
+        se::SunState sun;
+        se::SunInputs si;
+        si.setting = true;
+        si.aboard = true;
+        si.docked = true;
+        si.ownKnown = true;
+        si.r0Fresh = true;
+        si.r0 = 1;
+        si.r1Fresh = true;
+        si.inHangar = true;
+        si.relOk = true;
+        si.rel = -45.0f;
+        const char* why = "";
+        check(se::sunStep(si, &sun, &why) && sun.off, "on foot sun: aboard in the bay, the skip goes on");
+        si.aboard = false;   // the disembark: the pad is still in the bay (r1 1), Status still docked
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "on foot") != nullptr, "on foot sun: the seat leaving turns the sun back on although r1 is 1 and Status is docked");
+        check(!se::sunStep(si, &sun, &why) && !sun.off, "on foot sun: it stays on while on foot, even with the pad moving (r0 1)");
+        si.aboard = true;
+        check(se::sunStep(si, &sun, &why) && sun.off, "on foot sun: boarding again, the pad moving in, turns it off again");
     }
     // The pure helpers that are not about the seal trigger (kept): the latch's identity, the bounded probe, the rig's epoch rule, the view's centre.
     {
@@ -1060,6 +1087,72 @@ int main(int argc, char** argv) {
         check(std::strcmp(text, "Status Flags unknown") == 0, "an unknown sample says so");
         se::describeStatusFlags(text, sizeof(text), true, 0x01000001u, 0x0u);
         check(std::strstr(text, "in main ship 1") && std::strstr(text, "on foot 0"), "aboard in the main ship reads as such");
+    }
+
+    // ---- TEMPORARY: the character census (read-only; it says what a cull of skinned entities would act on while the seal is held) -------------------------------
+    {
+        se::CharCensus c;
+        c.hook = 1;
+        c.sealedFrames = 2000;
+        c.draws = 36000;
+        c.sample(9, 240, 70);
+        c.sample(12, 300, 90);
+        c.sample(6, 180, 50);
+        char line[1100];
+        se::formatCharCensus(line, sizeof(line), c);
+        const std::string got(line);
+        const std::string want =
+            "optimized station: characters while sealed (last 30 s, 2000 sealed frames): skinned entities in the game's assembly list (exe+0x4C540E0): 3 samples, per sample min 6 avg 9.0 max 12; "
+            "palette rows avg 240 max 300; largest entity 90 bones; skinned draws 18.0 a sealed frame, both eyes (36000 in the window); distance of each entity to the sealed box: unknown (the list carries "
+            "no position), so none is counted inside or outside; GPU time of the skinned draws: not measured.";
+        check(got == want, "census: the 30 s line has exactly this text (observed)");
+        if (got != want) std::printf("  got:  %s\n  want: %s\n", got.c_str(), want.c_str());
+        // never ran / could not see: distinguishable from the observed line, and from no line at all (a window with no sealed frame writes none)
+        se::CharCensus flat;
+        flat.sealedFrames = 500;
+        se::formatCharCensus(line, sizeof(line), flat);
+        check(std::strstr(line, "skinned entities not observed (the skin hook is not armed in this profile)") && std::strstr(line, "skinned draws not counted") && !std::strstr(line, "samples"),
+              "census: flat (hook not armed) says not observed, never zero entities");
+        se::CharCensus down = flat;
+        down.hook = 2;
+        se::formatCharCensus(line, sizeof(line), down);
+        check(std::strstr(line, "stood down") != nullptr, "census: a stood-down hook says so");
+        se::CharCensus blind = flat;
+        blind.hook = 1;
+        se::formatCharCensus(line, sizeof(line), blind);
+        check(std::strstr(line, "armed but no list was read (0 samples)") != nullptr, "census: armed with no list read is 0 samples, not 0 entities");
+        // a tiny buffer never overruns and always terminates
+        char tiny[40];
+        std::memset(tiny, 'x', sizeof(tiny));
+        const size_t n = se::formatCharCensus(tiny, sizeof(tiny), c);
+        check(n < sizeof(tiny) && tiny[n] == '\0', "census: the formatter respects its buffer");
+    }
+    {
+        // Source pins: the census must stay read-only and gated (the rig cannot run the DLL, so the wiring is pinned in the text).
+        auto slurp = [](const char* path) {
+            std::string out;
+            if (FILE* f = std::fopen(path, "rb")) {
+                char buf[8192];
+                size_t k;
+                while ((k = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, k);
+                std::fclose(f);
+            }
+            return out;
+        };
+        const std::string st = slurp("src/d3d11/optimized_station.cpp");
+        const std::string ev = slurp("src/d3d11/engine_velocity.cpp");
+        check(!st.empty() && !ev.empty(), "census pins: the sources were read (run the rig from the repository root)");
+        if (!st.empty() && !ev.empty()) {
+            check(st.find("engineVelocitySkinCensusGate(held)") != std::string::npos && st.find("if (!held) return;") != std::string::npos,
+                  "census pins: the draw counter follows the held seal and the sampler returns at once when unsealed");
+            check(st.find("characterCensusTick();") != std::string::npos && st.find("if (g_winSealedFrames > 0) {   // the census line") != std::string::npos,
+                  "census pins: the tick calls the census and the line is written only for a window with a sealed frame");
+            check(st.find("engineVelocitySkinCensusGate(false)") != std::string::npos, "census pins: turning the setting off shuts the draw counter");
+            check(ev.find("if (g_skinCensusGate.load(std::memory_order_relaxed)) g_skinCensusDraws.fetch_add") != std::string::npos,
+                  "census pins: the draw path counts only behind the gate");
+            check(st.find("skinEntityHookLatest(g_censusSnap)") != std::string::npos && st.find("skinEntityHookSetGate") == std::string::npos,
+                  "census pins: the census reads the hook's latest snapshot and never touches the hook's gate");
+        }
     }
 
     // ---- Built v14.24 (2026-10-13, the review of the 013c6122 flight) -----------------------------------------------------------------------------

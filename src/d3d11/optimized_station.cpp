@@ -16,6 +16,7 @@
 
 #include "../common/config.h"
 #include "../common/log.h"
+#include "engine_velocity.h"
 #include "journal_watch.h"
 #include "kinematic_eval_hook.h"
 #include "optimized_station_core.h"
@@ -23,6 +24,7 @@
 #include "station_lockfree_core.h"
 #include "station_pass_core.h"
 #include "pad_state_probe.h"
+#include "skin_entity_hook.h"
 #include "store_hook.h"
 #include "view_source.h"
 
@@ -1546,6 +1548,42 @@ void sealStatus(const sealed::OwnCell& cell, uint32_t frame) noexcept {
                     g_shellValid ? g_shellName : "none (the pad's motion is not checked)", lat, yaw);
 }
 
+// ---- TEMPORARY: the character census (optimized_station_core.h CharCensus; docs/optimized-station-2026-10-12.md). Render thread (the tick and the summary), read-only. ----
+sealed::CharCensus g_census;
+bool g_censusGateOn = false;
+bool g_censusAnnounced = false;
+uint64_t g_censusNextMs = 0;
+uint64_t g_censusDraws0 = 0;
+skinjoin::Snapshot g_censusSnap;   // 32 KB, taken once a second while sealed and never otherwise
+
+void characterCensusTick() noexcept {
+    const bool held = g_heldValid;
+    if (held != g_censusGateOn) {   // the draw counter runs only while the seal is held: unsealed, the draw path does one relaxed load
+        g_censusGateOn = held;
+        engineVelocitySkinCensusGate(held);
+        if (held) {
+            g_censusNextMs = 0;
+            g_censusDraws0 = engineVelocitySkinCensusDraws();
+            if (!g_censusAnnounced) {
+                g_censusAnnounced = true;
+                Log::get().note("optimized station: character census (temporary): while the seal is held, a line every 30 s counts the skinned entities in the game's skinning assembly list and the "
+                                "skinned draws. Read-only; nothing is culled.");
+            }
+        }
+    }
+    if (!held) return;
+    const uint64_t t = GetTickCount64();
+    if (t < g_censusNextMs) return;
+    g_censusNextMs = t + 1000;
+    if (skinEntityHookState() != SkinHookState::Armed) return;
+    if (!skinEntityHookLatest(g_censusSnap) || !skinjoin::checkSnapshot(g_censusSnap)) return;
+    uint32_t largest = 0;
+    for (uint32_t i = 0; i < g_censusSnap.n; ++i) {
+        if (g_censusSnap.e[i].count > largest) largest = g_censusSnap.e[i].count;
+    }
+    g_census.sample(g_censusSnap.n, g_censusSnap.end, largest);
+}
+
 // The 30 s summary: what the station did in the window. A user's log shows the station's work here.
 void summaryLine(uint64_t now) noexcept {
     // Built v14.31: the lines are written for a window in which the commander was docked or sealed (a flight in space writes none); the window resets either way.
@@ -1668,6 +1706,17 @@ void summaryLine(uint64_t now) noexcept {
         g_rigTally.asked = 0;
     }
 
+    if (g_winSealedFrames > 0) {   // the census line: only for a window with a sealed frame
+        const SkinHookState hs = skinEntityHookState();
+        g_census.hook = hs == SkinHookState::Armed ? 1 : hs == SkinHookState::StoodDown ? 2 : 0;
+        g_census.sealedFrames = g_winSealedFrames;
+        g_census.draws = engineVelocitySkinCensusDraws() - g_censusDraws0;
+        char line[1100];
+        sealed::formatCharCensus(line, sizeof(line), g_census);
+        SUMMARY_NOTE("%s", line);
+    }
+    g_census = sealed::CharCensus{};
+    g_censusDraws0 = engineVelocitySkinCensusDraws();
     g_prodStats.maxProbes.store(0, std::memory_order_relaxed);
     g_rigStats.maxProbes = g_collStats.maxProbes = 0;
     g_prodStats.full.store(0, std::memory_order_relaxed);
@@ -1751,7 +1800,13 @@ void applySetting(bool on, uint32_t frame) noexcept {
             Log::get().note("optimized station: sun light inside the hangar back on (setting off; Status docked=%s)",
                             g_dockedNow.load(std::memory_order_acquire) ? "yes" : "no");
         }
-        if (!on) releaseSeal("setting off", frame);
+        if (!on) {
+            releaseSeal("setting off", frame);
+            if (g_censusGateOn) {   // the tick no longer runs with the setting off: shut the census's draw counter here
+                g_censusGateOn = false;
+                engineVelocitySkinCensusGate(false);
+            }
+        }
     }
     if (on) {
         const char* direct = kinematicEvalDirectVetoAttach();
@@ -2507,6 +2562,7 @@ void optimizedStationFrameBody(uint32_t frame) {
     ++g_winFrames;
     if (g_dockedNow.load(std::memory_order_acquire)) ++g_winDockedFrames;
     if (g_heldValid) ++g_winSealedFrames;
+    characterCensusTick();   // TEMPORARY: zero work unsealed (the gate follows the seal)
     // Built v14.34: the Status.json docked flag under either profile (the flat profile's journal accessors answer the no-journal values).
     g_dockedKnownNow.store(journalStatusDockedKnown(), std::memory_order_release);
     g_dockedNow.store(journalStatusDockedKnown() && journalStatusDocked(), std::memory_order_release);
@@ -2690,6 +2746,7 @@ void optimizedStationFrameBody(uint32_t frame) {
         sealed::SunInputs su;
         su.setting = g_setting.load(std::memory_order_acquire);
         su.docked = g_dockedNow.load(std::memory_order_acquire);
+        su.aboard = g_aboardNow;
         su.ownKnown = g_game.ownKnown;
         su.r0Fresh = g_game.r0Fresh;
         su.r0 = static_cast<uint8_t>(g_game.r0 < 0 ? 0 : g_game.r0);
