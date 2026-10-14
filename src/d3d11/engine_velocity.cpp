@@ -2866,11 +2866,16 @@ EngineVelocityWrapperCounts engineVelocityTakeWrapperCounts() noexcept {
     return out;
 }
 
+std::atomic<bool> g_skinCensusGate{false};
+std::atomic<uint64_t> g_skinCensusDraws{0};
+void engineVelocitySkinCensusGate(bool open) noexcept { g_skinCensusGate.store(open, std::memory_order_relaxed); }
+uint64_t engineVelocitySkinCensusDraws() noexcept { return g_skinCensusDraws.load(std::memory_order_relaxed); }
 namespace engine_velocity_detail {
 // F2: one skinned family draw's instance window, listed for the frame's pose table (skin_join.h, "the pose table's CPU reference"). The instance stream is
 // the vertex buffer of stride 8 the draw reads (the ledger's rule: the first one of the four slots; two of them is not a stream this can name).
 void noteSkinDrawSlow(ID3D11DeviceContext* ctx, uint32_t startInstance, uint32_t instances) {
     if (!ctx || !instances) return;
+    if (g_skinCensusGate.load(std::memory_order_relaxed)) g_skinCensusDraws.fetch_add(1, std::memory_order_relaxed);   // the station's character census (sealed only)
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (!g_skinWanted.load(std::memory_order_relaxed)) return;
     SkinRefCollector& c = g_skinRefs;

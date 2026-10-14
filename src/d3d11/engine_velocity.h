@@ -76,6 +76,11 @@ constexpr unsigned kEngineVelocityScenePrevCb = 2;
 // On with the temporal pass live (fix.temporal_aa, every mode). Idempotent
 // across the once-per-second config re-poll.
 void engineVelocityConfigure(bool on);
+// The optimized station's character census (a TEMPORARY instrument, docs/optimized-station-2026-10-12.md): while the gate is open (the seal is held) every skinned family
+// draw the second skin lists is counted; the count is cumulative and the caller takes deltas. Shut, the draw path does one relaxed load and nothing else. Zero in flat
+// (the second skin is VR only).
+void engineVelocitySkinCensusGate(bool open) noexcept;
+uint64_t engineVelocitySkinCensusDraws() noexcept;
 void engineVelocityShutdown();
 bool engineVelocityActive() noexcept;
 // Engine motion's diagnostics wanted (temporal_pass: advanced.temporal_aa_
