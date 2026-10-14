@@ -25,9 +25,8 @@
   removed (the bullet above).
 
 * **Levers still open:** the draw count (its governor lever is gone);
-  the last ~0.4-0.6 ms of EDVR's own per-draw
-  path — the always-on instruments armed-only, plus a fourth round on
-  the resource hooks ("Leg C").
+  the last ~0.4-0.6 ms of EDVR's own per-draw path — the always-on
+  instruments armed-only, plus a fourth round on the resource hooks ("Leg C").
 
 * **Open items (pointers; open the named entry for the evidence):**
   settlement admission (C2) untested from a real arrival ("The ~1 km
@@ -56,9 +55,10 @@
   C"); applicationMs as a frame-fit signal, it omits the post-submit
   phase ("Shadow flight 1").
 
-* **Next flight:** a cpu_profile leg at the pad, k 6 (F9/F11), to
-  see what the slow 30% of frames do; the 4b benefit judgement gets
-  a stable-scene-only correction, in build.
+* **Next flight:** the in-process render-thread CPU profile (branch
+  claude/render-cpu-profiler, not merged): hotkey.profile_cpu at the pad
+  to see what the slow 30% of frames do. Temporary keys, removed when
+  this closes: `hotkey.profile_cpu`, `diag.profile_cpu`.
 
 ## Frame budget philosophy
 
@@ -3332,3 +3332,40 @@ restore in force).
 Next: a cpu_profile leg at the pad at k 6 (F9/F11 hotkeys) to see
 what the slow 30% of frames do; the 4b correction to the benefit
 judgement (stable scene only, tested+passed) is in build.
+
+## 2026-10-10 -- the render-thread CPU profile (instrument, branch claude/render-cpu-profiler, not merged, not flown)
+
+Question: where the render thread's 11-12 ms goes in a station hangar, where the game is CPU-bound. The arc's
+own counters measure EDVR's share, not Elite's, and the WPR capture (tools\cpu_profile.py) needs an administrator
+token and cannot name EDVR's frames directly. This instrument is in-process, so it needs neither.
+
+What it is. `hotkey.profile_cpu` (unbound by default) takes a press; `diag.profile_cpu = on` (VR) takes one
+capture about 20 s after the first in-scene frame. The press asks; the render thread starts the capture at its next
+Present, duplicating its own handle. A worker then stops that thread at about 1 kHz for 10 s through
+`stall::captureThread` (the stall sampler's stopped window, unchanged), walks each copy to the leaf and up to eight
+return frames, and after the window resolves each frame to module+RVA and to its `.pdata` function. The stopped share
+is capped at 5 percent; the achieved rate and the stopped time are logged. Off costs no thread: one branch in the frame
+tick, one relaxed load at Present.
+
+Output, in the graphics log: `cpu profile:` lines, a start line, a pacing line, the top 40 leaves by module+RVA, the top
+40 functions by inclusive and exclusive counts, the class shares (elite, edvr_d3d11, edvr_openvr, vendor, d3d_driver,
+ntdll_kernel, other, unknown), the top modules and an end line. The raw samples go to `edvr_logs\cpu_profile_<stamp>.csv`
+in the contract tools\elite_hotspots.py reads: one row per valid sample, `module,rva_hex`, then up to eight frames,
+innermost first. Reading the log: no start line means the capture never started (the armed or off note above it says
+why); a start line with no end line means the log stops during it; `end samples=0` means the thread was never read.
+`edvr_log.py --cpu-profile` prints the latest capture with a VERDICT line, or re-aggregates a CSV.
+
+Rig (tools\cpu_sampler_test, in the build gate, run alone as a --quiet rig): a busy thread calls known hot functions in
+hot_target.dll, so the rig checks that the hot leaf dominates, that every listed `.pdata` range equals
+RtlLookupFunctionEntry's, that the report and CSV parse, that the pacer holds the cap on a fake clock, and that the
+window calls nothing that stops the thread but `stall::captureThread`. Scratch runs before the build: 1992-2000 valid
+samples in 2 s (about 996-1000 Hz); the stop averaged 10-13 us a sample, with a maximum of 33 to 700 us (one run, a
+worker preempted inside the window, is the largest). The numbers the build's own run reports are in its log.
+
+Caveats for the flight. Flat has no scene flag, so `diag.profile_cpu = on` waits and never fires in flat; bind
+`hotkey.profile_cpu`. Each sample stops the render thread, about 1 percent of wall at 1 kHz: read the shares, not the
+frame time, from a profiled run. Sampling is uniform in time, so a thread blocked in a wait is counted as a wait.
+
+Hypothesis for the hangar flight (not tested): the render thread's time is mostly inside EliteDangerous64.exe frames,
+with the edvr_d3d11 class a minor share. Confirms if the game's class leads the on_stack shares and the top exclusive
+functions are game functions. Refutes if edvr_d3d11 is on the stack in more than about 30 percent of samples.

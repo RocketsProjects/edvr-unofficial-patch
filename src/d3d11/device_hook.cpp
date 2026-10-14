@@ -84,6 +84,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "gpu_pass_profile.h"   // TEMPORARY hotkey.gpu_pass_profile: the GPU pass profiler's request
 #include "blend_probe.h"       // TEMPORARY hotkey.blend_probe: the blend probe's install and request
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
+#include "cpu_profile.h"      // cpuProfileBeat / cpuProfileRequest / cpuProfileFrameTick: the render-thread CPU profile
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "light_grid_cache_hook.h"   // lightGridCacheInstall at startup, lightGridCachePoll once a second, lightGridCacheNoteFrame per Present: the fragment-culling grid cache (both profiles)
@@ -275,7 +276,9 @@ struct State {
     // What each of those three was last bound from (the ini text), so a reload
     // that changes one re-resolves it and one that does not says nothing: the
     // settings menu's Hotkeys page writes them while the game runs.
-    std::string dumpKeyText, censusKeyText, eyesKeyText, gpuPassKeyText, blendProbeKeyText;
+    std::string dumpKeyText, censusKeyText, eyesKeyText, gpuPassKeyText, blendProbeKeyText, cpuProfileKeyText;
+    // The render-thread CPU profile key (cpu_profile.h). Unbound by default; a press asks for one ten-second capture.
+    Hotkey cpuProfileKey;
     bool        diagnosticKeysBound = false;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings; they give the FSS mode latch its frame-exact edges.
@@ -1344,6 +1347,10 @@ void tickHotkeys() {
     if (g_state->blendProbeKey.pressed()) blendProbeRequest("hotkey.blend_probe");   // TEMPORARY (blend_probe.h)
     // The eye dump key: the next treated frame's two eyes to disk.
     if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
+    // The render-thread CPU profile (cpu_profile.h): a press asks for one capture, started at the next Present; the `on`
+    // mode of diag.profile_cpu is timed here too. Both are one branch each when nothing is armed.
+    if (g_state->cpuProfileKey.pressed()) cpuProfileRequest("hotkey.profile_cpu");
+    cpuProfileFrameTick();
     if (g_state->missedCensusNotes < kMissedDumpNotes &&
         g_state->censusKey.takeMissedWhileUnfocused()) {
         ++g_state->missedCensusNotes;
@@ -1791,6 +1798,8 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // on a clock, under pressure and at each crossing. One compare of two integers per frame; the OS is asked once
     // a second. Here because this is the one hook the VR and the flat profile share.
     vramWatchTick(presentT1, g_state->device);
+    // The render-thread CPU profile's start (cpu_profile.h): one relaxed load unless a capture was asked for.
+    cpuProfileBeat();
     if (routeCrumbs)
         hdrCrumbWrite("present", "end", "hr=0x%08X removed=0x%08X", static_cast<unsigned>(hr),
                       static_cast<unsigned>(g_state->device->GetDeviceRemovedReason()));
@@ -2064,6 +2073,12 @@ void configureDiagnosticHotkeys() {
          "hotkey: dump_eyes is set but bound nothing, so the eye dump cannot be armed this session "
          "(the settings menu's row still can).",
          " Both eyes go to edvr_logs\\eyes as BMP on each press, one hitch each."},
+        // The render-thread CPU profile (cpu_profile.h). Empty is off, as for the census: an unbound key is how "off" is
+        // spelled. A press costs nothing until the next Present, then ten seconds of samples of that thread.
+        {&s.cpuProfileKey, &s.cpuProfileKeyText, Config::get().getString("hotkey.profile_cpu", ""),
+         "hotkey.profile_cpu", "render-thread CPU profile",
+         "hotkey: profile_cpu is set but bound nothing, so the CPU profile cannot be armed by key this session.",
+         " A press samples the render thread for ten seconds from its next Present; the cpu profile: lines follow in the graphics log."},
     };
     for (Item& it : items) {
         if (!first && *it.applied == it.value) continue;
@@ -2097,6 +2112,7 @@ State& ensureState() {
             return *g_state;
         }
         configureDiagnosticHotkeys();
+        cpuProfileConfigure();
         // The settings menu, read here for install and on vScreen's reload
         // path for live changes; its Instruments page gets the diagnostic
         // keys' functions as rows.

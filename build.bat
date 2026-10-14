@@ -197,6 +197,8 @@ REM The guard tools\run_jobs.py holds every rig to (no window, no console, no
 REM move of the keyboard focus); its own self-test, run below with the rigs,
 REM starts it on real processes, so this one fails first and fast.
 python tools\focus_watch.py --self-test || exit /b 1
+REM tools\elite_hotspots.py: the CPU-sample reader, the .pdata function map (chained fragments folded into their primary), the sample report, and the build refusal, held to a synthetic PE; needs no game files and no capstone.
+python tools\elite_hotspots.py --self-test || exit /b 1
 
 REM The version baked into both DLLs, printed in the second line of every log.
 REM
@@ -558,7 +560,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
-    "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" ^
+    "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" "src\d3d11\cpu_profile.cpp" ^
     "src\d3d11\stall_watch.cpp" "src\d3d11\vram_tick.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
@@ -758,7 +760,7 @@ set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
 python tools\run_jobs.py --script "%ROOT%\build.bat" --times "%BUILD%\rig_times.json" ^
-    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,gpu_pass_profile_test,vtable_test,stall_sampler_test ^
+    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,gpu_pass_profile_test,vtable_test,stall_sampler_test,cpu_sampler_test ^
     --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1
 
@@ -1259,6 +1261,43 @@ if "%EDVR_RIG_STEP%"=="build" exit /b 0
 "%OBJ%\stallsampler\stall_sampler_test.exe" --dry-run || exit /b 1
 "%OBJ%\stallsampler\stall_sampler_test.exe" --self-test "%ROOT%" || exit /b 1
 python "tools\stall_sampler_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_cpu_sampler_test
+if "%EDVR_RIG_STEP%"=="run" goto cpu_sampler_test_run
+echo [edvr] === cpu_sampler_test.exe ===
+REM Build gate for the render-thread CPU profile (src\common\cpu_sampler.h, src\d3d11\cpu_profile.cpp,
+REM docs\engine-render-performance-2026-09-19.md): the REAL capture, resolution, report and CSV code run against a busy
+REM thread in this exe that calls known hot functions in hot_target.dll (a module that is not the exe), so the hot leaf must
+REM dominate the leaf and function tables; every .pdata range the report names must equal RtlLookupFunctionEntry's; the
+REM report's lines must parse, each under 1100 characters; the CSV's rows must find their functions; the pacer must hold the
+REM stopped-share cap on a fake clock; and the window's source must call nothing that stops the thread but
+REM stall::captureThread. It samples for two seconds at 1 kHz, so it is a --quiet rig and runs alone. Its output is then read
+REM back by edvr_log.py --cpu-profile, in both its log form and its CSV form.
+if not exist "%OBJ%\cpusampler" mkdir "%OBJ%\cpusampler"
+cl.exe /nologo /O2 /MT /LD /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\cpusampler"\ /Fe"%OBJ%\cpusampler\hot_target.dll" ^
+    "tools\cpu_sampler_test\hot_target_dll.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: hot_target.dll build failed & exit /b 1 )
+REM The owner-role module: a second test DLL that exports VR_GetGenericInterface, so a thread started in it gets role=owner.
+cl.exe /nologo /O2 /MT /LD /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\cpusampler"\ /Fe"%OBJ%\cpusampler\owner_target.dll" ^
+    "tools\cpu_sampler_test\owner_target_dll.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: owner_target.dll build failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"src\common" ^
+    /Fo"%OBJ%\cpusampler"\ /Fe"%OBJ%\cpusampler\cpu_sampler_test.exe" ^
+    "tools\cpu_sampler_test\cpu_sampler_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: cpu_sampler_test build failed & exit /b 1 )
+if "%EDVR_RIG_STEP%"=="build" exit /b 0
+:cpu_sampler_test_run
+if not exist "%OBJ%\cpusampler\out" mkdir "%OBJ%\cpusampler\out"
+"%OBJ%\cpusampler\cpu_sampler_test.exe" --dry-run || exit /b 1
+"%OBJ%\cpusampler\cpu_sampler_test.exe" --self-test "%ROOT%" "%OBJ%\cpusampler\out" || exit /b 1
+python tools\edvr_log.py --cpu-profile --file "%OBJ%\cpusampler\out\cpu_profile_report.log" || exit /b 1
+python tools\edvr_log.py --cpu-profile "%OBJ%\cpusampler\out\cpu_profile_rig.csv" || exit /b 1
 exit /b 0
 
 :rig_vram_watch_test

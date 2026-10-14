@@ -20,6 +20,8 @@ inline bool flatProfileReadsKey(const char* key) {
         std::strcmp(key, "hotkey.dump_draws") == 0 ||
         // TEMPORARY (GPU pass profile, 2026-10-12): the flat profile reads the same key. Remove with the arc.
         std::strcmp(key, "hotkey.gpu_pass_profile") == 0 ||
+        // TEMPORARY (process CPU profile, cpu_profile.h): unlisted, flat reads them as "off". Remove with the arc.
+        std::strcmp(key, "hotkey.profile_cpu") == 0 || std::strcmp(key, "diag.profile_cpu") == 0 ||
         std::strcmp(key, "fix.render_sharpness") == 0 ||
         // The interface quality (flat panel row; ui_panel_scale.cpp's flat factor and the flat UI layer). The VR layer reads it
         // too, but stays inert in flat: it is live only with fix.temporal_aa on through this gate, which refuses that key.
