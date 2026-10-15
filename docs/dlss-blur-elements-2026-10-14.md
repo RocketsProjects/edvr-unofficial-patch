@@ -251,3 +251,8 @@ arrived (a menu, no VR), none was a candidate, or none reached the window.
   removes a jitter that was never there (a crawl of the jitter's amplitude, relative to the jittered star: the symptom); (2) the sign convention is wrong for the
   game's rows; (3) the input is LDR (hdr=0, pre-exposure 1.0, no exposure texture): a clipped star at 1.0 beside a dark rim does not conserve energy between phases.
   Discriminating A/B: jitter off (the edge should be perfectly still if (1) or (2)); then flip_y, flip_x, flip_both. Not built.
+
+- **2026-10-14 (from main, `claude/srv-split`): a sixth case, SRV driving.** ROOT CAUSE, fix BUILT, NOT FLOWN: terrain 5 to 8 m from an SRV took the head path because the
+  ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV (docs/per-object-motion.md "The split in an SRV, 2026-10-14"). Not one of the five elements. The same
+  question for a docking slot inside 10 m of a ship cockpit is open and unmeasured. (Merged into this doc when main was merged into claude/rim-jitter; the rest of main's old Status
+  block is the pre-inspector state and is superseded by the Status above.)
