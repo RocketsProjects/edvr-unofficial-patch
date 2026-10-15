@@ -49,6 +49,11 @@ Newest first. The Status block above is the shipped design; the entries below ar
   - an origin shift while unsealed (a boarding), or a release by an origin shift or by the mechanism, holds any seal request for 2.5 s (`SealState::holdUntilMs`). Status.json then reports the seat, and the on-foot rule takes over as before.
   - A Lift that moves for another reason while you sit in the cockpit now re-seals after 2.5 s instead of 0.35 s.
   - The hold does not cover a re-seal on the game's own edge (r1 1 to 0 and back to 1, the pad out of the bay and in again); the v14.24 edge test pins it. None of the five disembarks had that edge: r1 stayed 1.
+- **FLOWN 2026-10-15 (Steam flat, v0.20.0-rc.1-44-g8bb8ea37, log edvr_gfx_20261015_165224); the flash did not come back.**
+  - Disembark: `16:56:11.070 the coordinate origin shifted by 442.02 m` and `released ...: the coordinate origin shifted` on the same tick. Status.json said on foot 1.06 s later, a second the seal is no longer held for.
+  - Boarding: the shift at 16:56:23.626, Status aboard at :25.572, `re-seal held until 2.5 s after the origin shift`, `sealed` at :26.128, on the hold's expiry.
+  - Trace: three dumps, all T3 and all noise. Two came 22-24 ms after a seal started (no held history for the median). One came 12 s into a seal, with every other field steady: informative passes, the pad present, the cell refreshed with 0.00 m shift, no camera jump. The per-tick cull count swung 21-248 against about 240 rig vetoes. T1, T2 and T4 never fired, boarding included.
+  - ruled out: the cull-count spike as an anomaly signal, because the culled count swings 10x frame to frame while sealed with every other field steady (log 165224, dump 3).
 - **The trace (same build, temporary):** silent until a trigger while sealed:
   - T1, the held cell kept stale (pose unreadable);
   - T2, the held cell jumped more than 2 m in a tick;
