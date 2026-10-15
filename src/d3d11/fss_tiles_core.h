@@ -323,6 +323,85 @@ inline const char* writeCallName(uint32_t i) {
     return i < kWriteCalls ? n[i] : "?";
 }
 
+// ---- v3: the band event (2026-10-15, after flight e2e182a6) ------------------------------------------------------------
+// Flight e2e182a6: the two lists partition the 17 x 17 grid of 128-pixel cells in BOTH eyes (entries (x, y), the pair
+// (17, 17) filling the tail); what differed was the row where cells change from the large shader's list to the small
+// one's, by a whole row between the eyes at the zoom (f34170: large 136 against 152 cells), and at f34171 every cell went to
+// the small list (large 0). The band watch finds that moment from the lists, without a keypress.
+constexpr uint32_t kGrid = 17;
+constexpr uint32_t kBandBefore = 10;         // frames logged before the event
+constexpr uint32_t kBandAfter = 60;          // frames logged after it
+constexpr uint32_t kMaxAutoRuns = 2;         // automatic eye runs a session
+constexpr uint32_t kMaxBandLines = 100;      // band lines a window
+constexpr uint32_t kBandRaw = 4096;          // raw bytes kept per list (the list is 2312)
+
+struct Band {
+    uint32_t valid = 0;     // entries other than the (17, 17) filler
+    uint32_t minY = 0;      // the smallest row among them
+};
+
+inline Band bandOf(const void* data, uint32_t bytes) {
+    Band b;
+    const uint32_t* w = static_cast<const uint32_t*>(data);
+    const uint32_t n = bytes / 8;
+    bool any = false;
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t x = w[2 * i], y = w[2 * i + 1];
+        if (x == kGrid && y == kGrid) continue;
+        ++b.valid;
+        if (!any || y < b.minY) { b.minY = y; any = true; }
+    }
+    return b;
+}
+
+// The row at which the large list starts, from its size: the large list holds the rows from there to the bottom.
+inline double rowOfLarge(uint32_t largeCells) { return kGrid - largeCells / static_cast<double>(kGrid); }
+
+struct BandRec {
+    uint32_t frame = 0;
+    uint32_t large[2] = {};    // valid cells in each eye's large list
+    uint32_t smallN[2] = {};
+    uint32_t minY[2] = {};     // smallest row in each eye's large list
+    bool     ranEye0 = false;  // eye 1 drew eye 0's lists on this frame (the tiles candidate)
+};
+
+inline int formatBand(char* out, size_t cap, const BandRec& r) {
+    char ran[96] = "";
+    if (r.ranEye0) std::snprintf(ran, sizeof(ran), " | ran: eye1 drew eye0's lists (row %.2f)", rowOfLarge(r.large[0]));
+    const double r0 = rowOfLarge(r.large[0]), r1 = rowOfLarge(r.large[1]);
+    return std::snprintf(out, cap, "fss tiles: band f=%u eye0 L=%u (row %.2f, minY %u) S=%u | eye1 L=%u (row %.2f, minY %u) S=%u | own row gap %.2f%s",
+                         r.frame, r.large[0], r0, r.minY[0], r.smallN[0], r.large[1], r1, r.minY[1], r.smallN[1],
+                         r1 > r0 ? r1 - r0 : r0 - r1, ran);
+}
+
+// The watch: fed each frame's two large-list sizes in frame order.
+struct BandWatch {
+    enum Reason : uint8_t { None = 0, RowStep, AllSmall };
+    bool     havePrev = false;
+    uint32_t prev[2] = {};
+    uint32_t lo[2] = {}, hi[2] = {};
+    uint32_t maxStep[2] = {};
+    uint32_t frames = 0;
+    Reason feed(uint32_t l0, uint32_t l1) {
+        const uint32_t l[2] = {l0, l1};
+        Reason r = None;
+        for (int e = 0; e < 2; ++e) {
+            if (frames == 0 || l[e] < lo[e]) lo[e] = l[e];
+            if (frames == 0 || l[e] > hi[e]) hi[e] = l[e];
+            if (!havePrev) continue;
+            const uint32_t step = l[e] > prev[e] ? l[e] - prev[e] : prev[e] - l[e];
+            if (step > maxStep[e]) maxStep[e] = step;
+            if (l[e] == 0 && prev[e] > 0) r = AllSmall;
+            else if (step >= kGrid && r == None) r = RowStep;
+        }
+        prev[0] = l0;
+        prev[1] = l1;
+        havePrev = true;
+        ++frames;
+        return r;
+    }
+};
+
 // ---- the state-restoring substitution ------------------------------------------------------------------------------
 // Ops supplies: void* getSrv(uint32_t slot) (a reference the caller releases), void setSrv(uint32_t slot, void* view),
 // void release(void* view), void dispatchIndirect(void* args, uint32_t off).
