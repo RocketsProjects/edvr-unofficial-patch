@@ -43,12 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight (2026-10-15, built, not flown):** `fix.fss_eye_sync` = `off`,
-  zoom a ringed planet, press the eye-dump key in the window; read the `fss tiles:` lines
-  ("2026-10-15: the tile renderer, per view"). `tiles` is TEMPORARY (the
-  engine candidate; budget hypothesis refuted by flight f9f62bbc, "later").
-  Known, not fixed: the ~220 m remap under head sway; the "scanner is up"
-  bit firing on the loading screen's panel; the sky's ~+0.4 px/frame.
+- **Next flight (2026-10-15 eve, not built):** flight e2e182a6: both eyes
+  cover all 289 cells and the writes are symmetric, but the large/small
+  split row differs by a row at the zoom. It ran `tiles` then `on`, never
+  `off`, and missed the arrival. Next: arm the capture on the band event;
+  `off`, then `tiles`, no key. Known, not fixed: the ~220 m remap; the
+  loading-screen panel bit; the sky's ~+0.4 px/frame.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -1793,6 +1793,93 @@ one hitch). Do not touch the key again until the log says the window closed.
 Repeat once more on the same planet without the key for the timing baseline.
 Read: the `window N lists` and `writes` lines, the split lines around the
 dump, and the files in `edvr_logs\fsstiles` and `edvr_logs\eyes`.
+
+## 2026-10-15 (evening): flight e2e182a6, the lists read
+
+Flight on test build J (`v0.20.0-rc.1-75-ge2e182a6`, Frontier, VR;
+`edvr_gfx_20261015_070826.log`, raw files in `edvr_logs\fsstiles`, eye dumps
+`eye_071319_*` and `eye_071341_*`). Read-only analysis; no code changed.
+
+**The A/B was not the one planned.** The ini read `tiles` at window 1
+(07:13:10, `lockstep=on`, `substituted=1560`) and Sean flipped it to `on`
+from the menu at 07:13:28 (`fix.fss_eye_sync tiles -> on`), so windows 2
+(07:13:41) and 3 (07:14:45) ran with the heal and the composite freeze, not
+stock. There is no `off` baseline. Dump 071319 is `tiles`; dump 071341 is
+`on`. Window 1's dump key came 8.5 s after the press, window 2's 0.4 s after:
+neither caught the arrival (about 3 s after the press).
+
+What the lines say (all three windows opened; `fss tiles: window N` lines):
+
+- READ: the two lists PARTITION the whole 17 x 17 grid of 128-pixel cells in
+  both eyes (8-byte entries `(x, y)`, sentinel `0x11:0x11` after the valid
+  ones): at f28842 eye 0 and eye 1 both hold 136 cells in the large list (rows
+  9-16) and 153 in the small (rows 0-8), 136 + 153 = 289, no cell twice and
+  none missing. The tail the dispatch skips (about 12 % of each list: the
+  first `groups * 128 / 256` entries run) is the same set of interior cells in
+  both eyes (e.g. large (10,14), (3,12), (12,14), (1,12); small (11,2), (8,5),
+  (2,3), (6,7)).
+- READ: the SRV-slot-1 buffer (14,336 bytes, 3,584 words) is not a tile table:
+  it repeats a 23-word record of floats and masks (about 155 records), 9.4-9.8 k
+  non-zero bytes, never identical between the eyes (2,768 bytes differ at one
+  frame) and moving 4.7-5.0 k bytes frame to frame. INFERRED: per-view light
+  data, culled per view.
+- READ: the writes are the same in every frame and both eyes:
+  `ClearUnorderedAccessViewUint` on each eye's argument buffer and both lists
+  (2 args + 4 lists a frame over the two eyes) and `ClearRenderTargetView` on
+  each eye's two outputs (4 a frame): 1,556 / 3,112 / 3,112 in window 1. No copy, no
+  update, nothing at the zoom, nothing for eye 0 alone.
+- READ: window 3, the zoom itself (f34169-34172): the SPLIT BAND differs by a
+  row between the eyes. f34170: eye 0 large 136 cells, small 153 (groups
+  240 / 269); eye 1 large 152, small 137 (groups 268 / 241). f34171 and on:
+  both eyes large 0, small all 289 cells (groups 0 / 509). Window 2 (on) moves
+  the same way over 600 frames: eye 0 large x 127..255 and small 254..382, eye
+  1 large 210..305 and small 204..299 (mean small share 60.3 % against
+  52.0 %). Large + small is 509 in every frame of both eyes.
+- READ, the dumps (16 consecutive crops, 1400 px about the centre, 16 x 16
+  blocks that are black with lit blocks on both sides in time): window 2 dump,
+  left 21 at its worst frame and right 35; window 1 dump (tiles), left 78 at
+  one frame and right 16, 24 against 30 at another. Both eyes flicker; the
+  centre crop sees different content in the two eyes (the body is at
+  infinity), so the counts are not a paired measurement.
+
+Classification of the cause:
+
+- (b) a clear or copy hitting eye 0's output at the zoom: ruled out: every
+  frame clears both eyes' args, lists and outputs the same way, and nothing
+  else writes to them (windows 1-3).
+- (a) per-eye classification: the cells are all covered in both eyes, so
+  nothing is MISSING from a list; what differs is the row at which the cells
+  change from the large to the small shader, by a whole row at the zoom
+  (f34170) and over the window. SUPPORTED, not proven to make the squares: a
+  band of 16 cells is shaded by the large shader in one eye and the small in
+  the other for a frame or two.
+- (c) the shader inputs: slot 1 is per-view light records, not a validity
+  table; slot 0 (21,936,256 bytes) and the cube array are untested.
+- (d) the dumps do not show the left-only squares: the eye textures flicker
+  in both eyes (round 30b again), and the arrival was not captured.
+
+ruled out: an eye-0-only clear or copy of the tile outputs, lists or
+arguments at the zoom, because windows 1-3 show the same per-frame clears for
+both eyes and no other write.
+ruled out: a cell missing from one eye's lists, because both lists partition
+all 289 cells in both eyes and the skipped tails match.
+ruled out: the SRV-slot-1 buffer as a per-tile validity table, because it is
+a repeating 23-word record array that differs per eye by content.
+not tested: `fix.fss_eye_sync = off` (Sean ran `tiles`, then `on`), and any
+frame at the zoom's arrival.
+
+Fix, if the band is the cause: the engine's per-view band row must agree
+between the eyes; the `tiles` candidate does exactly that at the dispatch
+(eye 1 draws from eye 0's arguments and lists) and its window 1 never moved
+(240 / 269 in both eyes for all 779 frames), so it has not been tested at an
+arrival. Next instrument (one flight): arm the capture on the arrival
+signature instead of a keypress: when either eye's large list changes by a row,
+or both go to zero (the f34171 event), log `bandRow` and the large count per
+eye for that frame and the 16 around it, write the raw lists for them, and
+arm the eye run once from the code (`temporalPassArmEyeDump`) so the dump
+brackets the event. Flight: `fix.fss_eye_sync = off` (check the log line
+`fss tiles: window N opened ... lockstep=off` and no `fss eye heal` line),
+zoom a ringed planet, do not press the dump key; then the same with `tiles`.
 
 ## Open
 
