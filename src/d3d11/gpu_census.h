@@ -70,6 +70,11 @@ enum class GpuCensusSection : uint8_t {
     FrameWorldResolve,        // the route's resolve at the tone: the input copy, prep, upscaler and the finish into H
     FrameWorldMips,           // the screen texture's copy into the mipped texture and its GenerateMips
     FrameWorldLayer,          // the layer's re-issue of each eye's screen draw with the resolved, mipped screen
+    // The FSS reveal fix's own GPU work (fss_reveal_replay.h): the downsample replay draw (its state applied, the draw, the state put back) and the private
+    // copies of the constant buffers a recorded downsample read (captureState with a pool). EDVR's cost, in the in-frame total. Called only while the scanner
+    // is on show, from the slow path behind the hook's watch gate -- never from the no-op watcher calls -- and, like the world route's, with no turn in the
+    // rotation until called this window, so with no scanner on show the census samples as it did before this section existed.
+    FrameFssReveal,
     // The second skin's GPU work (F2: engine_velocity.cpp and skin_join_gpu.cpp), priced item by item (F16). Each is NESTED inside a FrameEngineVelocity span (the
     // work was already in the engine velocity figure and still is), so they are timed on turns of their own, are NEVER added to a total, and are reported on a line
     // of their own. Like the world route's they have no turn until called this window, so with no skinned character the census samples exactly as it did before.

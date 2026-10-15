@@ -21,11 +21,23 @@
 #include <vector>
 
 #include "../../src/common/system_d3d11.h"
+#include "../../src/d3d11/gpu_census.h"
 #include "../../src/d3d11/fss_reveal_core.h"
 #include "../../src/d3d11/fss_reveal_replay.h"
 
 using Microsoft::WRL::ComPtr;
 namespace fr = edvr::fssreveal;
+
+// The census's three entry points, counted instead of timed (the real ones are gpu_census.cpp's, which this rig does not link). The replay header opens its cost
+// scope through them, so what the rig counts here is what the 30 s census would be called with.
+namespace edvr {
+unsigned g_censusBegins[static_cast<size_t>(GpuCensusSection::Count)] = {};
+unsigned g_censusEnds[static_cast<size_t>(GpuCensusSection::Count)] = {};
+unsigned g_censusIssued[static_cast<size_t>(GpuCensusSection::Count)] = {};
+bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection section) noexcept { ++g_censusBegins[static_cast<size_t>(section)]; return false; }
+void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection section) noexcept { ++g_censusEnds[static_cast<size_t>(section)]; }
+void gpuCensusNoteIssued(GpuCensusSection section) noexcept { ++g_censusIssued[static_cast<size_t>(section)]; }
+}  // namespace edvr
 
 namespace {
 
@@ -212,7 +224,22 @@ void testReplayOnWarp(Gpu& g) {
     g.ctx->PSSetSamplers(0, 1, &ss);
     fr::DrawState rec;
     fr::CbPool pool;
-    check(fr::captureState(d, g.ctx.Get(), c1.Get(), &pool, rec) && rec.valid && rec.psCb[2] != nullptr && rec.psCb[2] != bufB.Get() && rec.rtv[0] == rtvT.Get() && rec.ps == ps.Get(),
+    // The GPU census sees the fix's own GPU work (review of main 9fe5b257, finding 5): the private constant-buffer copies of a recorded downsample are one entry, a replay is one.
+    constexpr size_t kFss = static_cast<size_t>(edvr::GpuCensusSection::FrameFssReveal);
+    {
+        // a frame in which the fix has nothing to do: no downsample recorded, no composite replayed -- the hook issues no GPU work, so the census is called for nothing
+        check(edvr::g_censusBegins[kFss] == 0 && edvr::g_censusEnds[kFss] == 0, "a frame with nothing recorded and nothing replayed produces no cost entry");
+        // reading the state without a pool (the replay's own before/after read-backs, the rig's checks) is CPU work: no entry
+        fr::DrawState peek;
+        fr::captureState(d, g.ctx.Get(), c1.Get(), nullptr, peek);
+        peek.release();
+        check(edvr::g_censusBegins[kFss] == 0, "reading the state back without a constant-buffer pool is not timed");
+    }
+    const unsigned beginsBeforeCapture = edvr::g_censusBegins[kFss];
+    const bool captured = fr::captureState(d, g.ctx.Get(), c1.Get(), &pool, rec);
+    check(edvr::g_censusBegins[kFss] == beginsBeforeCapture + 1 && edvr::g_censusEnds[kFss] == edvr::g_censusBegins[kFss] && edvr::g_censusIssued[kFss] == 1,
+          "recording a downsample with its constant buffers copied is one cost entry (opened and closed, counted as issued)");
+    check(captured && rec.valid && rec.psCb[2] != nullptr && rec.psCb[2] != bufB.Get() && rec.rtv[0] == rtvT.Get() && rec.ps == ps.Get(),
           "the downsample's state is captured with its constant buffer replaced by a private copy");
     rec.perInstance = 3;
     rec.instances = 1;
@@ -238,7 +265,10 @@ void testReplayOnWarp(Gpu& g) {
     fr::captureState(d, g.ctx.Get(), c1.Get(), nullptr, a1);
     bool verified = false;
     fr::ReplayCalls noCalls;
+    const unsigned beginsBeforeReplay = edvr::g_censusBegins[kFss];
     const bool done = fr::replayDraw(d, g.ctx.Get(), c1.Get(), noCalls, rec, &verified);
+    check(done && edvr::g_censusBegins[kFss] == beginsBeforeReplay + 1 && edvr::g_censusEnds[kFss] == edvr::g_censusBegins[kFss] && edvr::g_censusIssued[kFss] == 2,
+          "a replay is exactly one cost entry: its read-backs add none, and it is counted as issued");
     fr::DrawState a2;
     fr::captureState(d, g.ctx.Get(), c1.Get(), nullptr, a2);
     check(done && verified && fr::sameState(a1, a2), "the state after the replay equals the state before it (read back through the API, every stage the draw touches)");
@@ -275,7 +305,9 @@ void testReplayOnWarp(Gpu& g) {
     check(fr::replayDraw(d, g.ctx.Get(), c1.Get(), noCalls, rec, &verified) && verified, "a second replay from the same record also restores the state exactly");
     // an invalid record draws nothing
     fr::DrawState empty;
+    const unsigned beginsBeforeEmpty = edvr::g_censusBegins[kFss];
     check(!fr::replayDraw(d, g.ctx.Get(), c1.Get(), noCalls, empty, nullptr), "a record with no state is not replayed");
+    check(edvr::g_censusBegins[kFss] == beginsBeforeEmpty, "a replay that draws nothing produces no cost entry");
     a1.release(); a2.release(); rec.release(); pool.release();
     // leave the pipeline clean
     ID3D11ShaderResourceView* none[8] = {};
@@ -338,6 +370,22 @@ void testSourcePins(const std::string& root) {
           "the log says the fix is armed, then one summary per scanner session with the checked-call count, the declines, the state read-back and the verdict");
     check(has(rp, "applyState(ctx, c1, rc, rec, true);") && has(rp, "applyState(ctx, c1, rc, before, false);") && has(rp, "CopySubresourceRegion(pool.buf[stage][i]"),
           "the replay unbinds the target's inputs before it is bound, restores the targets before the inputs, and copies the constant buffers");
+    // the census scopes sit at the GPU work sites in the replay header, nowhere in the watcher glue (the no-op calls per DrawInstanced are not timed)
+    {
+        size_t scopes = 0;
+        for (size_t at = rp.find("GpuCensusScope census(ctx, GpuCensusSection::FrameFssReveal);"); at != std::string::npos;
+             at = rp.find("GpuCensusScope census(ctx, GpuCensusSection::FrameFssReveal);", at + 1)) ++scopes;
+        const size_t copiesScope = rp.find("GpuCensusScope census(ctx, GpuCensusSection::FrameFssReveal);", rp.find("inline bool captureState("));
+        const size_t copiesCall = rp.find("snapshotCbs(dev, ctx, *pool, 0,", copiesScope);
+        const size_t replayFn = rp.find("inline bool replayDraw(");
+        const size_t replayScope = rp.find("GpuCensusScope census(ctx, GpuCensusSection::FrameFssReveal);", replayFn);
+        const size_t replayApply = rp.find("applyState(ctx, c1, rc, rec, true);", replayFn);
+        const size_t replayRestore = rp.find("applyState(ctx, c1, rc, before, false);", replayFn);
+        check(scopes == 2 && copiesScope != std::string::npos && copiesCall != std::string::npos && copiesScope < copiesCall &&
+                  replayScope != std::string::npos && replayScope < replayApply && replayApply < replayRestore && rp.find("}", replayRestore) < rp.find("if (verified) {", replayFn),
+              "the replay header opens the cost scope around the private constant-buffer copies and around the replay draw with its two state applications, and nowhere else");
+        check(!has(cpp, "GpuCensus") && !has(cpp, "gpu_census"), "the hook glue in fss_reveal.cpp opens no cost scope: the watcher's no-op calls are not timed");
+    }
     // the removed things stay removed
     check(!has(vs, "fssRevealBegin") && !has(vs, "DrawVerdict::kFssReveal") && !has(vs, "fssRevealNoteMap") && !has(vs, "fssRevealWantsDraws") && !has(vs, "edvrFssHeal"), "the old composite-input freeze, its draw verdict and its tees are gone from the hook");
 }
