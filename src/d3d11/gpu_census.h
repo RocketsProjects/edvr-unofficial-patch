@@ -27,7 +27,7 @@ namespace edvr {
 // subtracts that pair's own mean cost from the real one's, floored at zero.
 // How many fixes wrap Elite's draws and are named in the census (AlteredFix below: one for each
 // verdict that can reach the altered-draw site, and a last one for "unnamed").
-constexpr int kAlteredFixCount = 14;
+constexpr int kAlteredFixCount = 13;
 
 enum class GpuCensusSection : uint8_t {
     // Door: once or twice a frame, at Submit. K = 2 (both eyes) while active.
@@ -44,7 +44,6 @@ enum class GpuCensusSection : uint8_t {
     DoorSharpen,              // sharpen_pass.cpp's dispatch
     DoorMenu,                 // menu_panel.cpp's dispatch
     DoorUiLayerComposite,     // ui_layer.cpp's kComposite dispatch
-    DoorFssHeal,              // fss_heal.cpp's dispatch
     DoorSkyRing,              // sky_ring.cpp's dispatch (diag.sky_ring, TEMPORARY; docs/sky-flicker-2026-10-13.md) -- nested inside DoorTemporalWhole, so not a top-level door item
     // In-frame: per game draw. K = 8 while active.
     FrameHologramPasses,      // the two hologram/icon depth reissues
@@ -131,7 +130,6 @@ enum class AlteredFix : uint8_t {
     GlareSteady,   // the sun glare train, world-locked (kGlareSteady)
     Particle,      // the particle billboards (kParticle)
     FssPanel,      // the FSS panel composite (kFssPanel)
-    FssReveal,     // the FSS body composite at one dissolve moment (kFssReveal)
     Scrim,         // the loader dialog's dimming wash (kScrim)
     Backdrop,      // the menu backdrop blit (kBackdrop)
     Unnamed,       // a verdict nobody gave a name (none reaches the altered-draw site today): visible, never silent
