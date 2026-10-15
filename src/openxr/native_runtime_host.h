@@ -369,6 +369,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   PressInfo seatTracePress{};bool seatTraceHasPress=false;      // the HMD key press that went with the reset being traced (seat_memory.h PressInfo)
   bool seatPressLogged=false;HmdPressStatus seatPressLoggedStatus=HmdPressStatus::Unpublished;uint32_t seatPressSeq=0;
   uint64_t seatNoPressAt=0;bool seatLatePressPending=false;uint64_t seatLateAfterMs=0;     // a reset answered "no press" and a press arrived just after
+  uint64_t seatLatePressAt=0;unsigned seatLatePressDrops=0;     // when the pending late press was found (its retry clock), and how many were dropped unapplied
   uint64_t localHandled=0;     // LOCAL reference-space changes (referenceChanges counts each as it takes effect) the seat memory has answered
   // Declared before boundary: boundary's constructor stores its address, and
   // it must already exist to be bound (native_frame's own reset() sequence
@@ -2748,6 +2749,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(retro&&ok)seatRetroPending=false;
     seatTraceDecision="head";seatTraceHasCall=false;seatTraceCall=HeadCall{};seatTraceHasPress=false;seatTracePress=PressInfo{};
   }
+  // A pending late press that will not be applied: logged once (it is dropped once), then forgotten.
+  void seatDropLatePress(uint64_t now,const char* why) {
+    seatLatePressPending=false;++seatLatePressDrops;
+    nativeTracePrintf("seat_late_press,action=dropped,why=%s,age_ms=%llu,retry_ms=%llu\n",why,
+        (unsigned long long)(now>=seatLatePressAt?now-seatLatePressAt:0),(unsigned long long)kLatePressRetryMs);
+  }
   // Take the graphics half's word and let the memory decide. Called every WaitGetPoses and before a reset is classified, so a change this
   // frame is seen first. A transition (a window opening, an apply due) is a line of its own.
   void seatSync(uint64_t now) {
@@ -2775,9 +2782,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(pr.seq!=seatPressSeq) {
         seatPressSeq=pr.seq;
         // A press the frame poll saw just AFTER a reset it was not there for: the game's call beat the poll, and that reset was the player's.
-        if(seat.takeLatePress(now)){seatLatePressPending=true;seatLateAfterMs=now-seatNoPressAt;}
+        if(seat.takeLatePress(now)){seatLatePressPending=true;seatLatePressAt=now;seatLateAfterMs=now-seatNoPressAt;}
       }
     }
+    if(ev.windowOpened&&seatLatePressPending)seatDropLatePress(now,"transition");     // the window's own seat replaces whatever the press was for
     if(ev.discardedPending) {
       seatRetroPending=true;seatRetroAgeMs=ev.discardAgeMs;
       nativeTracePrintf("seat_store,action=discard_pending,why=transition_within_%llus,age_ms=%llu,transition=%s,discarded=%.3f/%.3f/%.3f/%.1f,restored=%.3f/%.3f/%.3f/%.1f\n",
@@ -2937,14 +2945,19 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       moved=applyStoredSeat("seat_transition",seatRetroPending?"replace_with_seat":"transition_seat",true);
       if(moved)seatMeterDueAt=now+2000;
     }
+    // A late press (the player's recentre the game's reset beat the poll to) stays pending until its correction is APPLIED. A poll that cannot
+    // act now (a frame is open, the head will not locate, the reset is rejected) leaves it for the next one, so a transient failure does not cost
+    // the player their press. Bounded: it is dropped, with one log line, once it is older than kLatePressRetryMs (this check runs first, so an
+    // open frame cannot keep it alive either), or when a transition window opens (seatSync): that transition's own seat supersedes it.
+    if(seatLatePressPending&&now>=seatLatePressAt&&now-seatLatePressAt>kLatePressRetryMs)seatDropLatePress(now,"expired");
     if(seatLatePressPending&&!state.frameOpen()&&changes.active()) {
-      seatLatePressPending=false;
       XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
       lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
       if(lastResetResult==XR_SUCCESS) {
         seatTraceDecision="honour_press_late";
         seatTracePress=PressInfo{PressState::Seen,-(long long)seatLateAfterMs,"press_after_reset"};seatTraceHasPress=true;
         if(applySeatedReset(head,"seated_reset",true,nullptr)) {
+          seatLatePressPending=false;
           seat.noteReset(SeatResetDecision::HonourPress,currentOrigin,now);
           seatSave("manual_reset_press_late");
           moved=true;
