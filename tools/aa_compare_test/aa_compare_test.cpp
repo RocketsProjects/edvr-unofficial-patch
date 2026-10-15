@@ -17,6 +17,7 @@
 #include "../../src/common/log.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/flat_notice_queue.h"
+#include "../rig_graphics_mode.h"
 
 using namespace edvr;
 using namespace edvr::aacmp;
@@ -158,12 +159,53 @@ static void clashCells() {
     check(!keysClash(0, 0, 0, 0), "an unbound key clashes with nothing");
 }
 
+// Config::init decides the runtime profile from the 3D mode in Elite's Settings.xml under %LOCALAPPDATA% (runtime_profile.h), and mirrors the settings under
+// %LOCALAPPDATA%\EDVR. The rig never reads the machine's own: it points LOCALAPPDATA at a fixture tree holding a Settings.xml of the mode it wants
+// (tools\rig_graphics_mode.h; mode 0 is flat, 4 is VR). Before this, a machine whose Settings.xml said flat failed "the file's AA is read".
+static bool pinGraphicsMode(const std::wstring& root, int mode) { return edvr::rig::pinRigGraphicsMode(root, mode); }
+
+static void removeTree(const std::wstring& dir) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            const std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            const std::wstring full = dir + L"\\" + name;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) removeTree(full);
+            else DeleteFileW(full.c_str());
+        } while (FindNextFileW(find, &fd));
+        FindClose(find);
+    }
+    RemoveDirectoryW(dir.c_str());
+}
+
+// The same file under a flat Settings.xml (3D mode 0): the profile is flat, the allow-list gates generic reads, and the AA mode is still answered
+// around it by requestedTemporalMode, which is what the flat adapter calls. The override rides the same way.
+static void flatProfileCells(const std::wstring& dir) {
+    const std::wstring ini = dir + L"\\edvr.ini";
+    check(writeFile(ini, "[fix]\ntemporal_aa = dlss\nui_quality = 100\n"), "flat: the fixture ini is written");
+    check(pinGraphicsMode(dir + L"\\flat_localappdata", 0), "flat: the fixture Settings.xml (3D mode 0) is in place");
+    Config& cfg = Config::get();
+    cfg.init(dir);
+    check(runtimeFlatProfile() && !runtimeVrProfile(), "flat: the fixture's mode 0 makes the profile flat, whatever the machine's own Settings.xml says");
+    check(cfg.requestedTemporalMode() == "dlss" && cfg.configuredTemporalMode() == "dlss", "flat: the file's AA is read through the mode reader");
+    check(cfg.getString("fix.black_void", "x") == "off", "flat: the allow-list refuses what it refuses");
+    check(cfg.getString("hotkey.compare_aa", "F7") == "F7", "flat: the comparison key passes the gate");
+    cfg.setRuntimeOverride("fix.temporal_aa", "off");
+    check(cfg.requestedTemporalMode() == "off" && cfg.configuredTemporalMode() == "dlss", "flat: the override is what the flat adapter reads, the file's mode untouched");
+    cfg.clearRuntimeOverride("fix.temporal_aa");
+    check(cfg.requestedTemporalMode() == "dlss", "flat: clearing returns to the file's mode");
+}
+
 static void configCells(const std::wstring& dir) {
+    check(pinGraphicsMode(dir + L"\\vr_localappdata", 4), "the fixture Settings.xml (3D mode 4) is in place");
     const std::wstring ini = dir + L"\\edvr.ini";
     const std::string original = "[fix]\ntemporal_aa = dlss\nui_quality = 100\n";
     check(writeFile(ini, original), "the fixture ini is written");
     Config& cfg = Config::get();
     cfg.init(dir);
+    check(runtimeVrProfile() && !runtimeFlatProfile(), "the fixture's mode 4 makes the profile VR, whatever the machine's own Settings.xml says");
     check(cfg.getString("fix.temporal_aa", "off") == "dlss" && cfg.requestedTemporalMode() == "dlss", "the file's AA is read");
     check(cfg.configuredTemporalMode() == "dlss" && !cfg.hasRuntimeOverride("fix.temporal_aa"), "no override to begin with");
     check(!cfg.reloadIfChanged(), "an untouched file reports no change");
@@ -302,11 +344,13 @@ int main(int argc, char** argv) {
     wordsCells();
     clashCells();
     flatNoticeCells();
+    const std::wstring previous = edvr::rig::currentRigLocalAppData();
     configCells(dir);
+    flatProfileCells(dir);
+    edvr::rig::restoreRigLocalAppData(previous);
     sourcePins(argv[1]);
 
-    DeleteFileW((dir + L"\\edvr.ini").c_str());
-    RemoveDirectoryW(dir.c_str());
+    removeTree(dir);
     std::printf("aa_compare_test: %u checks, 0 failures\n", g_checks);
     return 0;
 }
