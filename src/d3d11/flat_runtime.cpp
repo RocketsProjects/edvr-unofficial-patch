@@ -6015,8 +6015,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             else if (ask == FlatUiLayerAsk::kRefused) {}   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
-            // The registry's tone pass, map tonemap, or the two physically verified E894 LDR-source writers.
-            // The E894 pair remains UI-only: it does not enter the global tone registry or mono HDR selector.
+            // The registry's tone pass, map tonemap, or the physically verified E894 and EDHM 0D43 LDR-source writers.
+            // The E894 and 0D43 pairs remain UI-only: they do not enter the global tone registry or mono HDR selector.
             else if (tone || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u || flatUiSourceTonePair(k.vs, k.ps)) {
                 // The route so far: the HDR route once it treated this frame, else the resolve plan's (trained-native,
                 // trained-upscale, ...), or none yet.
@@ -6025,7 +6025,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                                                            s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
                                         : "no-plan";
                 if (flatUiSourceTonePair(k.vs, k.ps)) {
-                    // Both physical captures issued one fullscreen triangle. Keep a partial draw from bootstrapping proof.
+                    // Each physical capture (E894 and 0D43) issued one fullscreen triangle. Keep a partial draw from bootstrapping proof.
                     if ((kind == 'D' || kind == 'N') && count == 3 && instances == 1 && startInstance == 0)
                         uiTone = flatUiLayerSourceToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
                                                                 k.color, k.width, k.height, route);

@@ -1248,6 +1248,12 @@ void testFlatLayerRules() {
               !flatUiSourceTonePair(0xF9CFC798F21E9AEAull, 0xE8948389387DA082ull) &&
               !flatUiSourceTonePair(0xCFA91824129ECBBCull, 0xE8948389387DA083ull),
           "E894 UI source tone: both observed exact pairs qualify, neighbouring PS and unrelated VS do not");
+    check(flatUiSourceTonePair(0xF9CFC798F21E9AEAull, 0x0D4329BDF65DE8F7ull) &&
+              flatUiSourceTonePair(0x43CA9F1C0AD2ACFEull, 0x0D4329BDF65DE8F7ull) &&
+              !flatUiSourceTonePair(0xF9CFC798F21E9AEAull, 0x0D4329BDF65DE8F6ull) &&
+              !flatUiSourceTonePair(0xCFA91824129ECBBCull, 0x0D4329BDF65DE8F7ull),
+          "EDHM 0D43 UI source tone: both VS qualify with PS 0D4329BDF65DE8F7; neighbouring PS 0D4329BDF65DE8F6 on VS F9CF "
+          "and PS 0D43 on unrelated VS CFA918 do not");
     {
         FlatUiUnknownSourceToneLog log;
         check(log.shouldInspect(1, 2) &&
@@ -1293,9 +1299,14 @@ void testFlatLayerRules() {
         check(flatUiSourceTonePair(kFlatUiSourceToneVsSteady, kFlatUiSourceTonePs) &&
                   flatUiSourceTonePair(kFlatUiSourceToneVsTransition, kFlatUiSourceTonePs),
               "exhausted unknown diagnostic cache does not affect known exact pair admission");
+        check(flatUiSourceTonePair(kFlatUiSourceToneVsSteady, kFlatUiSourceTonePsEdhm) &&
+                  flatUiSourceTonePair(kFlatUiSourceToneVsTransition, kFlatUiSourceTonePsEdhm),
+              "exhausted unknown diagnostic cache does not affect known EDHM 0D43 pair admission");
     }
     check(flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull) == ~0u,
           "E894 UI source tone: the map table remains unchanged");
+    check(flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0x0D4329BDF65DE8F7ull) == ~0u,
+          "EDHM 0D43 UI source tone: the map table remains unchanged");
     check(flatUiSourceToneShape(1720, 720, 1720, 720, 1720, 720, 28, 1720, 720, 26, true, true, true) &&
               !flatUiSourceToneShape(1720, 720, 3440, 1440, 1720, 720, 28, 1720, 720, 26, true, true, true) &&
               !flatUiSourceToneShape(1720, 720, 1720, 720, 1720, 720, 28, 1720, 720, 26, true, true, false) &&
@@ -1563,6 +1574,11 @@ void testFlatLayerRules() {
         check(!mono.empty() && !sharedTone.empty() && mono.find("E8948389387DA083") == std::string::npos &&
                   sharedTone.find("E8948389387DA083") == std::string::npos,
               "wiring: E894 remains absent from the mono HDR selector and shared tonemap registry");
+        check(!mono.empty() && !sharedTone.empty() && mono.find("0D4329BDF65DE8F7") == std::string::npos &&
+                  sharedTone.find("0D4329BDF65DE8F7") == std::string::npos &&
+                  mono.find("0d4329bdf65de8f7") == std::string::npos &&
+                  sharedTone.find("0d4329bdf65de8f7") == std::string::npos,
+              "wiring: EDHM 0D43 remains absent from the mono HDR selector and shared tonemap registry, in either hex case");
     }
 }
 
