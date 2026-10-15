@@ -55,7 +55,8 @@
 - **Open:** a pad-hologram capture that names its draws; an advert capture with the box on it; weapons fire, flares (option A, NOT FLOWN); the force field.
 - **Ruled out:** railing motion mismatch (tool label bug); the 2026-09-29 pad-into-layer rule (9122f31e); reactive bias or sharpening (docs/hologram-depth-2026-09-24.md);
   light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (4); FUN_14369C9C0 as the railing's writer (hooked, 0 calls since launch);
-  B75A6FF2 as an effect-only pair: it covers ~7M px per draw (the sky), hiding it made the skybox shimmer (flight d3013197).
+  B75A6FF2 as an effect-only pair: it covers ~7M px per draw (the sky), hiding it made the skybox shimmer (flight d3013197); 68DDDEF0 as a weapons-only pair:
+  constant ~200k px/draw background particles, hiding them made the skybox stars shimmer (flight 40b6dbc0). Option A has no safe pair left.
 - **Next flight:** `effect history:` census line (hidden px per eye-frame, covered px per draw, GPU ms per replica, `HDR target ... readable`); on a glow
   capture the box stats' `by the effect rule N` and the `effect rule:` line. A census saying the HDR target COULD NOT BE READ means the game's HDR target could not be bound
   or was not the eye's size at the pass. Aim: press the inspector key once (a "+" shows at the head-forward point), then again within 3 s; the box is 48 px.
@@ -224,3 +225,15 @@ arrived (a menu, no VR), none was a candidate, or none reached the window.
   substitution; what it did on build E was hide history under the sun's pixels. Consequence, said plainly: with the default `fix.particle_billboard = steady` the
   particle pair's draws carry a verdict, so the rule is inert by default until a flight shows the count and a replica inside that wrapper is justified. The kind-4
   depth check read 2-99 px per eye-frame on that flight: not a plausible cause of sky shimmer, and not part of the new key.
+
+- **2026-10-15, the particle pair removed in effect, and the cockpit rim capture (flight 40b6dbc0, build G).** With `advanced.effect_history = off` the skybox stars stopped
+  shimmering; on, the census read 68DDDEF0/06332CA1 at 2.00 draws/frame, 180-224k covered pixels per draw, 6-7k pixels hidden per eye-frame, all the time: background
+  particles (space dust, star sprites). ruled out: 68DDDEF0 as a weapons-only pair, because it is constant ~200k px/draw background particles; hiding them made the skybox stars
+  shimmer. The state cannot tell the two apart: every captured draw of the pair (13:25 weapons fire, 13:26, and this 04:54 capture) has the same blend (SRC_ALPHA,ONE),
+  depth (GREATER_EQUAL, no write), four textures (6x1 buffer, 128, 256, 128) and 8733-9339 instances of 12 indices (a pooled system, most instances dead), so a per-draw
+  or per-state rule cannot separate bolts from dust; only emitted brightness and per-instance motion can. Rim capture (cap1, 04:54:04, key off): the rim is the cockpit shell
+  BFE51414CC3024B4/DB79AE788E049DFD (#6 top at the centre, #10 and #11 partial) with EB5234DB/B7D50283 (#21), no verdict, no key, camera-row motion; 1344 box pixels path 1
+  (head delta, 2.5 m), 960 path 2 (sky); engine kind none on all 2304, hidden 0, kind-4 0, effect 0. mv against expected: ship path within 0.031 px of expect_ship, sky within
+  0.0003 px of expect_world; the layers differ by 0.025 px. So the rim is not a motion error, not the 10 m split (2.5 m), not kind-4. The one translucent draw over it that
+  moves differently is #250, VS 94D5C556DFD6D705 (the sun-glare train, verdict glare-steady, additive, depth test off, 15 instances, 5 layers at the centre), also taken as
+  `holo=cockpit` by the generic hologram pass, with no pixel on path 8.
