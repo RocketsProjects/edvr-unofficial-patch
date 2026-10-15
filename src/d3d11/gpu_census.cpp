@@ -36,7 +36,7 @@ unsigned occurrenceCapFor(GpuCensusSection section) noexcept {
 // in a line means the diag.sky_ring dispatch never ran in the window (key off).
 constexpr const char* kDoorBreakdownNames[] = {
     "upscaler", "motion prep", "hologram resolve", "hologram depth copy", "hologram near-light", "hologram resolve draw",
-    "UI resolve", "sharpen", "menu", "UI layer composite", "FSS heal", "sky ring"
+    "UI resolve", "sharpen", "menu", "UI layer composite", "sky ring"
 };
 constexpr size_t kDoorBreakdownCount = sizeof(kDoorBreakdownNames) / sizeof(kDoorBreakdownNames[0]);
 // The three hologram sub-sections sit right after the umbrella (index DoorHologramResolve); the umbrella's line item carries them in brackets.
@@ -70,7 +70,7 @@ constexpr const char* kAlteredFixSumName = "other fix-wrapped draws";
 // The fix names, in AlteredFix's order: fixed strings, never built from a draw.
 constexpr const char* kAlteredFixNames[kAlteredFixCount] = {
     "panel distance", "RemLok overlay", "loading hologram", "target indicator", "night vision", "intro panel",
-    "sun glare clamp", "sun glare steady", "particles", "FSS panel", "FSS reveal",
+    "sun glare clamp", "sun glare steady", "particles", "FSS panel",
     "loading scrim", "menu backdrop", "unnamed fix"
 };
 static_assert(kAlteredClassSections == 3, "one name for each altered-draw class");
@@ -321,8 +321,8 @@ void logAndResetWindow(uint64_t now) {
     const double seconds = static_cast<double>(now - g_windowStartMs) / 1000.0;
 
     // "door D" is the wrapped whole temporalInner (both eyes) plus the
-    // other TOP-LEVEL door passes -- sharpen, menu, UI layer composite,
-    // FSS heal -- never the sum of the parenthetical breakdown: upscaler,
+    // other TOP-LEVEL door passes -- sharpen, menu, UI layer composite
+    // -- never the sum of the parenthetical breakdown: upscaler,
     // motion prep, hologram resolve and UI resolve all run INSIDE
     // temporalInner, so DoorTemporalWhole's own ms already include them.
     // Adding those four again would double their cost. The same
@@ -343,7 +343,7 @@ void logAndResetWindow(uint64_t now) {
         const Snapshot s = snapshotOf(g_section[1 + i], frames);
         appendItem(doorItems, kDoorBreakdownNames[i], s);
         if (section == GpuCensusSection::DoorSharpen || section == GpuCensusSection::DoorMenu ||
-            section == GpuCensusSection::DoorUiLayerComposite || section == GpuCensusSection::DoorFssHeal) {
+            section == GpuCensusSection::DoorUiLayerComposite) {
             doorTotal += s.msPerFrame;
         }
     }
