@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include "gpu_census.h"   // GpuCensusScope: the fix's own GPU work is priced in the 30 s census (FrameFssReveal)
+
 namespace edvr {
 namespace fssreveal {
 
@@ -196,6 +198,10 @@ inline bool captureState(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Devi
     ctx->OMGetDepthStencilState(&s.dss, &s.stencilRef);
     s.valid = true;
     if (pool) {
+        // The private copies of the constant buffers are GPU work (CopySubresourceRegion), so they are priced; the state reads above are CPU-only and are not. The pool is
+        // null for the replay's own before/after read-backs, which therefore open no scope.
+        GpuCensusScope census(ctx, GpuCensusSection::FrameFssReveal);
+        census.markIssued();
         if (!detail_replay::snapshotCbs(dev, ctx, *pool, 0, s.vsCb, s.vsFirst, s.vsNum) || !detail_replay::snapshotCbs(dev, ctx, *pool, 1, s.psCb, s.psFirst, s.psNum)) {
             s.release();
             return false;
@@ -271,10 +277,15 @@ inline void applyState(ID3D11DeviceContext* ctx, ID3D11DeviceContext1* c1, const
 inline bool replayDraw(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11DeviceContext1* c1, const ReplayCalls& rc, const DrawState& rec, bool* verified) {
     DrawState before;
     if (!rec.valid || !captureState(dev, ctx, c1, nullptr, before)) return false;
-    applyState(ctx, c1, rc, rec, true);
-    if (rc.drawInstanced) rc.drawInstanced(ctx, rec.perInstance, rec.instances, rec.startVertex, rec.startInstance);
-    else ctx->DrawInstanced(rec.perInstance, rec.instances, rec.startVertex, rec.startInstance);
-    applyState(ctx, c1, rc, before, false);
+    {
+        // From here GPU work is issued: the scope covers the replay draw and the two state applications around it (not the no-op returns above, and not the verification read-back below).
+        GpuCensusScope census(ctx, GpuCensusSection::FrameFssReveal);
+        census.markIssued();
+        applyState(ctx, c1, rc, rec, true);
+        if (rc.drawInstanced) rc.drawInstanced(ctx, rec.perInstance, rec.instances, rec.startVertex, rec.startInstance);
+        else ctx->DrawInstanced(rec.perInstance, rec.instances, rec.startVertex, rec.startInstance);
+        applyState(ctx, c1, rc, before, false);
+    }
     if (verified) {
         DrawState after;
         captureState(dev, ctx, c1, nullptr, after);

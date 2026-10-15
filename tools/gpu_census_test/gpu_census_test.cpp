@@ -356,7 +356,7 @@ void rotationAndRealTimerCase(Device& d) {
     bool ownersVisited = true, membersSkipped = true, idleWorldSkipped = true;
     for (size_t i = 0; i < kSections; ++i) {
         // The VR world route's and the second skin's sections are turns only once called this window (nextTurnOwner): none was here.
-        if ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || (i >= kSkinFirst && i < kSkinFirst + kSkinSections)) { idleWorldSkipped = idleWorldSkipped && !visited[i]; continue; }
+        if ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections)) { idleWorldSkipped = idleWorldSkipped && !visited[i]; continue; }
         if (turnOwnerOf(static_cast<GpuCensusSection>(i)) == static_cast<GpuCensusSection>(i)) ownersVisited = ownersVisited && visited[i];
         else membersSkipped = membersSkipped && !visited[i];
     }
@@ -788,8 +788,8 @@ void alteredFixCases() {
         ++cycle;
         onlyOwners = onlyOwners && turnOwnerOf(static_cast<GpuCensusSection>(at)) == static_cast<GpuCensusSection>(at);
     } while (at != 0 && cycle < 200);
-    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - static_cast<unsigned>(kSkinSections) && cycle == 24,
-          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route and second-skin ones (24: the 20 there were after the terrain's two sections went, 2026-10-01, plus the three hologram sub-sections and the moved HDR HUD draw, 2026-10-13, and the sky ring's door section, 2026-10-13, less the FSS heal's door section, removed 2026-10-15; the key off changes nothing)");
+    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - 1 /* the FSS reveal's */ - static_cast<unsigned>(kSkinSections) && cycle == 24,
+          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route, FSS reveal and second-skin ones (24: the 20 there were after the terrain's two sections went, 2026-10-01, plus the three hologram sub-sections and the moved HDR HUD draw, 2026-10-13, and the sky ring's door section, 2026-10-13, less the FSS heal's door section, removed 2026-10-15; the key off changes nothing)");
     // The same cycle once the VR world route's three sections have been called this window: they take turns, 27.
     for (size_t i = kWorldFirst; i < kWorldFirst + kWorldSections; ++i) g_section[i].occurrences = 1;
     at = 0;
@@ -941,7 +941,7 @@ void seedTableCases() {
     check(!isDoorSection(seed) && occurrenceCapFor(seed) == 8 && turnOwnerOf(seed) == seed,
           "seed section: an in-frame section like the others: per draw, K = 8, a turn of its own in the rotation");
     check(static_cast<size_t>(seed) == kDoorSections + 7 && static_cast<size_t>(seed) + 1 == kWorldFirst &&
-              kWorldFirst + kWorldSections == kSkinFirst && kSkinFirst + kSkinSections == kAlteredFirst &&
+              kWorldFirst + kWorldSections == kFssFirst && kFssFirst + 1 == kSkinFirst && kSkinFirst + kSkinSections == kAlteredFirst &&
               seed > GpuCensusSection::FrameUiLayerReissues && seed < GpuCensusSection::AlteredPoolFamily,
           "seed section: the eighth in-frame section (the ninth before the terrain's went, 2026-10-01), followed by the three world-route ones, so the altered-draw sections still follow the in-frame ones");
     bool filled = true, distinct = true;
@@ -950,12 +950,13 @@ void seedTableCases() {
         for (size_t j = i + 1; j < kFrameSections; ++j)
             distinct = distinct && std::strcmp(kFrameBreakdownNames[i], kFrameBreakdownNames[j]) != 0;
     }
-    check(kFrameSections == 11 && filled && distinct &&
+    check(kFrameSections == 12 && filled && distinct &&
               std::strcmp(kFrameBreakdownNames[kSeedSection - kDoorSections], "HDR HUD depth-stencil seed") == 0 &&
-              std::strcmp(kFrameBreakdownNames[kFrameSections - 3], "world resolve") == 0 &&
-              std::strcmp(kFrameBreakdownNames[kFrameSections - 2], "world mips") == 0 &&
-              std::strcmp(kFrameBreakdownNames[kFrameSections - 1], "world layer") == 0,
-          "seed section: eleven in-frame items, none alike, the eighth named what the UI layer's own line calls the stage, the last three the world route's");
+              std::strcmp(kFrameBreakdownNames[kFrameSections - 4], "world resolve") == 0 &&
+              std::strcmp(kFrameBreakdownNames[kFrameSections - 3], "world mips") == 0 &&
+              std::strcmp(kFrameBreakdownNames[kFrameSections - 2], "world layer") == 0 &&
+              std::strcmp(kFrameBreakdownNames[kFrameSections - 1], "FSS reveal replay") == 0,
+          "seed section: twelve in-frame items, none alike, the eighth named what the UI layer's own line calls the stage, then the world route's three and the FSS reveal's (2026-10-15)");
 }
 
 void seedLineCases() {
@@ -1209,7 +1210,7 @@ void skinTableCases() {
     using S = GpuCensusSection;
     check(S::FrameSkinSourceClear == static_cast<S>(kSkinFirst) && S::FrameSkinEyeClear == static_cast<S>(kSkinFirst + 1) &&
               S::FrameSkinJoinClear == static_cast<S>(kSkinFirst + 2) && S::FrameSkinJoin == static_cast<S>(kSkinFirst + 3) &&
-              S::FrameSkinPose == static_cast<S>(kSkinFirst + 4) && kSkinSections == 5 && kSkinFirst == kWorldFirst + kWorldSections,
+              S::FrameSkinPose == static_cast<S>(kSkinFirst + 4) && kSkinSections == 5 && kSkinFirst == kFssFirst + 1,
           "second skin: five sections in a row, the source's clear, the eyes' clear, the join's clear pass, the join and the pose table, right after the world route's three");
     bool filled = true, distinct = true;
     for (size_t i = 0; i < kSkinSections; ++i) {
@@ -1223,7 +1224,7 @@ void skinTableCases() {
     bool inBreakdown = false;
     for (size_t i = 0; i < kFrameSections; ++i)
         for (size_t j = 0; j < kSkinSections; ++j) inBreakdown = inBreakdown || std::strcmp(kFrameBreakdownNames[i], kSkinNames[j]) == 0;
-    check(!inBreakdown && kFrameSections == 11, "second skin: the main line's in-frame items are still the eleven, none of them the second skin's (they are inside engine velocity already)");
+    check(!inBreakdown && kFrameSections == 12, "second skin: the main line's in-frame items are the twelve (the FSS reveal's added 2026-10-15), none of them the second skin's (they are inside engine velocity already)");
 }
 
 void skinLineCases() {
@@ -1702,6 +1703,74 @@ void failureRateCases() {
     check(gpuTimingShutdown(d.ctx.Get()), "failure rate: release the scripted owner so the real WARP timer cases bind their own");
 }
 
+// ---- the FSS reveal fix's own GPU work (fss_reveal_replay.h's two cost scopes; review of main 9fe5b257, finding 5) ----
+// fss_reveal_test holds that the scopes are opened at the replay draw and at the private constant-buffer copies, and not for a frame with neither. This holds the other half: what
+// the census does with them -- the section's kind, its turn, its count, and its place and name in the 30 s line.
+void fssRevealCases() {
+    using S = GpuCensusSection;
+    constexpr S fss = S::FrameFssReveal;
+    check(!isDoorSection(fss) && occurrenceCapFor(fss) == 8 && turnOwnerOf(fss) == fss && static_cast<size_t>(fss) == kFssFirst &&
+              static_cast<size_t>(fss) > static_cast<size_t>(S::FrameWorldLayer) && static_cast<size_t>(fss) < static_cast<size_t>(S::FrameSkinSourceClear),
+          "FSS reveal: an in-frame section (per draw, K = 8, a turn of its own) between the world route's and the second skin's");
+    // no turn until called this window: with no scanner on show the rotation is what it was
+    for (auto& s : g_section) s = SectionState{};
+    int at = 0;
+    unsigned cycle = 0, fssTurns = 0;
+    do {
+        at = nextTurnOwner(at);
+        ++cycle;
+        if (static_cast<size_t>(at) == kFssFirst) ++fssTurns;
+    } while (at != 0 && cycle < 200);
+    check(cycle == 24 && fssTurns == 0, "FSS reveal turns: with no replay or copy this window the rotation gives it no turn (the cycle is still the 24)");
+    g_section[kFssFirst].occurrences = 1;
+    at = 0;
+    cycle = fssTurns = 0;
+    do {
+        at = nextTurnOwner(at);
+        ++cycle;
+        if (static_cast<size_t>(at) == kFssFirst) ++fssTurns;
+    } while (at != 0 && cycle < 200);
+    check(cycle == 25 && fssTurns == 1, "FSS reveal turns: once called this window it takes one turn a cycle (25)");
+
+    // the scope counts every occurrence and notes the real pass; on another section's turn it is counted, not timed
+    for (auto& s : g_section) s = SectionState{};
+    g_windowStartMs = GetTickCount64();   // no window closes here
+    g_activeSection = static_cast<int>(fss);
+    g_activeCalls = g_activeTimed = 0;
+    g_activeStride = 1;
+    g_activeOffset = 0;
+    g_activeNullDone = false;
+    {
+        GpuCensusScope copies(nullptr, fss);
+        copies.markIssued();
+    }
+    { GpuCensusScope empty(nullptr, fss); }
+    check(g_section[kFssFirst].occurrences == 2 && g_section[kFssFirst].issued == 1 && g_activeCalls == 2,
+          "FSS reveal scope: two occurrences counted on its turn, one of them noted as having issued a pass");
+    g_activeSection = static_cast<int>(S::FramePlanet);
+    g_activeCalls = g_activeTimed = 0;
+    { GpuCensusScope replay(nullptr, fss); }
+    check(g_section[kFssFirst].occurrences == 3 && g_activeCalls == 0 && g_activeTimed == 0,
+          "FSS reveal scope: on another section's turn an occurrence is counted and takes nothing of the turn");
+
+    // the 30 s line: 2 occurrences a frame over 200 frames, 8 timed for 0.4 ms, is 0.050 ms a call and 0.100 ms a frame, named, and part of the in-frame total
+    const uint64_t start = GetTickCount64() - 30000;
+    freshWindow(start);
+    g_section[kFssFirst].occurrences = 400;
+    g_section[kFssFirst].sampler.totals.ms = 0.4;
+    g_section[kFssFirst].sampler.totals.samples = 8;
+    logAndResetWindow(start + 30000);
+    check(g_lastLog.find("FSS reveal replay 0.100 (2.00/frame)") != std::string::npos && g_lastLog.find("in-frame 0.100 (") != std::string::npos &&
+              g_lastLog.find("EDVR ~0.100 ms/frame = door 0.000 (") != std::string::npos,
+          "FSS reveal line: the section appears in the per-feature report under its FSS name, 0.100 ms a frame, and is part of EDVR's in-frame total");
+    // a window with no replay and no copy: the item is '-', never 0.000
+    freshWindow(start);
+    logAndResetWindow(start + 30000);
+    check(g_lastLog.find("FSS reveal replay -") != std::string::npos && g_lastLog.find("FSS reveal replay 0.000") == std::string::npos,
+          "FSS reveal line: a window with no replay and no copy prints '-' for it, not 0.000");
+    for (auto& s : g_section) s = SectionState{};
+}
+
 void run() {
     instrumentCases();
     estimatorMathCases();
@@ -1718,6 +1787,7 @@ void run() {
     skinTableCases();
     skinLineCases();
     skinTurnCases();
+    fssRevealCases();
     skinWiringCases();
     lineLengths();
     failureRateCases();
