@@ -43,12 +43,11 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight (2026-10-15 v6, built, not flown):** `off`, one zoom of a ringed
-  planet, no keys, wait for the reveal. 60 frames from the all-small event: every
-  draw into eye-sized and ring targets is listed per eye and only the
-  differences are logged (`eyediff`), the ring quad's t0-t3 are compared per
-  eye, and the eye run now captures the whole eye at 1/4 size. Reading rules in
-  "2026-10-15 (v6)". Fallback `mirror`. Not fixed: ~220 m remap; panel bit.
+- **Next (after flight e05b6be6, v6):** under `off` the window opened at the
+  FSS EXIT, not the zoom: the eye runs show the cockpit, and the same holds
+  for v4 and v5. Their reveal conclusions are withdrawn ("v6 flown"). First
+  fix the instrument so a window opens only at the arrival, with the chrome
+  held. Then re-fly v6 unchanged. Fallback `mirror`. Not fixed: ~220 m remap.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -2471,6 +2470,86 @@ Reading rules:
   set against the ledger's frames). Left-only blocks in frames where the diff
   shows a difference confirm the producer; blocks in neither eye mean the run was
   too early or too late: the two runs are at +20 and +150 frames.
+
+## 2026-10-15 (v6 flown): flight e05b6be6, the windows caught the FSS exit
+
+Flight on test build N (`v0.20.0-rc.1-96-ge05b6be6`, Frontier, VR;
+`edvr_gfx_20261015_101526.log`, `--expect-build e05b6be6` matches; eye runs
+`eye_101759_*` and `eye_101803_*`, whole eye at 1008 x 1008). `off`, one zoom
+of a ringed planet, no keys. Sean: the squares in the LEFT eye only, again.
+Read-only analysis.
+
+**The capture was not the reveal.** CONFIRMED from four independent things:
+
+- The whole-eye images. Run 1 (f15120-15135) is the COCKPIT fading up from
+  black in both eyes. Run 2 (f15250-) is the steady cockpit, with the target
+  "RINGED SAPPHIRE 698 Ls" on the HUD. There is no scanner and no ring. Both
+  runs log `eye capture: no scanner chrome was held on the run's first
+  frame`.
+- The timeline. The scanner screen came up at 10:17:23 (f11890). Transition
+  flashes at f13006 (10:17:36) and f13273 (10:17:39.095) are the zoom's
+  departure and arrival (INFERRED: 267 frames apart, the ~3 s transit).
+  `GuiFocus 9` was read only at 10:17:39.162, 67 ms after the arrival. The
+  window opened at f15096 (10:17:59.34) with a transition flash of its own,
+  and `the game says FSS focus ended` followed at 10:18:02. Flight M
+  (db982c64) has the same shape: focus read 09:22:22.4 after a flash at
+  09:22:21.5, window at 09:22:38.9, focus ended 09:22:39.96.
+- The code (`vscreen.cpp` 6029-6069). The window opens on a world camera jump
+  while `journalFssFocus()` is true. Under `off` the eager Status.json poll and
+  the zoom-press watcher do not run (`needsFssSignals()` is `any() || tiles`),
+  so the focus is read late. The arrival jump landed before focus was known,
+  and set nothing. The exit jump back to the cockpit landed while the stale
+  focus still read 9, and opened the window.
+- The all-small band event (every cell to the small shader) is the black
+  frame of that exit transition, not the arrival.
+
+What the v6 lines measured, then, is the cockpit after the exit:
+
+- `eyediff`: 60 of 60 frames differ. The scene pair (2016 x 2016 fmt 26)
+  carries per-eye culling noise. An eye-sized R8 pair (fmt 60) drawn by VS
+  `53211E8C` with PS `7EAC7196` / `B403F48C` (3-vertex instanced) differs in
+  instance batches of about 5,800: eye 0 182,444 against eye 1 91,045 over 37
+  frames for `7EAC7196`, with the larger batch in either eye on different
+  frames. Unpaired (mono) targets: `DEF19B03/06CD42A9` x5253,
+  `2D78DC3F/99C21CEB` x4037, `20F383BB/DED87960` x3810, `5DAD41AA/25D5F73A`
+  x3565, `E8FDC0D9/5D07ACB4` x1332. None of these is tied to the reveal.
+- `ring quad`: the "ring family" matched 10,331 / 10,240 draws in the
+  COCKPIT (`53211E8C/7EAC7196` x5185, `53211E8C/B403F48C` x5065,
+  `7E38A6AA/7CECABDE` x5074, `0357BBB2/81812EF9` x5251). On 332841 these
+  hashes are not ring-specific. The tracked PS's t0-t2 are per eye and t3 is
+  shared (T30, 60 of 60). ring_t0 takes 1 draw a frame per eye, ring_t3 2;
+  `ClearRenderTargetView->ring_t3` x1199.
+- The ring hook again saw 0 calls inside (50,736 outside). That is expected
+  in the cockpit after the exit, so it says nothing about the reveal.
+
+Withdrawn (the evidence was the FSS exit, not the reveal):
+
+- withdrawn: flight db982c64's "ruled out: the StellarBodyEffects ring pass
+  (0x36558a0) as the reveal's producer". The capture was after the exit; the
+  ring pass at the arrival is UNTESTED.
+- withdrawn: flight db982c64's "ruled out: the scene G-buffer t9-t11 filling
+  progressively in the left eye"; UNTESTED at the arrival.
+- suspect: flight bca9d6b8's `off` run (its event and black eye run match
+  this exit signature) and so the list-row ruling drawn from it. The `tiles`
+  run had the eager signals and may have been a real zoom; the visual
+  "`tiles` does not fix it" stands on Sean's eyes, not on the window.
+- ruled out: an `off`-mode window as evidence of the arrival, because
+  without the eager focus signals the window opens on the exit jump.
+- Unaffected: the RE's static findings, the slots 3-4 correction, and the
+  e2e182a6 / f9f62bbc windows (`tiles` / `on`, eager signals running).
+
+Root cause: OPEN, with nothing yet measured at the arrival under `off`.
+
+Next (an instrument fix, then the same v6 flight). Make the fss tiles window
+independent of `fix.fss_eye_sync`: run the eager Status.json poll and the
+zoom watchers (gamepad included: Sean zooms on `Pos_GamePad_RTrigger`)
+whenever the instrument is armed. Open the window only on a jump while the
+scanner chrome is held (`fssChromeFrame` within 5 frames), not on the
+journal alone. Refuse the band event and the eye runs unless the chrome is
+held on that frame. Log `window N opened ... chrome held=yes|no` so a reader
+can reject an exit capture from the log head. The proof is the eye run: the
+FinalCrisp rows must show the scanner view with the ring. Only then are the
+eyediff, ring quad and ring hook lines evidence.
 
 ## Open
 
