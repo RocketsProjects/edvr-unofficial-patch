@@ -43,12 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight (2026-10-15 eve, not built):** flight e2e182a6: both eyes
-  cover all 289 cells and the writes are symmetric, but the large/small
-  split row differs by a row at the zoom. It ran `tiles` then `on`, never
-  `off`, and missed the arrival. Next: arm the capture on the band event;
-  `off`, then `tiles`, no key. Known, not fixed: the ~220 m remap; the
-  loading-screen panel bit; the sky's ~+0.4 px/frame.
+- **Next flight (2026-10-15 night, v3 built, not flown):** two zooms, no
+  keys, `fix.fss_eye_sync` = `off` then `tiles`, set in the ini before launch.
+  The band watch fires the eye run itself on a whole-row move of a large list
+  ("2026-10-15 (night)"). Flight e2e182a6: both eyes cover all 289 cells,
+  writes symmetric, the large/small row differs at the zoom. Known, not
+  fixed: the ~220 m remap; the loading-screen panel bit; the sky's drift.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -1880,6 +1880,83 @@ arm the eye run once from the code (`temporalPassArmEyeDump`) so the dump
 brackets the event. Flight: `fix.fss_eye_sync = off` (check the log line
 `fss tiles: window N opened ... lockstep=off` and no `fss eye heal` line),
 zoom a ringed planet, do not press the dump key; then the same with `tiles`.
+
+## 2026-10-15 (night): the band watch, v3 (built, not flown)
+
+Sean approved the next instrument after flight e2e182a6 (the lists partition
+every cell in both eyes; what differs is the row where cells change from the
+large list to the small one's, a whole row apart at the zoom, and at the
+arrival every cell goes to the small list). It arms on that event, not on a
+key. Read-only apart from the files it writes and the eye run it starts.
+
+What it does, inside every zoom window (the same caps as v2):
+
+- From the lists it already reads every frame it computes, per eye, the
+  large list's valid cells (entries other than `(17, 17)`), its boundary row
+  `17 - cells / 17` and its smallest row, and the small list's cells.
+- The event is the first frame of a window (one event a window, at most 2
+  automatic eye runs a session) in which either eye's large list moves by a
+  whole row (17 cells) or more since the previous frame, or goes to zero. The
+  eyes merely disagreeing is not an event: they disagreed for all of window 2.
+- At the event it logs the 10 frames before, the event frame and the 60 after
+  as `band` lines, writes those frames' raw lists (`f<frame>_e<eye>_listL|listS.bin`,
+  edvr_logs\fsstiles) and starts the 16-frame eye run at the next frame
+  boundary (the Present tick, where the key's own press runs), no key.
+
+Lines:
+
+    fss tiles: instrument armed -- ... it also watches the lists for the band event and starts the eye run itself (at most 2 a session, no key). ...
+    fss tiles: window N opened ... Band watch: armed, waiting for a whole-row move of a large list or one going to zero (automatic eye run, at most 2 a session).
+    fss tiles: band event at f=N (<reason>): eye0 L=a (row r), eye1 L=b (row s). The 10 frames before, this one and the 60 after are logged as `band` lines ...; the eye run starts at the next frame boundary (automatic run K of 2 this session).
+    fss tiles: automatic eye run started at f=N (the band event); ...
+    fss tiles: band f=N eye0 L=136 (row 9.00, minY 9) S=153 | eye1 L=152 (row 8.06, minY 8) S=137 | own row gap 0.94 [| ran: eye1 drew eye0's lists (row 9.00)]
+    fss tiles: window N band watch -- B band event(s) (automatic eye runs started this session: K of 2); large-list size over the window eye0 a..b eye1 c..d cells, largest one-frame step eye0 X eye1 Y (an event needs a step of 17, ...); band lines n, raw frames written m
+
+The window's band-watch line is printed whether or not an event happened, so
+"no event" (the steps it saw are in the line) reads differently from "never
+ran" (no `armed` line, or `armed` with no `window opened`).
+
+Flight plan (Sean, VR, a ringed planet, no keys; two zooms in one session or
+two sessions):
+
+1. Set `fix.fss_eye_sync = off` in the ini before the game starts (not from
+   the menu: flight e2e182a6 flipped it mid-session). Check the log head: no
+   `fss eye heal: armed` and no `fss reveal: ON` line, and the instrument line
+   says the candidate is `off`. Zoom onto a ringed planet, press nothing else,
+   watch the reveal until it settles. Note which eye shows the black tiles.
+2. Set `fix.fss_eye_sync = tiles` and zoom onto the same planet the same way.
+   The window line must say `lockstep=on` and a `lockstep engaged` line must
+   follow in the first frames.
+
+Reading rules:
+
+- Did it fire: each zoom should log one `band event` and one `automatic eye
+  run`. `largest one-frame step` below 17 with no event means the lists never
+  moved by a row (no arrival reached); zero `window opened` means the zoom
+  window never opened (the line `a zoom was signalled ... no window` says why).
+- `off`: in the `band` lines before the event, is the own row gap non-zero
+  for several frames (one eye's boundary row ahead of the other's)? Take the
+  eye run's `FinalCrisp_L/R` images (frame numbers in `eye_*_FinalCrisp.json`),
+  mark 16 x 16 blocks that are black with lit blocks on both sides in time
+  (cell x = (1316 + px) / 256 for the 1400 crop, the same for y), and set them
+  against the cells of the two lists for that frame (raw files; a cell's list is
+  the one that holds `(x, y)`). Black blocks falling in the cells the two eyes
+  assign to different shaders, in the eye that shows them, confirm the band as
+  the cause. No such correspondence, or the same black blocks in both eyes:
+  ruled out as the source of the left-only squares.
+- `tiles`: the band line carries `own row gap` (the engine's own, still the
+  eyes' difference) and `ran: eye1 drew eye0's lists (row r)`. Both eyes were
+  on the same row on a frame exactly when that suffix is present, and the
+  row printed is eye 0's. A frame without the suffix drew eye 1's own list (a
+  declined frame: the window's `declined(...)` counts say which reason). The
+  read-back group counts of eye 1 are its OWN arguments read before the
+  substitution, so they do not show what the dispatch used. `tiles` works if,
+  with the suffix present on the frames around the event, the eye run shows
+  the squares in neither or in both eyes alike; it does not if the left-only
+  squares survive with `ran` present on every frame.
+- Either run: compare the two events' frame counts from the zoom press to the
+  event (about 3 s at 90 Hz is the arrival) and the large-list sizes before
+  the event; a row event early in the transit is not the arrival.
 
 ## Open
 

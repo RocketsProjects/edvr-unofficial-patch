@@ -199,6 +199,49 @@ void testV2Pure() {
     check(ft::regionOf(0, 0) == 0 && ft::regionOf(1, 2) == 5 && ft::kRegions == 6, "regions: two eyes by three roles");
 }
 
+void testBand() {
+    // A list as the engine writes it: valid cells then the (17, 17) filler.
+    uint32_t list[2 * 20];
+    for (int i = 0; i < 20; ++i) { list[2 * i] = 17; list[2 * i + 1] = 17; }
+    const uint32_t cells[5][2] = {{13, 16}, {7, 9}, {0, 0}, {15, 9}, {3, 12}};
+    for (int i = 0; i < 5; ++i) { list[2 * i] = cells[i][0]; list[2 * i + 1] = cells[i][1]; }
+    ft::Band b = ft::bandOf(list, sizeof(list));
+    check(b.valid == 5 && b.minY == 0, "bandOf counts the valid cells, the (0, 0) cell included, and finds the smallest row");
+    check(ft::bandOf(list, 0).valid == 0, "an empty list has no cells");
+    check(ft::rowOfLarge(136) == 9.0 && ft::rowOfLarge(0) == 17.0 && ft::rowOfLarge(153) == 8.0, "the large list's starting row from its size");
+
+    ft::BandWatch w;
+    check(w.feed(136, 136) == ft::BandWatch::None, "the first frame is never an event");
+    check(w.feed(136, 152) == ft::BandWatch::None, "the eyes disagreeing by a row is not an event by itself");
+    check(w.feed(136, 152) == ft::BandWatch::None, "steady is quiet");
+    check(w.feed(136, 150) == ft::BandWatch::None && w.feed(120, 140) == ft::BandWatch::None, "steps under a row are quiet");
+    check(w.feed(100, 140) == ft::BandWatch::RowStep, "a step of a whole row in one eye is a row event");
+    check(w.feed(0, 0) == ft::BandWatch::AllSmall, "a large list going to zero is the all-small event");
+    check(w.feed(0, 0) == ft::BandWatch::None, "and it is said once");
+    check(w.lo[0] == 0 && w.hi[0] == 136 && w.lo[1] == 0 && w.hi[1] == 152 && w.maxStep[1] == 140 && w.maxStep[0] == 100 && w.frames == 8,
+          "the watch keeps the ranges and the largest step for the window summary");
+    ft::BandWatch w2;
+    w2.feed(136, 152);
+    check(w2.feed(0, 140) == ft::BandWatch::AllSmall, "one eye going to zero is enough, whatever the other does");
+    ft::BandWatch w3;
+    w3.feed(50, 50);
+    check(w3.feed(50, 67) == ft::BandWatch::RowStep && w3.maxStep[1] == 17, "exactly one row (17 cells) is an event");
+
+    ft::BandRec r;
+    r.frame = 34170;
+    r.large[0] = 136; r.smallN[0] = 153; r.minY[0] = 9;
+    r.large[1] = 152; r.smallN[1] = 137; r.minY[1] = 8;
+    char line[400];
+    ft::formatBand(line, sizeof(line), r);
+    check(std::strcmp(line, "fss tiles: band f=34170 eye0 L=136 (row 9.00, minY 9) S=153 | eye1 L=152 (row 8.06, minY 8) S=137 | own row gap 0.94") == 0,
+          "the band line shows each eye's large list, boundary row and the gap");
+    r.ranEye0 = true;
+    ft::formatBand(line, sizeof(line), r);
+    check(std::strstr(line, "| ran: eye1 drew eye0's lists (row 9.00)") != nullptr,
+          "under the tiles candidate the line says eye 1 drew eye 0's lists, at eye 0's row");
+    check(ft::kBandBefore == 10 && ft::kBandAfter == 60 && ft::kMaxAutoRuns == 2 && ft::kGrid == 17, "the caps the task named");
+}
+
 void testKeyParsing() {
     edvr::EyeSync t = edvr::eyeSyncParse("tiles");
     check(t.tiles && t.recognised && t.healMode == 0 && !t.lockstep && !t.steady && !t.any(), "tiles is its own value: no heal, no composite freeze");
@@ -569,6 +612,18 @@ void testSourcePins(const std::string& root) {
     check(has(cpp, "fss tiles: window %u lists --") && has(cpp, "fss tiles: window %u writes --") &&
               has(cpp, "no clear, copy or update touched any of them") && has(cpp, "samples read=%u"),
           "every window closes with a lists line and a writes line, zero counts included, so nothing-happened reads differently from never-ran");
+    check(has(cpp, "fss tiles: band event at f=%u") && has(cpp, "fss tiles: window %u band watch --") &&
+              has(cpp, "an event needs a step of %u") && has(cpp, "Band watch: armed"),
+          "the band watch says it armed, what it saw in every window (zero events included) and each event");
+    {
+        const size_t pend = cpp.find("g.autoRunPending = true;");
+        const size_t bnd = cpp.find("void fssTilesFrameBoundary(");
+        const size_t arm = cpp.find("temporalPassArmEyeDump();", bnd);
+        check(pend != std::string::npos && bnd != std::string::npos && arm != std::string::npos && arm > bnd &&
+                  cpp.find("temporalPassArmEyeDump();") == arm,
+              "the automatic eye run is only ever started from the frame boundary, never from inside the dispatch hook");
+        check(has(cpp, "g.autoRuns < kMaxAutoRuns") && has(cpp, "!g.windowEventFired"), "one event a window and at most kMaxAutoRuns a session");
+    }
     check(has(cpp, "fss tiles: eye-dump key at f=%u") && has(cpp, "outside a capturing zoom window"), "the eye-dump key's reception is logged either way");
     check(has(cpp, "fss tiles: window %u opened") && has(cpp, "fss tiles: window %u closed") && has(cpp, "fss tiles: instrument armed"),
           "the instrument says it armed, opened and closed, so never-ran reads differently from zero");
@@ -594,6 +649,7 @@ int main(int argc, char** argv) {
     testLineAndTallies();
     testKeyParsing();
     testV2Pure();
+    testBand();
     testFakeRestore();
 
     const auto createDevice = edvr::systemD3D11CreateDevice();

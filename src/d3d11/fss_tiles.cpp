@@ -15,6 +15,7 @@
 #include "../common/timing.h"
 #include "fss_tiles_core.h"
 #include "fss_tiles_d3d.h"
+#include "temporal_pass.h"   // temporalPassArmEyeDump: the automatic eye run
 #include "journal_watch.h"   // journalFssFocus: the zoom window's authority
 
 // See fss_tiles_core.h for the story. Two jobs, both inside an FSS zoom window only:
@@ -62,6 +63,7 @@ struct Sample {
     bool     used = false;
     bool     drained = true;
     bool     files = false;                 // write the raw bytes to disk
+    bool     ranEye0 = false;               // eye 1 drew eye 0's lists on this frame (the tiles candidate)
     bool     have[kRegions] = {};
     uint32_t bytes[kRegions] = {};
     uint32_t groups[2][2] = {};             // [eye][cs] x group counts, filled from the argument read-back for the split line
@@ -110,6 +112,23 @@ struct State {
     uint64_t lastInfoHash[2] = {};
     bool     haveLastInfo[2] = {};
     uint32_t lastLoggedFrame = 0;
+    // v3: the band watch
+    struct BandFrame {
+        BandRec  rec;
+        uint32_t rawBytes[4] = {};          // [eye * 2 + role]
+        uint8_t  raw[4][kBandRaw];
+    };
+    BandWatch bandWatch;
+    BandFrame bring[kBandBefore + 1];
+    uint32_t bringHead = 0, bringCount = 0;
+    bool     windowEventFired = false;
+    uint32_t windowEvents = 0;
+    uint32_t autoRuns = 0;                  // session
+    bool     autoRunPending = false;
+    bool     autoArming = false;
+    uint32_t afterLeft = 0;
+    uint32_t bandLines = 0;
+    uint32_t bandFiles = 0;
     double   lastSplit[2] = {-100.0, -100.0};
 
     // eye zero's bindings, per shader
@@ -178,6 +197,12 @@ void resetWindowTallies() {
     g.haveLastInfo[0] = g.haveLastInfo[1] = false;
     g.lastLoggedFrame = 0;
     g.lastSplit[0] = g.lastSplit[1] = -100.0;
+    g.bandWatch = BandWatch();
+    g.bringHead = g.bringCount = 0;
+    g.windowEventFired = false;
+    g.windowEvents = 0;
+    g.afterLeft = 0;
+    g.bandLines = g.bandFiles = 0;
 }
 
 bool pendingReadbacks() {
@@ -322,6 +347,87 @@ void writeSampleFiles(const Sample& sm, const D3D11_MAPPED_SUBRESOURCE* m) {
     }
 }
 
+// ---- v3: the band event -----------------------------------------------------------------------------------------------
+void writeBandRaw(const State::BandFrame& f) {
+    if (!g.dirMade) {
+        g.dirMade = true;
+        CreateDirectoryW((Log::get().dir() + L"\\fsstiles").c_str(), nullptr);
+    }
+    for (uint32_t idx = 0; idx < 4; ++idx) {
+        if (!f.rawBytes[idx]) continue;
+        wchar_t path[MAX_PATH];
+        _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\fsstiles\\f%u_e%u_%S.bin", Log::get().dir().c_str(), f.rec.frame, idx / 2,
+                     kRegionFile[idx % 2]);
+        HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        DWORD wrote = 0;
+        WriteFile(h, f.raw[idx], f.rawBytes[idx], &wrote, nullptr);
+        CloseHandle(h);
+    }
+    ++g.bandFiles;
+}
+
+void logBandFrame(const State::BandFrame& f) {
+    if (g.bandLines >= kMaxBandLines) return;
+    char line[600];
+    formatBand(line, sizeof(line), f.rec);
+    Log::get().note("%s", line);
+    ++g.bandLines;
+}
+
+void processBand(const Sample& sm, const D3D11_MAPPED_SUBRESOURCE* m, const bool (*hl)[2]) {
+    if (!hl[0][0] || !hl[1][0] || !hl[0][1] || !hl[1][1]) return;
+    State::BandFrame& slotRef = g.bring[g.bringHead % (kBandBefore + 1)];
+    State::BandFrame& f = slotRef;
+    f.rec = BandRec();
+    f.rec.frame = sm.frame;
+    f.rec.ranEye0 = sm.ranEye0;
+    for (uint32_t e = 0; e < 2; ++e) {
+        const Band bl = bandOf(m[regionOf(e, 0)].pData, sm.bytes[regionOf(e, 0)]);
+        const Band bs = bandOf(m[regionOf(e, 1)].pData, sm.bytes[regionOf(e, 1)]);
+        f.rec.large[e] = bl.valid;
+        f.rec.smallN[e] = bs.valid;
+        f.rec.minY[e] = bl.minY;
+        for (uint32_t role = 0; role < 2; ++role) {
+            const uint32_t r = regionOf(e, role);
+            const uint32_t idx = e * 2 + role;
+            f.rawBytes[idx] = sm.bytes[r] <= kBandRaw ? sm.bytes[r] : 0;
+            if (f.rawBytes[idx]) std::memcpy(f.raw[idx], m[r].pData, f.rawBytes[idx]);
+        }
+    }
+    ++g.bringHead;
+    if (g.bringCount < kBandBefore + 1) ++g.bringCount;
+
+    const BandWatch::Reason why = g.bandWatch.feed(f.rec.large[0], f.rec.large[1]);
+    if (why != BandWatch::None && g.win.open && !g.windowEventFired && g.autoRuns < kMaxAutoRuns) {
+        g.windowEventFired = true;
+        ++g.windowEvents;
+        ++g.autoRuns;
+        g.autoRunPending = true;
+        g.afterLeft = kBandAfter;
+        Log::get().note("fss tiles: band event at f=%u (%s): eye0 L=%u (row %.2f), eye1 L=%u (row %.2f). The 10 frames before, this one "
+                        "and the 60 after are logged as `band` lines and their raw lists written to edvr_logs\\fsstiles; the eye run "
+                        "starts at the next frame boundary (automatic run %u of %u this session).",
+                        sm.frame, why == BandWatch::AllSmall ? "a large list went to zero: every cell is now the small shader's"
+                                                             : "a large list moved by a whole row or more",
+                        f.rec.large[0], rowOfLarge(f.rec.large[0]), f.rec.large[1], rowOfLarge(f.rec.large[1]), g.autoRuns,
+                        kMaxAutoRuns);
+        // the frames before, oldest first (the ring holds this frame last)
+        const uint32_t n = g.bringCount;
+        for (uint32_t k = 0; k < n; ++k) {
+            const uint32_t at = (g.bringHead - n + k) % (kBandBefore + 1);
+            logBandFrame(g.bring[at]);
+            writeBandRaw(g.bring[at]);
+        }
+        return;
+    }
+    if (g.afterLeft > 0) {
+        --g.afterLeft;
+        logBandFrame(f);
+        writeBandRaw(f);
+    }
+}
+
 void processSample(Sample& sm, const D3D11_MAPPED_SUBRESOURCE* m) {
     ListSummary ls[2][2];
     bool hl[2][2] = {};
@@ -382,6 +488,7 @@ void processSample(Sample& sm, const D3D11_MAPPED_SUBRESOURCE* m) {
         Log::get().note("%s", c);
         g.listLines += 3;
     }
+    processBand(sm, m, hl);
     if (sm.files && g.sampleFiles < kMaxDumpFrames) {
         writeSampleFiles(sm, m);
         ++g.sampleFiles;
@@ -447,6 +554,7 @@ void queueSample(ID3D11DeviceContext* ctx, const Rec& r, const Slot* slot) {
         sm.have[region] = true;
         sm.bytes[region] = slot[slotIdx].bytes;
     };
+    if (r.substituted && r.eye == 1) sm.ranEye0 = true;
     if (ci == 0) {
         take(regionOf(r.eye, 0), 2);
         take(regionOf(r.eye, 2), 1);
@@ -512,6 +620,11 @@ void emitSummary() {
         Log::get().note("fss tiles: window %u writes -- watched %u buffer(s) (args, outputs, lists, tile info); %s", g.windowNo,
                         g.watch.n, wa ? wb : "no clear, copy or update touched any of them");
     }
+    Log::get().note("fss tiles: window %u band watch -- %u band event(s) (automatic eye runs started this session: %u of %u); large-list "
+                    "size over the window eye0 %u..%u eye1 %u..%u cells, largest one-frame step eye0 %u eye1 %u (an event needs a step of %u, "
+                    "a whole row, or a list going to zero); band lines %u, raw frames written %u",
+                    g.windowNo, g.windowEvents, g.autoRuns, kMaxAutoRuns, g.bandWatch.lo[0], g.bandWatch.hi[0], g.bandWatch.lo[1],
+                    g.bandWatch.hi[1], g.bandWatch.maxStep[0], g.bandWatch.maxStep[1], kGrid, g.bandLines, g.bandFiles);
     char sl[200];
     size_t sa = 0;
     sl[0] = 0;
@@ -597,10 +710,7 @@ bool onTarget(ID3D11DeviceContext* ctx, ID3D11Buffer* args, UINT off, uint64_t h
     Slot slot[kSrvSlots];
     const void* uavRes[2] = {};
     describeBindings(ctx, sr, slot, r, uavRes);
-    if (g.win.capturing) {
-        registerWatch(r, args, slot, uavRes);
-        queueSample(ctx, r, slot);
-    }
+    if (g.win.capturing) registerWatch(r, args, slot, uavRes);
 
     // ---- the candidate ----
     bool sub = false;
@@ -645,6 +755,10 @@ bool onTarget(ID3D11DeviceContext* ctx, ID3D11Buffer* args, UINT off, uint64_t h
     }
 
     // ---- the read-back copy (before the dispatch; it reads the arguments as this view's dispatch will) ----
+    if (g.win.capturing) {
+        r.substituted = sub;
+        queueSample(ctx, r, slot);
+    }
     if (g.win.capturing && ensureStaging(ctx)) {
         FrameBuf& fb = g.fb[g.frame % kStagingRing];
         if (!fb.used || fb.frame != g.frame) {
@@ -713,10 +827,10 @@ void fssTilesConfigure(Config& cfg) {
         g.lastLockstepNoted = want;
         Log::get().note("fss tiles: instrument armed -- inside each FSS zoom window (at most %u a session) it reads back the "
                         "group counts of CS %016llX / %016llX per view and logs what each dispatch binds; the candidate "
-                        "(fix.fss_eye_sync = tiles) is %s. A session with no 'window opened' line below never reached a "
-                        "zoom window.",
+                        "(fix.fss_eye_sync = tiles) is %s; it also watches the lists for the band event and starts the eye run itself "
+                        "(at most %u a session, no key). A session with no 'window opened' line below never reached a zoom window.",
                         kMaxWindows, static_cast<unsigned long long>(kCsLarge), static_cast<unsigned long long>(kCsSmall),
-                        want ? "ON" : "off");
+                        want ? "ON" : "off", kMaxAutoRuns);
     }
     refreshActive();
 }
@@ -745,6 +859,11 @@ void fssTilesNoteWriteSlow(const void* p, bool isView, uint32_t call) {
 }
 
 void fssTilesNoteEyeDump() {
+    if (g.autoArming) {
+        Log::get().note("fss tiles: automatic eye run started at f=%u (the band event); the eye dump writes to edvr_logs\\eyes and the "
+                        "raw lists of the frames around the event are in edvr_logs\\fsstiles.", g.frame);
+        return;
+    }
     if (!g.win.capturing) {
         if (g.eyeDumpNotes < 3) {
             ++g.eyeDumpNotes;
@@ -775,12 +894,19 @@ void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
         g.windowNo = g.win.windows;
         resetWindowTallies();
         Log::get().note("fss tiles: window %u opened at frame %u (the zoom window; lockstep=%s) -- logging the tile "
-                        "renderer's dispatches for up to %llu ms, at most %u lines.",
+                        "renderer's dispatches for up to %llu ms, at most %u lines. Band watch: armed, waiting for a whole-row move of a large list "
+                        "or one going to zero (automatic eye run, at most %u a session).",
                         g.windowNo, frameNo, g.lockstep ? "on" : "off", static_cast<unsigned long long>(kWindowMs),
-                        kMaxLinesPerWindow);
+                        kMaxLinesPerWindow, kMaxAutoRuns);
     } else if (ev == WindowMachine::Closed) {
         g.summaryDue = true;
         g.summaryAfterFrame = frameNo + kReadbackDelay + 6;
+    }
+    if (g.autoRunPending) {
+        g.autoRunPending = false;
+        g.autoArming = true;
+        temporalPassArmEyeDump();   // the eye run, from the Present tick like the key's own press
+        g.autoArming = false;
     }
     if (g.signalPending) {
         g.signalPending = false;
