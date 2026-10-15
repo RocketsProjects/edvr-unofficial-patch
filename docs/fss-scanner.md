@@ -46,9 +46,9 @@ before 2026-09-29 is kept in "Status detail".*
 - **Next (after flight 38aef250, v10, VALID):** the left composite leaves the
   ring's near arc UNCOVERED at f18888-95 while the right covers it, from the
   same draw and the same layer. Depth, a later overwrite and the suspect quads
-  are ruled out. Next: per eye at the composite, fingerprint every PS input
-  t0-t7 and read the VS/PS constants, to find the input that differs.
-  Fallback `mirror`.
+  are ruled out. The missing region is the ring's front arc, not a crop.
+  Static analysis cannot reach the shader bytecode. Next flight (v11): set
+  `advanced.glare_shader_dump = 1` too; read the composite's t1-t3 per eye.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -3210,6 +3210,85 @@ Fix, once that input is named: make both eyes' composites read the same
 state of it. Sean wants the animation in both eyes, so the right eye should
 take the left's input for the reveal frames. The hook point is the composite
 draw, VS `953C8123` / PS `A473A867`, by shader identity. Not built.
+
+## 2026-10-15: the composite, statically (Opus, no flight)
+
+Sean asked for the composite (VS `953C8123AD8DC13B` / PS `A473A867BDDBC342`)
+to be settled from the code, without a flight. Read-only throughout.
+
+**The bytecode is not reachable offline.** CONFIRMED:
+
+- EDVR's dump directory (`edvr_logs\shaders`, 1,199 blobs from 2026-09-23
+  and 2026-10-08) holds neither hash. Those sessions dumped every created
+  VS/PS, but the composite is evidently created only when the FSS layer is
+  first used.
+- No file on C: or D: is named after either hash.
+- The game's `ShaderCache` folder is empty.
+- `Win64\EffectsBinary\Effects*_Win64_SM50.arc` (16.8 MB) holds no raw DXBC:
+  a scan for the `DXBC` magic, FNV-1a-64 hashed the way EDVR hashes a shader,
+  found 0 blobs. The archives are packed in a format I could not decode, and
+  there is no Oodle library on the machine. The exe holds one unrelated
+  blob.
+- The cheap way to get it is EDVR's existing dump:
+  `advanced.glare_shader_dump = 1` (`device_hook.cpp:2678`) writes every
+  VS/PS the game creates, by hash. One session that enters the FSS dumps both
+  shaders. No build is needed; set it on the v11 flight.
+
+**What the images say about the mechanism** (v10 `rt_after` / `rt_final`,
+f18888-18895, re-read). The left eye's missing region is shaped like the
+ring's FRONT arc: the ring's side lobes reach lower than the gap below the
+planet, and the back arc over the top is drawn. A crop (UV window, scissor,
+viewport, quad extent) would cut both lobes at one height. So: INFERRED, a
+near/far split. The front part of the ring reaches the left eye's composite
+through an input that is empty for it in those frames, and full for the
+right.
+
+**What the census says about that input** (v9, CONFIRMED):
+
+- The composite binds four pixel-shader textures.
+- At f23364: `s=@60,@221,@221,@221`, one texture in t1, t2 and t3 alike.
+- Later: `s=@70,@224,@225,@226`, three distinct textures.
+- The instruments tracked only one of them: the ring target T39/T95 (t2,
+  then t3). The two others have never been read.
+- In the arrival frames t1-t3 are bound to ONE texture, so whatever the
+  shader expects in the other two slots (the front half, or a history or mask
+  of the layer) is the same image as the main one there. Then it becomes three
+  separate textures.
+
+**The engine side.**
+
+- CONFIRMED from v8-v10: camera 1 alone draws into the target, 4 draws a
+  frame (RT0 = T39/T95), through the main-camera tests at 0x3659a1d /
+  0x3659f78 inside `FUN_1436597f0` (mode 2, ring+0x6b0 set). Cameras 22 and 8
+  draw no ring.
+- Not found statically: where the composite is issued, and what binds t1-t3
+  per eye. It is not under the ring pass (no ring-pass call surrounds it).
+  ring+0x6b0's setter is not in the ring module either (59 writes of `+0x6b0`
+  in `.text`, none tied to the FSS).
+- So no RVA ties the per-eye input to code yet.
+
+Root cause: OPEN. The leading hypothesis (INFERRED) is that the composite's
+other layer inputs (t1/t3 beside the ring target) carry the ring's front arc,
+or a mask or history of the layer. For about 8 arrival frames the left eye's
+composite gets them empty, stale or aliased, and the right eye's gets them
+filled.
+
+**The single v11 field that settles it:**
+
+- Per eye at the composite, frames +9..+17 of the arrival: the identity and
+  the 16 px block fingerprint of PS t1, t2 and t3, over the blocks of the
+  ring's near arc.
+- If one of them is black there in the left and filled in the right, that
+  slot is the cause, and its producer (the draw whose RT0 it is, and its
+  camera) is the next and last step.
+- If t1-t3 are identical per eye, the per-eye VS/PS constants are the cause.
+- Fly v11 with `advanced.glare_shader_dump = 1` so the bytecode of both
+  shaders lands in `edvr_logs\shaders` the same session, and the shader can
+  say what each slot means.
+
+Fix direction, unchanged: hook the composite by shader identity and give the
+right eye's composite the left eye's state of the differing input for the
+reveal frames, so both eyes animate. Not built.
 
 ## Open
 
