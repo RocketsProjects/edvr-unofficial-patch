@@ -55,11 +55,10 @@
 - **Open:** a pad-hologram capture that names its draws; an advert capture with the box on it; weapons fire, flares (option A, NOT FLOWN); the force field.
 - **Ruled out:** railing motion mismatch (tool label bug); the 2026-09-29 pad-into-layer rule (9122f31e); reactive bias or sharpening (docs/hologram-depth-2026-09-24.md);
   light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (4); FUN_14369C9C0 as the railing's writer (hooked, 0 calls since launch);
-  B75A6FF2 as an effect-only pair: it covers ~7M px per draw (the sky), hiding it made the skybox shimmer (flight d3013197); 68DDDEF0 as a weapons-only pair:
-  constant ~200k px/draw background particles, hiding them made the skybox stars shimmer (flight 40b6dbc0). Option A has no safe pair left.
-- **Next flight:** `effect history:` census line (hidden px per eye-frame, covered px per draw, GPU ms per replica, `HDR target ... readable`); on a glow
-  capture the box stats' `by the effect rule N` and the `effect rule:` line. A census saying the HDR target COULD NOT BE READ means the game's HDR target could not be bound
-  or was not the eye's size at the pass. Aim: press the inspector key once (a "+" shows at the head-forward point), then again within 3 s; the box is 48 px.
+  B75A6FF2 as an effect-only pair (~7M px/draw, the sky; flight d3013197); 68DDDEF0 as a weapons-only pair (constant ~200k px/draw background particles; hiding them
+  shimmered the stars, flight 40b6dbc0). Option A has no safe pair left.
+- **Next flight:** rim: `fix.sun_glare = off` against vivid (does the rim shimmer persist?), then HMD Quality 1.0. Aim: press the inspector key once (a "+" shows at
+  the head-forward point), then again within 3 s; the box is 48 px. Option A: `effect history:` census line, key `advanced.effect_history`.
 
 ## Triage
 
