@@ -16,6 +16,7 @@
 //   ring+0x48      the renderer; renderer->vtbl[0xa8]() -> object; object->vtbl[0x70]() is the main camera's ID
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -81,11 +82,25 @@ struct TupleTable {
     void clear() { used = 0; overflow = 0; for (auto& x : e) x = Entry(); }
 };
 
-// The arrival, as the ring pass shows it (flight 0dbd3964, docs/fss-scanner.md "v7 flown"): body mode 2 with the scan alpha still ramping UP (alpha below 1, direction 0).
-// Seen on the first such call, it starts the capture, whatever the zoom press or jump did or did not say.
-constexpr float kArrivalAlpha = 0.999f;
-inline bool isArrival(const Call& c) { return c.mode == 2 && c.alpha >= 0.0f && c.alpha < kArrivalAlpha && c.direction == 0; }
-inline bool rampDone(const Call& c) { return c.mode == 2 && c.alpha >= kArrivalAlpha; }
+// The arrival, as the ring pass shows it. Flight 0dbd3964 and flight f5c7ad89 (docs/fss-scanner.md) refuted the scan alpha and body mode as its clock: the alpha reads
+// 1.000 from the first call of the zoom. What does start with the zoom is the offscreen ring layer: ring+0x6b0 is clear in the sky view and set in the zoomed view,
+// where camera 1 (the main camera) draws four times a frame into it. So the first ring-pass call with ring+0x6b0 set is the arrival.
+inline bool isArrival(const Call& c) { return c.scratch; }
+
+// One trigger per zoom. The layer going away for more than kRearmGapFrames frames (the zoom ended, whatever the chrome did) re-arms it; so does the scanner being left.
+constexpr uint32_t kRearmGapFrames = 60;
+struct ArrivalLatch {
+    std::atomic<bool> latched{false};
+    std::atomic<uint32_t> lastFrame{0};
+    // True exactly once per zoom, on the first call with ring+0x6b0 set. `frame` is the frame counter the call was made in.
+    bool offer(const Call& c, uint32_t frame) {
+        if (!isArrival(c)) return false;
+        const uint32_t last = lastFrame.exchange(frame, std::memory_order_relaxed);
+        if (last != 0 && frame - last > kRearmGapFrames) latched.store(false, std::memory_order_relaxed);
+        return !latched.exchange(true, std::memory_order_acq_rel);
+    }
+    void rearm() { latched.store(false, std::memory_order_relaxed); }
+};
 
 // What a ring-pass call looks like to the draws made inside it (fss_ring_hook.cpp sets it around the forward, on the calling thread).
 struct Current {

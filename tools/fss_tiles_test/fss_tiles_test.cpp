@@ -245,7 +245,7 @@ void testBand() {
     ft::formatBand(line, sizeof(line), r);
     check(std::strstr(line, "| ran: eye1 drew eye0's lists (row 9.00)") != nullptr,
           "under the tiles candidate the line says eye 1 drew eye 0's lists, at eye 0's row");
-    check(ft::kBandBefore == 10 && ft::kBandAfter == 60 && ft::kMaxAutoRuns == 2 && ft::kGrid == 17, "the caps the task named");
+    check(ft::kBandBefore == 10 && ft::kBandAfter == 60 && ft::kMaxAutoRuns == 9 && ft::kGrid == 17, "the caps the task named");
 }
 
 void testV4Pure() {
@@ -267,7 +267,7 @@ void testV4Pure() {
     char tiny[10];
     ft::formatGrid(tiny, sizeof(tiny), [](uint32_t, uint32_t) { return 'x'; });
     check(std::strlen(tiny) < 10, "a short buffer is cut, never overrun");
-    check(ft::kRevealFrames == 600 && ft::kRunOffsets[0] == 20 && ft::kRunOffsets[1] == 150 && ft::kFingerEvery == 10 && ft::kTileGrid == 8 &&
+    check(ft::kRevealFrames == 600 && ft::kRunOffsets[0] == 0 && ft::kRunOffsets[1] == 30 && ft::kRunOffsets[2] == 270 && ft::kRunCount == 3 && ft::kFillEvery == 5 && ft::kFingerEvery == 10 && ft::kTileGrid == 8 &&
               ft::kTilePx == 16 && ft::kBufRegions * ft::kBufRegionBytes == 4096,
           "the numbers the task named");
     check(std::strcmp(ft::roleName(ft::Role::Gbuf8), "t8") == 0 && std::strcmp(ft::roleName(ft::Role::Gbuf11), "t11") == 0 && ft::kRoles == 14 &&
@@ -916,16 +916,14 @@ bool has(const std::string& s, const char* needle) { return s.find(needle) != st
 
 void testV8(const std::string& root) {
     namespace rh = edvr::ringhook;
-    // The arrival signature: body mode 2 with the scan alpha ramping up (below 1, direction 0).
+    // The arrival signature (v9): ring+0x6b0 set. The alpha, the body mode and the direction are not part of it (flight f5c7ad89: the alpha is 1.000 from the first call).
     rh::Call c;
-    c.mode = 2; c.alpha = 0.25f; c.direction = 0;
-    check(rh::isArrival(c) && !rh::rampDone(c), "mode 2 with alpha 0.25 ramping up is the arrival");
-    c.alpha = 1.0f;
-    check(!rh::isArrival(c) && rh::rampDone(c), "mode 2 with alpha 1.0 is the ramp done, not the arrival (flight 0dbd3964 window 2)");
-    c.alpha = 0.25f; c.mode = 1;
-    check(!rh::isArrival(c) && !rh::rampDone(c), "another body mode is neither");
-    c.mode = 2; c.direction = 1;
-    check(!rh::isArrival(c), "a ramp going down is not the arrival");
+    c.mode = 2; c.alpha = 1.0f; c.direction = 0; c.scratch = true;
+    check(rh::isArrival(c), "a call with ring+0x6b0 set at alpha 1.0 is the arrival");
+    c.scratch = false;
+    check(!rh::isArrival(c), "a call with ring+0x6b0 clear is not");
+    c.scratch = true; c.mode = 1; c.alpha = 0.25f; c.direction = 1;
+    check(rh::isArrival(c), "the body mode, the alpha and its direction do not matter");
 
     // A press 0.5 s after the capture closed finds the gate open and restarts the capture; the old one is over.
     ft::WindowMachine w;
@@ -946,32 +944,200 @@ void testV8(const std::string& root) {
 
     // The validity line.
     ft::Validity v;
-    v.chromeAtStart = true; v.arrivalFrame = 13273; v.runsRan = 2; v.runsPlanned = 2;
+    v.chromeAtStart = true; v.arrivalFrame = 13273; v.runsRan = 3; v.runsPlanned = 3;
     char line[800];
-    ft::formatValidity(line, sizeof(line), 1, "ring arrival (mode 2, scan alpha 0.083 ramping up, camera 1, seen at f=13273)", v);
-    check(std::strcmp(line, "fss tiles: capture 1 valid=yes (started by ring arrival (mode 2, scan alpha 0.083 ramping up, camera 1, seen at f=13273), mode 2 alpha<1 seen at f=13273, eye runs ran: 2 of 2 planned)") == 0,
+    ft::formatValidity(line, sizeof(line), 1, "ring arrival (the first ring-pass call with ring+0x6b0 set, camera 1, scan alpha 1.000, seen at f=13273)", v);
+    check(std::strcmp(line, "fss tiles: capture 1 valid=yes (started by ring arrival (the first ring-pass call with ring+0x6b0 set, camera 1, scan alpha 1.000, seen at f=13273), ring+0x6b0 set seen at f=13273, eye runs ran: 3 of 3 planned)") == 0,
           "a capture with the arrival, the chrome and its eye runs is valid");
     ft::Validity bad;
-    bad.chromeAtStart = true; bad.runsPlanned = 2; bad.endedBy = "the scanner chrome dropped (the scanner was left)";
+    bad.chromeAtStart = true; bad.runsPlanned = 3; bad.endedBy = "the scanner chrome dropped (the scanner was left)";
     ft::formatValidity(line, sizeof(line), 2, "zoom press at f=100", bad);
-    check(std::strstr(line, "capture 2 valid=no (started by zoom press at f=100, mode 2 alpha<1 seen at never, eye runs ran: 0 of 2 planned, ended by: the scanner chrome dropped") &&
-              std::strstr(line, "never showed mode 2 with alpha below 1") && std::strstr(line, "no eye run ran") && std::strstr(line, "cut short"),
+    check(std::strstr(line, "capture 2 valid=no (started by zoom press at f=100, ring+0x6b0 set seen at never, eye runs ran: 0 of 3 planned, ended by: the scanner chrome dropped") &&
+              std::strstr(line, "never showed ring+0x6b0 set") && std::strstr(line, "no eye run ran") && std::strstr(line, "cut short"),
           "an invalid capture says it is invalid and every reason");
 
     // Source pins.
     const std::string cpp = slurp(root + "/src/d3d11/fss_tiles.cpp");
     const std::string rhs = slurp(root + "/src/d3d11/fss_ring_hook.cpp");
-    check(!cpp.empty() && has(cpp, "fssRingHookTakeArrival(&aFrame, &aAlpha, &aCam)") && has(cpp, "g.win.restart(frameNo, nowMs())") && has(cpp, "g.restartRequested = true;") &&
+    check(!cpp.empty() && has(cpp, "fssRingHookTakeArrival(&aFrame, &aAlpha, &aCam)") && has(cpp, "g.rv.step(in)") && has(cpp, "g.rv.restartRequested = true;") &&
               has(cpp, "g.latch.jumpRefused(nowMs())"),
           "the arrival starts a capture, a later accepted press or jump restarts it, and a jump after the latch closed is refused");
     check(has(cpp, "formatValidity(vl, sizeof(vl), g.windowNo,") && has(cpp, "ring offscreen target identified: T%u") && has(cpp, "fss tiles: ring path f=%u cam=%d role=%u 6b0=%s") &&
-              has(cpp, "ring path -- offscreen ring target (ring+0x6b0)") && has(cpp, "ring offscreen target fill") && has(cpp, "fss tiles: input f=%u ring offscreen target T%u"),
+              has(cpp, "ring path -- offscreen ring target (ring+0x6b0)") && has(cpp, "ring offscreen target fill") && has(cpp, "fss tiles: ring fill f=%u T%u"),
           "the validity line, the ring path lines and the offscreen target lines are written");
-    check(has(cpp, "if (fssRingHookCurrent(&rc)) ringPathRecord(ctx, rtv, res, rc, instances);") && has(cpp, "detail::g_fssTilesDraws = g.win.capturing;"),
+    check(has(cpp, "if (fssRingHookCurrent(&rc)) ringPathRecord(ctx, rtv, res, rc, instances, seq);") && has(cpp, "detail::g_fssTilesDraws = g.rv.win.capturing;"),
           "the draws made inside a ring-pass call are recorded for the whole capture");
-    check(!rhs.empty() && has(rhs, "if (active || g_scan.load(std::memory_order_relaxed)) observe(ring, pass, camera, data, active);") &&
+    check(!rhs.empty() && has(rhs, "if (active || g_scan.load(std::memory_order_relaxed)) observe(ring, pass, camera, data, active);") && has(rhs, "g_latch.offer(c, frame)") &&
               has(rhs, "forward(ring, pass, camera, a4, a5, a6, a7, data);") && has(rhs, "t_cur.inCall = false;"),
           "every argument is forwarded unchanged, and the observation runs inside a capture or while the scanner is on show");
+}
+
+// ---- v9: the replay of flight f5c7ad89 (capture 4) through the decisions that missed three flights -----------------------------------------------------------
+// The sequence: a zoom press in the scanner at f18832 opens a gate-started capture; the ring pass starts calling at f18855 with ring+0x6b0 set and the scan alpha at 1.000 (never
+// below it); camera 1 draws into T42 252x252 from f18856 and into T43 1008x1008 from f18905; cameras 22 and 8 make the same calls and draw nothing. The scanner chrome is held
+// on every frame. The capture must arm at the arrival, re-identify the target at the change, and the eye runs must fire at +0, +30 and +270.
+void testV9Replay(const std::string& root) {
+    namespace rh = edvr::ringhook;
+    ft::RevealMachine m;
+    rh::ArrivalLatch latch;
+    ft::TargetTracker tracker;
+    int a_dummy = 0, b_dummy = 0;
+    const void* T42 = &a_dummy;
+    const void* T43 = &b_dummy;
+    uint32_t triggers = 0, firstTrigger = 0;
+    uint32_t armedAt = 0, openedAtArrival = 0, closedAt = 0, windowsAfter = 0;
+    uint32_t fired[3] = {0, 0, 0}, firedN = 0;
+    uint32_t firsts = 0, changes = 0, changedAt = 0, firstAt = 0;
+    uint32_t refusedRestartAt = 0;
+    bool pressRestartIgnored = false, ledgerStillOnAt100 = true;
+    ft::RevealMachine::Out armedOut;
+    for (uint32_t f = 18800; f <= 19600; ++f) {
+        // the glue: a zoom press while the scanner chrome is held opens the gate (fssTilesNoteZoomSignal)
+        if (f == 18832) m.gate.signal(f, 0);
+        // a later press while the arrival's reveal capture runs (the second jump of a zoom): it must not restart it
+        if (f == 18900) m.restartRequested = true;
+        // the ring pass runs inside this frame (before the boundary that ends it): cameras 1, 22, 8, passes 0 1 2 5 6 8, ring+0x6b0 clear then set
+        bool offered = false;
+        if (f >= 18855) {
+            const int cams[3] = {1, 22, 8};
+            const unsigned roles[3] = {1, 2, 0};
+            const int passes[6] = {0, 1, 2, 5, 6, 8};
+            for (int scratch = 0; scratch < 2; ++scratch) {
+                for (int ci = 0; ci < 3; ++ci) {
+                    for (int pi = 0; pi < 6; ++pi) {
+                        rh::Call c;
+                        c.camera = cams[ci]; c.role = roles[ci]; c.pass = passes[pi]; c.mode = 2; c.scratch = scratch != 0; c.alpha = 1.0f; c.direction = 0; c.active = 1;
+                        if (latch.offer(c, f)) { offered = true; ++triggers; if (!firstTrigger) firstTrigger = f; }
+                    }
+                }
+            }
+            // camera 1's four draws a frame into the layer: T42, then T43 from f18905
+            const void* target = f >= 18905 ? T43 : T42;
+            const ft::TargetTracker::Result r = tracker.observe(target);
+            if (r == ft::TargetTracker::First) { ++firsts; firstAt = f; }
+            if (r == ft::TargetTracker::Changed) { ++changes; changedAt = f; }
+        }
+        // the boundary that ends frame f-1 and starts f; the arrival seen in frame f is taken at the next one (the glue's order)
+        ft::RevealMachine::In in;
+        in.frame = f;
+        in.ms = 1000 + static_cast<uint64_t>(f - 18800) * 11;
+        in.chromeAgo = 0;
+        in.arrivalOffered = false;
+        static bool pending = false;
+        if (f == 18800) pending = false;
+        in.arrivalOffered = pending;
+        pending = offered;
+        const bool wasCapturing = m.win.capturing;
+        const ft::RevealMachine::Out o = m.step(in);
+        if (o.armed) { armedAt = f; armedOut = o; windowsAfter = m.win.windows; }
+        if (o.ev == ft::WindowMachine::Opened && o.start == ft::RevealMachine::StartArrival) openedAtArrival = f;
+        if (o.restartIgnored) refusedRestartAt = f;
+        if (o.fire) { if (firedN < 3) fired[firedN] = f; ++firedN; }
+        if (o.ev == ft::WindowMachine::Closed && closedAt == 0 && wasCapturing) closedAt = f;
+        if (f == armedAt + 100 && armedAt) { ledgerStillOnAt100 = m.ledgerOn; pressRestartIgnored = m.win.windows == windowsAfter && m.win.capturing && m.revealUntil == armedAt + ft::kRevealFrames; }
+        (void)ledgerStillOnAt100;
+    }
+    check(triggers == 1 && firstTrigger == 18855, "the first ring-pass call with ring+0x6b0 set triggers, once, at f18855, though the alpha is 1.000 throughout (flight f5c7ad89)");
+    check(armedAt == 18856 && openedAtArrival == 18856 && armedOut.armed && armedOut.armedRuns == 3 && armedOut.restarted && armedOut.start == ft::RevealMachine::StartArrival,
+          "the capture arms on the arrival, replacing the press-started one, with three eye runs planned");
+    check(m.win.windows == 2 && windowsAfter == 2, "the arrival restarts the capture a press had started: two windows, not three");
+    check(firedN == 3 && fired[0] == 18856 && fired[1] == 18886 && fired[2] == 19126, "the eye runs fire at +0, +30 and +270 frames from the arrival and at no other frame");
+    check(m.runs.ran == 3 && m.runs.planned == 3 && m.runs.sessionPlanned == 3, "all three runs ran");
+    check(pressRestartIgnored && refusedRestartAt == 18900, "a later press or jump during the reveal capture does not restart it");
+    check(closedAt == 18856 + ft::kRevealFrames + 1, "the capture runs its 600 frames and ends there");
+    check(!m.ledgerOn && m.revealUntil == 0, "the ledger and the reveal clock are done");
+    check(firsts == 1 && firstAt == 18855 && changes == 1 && changedAt == 18905 && tracker.cur == T43 && tracker.changes == 1,
+          "the offscreen target is identified at its first draw and re-identified once when it moves from T42 to T43");
+    ft::TargetTracker t2;
+    check(t2.observe(nullptr) == ft::TargetTracker::Same && t2.observe(T42) == ft::TargetTracker::First && t2.observe(T42) == ft::TargetTracker::Same &&
+              t2.observe(T43) == ft::TargetTracker::Changed && t2.observe(T42) == ft::TargetTracker::Changed && t2.changes == 2,
+          "the tracker reports a first target, no change, and every move");
+
+    // the validity of that capture
+    ft::Validity v;
+    v.chromeAtStart = true; v.arrivalFrame = 18855; v.runsRan = m.runs.ran; v.runsPlanned = m.runs.planned;
+    check(v.valid(), "the replayed capture is valid");
+
+    // the latch: one trigger per zoom, a new one after the layer was away for more than a minute of frames, or after the scanner was left
+    {
+        rh::ArrivalLatch l;
+        rh::Call on;
+        on.scratch = true;
+        rh::Call off;
+        check(!l.offer(off, 10) && l.offer(on, 11) && !l.offer(on, 12) && !l.offer(off, 13) && !l.offer(on, 14), "the latch triggers on the first call with ring+0x6b0 set and then stays quiet");
+        check(!l.offer(on, 14 + rh::kRearmGapFrames) && l.offer(on, 14 + rh::kRearmGapFrames + rh::kRearmGapFrames + 1), "a gap of more than kRearmGapFrames frames makes the next zoom a new arrival");
+        l.rearm();
+        check(l.offer(on, 400), "leaving the scanner re-arms it");
+    }
+
+    // an arrival while the chrome is not held is refused and starts nothing
+    {
+        ft::RevealMachine mm;
+        ft::RevealMachine::In in;
+        in.frame = 500; in.ms = 5000; in.chromeAgo = 20; in.arrivalOffered = true;
+        const ft::RevealMachine::Out o = mm.step(in);
+        check(o.arrivalRefused && !o.arrivalAccepted && o.ev == ft::WindowMachine::None && !mm.win.capturing && !o.armed && !mm.runs.pending[0], "an arrival without the scanner chrome is refused");
+    }
+    // leaving the scanner mid-capture ends it, cancels the pending runs, and the runs wait for the chrome
+    {
+        ft::RevealMachine mm;
+        ft::RevealMachine::In in;
+        in.frame = 100; in.ms = 1000; in.chromeAgo = 0; in.arrivalOffered = true;
+        ft::RevealMachine::Out o = mm.step(in);
+        check(o.armed && o.fire == 1u && mm.runs.pending[1] && mm.runs.pending[2], "armed with the first run fired at once");
+        in.arrivalOffered = false;
+        uint32_t refusedBits = 0, fired1 = 0;
+        for (uint32_t f = 101; f <= 135; ++f) {
+            in.frame = f; in.ms += 11;
+            in.chromeAgo = (f >= 130 && f < 134) ? 10u : 0u;   // the chrome is lost for a few frames when the second run is due
+            o = mm.step(in);
+            refusedBits |= o.refused;
+            if (o.fire == 2u) fired1 = f;
+        }
+        check(refusedBits == 2u && fired1 == 134, "a run that is due while the chrome is lost waits, is refused once, and starts when the chrome is back");
+        in.frame = 150; in.ms += 11; in.chromeAgo = ft::kChromeDropFrames + 1;
+        o = mm.step(in);
+        check(o.exited && o.endedBy[0] && !mm.win.capturing && o.ev == ft::WindowMachine::Closed && o.cancelledExit == 4u && mm.revealUntil == 0,
+              "leaving the scanner ends the capture and cancels the third run");
+    }
+    // a press-started capture that has not seen the arrival is restarted by a later press
+    {
+        ft::RevealMachine mm;
+        mm.gate.signal(10, 0);
+        ft::RevealMachine::In in;
+        in.frame = 10; in.ms = 100; in.chromeAgo = 0;
+        ft::RevealMachine::Out o = mm.step(in);
+        check(o.ev == ft::WindowMachine::Opened && o.start == ft::RevealMachine::StartGate && !o.armed, "a press opens a gate-started capture that arms nothing");
+        mm.gate.signal(40, 0);
+        mm.restartRequested = true;
+        in.frame = 40; in.ms = 500;
+        o = mm.step(in);
+        check(o.ev == ft::WindowMachine::Opened && o.restarted && o.start == ft::RevealMachine::StartRestart && mm.win.windows == 2 && !o.restartIgnored,
+              "a later press restarts a capture that has not found the arrival");
+    }
+    // the order of a draw among camera 1's four ring draws
+    check(ft::orderOf(50, 100, 103, 4) == ft::RingOrder::Before && ft::orderOf(101, 100, 103, 4) == ft::RingOrder::Between && ft::orderOf(100, 100, 103, 4) == ft::RingOrder::Between &&
+              ft::orderOf(200, 100, 103, 4) == ft::RingOrder::After && ft::orderOf(50, 0, 0, 0) == ft::RingOrder::NoRingDraws,
+          "a compositor draw is classified before, between or after camera 1's ring draws, or as having no ring draw to compare with");
+    check(std::strstr(ft::orderText(ft::RingOrder::Before), "BEFORE") && std::strstr(ft::orderText(ft::RingOrder::After), "AFTER") && std::strstr(ft::orderText(ft::RingOrder::Between), "BETWEEN"),
+          "the order text names the position");
+
+    // the glue uses all of it
+    const std::string cpp = slurp(root + "/src/d3d11/fss_tiles.cpp");
+    const std::string rhs = slurp(root + "/src/d3d11/fss_ring_hook.cpp");
+    check(has(cpp, "const RevealMachine::Out o = g.rv.step(in);") && has(cpp, "fssRingHookScan(chromeHeld(chromeAgo));") && has(cpp, "in.arrivalOffered = fssRingHookTakeArrival(&aFrame, &aAlpha, &aCam);") &&
+              has(rhs, "if (g_latch.offer(c, frame)) {"),
+          "the boundary feeds the machine the ring hook's trigger, and the hook feeds the latch every ring-pass call while the scanner chrome is held");
+    check(has(cpp, "if (rc.scratch && e->tw >= kMinTargetWidth) adoptRingTarget(res, e->tw, e->th, e->tfmt, rc);") && has(cpp, "const TargetTracker::Result tr = g.tracker.observe(res);") &&
+              has(cpp, "ring offscreen target CHANGED at f=%u"),
+          "every change of the offscreen target is logged and followed");
+    check(has(cpp, "*e = State::RPEnt();   // the entries are reused every frame") && has(cpp, "g.drawSeq = g.ringSeqFirst = g.ringSeqLast = g.ringSeqN = 0;"),
+          "the ring path's per-frame entries start clean, so draws= is a per-frame count");
+    check(has(cpp, "else if (g.ringTargetRef) compositorCheck(ctx, rtv, res, shape, instances, seq);") && has(cpp, "orderOf(c.firstSeq, g.ringSeqFirst, g.ringSeqLast, g.ringSeqN)") &&
+              has(cpp, "fss tiles: compositor f=%u %s draw #%u..#%u") && has(cpp, "window %u compositors -- no draw outside the ring pass sampled the offscreen ring layer"),
+          "the draws that sample the layer are found, ordered against camera 1's ring draws and said, nothing found included");
+    check(has(cpp, "ringSnapshot(g.frame);") && has(cpp, "drainRingSnap(frameNo);") && has(cpp, "frame % kFillEvery != 0") && has(cpp, "if (g.snap.used && !g.snap.drained) return true;"),
+          "the layer's fingerprint is taken at the end of a frame every kFillEvery frames and read back without a stall");
 }
 
 void testSourcePins(const std::string& root) {
@@ -1067,7 +1233,7 @@ void testSourcePins(const std::string& root) {
     const std::string cpp = slurp(root + "/src/d3d11/fss_tiles.cpp");
     check(has(cpp, "swapBack(ops, g.sw)") && has(cpp, "if (!ok || g.sw.swapped)"), "the fault path restores the bindings from outside the guarded dispatch");
     check(has(cpp, "D3D11_MAP_FLAG_DO_NOT_WAIT"), "the read-back never waits");
-    check(has(cpp, "fssRingHookWindow(g.win.capturing, g.windowNo, frameNo);") && has(cpp, "fssRingHookWindowSummary(g.windowNo);"),
+    check(has(cpp, "fssRingHookWindow(g.rv.win.capturing, g.windowNo, frameNo);") && has(cpp, "fssRingHookWindowSummary(g.windowNo);"),
           "the capture window is handed to the ring hook each frame and its summary is said with every window's");
     check(has(cpp, "fss tiles: window %u lists --") && has(cpp, "fss tiles: window %u writes --") &&
               has(cpp, "no clear, copy or update touched any of them") && has(cpp, "samples read=%u"),
@@ -1076,16 +1242,18 @@ void testSourcePins(const std::string& root) {
               has(cpp, "an event needs a step of %u") && has(cpp, "Band watch: armed"),
           "the band watch says it armed, what it saw in every window (zero events included) and each event");
     {
-        const size_t pend = cpp.find("g.runPending[k] = true;");
+        const std::string core = slurp(root + "/src/d3d11/fss_tiles_core.h");
+        const size_t pend = core.find("pending[k] = true;");
         const size_t bnd = cpp.find("void fssTilesFrameBoundary(");
         const size_t arm = cpp.find("temporalPassArmEyeDump();", bnd);
         check(pend != std::string::npos && bnd != std::string::npos && arm != std::string::npos && arm > bnd &&
-                  cpp.find("temporalPassArmEyeDump();") == arm,
-              "the automatic eye run is only ever started from the frame boundary, never from inside the dispatch hook");
-        check(has(cpp, "g.autoRunsPlanned < kMaxAutoRuns") && has(cpp, "!g.windowEventFired") && has(cpp, "why == BandWatch::AllSmall"),
+                  cpp.find("temporalPassArmEyeDump();") == arm && has(cpp, "if (o.fire & (1u << k)) {"),
+              "the automatic eye run is only ever started from the frame boundary, never from inside the dispatch hook, and only for a run the machine fired");
+        check(has(cpp, "g.rv.runs.sessionPlanned < kMaxAutoRuns") && has(cpp, "!g.windowEventFired") && has(cpp, "why == BandWatch::AllSmall") &&
+                  has(core, "const uint32_t room = kMaxAutoRuns > sessionPlanned ? kMaxAutoRuns - sessionPlanned : 0;"),
               "one all-small event a window and at most kMaxAutoRuns planned runs a session");
-        check(has(cpp, "g.revealUntil = g.frame + kRevealFrames;") && has(cpp, "if (ev == WindowMachine::Closed) ev = WindowMachine::None;") &&
-                  has(cpp, "g.win.capturing = true;"),
+        check(has(core, "revealUntil = frame + kRevealFrames;") && has(core, "if (o.ev == WindowMachine::Closed) o.ev = WindowMachine::None;") &&
+                  has(core, "win.capturing = true;"),
               "after the event the capture continues for kRevealFrames whatever the zoom window does");
     }
     check(has(cpp, "fss tiles: gbuf f=%u") && has(cpp, "fss tiles: input f=%u eye%u") && has(cpp, "fss tiles: window %u upstream --") &&
@@ -1100,7 +1268,7 @@ void testSourcePins(const std::string& root) {
               has(cpp, "never armed: no all-small event in this window") && has(cpp, "none: the two eyes' lists matched in every compared frame") &&
               has(cpp, "no draw matched the ring family"),
           "every window says what the eye diff compared and found, what went to unpaired targets, and what the ring family did, none included");
-    check(has(cpp, "g.ledgerOn = true;") && has(cpp, "g.ledgerUntil = g.frame + kLedgerFrames;") && has(cpp, "if (g.ledgerOn && frameNo > g.ledgerUntil) g.ledgerOn = false;") &&
+    check(has(slurp(root + "/src/d3d11/fss_tiles_core.h"), "ledgerOn = true;\n        ledgerUntil = frame + kLedgerFrames;") && has(slurp(root + "/src/d3d11/fss_tiles_core.h"), "if (ledgerOn && in.frame > ledgerUntil) ledgerOn = false;") &&
               has(cpp, "flushLedger(g.frame);"),
           "the ledger starts at the all-small event, runs kLedgerFrames and is flushed once a frame at the boundary");
     check(has(cpp, "eye_final_capture::g_reduceLevel = kReduceLevel;") && has(cpp, "eye_final_capture::g_reduceLevel = 0;"),
@@ -1112,7 +1280,7 @@ void testSourcePins(const std::string& root) {
               has(cpp, "chrome held=%s, last matched %s"),
           "the band event, each eye run and each jump or press the gate refuses is logged with its reason, and the window-opened line says whether the chrome was held");
     check(has(cpp, "fss tiles: window %u gate closed at f=%u: %s.") && has(cpp, "The reveal capture ends with it, and any pending eye run is cancelled.") &&
-              has(cpp, "g.gate.step(frameNo, chromeAgo, focusKnown, focus)") && has(cpp, "if (!chromeHeld(chromeAgo)) {"),
+              has(slurp(root + "/src/d3d11/fss_tiles_core.h"), "gate.step(in.frame, in.chromeAgo, in.focusKnown, in.focus)") && has(cpp, "o.refused & (1u << k)"),
           "leaving the scanner or losing FSS focus closes the window and ends the capture, and an eye run waits for the chrome");
     check(has(cpp, "fss tiles: eye-dump key at f=%u") && has(cpp, "outside a capturing zoom window"), "the eye-dump key's reception is logged either way");
     check(has(cpp, "fss tiles: window %u opened") && has(cpp, "fss tiles: window %u closed") && has(cpp, "fss tiles: instrument armed"),
@@ -1145,6 +1313,7 @@ int main(int argc, char** argv) {
     testLedger();
     testGate();
     testV8(root);
+    testV9Replay(root);
     testFakeRestore();
 
     const auto createDevice = edvr::systemD3D11CreateDevice();

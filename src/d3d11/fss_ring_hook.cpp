@@ -93,7 +93,7 @@ std::atomic<uint32_t> g_windowNo{0};
 std::atomic<uint32_t> g_frame{0};
 std::atomic<uint32_t> g_windowStartFrame{0};
 std::atomic<bool> g_scan{false};                  // the scanner is on show: look for the arrival even outside a capture
-std::atomic<bool> g_arrivalLatched{false};        // one trigger per zoom: cleared when the ramp finishes or the scanner is left
+ArrivalLatch g_latch;                             // one trigger per zoom: the first call with ring+0x6b0 set; re-armed when the layer goes away or the scanner is left
 std::atomic<bool> g_trigPending{false};
 std::atomic<uint32_t> g_trigFrame{0}, g_trigAlphaBits{0};
 std::atomic<int> g_trigCamera{0};
@@ -189,19 +189,15 @@ void observe(uintptr_t ring, int pass, uintptr_t camera, uintptr_t data, bool ac
         noteFault();
         return;
     }
-    // The arrival: body mode 2 with the scan alpha ramping up. One trigger per zoom (the latch); inside a capture the first sighting is also recorded for the validity line.
-    if (isArrival(c)) {
-        if (active && g_arrivalInWindow.load(std::memory_order_relaxed) == 0) g_arrivalInWindow.store(frame ? frame : 1u, std::memory_order_relaxed);
-        if (!g_arrivalLatched.exchange(true, std::memory_order_acq_rel)) {
-            uint32_t bits = 0;
-            std::memcpy(&bits, &c.alpha, sizeof(bits));
-            g_trigAlphaBits.store(bits, std::memory_order_relaxed);
-            g_trigCamera.store(c.camera, std::memory_order_relaxed);
-            g_trigFrame.store(frame, std::memory_order_relaxed);
-            g_trigPending.store(true, std::memory_order_release);
-        }
-    } else if (rampDone(c)) {
-        g_arrivalLatched.store(false, std::memory_order_relaxed);
+    // The arrival: the first call with ring+0x6b0 set. One trigger per zoom (the latch); inside a capture the first sighting is also recorded for the validity line.
+    if (isArrival(c) && active && g_arrivalInWindow.load(std::memory_order_relaxed) == 0) g_arrivalInWindow.store(frame ? frame : 1u, std::memory_order_relaxed);
+    if (g_latch.offer(c, frame)) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &c.alpha, sizeof(bits));
+        g_trigAlphaBits.store(bits, std::memory_order_relaxed);
+        g_trigCamera.store(c.camera, std::memory_order_relaxed);
+        g_trigFrame.store(frame, std::memory_order_relaxed);
+        g_trigPending.store(true, std::memory_order_release);
     }
     if (!active) return;
     if (g_tallyWindow != window) {      // a new window: its own tallies
@@ -312,7 +308,7 @@ void fssRingHookInstall() {
 
 void fssRingHookScan(bool wanted) {
     g_scan.store(wanted && g_installed.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    if (!wanted) g_arrivalLatched.store(false, std::memory_order_relaxed);
+    if (!wanted) g_latch.rearm();
 }
 
 bool fssRingHookTakeArrival(uint32_t* frame, float* alpha, int* camera) {
