@@ -108,6 +108,8 @@ void uiLayerConfigure(Config& cfg);
 // lit HDR target, the G-buffer), 2 an eye target viewed as 8-bit UNORM (the
 // post-tonemap target the UI composites draw into).
 int uiLayerTargetKind();
+// The colour target resource (identity only) of the draw uiLayerTargetKind() was just asked about; null when that answer was 0.
+const void* uiLayerTargetResource();
 
 // For an owner-context draw whose family vscreen.cpp recognised
 // (ui_layer_math.h's UiLayerFamily, as an int): true when the draw goes to

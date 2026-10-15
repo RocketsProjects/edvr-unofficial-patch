@@ -21,6 +21,9 @@ namespace edvr {
 // The GPU census's spans (ui_depth.cpp's hologram sub-sections, 2026-10-13). This rig does not run the census, so they are inert here.
 bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
+// The panel data-flow census (ui_depth.cpp, 2026-10-14) asks vscreen for the eye-size test and the node probe for its clause; this rig runs neither (its binding shadow aborts if asked).
+bool vScreenIsEyeSized(uint32_t, uint32_t) { return false; }
+void uiNodeProbeClause(char* out, size_t cap) { if (cap) out[0] = 0; }
 ID3D11VertexShader* shaderSwapCreateVs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
     ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11VertexShader* shader=nullptr;
     if(FAILED(dev->CreateVertexShader(bytes,size,nullptr,&shader)))return nullptr;return shader;

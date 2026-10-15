@@ -2965,6 +2965,9 @@ void logTotals(double seconds) {
         uiSceneCompositeFormat(composites, sizeof(composites), g_win.scene, g_win.frames, uiDepthWantsDraws());
         Log::get().note("%s", composites);
     }
+    // The panel data-flow census (ui_panel_tag.h; observe only): two lines every window, zeros included, "NOT COUNTED" when the interface
+    // depth pass is off, so a log without them is a build that never ran it.
+    uiDepthBoundaryReport(g_win.frames, runtimeFlatProfile() ? "flat" : "vr");
     // The family census: what the family rule made of the two composites'
     // draws -- the ones it turned away never reach a decision above.
     {
@@ -3175,6 +3178,8 @@ int uiLayerTargetKind() {
                     : 1;
     return g_tc.kind;
 }
+
+const void* uiLayerTargetResource() { return g_tc.kind != 0 ? g_tc.info.resource : nullptr; }
 
 // --------------------------------- the VR world route's re-issue (ui_layer.h)
 //

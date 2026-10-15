@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include "holo_motion.h"
+#include "ui_panel_tag.h"   // the PS SRV panel bits: uiPanelTagMask is the draw path's one read
 
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
@@ -102,6 +103,21 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 //     SHARED, so the layer and this pass can never disagree about an eye.
 //     -1 for a third target of one shape, or a full table.
 int uiDepthSampledSurfaceSlot();
+
+// The panel tag and its census (ui_panel_tag.h; docs/ui-layer-2026-09-23.md, "2026-10-14: the panel data-flow census"). OBSERVE ONLY:
+// nothing is moved or decided from any of this.
+//   uiDepthTagBind      the PSSetShaderResources hook, right after the shadow's cells were written: the slots [start, start+n) that
+//                       fall in 0..3 are tagged from the shadow (a pointer-hash probe; a view not seen lately is resolved once). When the
+//                       learned set has changed since the bits were made, all four slots are recomputed.
+//   uiDepthBoundaryNoteDraw  one owner draw into an eye target (targetKind: uiLayerTargetKind, 1 the lit HDR target, 2 the 8-bit
+//                       post-tonemap one; listed: the hash rule named a family). Reads the bit; scans no slot.
+//   uiDepthBoundaryReport    the layer's 30 s tick: the two "ui boundary" lines, then the window starts over.
+// All three are one test while the interface depth pass is off.
+void uiDepthTagBind(unsigned start, unsigned n);
+void uiDepthBoundaryNoteDraw(int targetKind, const void* target, bool listed);
+void uiDepthBoundaryReport(uint64_t layerFrames, const char* profile);
+// The engine's UI node probe (ui_node_probe.h) tells the census where its calls fell among the draws.
+void uiDepthBoundaryDrawPosition(uint32_t* lit, uint32_t* ldr, unsigned long* thread);
 int uiDepthEyeOfTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt);
 // The read-only form, for observers (the HUD layer census): a query that
 // REGISTERS changes the table the deciding paths then read. On 2026-09-27

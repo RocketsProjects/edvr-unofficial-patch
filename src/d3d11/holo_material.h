@@ -31,4 +31,14 @@ constexpr unsigned holoSurfaceSlot(uint64_t ps) {
 // TEXCOORD7 and TEXCOORD8, which this vertex shader does not write.
 constexpr uint64_t kHoloGuiFxOffVs = 0x1989E6D3B405FDE0ull;
 constexpr uint64_t kHoloGuiFxOffPs = 0xEAB8A1C95A13FFBEull;
+
+// A THIRD VERTEX SHADER FOR THE COCKPIT PANELS, seen on game build 332841 (issue 90, Tomcatt, Valve Index, DLAA; logs
+// edvr_gfx_20261014_224826 and _225842). vs 925ACEDA0153AA5B composites a learned interface surface into the lit
+// R11G11B10 eye target 22-25 draws a frame, the same count as the 1989E6D3 panels, and until the game switched to
+// 1989E6D3 mid-session (23:03:20, with EDHM off) the census listed it as "no family" and left it in the scene: no
+// depth, no mask, so DLAA smeared the panel text when the head turned. With EDHM chained only its pixel shader
+// changes (738A98ED038E58B7 stock, 9BBEB813F471B4E3 under EDHM); the layer's rule keys on the vertex shader alone.
+// It is NOT disassembled, so the same conclusion as kHoloGuiFxOffVs is drawn without the proof: the layer takes it
+// (the take needs no knowledge of the shader's outputs) and there is no depth stand-in or flat recipe for it.
+constexpr uint64_t kHoloPanelAltVs = 0x925ACEDA0153AA5Bull;
 }

@@ -45,6 +45,9 @@ namespace detail { bool g_objectProbeOn = false; bool g_objectProbeLedgerOn = fa
 // The GPU census's spans (ui_depth.cpp's hologram sub-sections, 2026-10-13): this rig does not run the census, so they are inert.
 bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
+// The panel data-flow census (ui_depth.cpp, 2026-10-14) asks vscreen for the eye-size test and the node probe for its clause; this rig runs neither (its binding shadow aborts if asked).
+bool vScreenIsEyeSized(uint32_t, uint32_t) { return false; }
+void uiNodeProbeClause(char* out, size_t cap) { if (cap) out[0] = 0; }
 Log& Log::get() { static Log instance; return instance; }
 Log::~Log() = default;
 // Unlike tools\ui_depth_test's no-op stub, this one FORMATS the message:

@@ -591,7 +591,8 @@ enum class UiLayerFamily : uint8_t {
     kSurface,    // any other eye draw sampling a learned interface surface
     kGuiDirect,  // a GUI-family draw (vector/text/icon) straight into an eye
     kHolo,       // cockpit holo panels (vs 81216C77F90DEDD6; with Elite's Disable
-                 // GUI effects on, vs 1989E6D3B405FDE0: uiVsIsHoloPanel)
+                 // GUI effects on, vs 1989E6D3B405FDE0; build 332841's third,
+                 // vs 925ACEDA0153AA5B: uiVsIsHoloPanel)
     kFlightHud,  // flight HUD (vs B7790CBFC6554097)
     kSprite,     // target-time sprite (vs E508648660A352B2)
     kHoloGeneric,  // the crisp take's eight (holo_families.h kHoloFamiliesTake:
@@ -785,6 +786,9 @@ constexpr uint64_t kUiVsHolo = 0x81216C77F90DEDD6ull;
 // effects", user 5 on rc.5: soft panels, ghosting text; the pair in 3 of 3 field logs with the
 // setting on and 0 of 11 with it off).
 constexpr uint64_t kUiVsHoloGuiFxOff = kHoloGuiFxOffVs;
+// ...and a third, seen on game build 332841 (issue 90, Tomcatt: 22-25 draws a frame as "no family", the
+// 1989E6D3 panels' count, until the game switched to 1989E6D3 mid-session): holo_material.h has the evidence.
+constexpr uint64_t kUiVsHoloAlt = kHoloPanelAltVs;
 constexpr uint64_t kUiVsFlightHud = 0xB7790CBFC6554097ull;
 constexpr uint64_t kUiVsSprite = 0xE508648660A352B2ull;
 constexpr uint64_t kUiVsGuiVector = 0x666EF0C4C616F67Eull, kUiVsGuiText = 0x1012E00B3CB44469ull,
@@ -815,10 +819,10 @@ inline bool uiKnownPs(const uint64_t* list, size_t n, uint64_t ps) {
     return false;
 }
 
-// The cockpit holo panels' vertex shaders: the stock one's, and the one the game draws them with
-// while Disable GUI effects is on. The ONE place that says so: both of uiLayerFamilyFor's
+// The cockpit holo panels' vertex shaders: the stock one's, the one the game draws them with
+// while Disable GUI effects is on, and the third seen on build 332841 (kUiVsHoloAlt). The ONE place that says so: both of uiLayerFamilyFor's
 // branches ask it, so a panel the HDR take names is named on the post-tonemap target too.
-constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff; }
+constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff || vs == kUiVsHoloAlt; }
 
 struct UiFamilyFacts {
     int targetKind = 0;           // uiLayerTargetKind: 0 no eye target, 1 not 8-bit UNORM, 2 post-tonemap
@@ -874,8 +878,8 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
         // repaired and all dependencies prepared before redirecting. Unknown
         // sphere variants and the shared world/cockpit corona remain stock.
         // World-marker brackets remain in the original scene. The cockpit holo
-        // panels are two vertex shaders (uiVsIsHoloPanel): the stock one and the
-        // one the game switches in with Disable GUI effects on. An unnamed pair
+        // panels are three vertex shaders (uiVsIsHoloPanel): the stock one, the
+        // one the game switches in with Disable GUI effects on, and build 332841's third. An unnamed pair
         // gets no decision and no refusal line (2026-10-01: soft, ghosting panels
         // for a user with the setting on), which is why ui_scene_composites.h
         // counts the composites left in the scene. The three supercruise draws (the

@@ -59,6 +59,8 @@ KNOWN = {
     '81216C77F90DEDD6': 'holo-panel composite (24/frame)',
     # The same panels with Elite's Disable GUI effects on (ps EAB8A1C95A13FFBE; docs/ui-layer-2026-09-23.md, 2026-10-01).
     '1989E6D3B405FDE0': 'holo-panel composite, Disable GUI effects on (22-24/frame)',
+    # A third panel vertex shader on game build 332841 (issue 90, Tomcatt): 22-25/frame, the same count.
+    '925ACEDA0153AA5B': 'holo-panel composite, build 332841 third shader (22-25/frame)',
     'E508648660A352B2': 'interface-surface composite',
     'B7790CBFC6554097': 'flight HUD vectors (direct)',
     '5DA53D8B0133341E': 'target indicator quad (direct)',
@@ -766,10 +768,10 @@ def self_test():
         print('self-test: the depth token described wrong: %r'
               % tok_desc(censuses[0], '@2'))
         return 1
-    # The cockpit's holo panels are two vertex shaders, the second the one the game draws them with
+    # The cockpit's holo panels are three vertex shaders (the third from game build 332841); the second is the one the game draws them with
     # while Disable GUI effects is on (docs/ui-layer-2026-09-23.md, 2026-10-01): both are labelled,
     # so a census of such a rig does not list its panels as an unnamed composite.
-    for vh in ('81216C77F90DEDD6', '1989E6D3B405FDE0'):
+    for vh in ('81216C77F90DEDD6', '1989E6D3B405FDE0', '925ACEDA0153AA5B'):
         if 'holo-panel' not in KNOWN.get(vh, ''):
             print('self-test: the holo-panel composite vs %s is not labelled' % vh)
             return 1

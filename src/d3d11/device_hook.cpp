@@ -98,6 +98,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "light_grid_cache_hook.h"   // lightGridCacheInstall at startup, lightGridCachePoll once a second, lightGridCacheNoteFrame per Present: the fragment-culling grid cache (both profiles)
+#include "ui_node_probe.h"   // uiNodeProbeInstall: the OBSERVE-ONLY probe on the engine's UI node (the panel data-flow census)
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
 #include "planet_lod_trace_hook.h"   // planetLodTraceInstall at startup, planetLodTracePoll once a second: TEMPORARY read-only trace of the terrain generation scheduler and tile tree
 #include "cross_profile_cost.h"   // the flat hooks' and the creation captures' cost while VR is active (log only)
@@ -3040,6 +3041,9 @@ void hookDevice(ID3D11Device* device) {
             // The planet LOD trace (TEMPORARY, planet_lod_trace_hook.cpp; docs/planet-lod-streaming-2026-10-14.md): five read-only CodeHooks on the generation scheduler and the tile tree,
             // both profiles, no key. A build that is not 332841 is one log line and nothing patched.
             planetLodTraceInstall();
+            // The UI node probe (ui_node_probe.cpp; docs/ui-layer-2026-09-23.md, "2026-10-14: the panel data-flow census"): one vtable slot of the game's UI node, pinned
+            // to build 332841 by stamp, slot value and prologue, swapped for a counter that calls the original. Observe only; both profiles; one line, live or inert.
+            uiNodeProbeInstall();
             // The optimized station (optimized_station.cpp): reads fix.optimized_stations; its hooks attach while it is on (VR by default; flat off).
             optimizedStationInstall(runtimeFlatProfile());
             // The blend probe (TEMPORARY, blend_probe.cpp): armed by key only; nothing is observed until then. One line: whether the key is bound.

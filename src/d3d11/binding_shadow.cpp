@@ -1,4 +1,5 @@
 #include "binding_shadow.h"
+#include "ui_panel_tag.h"  // the PS SRV slots' panel bits live and die with the shadow's cells
 
 #include <windows.h>
 
@@ -86,16 +87,28 @@ bool describeResource(ID3D11Resource* res, ResourceInfo* out) {
 
 }  // namespace
 
+namespace {
+// The panel bits (ui_panel_tag.h) are about what a PS SRV cell holds: a write to the cell, an invalidation or a forget ends the old
+// answer, and the tagger (ui_depth.cpp, called from vscreen's PSSetShaderResources hook right after the write) sets the new one.
+inline void panelBitsOf(BindSlot slot) {
+    const uint32_t i = static_cast<uint32_t>(slot);
+    const uint32_t first = static_cast<uint32_t>(BindSlot::PsSrv0);
+    if (i >= first && i < first + kPanelTagSlots) g_panelTag.clearSlot(i - first);
+}
+}  // namespace
+
 void bindingSet(BindSlot slot, void* ptr) {
     Slot& s = slotOf(slot);
     s.ptr = ptr;
     ++s.gen;
+    panelBitsOf(slot);
 }
 
 void bindingInvalidate(BindSlot slot) {
     Slot& s = slotOf(slot);
     s.ptr = nullptr;
     ++s.gen;
+    panelBitsOf(slot);
 }
 
 void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash) {
@@ -111,6 +124,7 @@ void bindingForgetAll() {
         s.hash = 0;
         ++s.gen;
     }
+    g_panelTag.forget();
 }
 
 void bindingFrameBoundary() {

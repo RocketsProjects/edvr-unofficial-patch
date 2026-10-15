@@ -656,6 +656,7 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\sky_ring.cpp" ^
     "src\d3d11\terrain_cull_cover_hook.cpp" ^
     "src\d3d11\planet_lod_trace_hook.cpp" ^
+    "src\d3d11\ui_node_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
@@ -1039,6 +1040,17 @@ if errorlevel 1 ( echo [edvr] ERROR: dlaa_mode_test build failed & exit /b 1 )
 "%BUILD%\dlaa_mode_test.exe" --self-test || exit /b 1
 REM tools\dlaa_mode_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
 python "tools\dlaa_mode_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_dlss_runtime_version_test
+echo [edvr] === dlss_runtime_version_test.exe ===
+if not exist "%OBJ%\dlss_runtime_version" mkdir "%OBJ%\dlss_runtime_version"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\dlss_runtime_version\\" /Fe"%BUILD%\dlss_runtime_version_test.exe" ^
+    "tools\dlss_runtime_version_test\dlss_runtime_version_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: dlss_runtime_version_test build failed & exit /b 1 )
+"%BUILD%\dlss_runtime_version_test.exe" --dry-run || exit /b 1
+"%BUILD%\dlss_runtime_version_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_format_support_test
@@ -3621,6 +3633,25 @@ if errorlevel 1 ( echo [edvr] ERROR: ui composite census test build failed & exi
 "%BUILD%\ui_composite_census_test.exe" --dry-run || exit /b 1
 "%BUILD%\ui_composite_census_test.exe" --self-test "%ROOT%" || exit /b 1
 python "tools\ui_composite_census_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_ui_panel_tag_test
+echo [edvr] === ui_panel_tag_test.exe ===
+REM The panel tag and the boundary census (src\d3d11\ui_panel_tag.h; docs\ui-layer-2026-09-23.md, "2026-10-14: the panel data-flow census"), OBSERVE ONLY: the PS SRV
+REM slots' panel bits (bind, unbind, overwrite, slot ranges, re-creation through the learned set's generation, and the production binding_shadow.cpp clearing them), the
+REM census window and its lines (the zero line, NOT COUNTED, the unlisted pairs, the cost arithmetic), the engine-node probe against a synthetic module image
+REM (src\d3d11\ui_node_probe.cpp with EDVR_UI_NODE_PROBE_TEST: pinned by stamp, slot value and prologue; inert on a mismatch; live it forwards and counts), a measured cost
+REM of the tagging half, and the source pins from the repo root (each with a control), among them that the draw path only reads the bit.
+if not exist "%OBJ%\uipaneltag" mkdir "%OBJ%\uipaneltag"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_UI_NODE_PROBE_TEST /I"src\d3d11" /I"src\common" ^
+    /Fo"%OBJ%\uipaneltag"\ /Fe"%BUILD%\ui_panel_tag_test.exe" ^
+    "tools\ui_panel_tag_test\ui_panel_tag_test.cpp" "src\d3d11\ui_node_probe.cpp" "src\d3d11\binding_shadow.cpp" ^
+    "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui panel tag test build failed & exit /b 1 )
+"%BUILD%\ui_panel_tag_test.exe" --dry-run || exit /b 1
+"%BUILD%\ui_panel_tag_test.exe" --self-test "%ROOT%" || exit /b 1
 exit /b 0
 
 :rig_flat_map_bounce_test
