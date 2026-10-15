@@ -1254,6 +1254,28 @@ void testFlatLayerRules() {
               !flatUiSourceTonePair(0xCFA91824129ECBBCull, 0x0D4329BDF65DE8F7ull),
           "EDHM 0D43 UI source tone: both VS qualify with PS 0D4329BDF65DE8F7; neighbouring PS 0D4329BDF65DE8F6 on VS F9CF "
           "and PS 0D43 on unrelated VS CFA918 do not");
+    check(flatUiShapeToneVs(0xF9CFC798F21E9AEAull) && flatUiShapeToneVs(0x43CA9F1C0AD2ACFEull) &&
+              flatUiShapeToneVs(0xCFA91824129ECBBCull) && !flatUiShapeToneVs(0) &&
+              !flatUiShapeToneVs(0xF9CFC798F21E9AEBull) && !flatUiShapeToneVs(0x1234567890ABCDEFull),
+          "shape tone VS: the three tone vertex shaders qualify; zero, a neighbouring hash and an arbitrary hash do not");
+    {
+        FlatUiShapeToneLog log;
+        check(log.record(1, 2) == FlatUiShapeToneLog::Result::NewPair &&
+                  log.record(1, 2) == FlatUiShapeToneLog::Result::Known,
+              "shape tone log: a pair is reported once as NewPair, then Known");
+        bool sixteenNew = true;
+        for (uint32_t i = 1; i < FlatUiShapeToneLog::kCapacity; ++i)
+            sixteenNew = sixteenNew && log.record(i + 1, 2) == FlatUiShapeToneLog::Result::NewPair;
+        check(sixteenNew && log.count == FlatUiShapeToneLog::kCapacity,
+              "shape tone log: sixteen distinct pairs are each NewPair and all are kept");
+        check(log.record(99, 2) == FlatUiShapeToneLog::Result::CapacityReached &&
+                  log.record(100, 2) == FlatUiShapeToneLog::Result::Full &&
+                  log.record(101, 2) == FlatUiShapeToneLog::Result::Full,
+              "shape tone log: the 17th distinct pair reports capacity once, and each later new pair is Full");
+        check(log.record(1, 2) == FlatUiShapeToneLog::Result::Known &&
+                  log.record(16, 2) == FlatUiShapeToneLog::Result::Known,
+              "shape tone log: a recorded pair stays Known after capacity");
+    }
     {
         FlatUiUnknownSourceToneLog log;
         check(log.shouldInspect(1, 2) &&
@@ -1553,13 +1575,18 @@ void testFlatLayerRules() {
         const std::string probe = afterSourceTone != std::string::npos && afterProbe != std::string::npos
             ? adapter.substr(afterSourceTone, afterProbe - afterSourceTone) : "";
         const size_t probeShape = probe.find("sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, true, shape)");
-        const size_t bloom = probe.find("ctx->PSGetShaderResources(2, 1, &bloom)");
+        const size_t bloom = probe.find("toneBloomInput(ctx)");
         const size_t record = probe.find("g_unknownSourceToneLog.record(vs, ps)");
+        const size_t bloomHelperAt = adapter.find("Ptr<ID3D11Resource> toneBloomInput(ID3D11DeviceContext* ctx) {");
+        const size_t bloomHelperEnd = bloomHelperAt == std::string::npos ? std::string::npos
+            : adapter.find("uint32_t g_candidateLines", bloomHelperAt);
+        const std::string bloomHelper = bloomHelperEnd != std::string::npos
+            ? adapter.substr(bloomHelperAt, bloomHelperEnd - bloomHelperAt) : "";
         check(probe.find("g_unknownSourceToneLog.shouldInspect(vs, ps)") < probeShape &&
                   probe.find("g_unknownSourceToneLog.reject(vs, ps)") != std::string::npos &&
                   probe.find("true, shape)) { reject(); return; }") != std::string::npos &&
-                  probe.find("if (!bloom) { reject(); return; }") != std::string::npos &&
-                  probe.find("if (bloomView.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) { reject(); return; }") != std::string::npos &&
+                  bloomHelper.find("if (!bloom) return {};") != std::string::npos &&
+                  bloomHelper.find("if (bloomView.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) return {};") != std::string::npos &&
                   probe.find("if (!bloomResource) { reject(); return; }") != std::string::npos,
               "wiring: cache precedes expensive queries and every physical/bloom rejection is negatively cached");
         check(!probe.empty() && probeShape != std::string::npos && bloom != std::string::npos &&
@@ -1579,6 +1606,26 @@ void testFlatLayerRules() {
                   mono.find("0d4329bdf65de8f7") == std::string::npos &&
                   sharedTone.find("0d4329bdf65de8f7") == std::string::npos,
               "wiring: EDHM 0D43 remains absent from the mono HDR selector and shared tonemap registry, in either hex case");
+        const size_t shapeAt = adapter.find("bool flatUiLayerShapeToneCandidate(");
+        const size_t shapeEnd = shapeAt == std::string::npos ? std::string::npos
+            : adapter.find("void flatUiLayerProbeUnknownSourceTone(", shapeAt);
+        const std::string shapeBody = shapeEnd != std::string::npos ? adapter.substr(shapeAt, shapeEnd - shapeAt) : "";
+        check(!shapeBody.empty() && shapeBody.find("outW, outH, /*unknownDiagnostic=*/false, shape)") != std::string::npos &&
+                  shapeBody.find("flatUiLayerToneCandidate(ctx, frame, renderW, renderH, 1, vs, ps,") != std::string::npos,
+              "wiring: the shape admission takes the strict physical shape (unknownDiagnostic false) and proves with slot 1");
+        check(shapeBody.find("!flatUiShapeToneVs(vs) || flatUiSourceTonePair(vs, ps)) return false;") != std::string::npos,
+              "wiring: the shape admission is gated to the three tone VS and excludes the named pairs (flatUiSourceTonePair)");
+        check(shapeBody.find("++g_w.toneByShape;") != std::string::npos &&
+                  shapeBody.find("sourceTonePhysicalShape(") < shapeBody.find("toneBloomInput(ctx)") &&
+                  shapeBody.find("toneBloomInput(ctx)") < shapeBody.find("++g_w.toneByShape;") &&
+                  shapeBody.find("++g_w.toneByShape;") < shapeBody.find("g_shapeToneLog.record(vs, ps)"),
+              "wiring: a shape admission counts toneByShape only after the physical shape and the t2 bloom both pass");
+        const size_t shapeCall = runtime.find("flatUiLayerShapeToneCandidate(ctx, s.prefix.frame");
+        const size_t probeCall = runtime.find("flatUiLayerProbeUnknownSourceTone(ctx, s.prefix.frame");
+        check(shapeCall != std::string::npos && probeCall != std::string::npos && shapeCall < probeCall &&
+                  runtime.substr(shapeCall, probeCall - shapeCall).find("else {") != std::string::npos &&
+                  runtime.find("startInstance, routeSoFar(), shapeAdmitted))") != std::string::npos,
+              "wiring: the unknown pair's shape admission runs first; the probe and VR's structural admission are its else branch");
     }
 }
 

@@ -6011,6 +6011,14 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             if (k.camera) { ui.haveRows = true; std::memcpy(ui.rows, d.camera, sizeof(ui.rows)); }
             ui.phaseX = s.phase.currentX; ui.phaseY = s.phase.currentY;
             ask = flatUiLayerDecide(ctx, ui);   // a cockpit HUD family's draw, or kNotAsked
+            // The route so far, for the tone branches below: the HDR route once it treated this frame, else the resolve plan's
+            // (trained-native, trained-upscale, ...), or none yet. Computed only when a tone branch runs, as before.
+            const auto routeSoFar = [&]() -> const char* {
+                return s.hdrTreated ? "hdr"
+                    : s.haveResolvePlan ? flatResolveRoute(s.plannedResolve.mode, s.plannedResolve.renderWidth, s.plannedResolve.renderHeight,
+                                                           s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
+                                        : "no-plan";
+            };
             if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; }
             else if (ask == FlatUiLayerAsk::kRefused) {}   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
@@ -6018,12 +6026,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             // The registry's tone pass, map tonemap, or the physically verified E894 and EDHM 0D43 LDR-source writers.
             // The E894 and 0D43 pairs remain UI-only: they do not enter the global tone registry or mono HDR selector.
             else if (tone || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u || flatUiSourceTonePair(k.vs, k.ps)) {
-                // The route so far: the HDR route once it treated this frame, else the resolve plan's (trained-native,
-                // trained-upscale, ...), or none yet.
-                const char* route = s.hdrTreated ? "hdr"
-                    : s.haveResolvePlan ? flatResolveRoute(s.plannedResolve.mode, s.plannedResolve.renderWidth, s.plannedResolve.renderHeight,
-                                                           s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
-                                        : "no-plan";
+                const char* route = routeSoFar();
                 if (flatUiSourceTonePair(k.vs, k.ps)) {
                     // Each physical capture (E894 and 0D43) issued one fullscreen triangle. Keep a partial draw from bootstrapping proof.
                     if ((kind == 'D' || kind == 'N') && count == 3 && instances == 1 && startInstance == 0)
@@ -6046,12 +6049,19 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 if (copySrv) copySrv->GetResource(&copySource);
                 flatUiLayerNoteCopy(s.prefix.frame, copySource.Get(), k.color);
             }
-            // Any other full-screen triangle may be the game's tonemap under a pair the flat list does not know: VR's
-            // structural admission, by the HUD source it reads.
+            // Any other full-screen triangle may be the game's tonemap under a pair the flat list does not know. An unknown pair
+            // that passes the full physical shape grants proof as a named pair does (Sean, 2026-10-15: a new EDHM version or settings
+            // tier must not need a named pair). Anything else is the probe's near miss and VR's structural admission, as before.
             else if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) {
-                flatUiLayerProbeUnknownSourceTone(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
-                    k.color, k.width, k.height, kind, count, instances, startInstance);
-                uiTone = flatUiLayerToneAdmit(ctx, s.prefix.frame, k.width, k.height, kind, count, instances, startInstance);
+                bool shapeAdmitted = false;
+                if (flatUiLayerShapeToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps, k.color, k.width, k.height,
+                                                  startInstance, routeSoFar(), shapeAdmitted))
+                    uiTone = shapeAdmitted;
+                else {
+                    flatUiLayerProbeUnknownSourceTone(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
+                        k.color, k.width, k.height, kind, count, instances, startInstance);
+                    uiTone = flatUiLayerToneAdmit(ctx, s.prefix.frame, k.width, k.height, kind, count, instances, startInstance);
+                }
             }
         }
         // A draw the layer leaves, while it holds this frame's HUD: a write of the depth buffer a seed copied makes it stale.

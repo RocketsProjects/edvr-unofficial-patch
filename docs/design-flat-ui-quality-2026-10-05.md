@@ -17,9 +17,10 @@
     eced5813's flat admission change not yet flown there.
   - Not flown: 100% at SS 1.0.
 - **2026-10-15, RC1 flat report (EDHM chained): built, not flown.** The cockpit
-  tone PS 0D4329BDF65DE8F7 was in no table, so the layer never armed (tone
-  candidates 0, holo-panels taken 0) and the panels ghosted. It joins E894 in
-  `flatUiSourceTonePair`. Entry at the end.
+  tone PS 0D4329BDF65DE8F7 was in no table, so the layer never armed and the
+  panels ghosted. It joins E894 in `flatUiSourceTonePair`, and (Sean) any unknown
+  pair on a tone VS that passes the full physical shape now grants proof
+  (`flatUiLayerShapeToneCandidate`). Entries at the end.
 - **Local flight:** 4b7bfec4, 120427.log, SS 0.5 then about 0.65/UI 125; the
   cleanup keeps the flown guards (88 CPU checks pass).
 - **The key:** `fix.ui_quality = off | 100 | 125`, default 100 in flat (the
@@ -44,8 +45,7 @@
     left in the frame;
   - the flat resize-loop fix (771bb99a): exercised OK by windowed resizes on
     13:23 and 13:51 (`result=ok refs=0`).
-- **Ruled-out pointer:** the 2026-10-09 entries below; VR's retired deferred
-  UI replay ([crisp-ui-handoff.md](crisp-ui-handoff.md)).
+- **Ruled-out pointer:** the 2026-10-09 entries; [crisp-ui-handoff.md](crisp-ui-handoff.md).
 - **0.19.0 review (10-09), finding 3:** the Supersampling setter's panel factor is
   held until the scene's size follows it, its epoch check and write one operation
   under the floats' lock (last entry; built, not flown).
@@ -781,10 +781,39 @@ joins E894 in `flatUiSourceTonePair`, with the same two VS. Admission still
 runs every physical check (`sourceTonePhysicalShape`). Like E894, it stays
 out of the global tone registry and the mono HDR selector.
 
-**Open, Sean's call.** Each new EDHM version or settings tier can bring
-another tone PS, and each costs a user report. The unknown probe already
-measures the full physical shape. Letting a pair that passes it grant proof
-would cover them all, but it reverses the October 11 rule.
-
 **Flight check.** In the cockpit, the 30 s line shows `tone-candidates` and
 `composites` above 0 and `holo-panels ... taken` above 0.
+
+## 2026-10-15: an unknown tone pair proves the tone by its physical shape
+
+**The decision (Sean, 2026-10-15).** It supersedes the October 11 rule that
+unknown pairs never bootstrap proof: "let an unknown tone pair that passes the
+full physical shape check grant UI-layer proof, so new EDHM versions don't need
+a named pair." Each new EDHM version or settings tier can bring another tone
+PS, and until now each one switched the layer off for that user, silently,
+until a report named it.
+
+**The rule (`flatUiLayerShapeToneCandidate`, branch claude/flat-ui-tone-by-shape).**
+A full-screen triangle (count 3, one instance, start instance 0) whose pair is
+in no table grants proof exactly as a named pair does, only when all of these
+hold:
+- its VS is one of the three tone VS (F9CF, 43CA, CFA9; EDHM replaces the PS);
+- the named pairs' strict physical shape (`sourceTonePhysicalShape`, not the
+  diagnostic one): one RTV, no DSV, no blend, PS cb2 at least 256 bytes,
+  the LDR output the copy reads (view format 28) at render size and full
+  viewport, the HDR read at t1, which is a physical HUD target of this frame,
+  and a 3D LUT at t0;
+- a 2D texture at t2 (the bloom, as the probe measured on 0D43).
+
+Each admitted pair is named once in the log (`tone pair admitted by its physical
+shape`). The 30 s line ends with `tone-by-shape=`. A pair that fails stays the
+probe's near miss, as before.
+
+**Why the shape is enough.** The draw reads the very HUD target the layer
+recorded this frame, at render size, and writes the full-size output the
+game's copy reads. Bloom, depth of field and exposure read H at reduced size or
+write float targets, so none of them can pass.
+
+**Flight check.** An EDHM-chained cockpit: `tone-by-shape` above 0, then
+`composites` and `holo-panels ... taken` above 0, and the admitted pair named
+once.

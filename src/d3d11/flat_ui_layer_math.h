@@ -91,6 +91,31 @@ inline bool flatUiSourceTonePair(uint64_t vs, uint64_t ps) {
     return (ps == kFlatUiSourceTonePs || ps == kFlatUiSourceTonePsEdhm) &&
            (vs == kFlatUiSourceToneVsSteady || vs == kFlatUiSourceToneVsTransition);
 }
+// The vertex shaders the game's tone pass is drawn with (flat_mono_detail::knownToneVs in flat_mono_frame.h names the same three:
+// the stock one, the no-constant passthrough and the cb2[2].y variant; none consumes a camera). EDHM replaces the tone's PIXEL
+// shader; an unknown pair is admitted by its shape only on one of these (flatUiLayerShapeToneCandidate).
+inline bool flatUiShapeToneVs(uint64_t vs) {
+    return vs == kFlatUiSourceToneVsSteady || vs == kFlatUiSourceToneVsTransition || vs == kFlatUiMapToneVs;
+}
+// Process-lifetime once-per-pair book of the unknown pairs the shape admission granted proof to, so each new pair is on record
+// exactly once. Pure, so the rig can test it. Like the unknown probe's book it never evicts: at capacity the 17th distinct pair
+// reports once and every later new pair is Full, while a recorded pair stays Known.
+struct FlatUiShapeToneLog {
+    static constexpr uint32_t kCapacity = 16;
+    struct Pair { uint64_t vs = 0, ps = 0; };
+    Pair pairs[kCapacity]{};
+    uint32_t count = 0;
+    bool capped = false;
+    enum class Result { NewPair, Known, CapacityReached, Full };
+    Result record(uint64_t vs, uint64_t ps) {
+        for (uint32_t i = 0; i < count; ++i)
+            if (pairs[i].vs == vs && pairs[i].ps == ps) return Result::Known;
+        if (capped) return Result::Full;
+        if (count == kCapacity) { capped = true; return Result::CapacityReached; }
+        pairs[count++] = {vs, ps};
+        return Result::NewPair;
+    }
+};
 // Process-lifetime diagnostic budget for physically qualifying unknown pairs.
 // No frame, route or resize resets it; exhausted is reported once.
 struct FlatUiUnknownSourceToneLog {
