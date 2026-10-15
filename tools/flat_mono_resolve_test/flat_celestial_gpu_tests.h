@@ -34,11 +34,11 @@ struct MonoConstants {
 };
 static_assert(sizeof(MonoConstants) == 336, "flat_mono_resolve.cpp's Constants (the prep's b0)");
 
-// flat_mono_shader_source.h's FlatCelestialRecord: six float4s.
+// The engine-motion core's CelestialRecord (flat_mono_shader_source.h reads it at t18): six float4s.
 struct Record {
     float m0[4], m1[4], m2[4], box[4], span[4], ctr[4];
 };
-static_assert(sizeof(Record) == 96, "FlatCelestialRecord: six float4s");
+static_assert(sizeof(Record) == 96, "CelestialRecord: six float4s");
 
 const float kIdentity[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
 
@@ -154,7 +154,7 @@ struct Output {
     std::vector<float> motion, rejection;
 };
 
-// The records buffer: `count` FlatCelestialRecords, the SRV the prep's t18 reads.
+// The records buffer: `count` CelestialRecords, the SRV the prep's t18 reads.
 ComPtr<ID3D11ShaderResourceView> recordsView(ID3D11Device* device, const std::vector<Record>& records) {
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = static_cast<UINT>(sizeof(Record) * records.size());

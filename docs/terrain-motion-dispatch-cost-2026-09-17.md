@@ -102,10 +102,11 @@ a v0.19.1 flat descent looked any better.
   the tangents, and on WARP a body pixel's motion against the analytic
   projection to 1e-3 px, a pixel outside it, a point behind the camera refused,
   bit clear unchanged). Removing the shader branch fails two of them.
-- Shader: `celestialBefore` applies VR's tests (box, depth span, radial shell)
-  and replaces the camera term for kind 0 and kind 3 pixels. A body point that
-  lands behind last frame's camera is refused history, never handed the
-  camera term.
+- Shader: `celestialBefore` replaces the camera term for kind 0 and kind 3
+  pixels. A body point that lands behind last frame's camera is refused
+  history, never handed the camera term. The record lookup (box, depth span,
+  radial shell, narrowest span wins) is `celestialLookup` in the engine-motion
+  core, the one copy VR's `celestialPixel` and the flat prep both run.
 
 ### 2026-10-08 -- the hangar fault: a straddling body claimed every world pixel; the path now runs in supercruise only
 

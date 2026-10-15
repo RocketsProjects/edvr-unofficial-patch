@@ -44,10 +44,9 @@ Texture2D<float> HistoryOutputDomain : register(t14);    // TAA only: last outpu
 Texture2D<float4> FlatForegroundMotion : register(t15); // SDK prep only: exact final foreground motion and canonical depth
 Texture2D<float4> SkinE : register(t17);                // prep only, bound when debug.w bit 2: the VR on-foot source's target 7 (F2): xyz a skinned character's previous - current
                                                          // position in centimetres, w 1 valid / 0 none, at the slot target's size; read at the pixel's own texel
-// Planet patch motion, flat (celestial_motion.h): one record per body, the layout of VR's CelestialRecord. Prep only, bound at t18 with debug.w
-// bit 3. Its own name, not VR's: the engine-motion core is compiled ahead of this source and a name collision must not happen.
-struct FlatCelestialRecord { float4 m0; float4 m1; float4 m2; float4 box; float4 span; float4 ctr; };
-StructuredBuffer<FlatCelestialRecord> CelestialRecords : register(t18); // prep only, bound with debug.w bit 3
+// Planet patch motion, flat (celestial_motion.h): one record per body, the engine-motion core's CelestialRecord. Prep only, bound at t18 with
+// debug.w bit 3.
+StructuredBuffer<CelestialRecord> CelestialRecords : register(t18); // prep only, bound with debug.w bit 3
 Texture2D<float4> OverlayColor : register(t16);         // HDR finish only, bound in overlay frames: the raw H with the protected late overlays
                                                          // drawn (t0 is then the CLEAN H, the image the backend was handed)
 SamplerState LinearClamp : register(s0);
@@ -106,7 +105,8 @@ bool cameraBefore(float2 uv, float depth, out float4 before) {
 R"HLSL(
 // Planet patch motion (celestial_motion.h; docs/terrain-motion-dispatch-cost-2026-09-17.md). 0: the pixel is in no body's
 // volume (the camera term stands); 1: before holds the body's own motion, cameraBefore's convention; 2: it is in a body
-// but last frame's point is not in front of the camera (no history). Same records and tests as VR's celestialPixel.
+// but last frame's point is not in front of the camera (no history). The lookup is the engine-motion core's celestialLookup, the one VR's
+// celestialPixel runs.
 uint celestialBefore(float2 rawUv, float depth, out float4 before) {
     before=0;
     if((debug.w&8)==0 || !(depth>0))return 0;
@@ -114,24 +114,11 @@ uint celestialBefore(float2 rawUv, float depth, out float4 before) {
     float z=now[3].z/depth;                     // view depth in metres: cameraBefore's iz is 1/z (reversed-Z, depth = near/z)
     float2 p=rawUv*float2(size.xy)-.5;          // the unjittered pixel, the records' box convention
     float3 P=float3(tn.x+rawUv.x*(tn.y-tn.x), tn.w-rawUv.y*(tn.w-tn.z), -1)*z;
-    int hit=-1; float narrow=3.0e38;
-    [loop] for(int i=0;i<16;++i) {
-        FlatCelestialRecord r=CelestialRecords[i];
-        if(r.span.z==0.0)break;
-        float span=r.span.y-r.span.x;
-        if(p.x>=r.box.x && p.x<=r.box.z && p.y>=r.box.y && p.y<=r.box.w && z>=r.span.x && z<=r.span.y && span<narrow) {
-            if(r.span.w>0.0) {
-                float slack=3.0*z*max((tn.y-tn.x)/float(size.x),(tn.w-tn.z)/float(size.y));
-                float radial=length(P-r.ctr.xyz);
-                if(!(radial>=r.ctr.w-slack && radial<=r.span.w+slack))continue;
-            }
-            hit=i; narrow=span;
-        }
-    }
-    if(hit<0)return 0;
-    FlatCelestialRecord r=CelestialRecords[hit];
-    float3 dp=float3(dot(r.m0.xyz,P)+r.m0.w, dot(r.m1.xyz,P)+r.m1.w, dot(r.m2.xyz,P)+r.m2.w);
-    if(!all(isfinite(dp)) || dp.z>=-1e-6)return 2;
+    float slack=3.0*z*max((tn.y-tn.x)/float(size.x),(tn.w-tn.z)/float(size.y));
+    float3 dp; int held=celestialLookup(CelestialRecords,p,P,z,slack,dp);
+    if(held<0)return 0;
+    if(held==0)return 2;
+    if(dp.z>=-1e-6)return 2;
     float w=-dp.z;
     float2 t=dp.xy/w;
     float2 prevUv=float2((t.x-tp.x)/(tp.y-tp.x),(tp.w-t.y)/(tp.w-tp.z));
