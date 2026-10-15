@@ -3768,3 +3768,13 @@ for the skip alone is the first item for a later cleanup.
   the dispatch recording.
 - The CB watch reads b0 only. A reveal value living in a later CB slot
   would need the watch widened — one more slot pair, same tee.
+
+## 2026-10-15: the replay is priced in the GPU census
+
+Review of main 9fe5b257, finding 5: the downsample replay and its private constant-buffer copies had no cost scope, and the removal of the old
+reveal section left the census with no FSS line at all. `GpuCensusSection::FrameFssReveal` ("FSS reveal replay" on the in-frame list, in the
+in-frame total) now wraps the two GPU work sites in `fss_reveal_replay.h`: the pooled copies in `captureState` and the replay draw with its
+two state applications in `replayDraw`. The hook glue in `fss_reveal.cpp` opens none, so the no-op watcher calls are not timed. The section
+has no rotation turn until called in a window, so a session with no scanner samples as before. `fss_reveal_test` counts the scopes for a
+record (one) and a replay (one) and for a failed replay or a bare read-back (none); `gpu_census_test` holds the section's place, turn and
+name in the 30 s line.
