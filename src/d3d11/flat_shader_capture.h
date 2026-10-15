@@ -26,6 +26,10 @@ inline constexpr FlatShaderCaptureKey kFlatShaderCaptureKeys[] = {
     // pairs before considering any change to HDR camera admission.
     {'v', 0x025B4B9FF54622EDull}, {'p', 0x46F92DC71BF8DFA5ull},
     {'v', 0x9AEC596A2B036EA6ull}, {'p', 0x3789CA2062E196FBull},
+    // 2026-10-14 the DLAA bloom entry (design doc section 107, TEMPORARY): the bloom's first level, its down and up passes, the exposure's
+    // small draw and the bloom-composite tone, to read the bloom's luminance handling (firefly suppression) and what the tone adds.
+    {'p', 0x143AAE0597E2F7BFull}, {'p', 0x5ECFE7085464069Bull}, {'p', 0x8826CACC6382C78Dull},
+    {'p', 0x831DF02EBA8AE814ull}, {'p', 0xE8948389387DA083ull},
 };
 inline constexpr size_t kFlatShaderCaptureCount =
     sizeof(kFlatShaderCaptureKeys) / sizeof(kFlatShaderCaptureKeys[0]);
@@ -35,6 +39,6 @@ inline constexpr uint32_t flatShaderCaptureBit(bool flat, char stage, uint64_t h
             return uint32_t(1) << i;
     return 0;
 }
-static_assert(kFlatShaderCaptureCount == 17 && kFlatShaderCaptureCount <= 32,
+static_assert(kFlatShaderCaptureCount == 22 && kFlatShaderCaptureCount <= 32,
               "bounded capture mask must cover the exact missing shader set");
 } // namespace edvr

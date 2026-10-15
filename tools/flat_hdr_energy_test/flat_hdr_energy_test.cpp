@@ -21,11 +21,13 @@
 
 #include "../flat_sharpen_test/flat_sharpen_rig.h"
 #include "../../src/d3d11/flat_hdr_energy.h"
+#include "../../src/d3d11/flat_bloom_probe.h"
 
 namespace edvr {
 thread_local bool g_flatComputeInternal = false;   // the hooks' bypass flag (flat_compute_readback.cpp), which this rig does not link
 void breadcrumb(const char*) {}                    // guard.cpp's crash trail and shader_swap.cpp's compile clock, neither under test
 void perfMonitorNoteEvent(uint32_t, double) {}
+uint64_t lookupShaderHash(void*) { return 0; }   // exposure_fix.cpp's registry, not under test (the rig binds no pixel shader)
 }
 
 using namespace rig;
@@ -163,6 +165,113 @@ bool sentinelHeld(ID3D11DeviceContext* ctx, const Sentinel& s) {
     return cs.Get() == s.cs.Get() && srv.Get() == s.srv.Get() && u[0].Get() == s.uav0.Get() && u[1].Get() == s.uav1.Get() && cb.Get() == s.cb.Get();
 }
 
+// ---- the bloom probe: the real module over a synthetic frame, against the CPU reference ---------------------------------------------
+uint32_t packR11G11B10(float r, float g, float b) {
+    const auto f = [](float v, int mantBits) -> uint32_t {
+        if (!(v > 0.0f)) return 0;
+        uint32_t bits; std::memcpy(&bits, &v, 4);
+        const uint32_t e = ((bits >> 23) & 0xFF) - 127 + 15;
+        const uint32_t m = (bits & 0x7FFFFF) >> (23 - mantBits);
+        return (e << mantBits) | m;
+    };
+    return f(r, 6) | (f(g, 6) << 11) | (f(b, 5) << 22);
+}
+
+ComPtr<ID3D11Texture2D> make2d(ID3D11Device* dev, UINT w, UINT h, DXGI_FORMAT fmt, UINT bind, const void* data, UINT bytesPerPixel) {
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = fmt; d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = bind;
+    D3D11_SUBRESOURCE_DATA init{data, w * bytesPerPixel, 0};
+    ComPtr<ID3D11Texture2D> t;
+    if (FAILED(dev->CreateTexture2D(&d, data ? &init : nullptr, &t))) t.Reset();
+    return t;
+}
+
+void bloomProbeScenario(Warp& w) {
+    ID3D11Device* dev = w.device.Get();
+    ID3D11DeviceContext* ctx = w.context.Get();
+    constexpr UINT kSceneW = 1280, kSceneH = 720;
+    // H: 2.0 on the left half, 0.5 on the right, a 4x4 star of 512 (every value exact in R11G11B10).
+    std::vector<float> hRgba(static_cast<size_t>(kSceneW) * kSceneH * 4, 1.0f);
+    std::vector<uint32_t> hPacked(static_cast<size_t>(kSceneW) * kSceneH);
+    for (UINT y = 0; y < kSceneH; ++y) for (UINT x = 0; x < kSceneW; ++x) {
+        float v = x < kSceneW / 2 ? 2.0f : 0.5f;
+        if (x >= 100 && x < 104 && y >= 100 && y < 104) v = 512.0f;
+        float* c = &hRgba[(static_cast<size_t>(y) * kSceneW + x) * 4]; c[0] = c[1] = c[2] = v;
+        hPacked[static_cast<size_t>(y) * kSceneW + x] = packR11G11B10(v, v, v);
+    }
+    std::vector<uint32_t> bloomPacked(static_cast<size_t>(kSceneW / 2) * (kSceneH / 2), packR11G11B10(0.25f, 0.25f, 0.25f));
+    std::vector<uint32_t> ldrPixels(static_cast<size_t>(kSceneW) * kSceneH);
+    for (UINT y = 0; y < kSceneH; ++y) for (UINT x = 0; x < kSceneW; ++x) ldrPixels[static_cast<size_t>(y) * kSceneW + x] = x < kSceneW / 2 ? 0xFFFFFFFFu : 0xFF333333u;
+    const float stripValues[6] = {42.5f, 40.0f, 76.25f, 76.25f, 0.5f, 3.0f};
+    ComPtr<ID3D11Texture2D> hTex = make2d(dev, kSceneW, kSceneH, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE, hPacked.data(), 4);
+    ComPtr<ID3D11Texture2D> levelTex = make2d(dev, kSceneW / 2, kSceneH / 2, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, nullptr, 4);
+    ComPtr<ID3D11Texture2D> bloomTex = make2d(dev, kSceneW / 2, kSceneH / 2, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE, bloomPacked.data(), 4);
+    ComPtr<ID3D11Texture2D> toneTex = make2d(dev, kSceneW, kSceneH, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, ldrPixels.data(), 4);
+    ComPtr<ID3D11Texture2D> stripTex = make2d(dev, 6, 1, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE, stripValues, 4);
+    D3D11_TEXTURE3D_DESC lutDesc{};
+    lutDesc.Width = lutDesc.Height = lutDesc.Depth = 4; lutDesc.MipLevels = 1; lutDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; lutDesc.Usage = D3D11_USAGE_DEFAULT;
+    lutDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture3D> lutTex;
+    check(hTex && levelTex && bloomTex && toneTex && stripTex && SUCCEEDED(dev->CreateTexture3D(&lutDesc, nullptr, &lutTex)), "the synthetic frame's textures are made");
+    if (!(hTex && levelTex && bloomTex && toneTex && stripTex && lutTex)) return;
+    ComPtr<ID3D11ShaderResourceView> hSrv, bloomSrv, stripSrv, lutSrv;
+    ComPtr<ID3D11RenderTargetView> levelRtv, toneRtv;
+    D3D11_RENDER_TARGET_VIEW_DESC toneRd{}; toneRd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; toneRd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    check(SUCCEEDED(dev->CreateShaderResourceView(hTex.Get(), nullptr, &hSrv)) && SUCCEEDED(dev->CreateShaderResourceView(bloomTex.Get(), nullptr, &bloomSrv)) &&
+          SUCCEEDED(dev->CreateShaderResourceView(stripTex.Get(), nullptr, &stripSrv)) && SUCCEEDED(dev->CreateShaderResourceView(lutTex.Get(), nullptr, &lutSrv)) &&
+          SUCCEEDED(dev->CreateRenderTargetView(levelTex.Get(), nullptr, &levelRtv)) && SUCCEEDED(dev->CreateRenderTargetView(toneTex.Get(), &toneRd, &toneRtv)),
+          "the synthetic frame's views are made");
+    const edvr::FlatHdrEnergySample refH = edvr::flatHdrEnergyReference(hRgba.data(), kSceneW, kSceneH, 0.0f);
+    std::string text = withLog(L"bloomprobe", [&] {
+        edvr::flatBloomProbeFrameEnd();   // the first frame end decides the next frame is sampled
+        check(edvr::flatBloomProbeWants(), "the probe samples the first frame it can");
+        // The bloom's first level: H read at t0, drawn into the half-size target.
+        ID3D11RenderTargetView* rtv = levelRtv.Get(); ID3D11ShaderResourceView* t0 = hSrv.Get();
+        ctx->OMSetRenderTargets(1, &rtv, nullptr); ctx->PSSetShaderResources(0, 1, &t0);
+        edvr::flatBloomProbeDraw(ctx, 3);
+        // The tone: the grade at t0, H at t1, the bloom at t2, the strip at the vertex shader's slot 0.
+        rtv = toneRtv.Get();
+        ID3D11ShaderResourceView* tone[4] = {lutSrv.Get(), hSrv.Get(), bloomSrv.Get(), nullptr};
+        ID3D11ShaderResourceView* strip = stripSrv.Get();
+        ctx->OMSetRenderTargets(1, &rtv, nullptr); ctx->PSSetShaderResources(0, 4, tone); ctx->VSSetShaderResources(0, 1, &strip);
+        edvr::flatBloomProbeDraw(ctx, 3);
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        ID3D11ShaderResourceView* none[4] = {};
+        ctx->PSSetShaderResources(0, 4, none); ctx->VSSetShaderResources(0, 1, none);
+        edvr::flatBloomProbeFrameEnd();   // the ldr reduction
+        for (int i = 0; i < 40; ++i) { Sleep(10); edvr::flatBloomProbeFrameEnd(); }   // the late readback
+        edvr::flatBloomProbeFlush();
+    });
+    check(countLines(text, "flat bloom probe: armed") == 1, "the bloom probe says it is armed, once");
+    const auto chain = linesWith(text, "flat bloom probe chain");
+    check(!chain.empty() && chain[0].find("aa=off): 2 full-screen draw(s)") != std::string::npos, "the chain line names the mode and the two full-screen draws");
+    bool firstLevelRead = false, toneRead = false;
+    for (const auto& l : chain) {
+        if (l.find("#1 PS=00000000 640x360/f26 <- t0=H:1280x720/f26") != std::string::npos) firstLevelRead = true;
+        if (l.find("#2 PS=00000000 1280x720/f27 <- t0=3d:4x4/f28 t1=1280x720/f26 t2=640x360/f26") != std::string::npos) toneRead = true;
+    }
+    check(firstLevelRead && toneRead, "the chain entries name the pixel shader, the targets and what each reads, H marked");
+    if (!(firstLevelRead && toneRead)) for (const auto& l : chain) std::printf("  chain got: %s\n", l.c_str());
+    std::string line;
+    for (const auto& l : linesWith(text, "flat bloom probe: aa=")) line = l;
+    check(!line.empty(), "the bloom probe's 5 s line is written");
+    if (!line.empty()) {
+        std::string bloomWord, atWord;
+        const bool lineHead = line.find(" bloom=yes samples=1 ") != std::string::npos && line.find(" tone=1 H@bloom(1280x720)") != std::string::npos;
+        check(lineHead, "the line finds the bloom, takes H at the bloom's first level and completes the one sample (the readback is late and the probe may sample again, so the frame count is not pinned)");
+        if (!lineHead) std::printf("  line got: %s\n", line.c_str());
+        check(isClose(numberOf(line, "mean"), refH.total / refH.finite, 2e-4), "H's mean luma is the CPU reference's");
+        const size_t maxAt = line.find(" max=");
+        check(maxAt != std::string::npos && isClose(std::atof(line.c_str() + maxAt + 5), refH.max, 2e-4), "H's largest luma is the star's 512");
+        check(line.find("bloom(640x360): mean=0.25 max=0.25 gain=") != std::string::npos, "the bloom texture is found at the tone, smaller than H, with its own mean");
+        const size_t gainAt = line.find("gain=");
+        check(gainAt != std::string::npos && isClose(std::atof(line.c_str() + gainAt + 5), 0.25 / (refH.total / refH.finite), 1e-3),
+              "the bloom's gain is its mean over H's mean");
+        check(line.find("strip: E=42.5 (42.5..42.5) t1..t5=40/76.25/76.25/0.5/3 (1)") != std::string::npos, "the exposure strip is read at the tone's vertex-shader slot 0, E first");
+        check(line.find("ldr: mean=0.60000 white=50.000% max=1.0000 (1)") != std::string::npos, "the tone's target is measured: mean luma, the white fraction, the largest value");
+        check(line.find("hazards=0 dropped=0 failures=0") != std::string::npos, "no hazard, no drop, no failure");
+    }
+}
 int selfTest() {
     Warp w = makeWarp();
     if (!w.ok) return 1;
@@ -273,6 +382,8 @@ int selfTest() {
     const auto quiet = linesWith(log2, "flat hdr energy: route=flat");
     check(quiet.size() == 1 && quiet[0].find("samples=0 frames=1 ") != std::string::npos,
           "frames offered and no sample finished prints a samples=0 line, so it reads differently from never ran");
+
+    bloomProbeScenario(w);
 
     std::printf("flat_hdr_energy_test: %u checks, %u failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

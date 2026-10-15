@@ -628,7 +628,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
-    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" "src\d3d11\flat_hdr_energy.cpp" ^
+    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" "src\d3d11\flat_hdr_energy.cpp" "src\d3d11\flat_bloom_probe.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
@@ -1080,7 +1080,7 @@ if not exist "%OBJ%\flat_hdr_energy_test" mkdir "%OBJ%\flat_hdr_energy_test"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" ^
     /Fo"%OBJ%\flat_hdr_energy_test\\" /Fe"%BUILD%\flat_hdr_energy_test.exe" ^
-    "tools\flat_hdr_energy_test\flat_hdr_energy_test.cpp" "src\d3d11\flat_hdr_energy.cpp" ^
+    "tools\flat_hdr_energy_test\flat_hdr_energy_test.cpp" "src\d3d11\flat_hdr_energy.cpp" "src\d3d11\flat_bloom_probe.cpp" ^
     "src\d3d11\shader_swap.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib

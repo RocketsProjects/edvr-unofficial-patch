@@ -78,6 +78,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "scheduler_stack_probe.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
 #include "flat_runtime.h"
+#include "flat_bloom_probe.h"   // TEMPORARY (design doc section 107)
 #include "flat_hdr_crumbs.h"   // the flat HDR route's crash-safe breadcrumbs: the real Present's pair
 #include "format_support_log.h"   // the device capability log: the two hooks' reports and its closing tick
 #include "flat_temporal.h"   // flat profile discovery at owned Present
@@ -1784,6 +1785,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (runtimeFlatProfile())
         flatTemporalBeforePresent(self, g_state->frameCounter, flags);
     if (runtimeFlatProfile()) flatRuntimeBeforePresent();
+    if (runtimeFlatProfile()) flatBloomProbeFrameEnd();   // TEMPORARY (design doc section 107): the bloom probe's frame end
     if (runtimeFlatProfile()) menuFlatBeforePresent(self, flags);
     if (runtimeFlatProfile()) flatRuntimeWeaponFootprintBeforePresent(self, flags);
     // The flat HDR route's crash-safe breadcrumbs (flat_hdr_crumbs.h): for the first frames that reach the resolver, the

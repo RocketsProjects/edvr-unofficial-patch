@@ -78,6 +78,7 @@
 #include "vscreen_footprint.h"   // fix.vscreen_res_width = auto's footprint instrument (the on-foot screen's width in the eye)
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "flat_runtime.h"
+#include "flat_bloom_probe.h"   // TEMPORARY (design doc section 107): the bloom probe's draw hook
 #include "flat_temporal.h"   // bounded, flat-profile-only scene discovery
 #include "cross_profile_cost.h"   // the flat PS constant-buffer observer's cost while VR is active (log only)
 #include "../common/runtime_profile.h"
@@ -4816,6 +4817,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             flatCensusDraw(self, 'D', count, 1, args);
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
+        if (flatBloomProbeWants() && self == g_state->ownerCtx) flatBloomProbeDraw(self, count);   // TEMPORARY (design doc section 107): after the route's own work for this draw
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         g_state->realDraw(self, count, start);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
@@ -4889,6 +4891,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
             flatCensusDraw(self, 'I', count, 1, args);
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
+        if (flatBloomProbeWants() && self == g_state->ownerCtx) flatBloomProbeDraw(self, count);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
@@ -4945,6 +4948,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         }
         FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
                                       static_cast<int32_t>(startVertex), startInstance);
+        if (flatBloomProbeWants() && self == g_state->ownerCtx) flatBloomProbeDraw(self, perInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
@@ -5013,6 +5017,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         }
         FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
                                       baseVertex, startInstance);
+        if (flatBloomProbeWants() && self == g_state->ownerCtx) flatBloomProbeDraw(self, perInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
