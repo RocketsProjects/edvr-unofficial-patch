@@ -88,6 +88,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "blend_probe.h"       // TEMPORARY hotkey.blend_probe: the blend probe's install and request
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
+#include "fss_tiles.h"       // fssTilesWantsSignals: the instrument needs the FSS signals whatever fix.fss_eye_sync is
 #include "fss_ring_hook.h"   // fssRingHookInstall: the read-only ring pass observer (VR profile)
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "light_grid_cache_hook.h"   // lightGridCacheInstall at startup, lightGridCachePoll once a second, lightGridCacheNoteFrame per Present: the fragment-culling grid cache (both profiles)
@@ -1688,7 +1689,7 @@ void presentFrameBoundary() {
             // The three diagnostic keys follow the file too (the menu's Hotkeys page).
             configureDiagnosticHotkeys();
             g_state->fssModeLatchWanted =
-                eyeSyncFromConfig(Config::get()).needsFssSignals();
+                eyeSyncFromConfig(Config::get()).needsFssSignals() || fssTilesWantsSignals();
             journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
         });
         tkFrameFlagPeer.run(tickFrameFlagPeer);
@@ -2199,7 +2200,7 @@ State& ensureState() {
         menuAdoptGameBindings(Config::get().getBool("hotkey.read_game_bindings", true), nullptr);
         journalWatchConfigure();
         g_state->fssModeLatchWanted =
-            eyeSyncFromConfig(Config::get()).needsFssSignals();
+            eyeSyncFromConfig(Config::get()).needsFssSignals() || fssTilesWantsSignals();
         // Flat reads the GuiFocus of the open map (temporal AA off on the Galaxy Map, the System Map and the Orrery) from Status.json, at the same 100 ms the FSS latch wants.
         journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
     }

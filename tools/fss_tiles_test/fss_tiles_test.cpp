@@ -382,6 +382,94 @@ void testLedger() {
     check(ft::kLedgerFrames == 60 && ft::kReduceLevel == 2 && ft::kMaxEyediffLines == 80, "the numbers the task named");
 }
 
+void testGate() {
+    ft::ZoomGate gate;
+    check(gate.step(100, 0, true, true) == ft::ZoomGate::Idle, "a closed gate is idle");
+    check(gate.signal(100, 6) == ft::ZoomGate::NoChrome && !gate.open && gate.signal(100, 0xFFFFFFFFu) == ft::ZoomGate::NoChrome,
+          "a jump with the chrome gone (more than 5 frames, or never) opens nothing");
+    check(gate.signal(100, 5) == ft::ZoomGate::Accepted && gate.open && gate.startFrame == 100, "a jump with the chrome held opens the window");
+    check(gate.step(101, 0, false, false) == ft::ZoomGate::Open && gate.step(102, 3, true, true) == ft::ZoomGate::Open, "an unknown focus does not close it, and neither does a focus that agrees");
+    check(gate.signal(300, 0) == ft::ZoomGate::Accepted && gate.startFrame == 300, "a second accepted signal (the arrival after the departure) restarts the clock");
+    check(gate.step(300 + ft::kGateWindowFrames, 0, true, true) == ft::ZoomGate::Open && gate.step(300 + ft::kGateWindowFrames + 1, 0, true, true) == ft::ZoomGate::Expired && !gate.open,
+          "it lives 600 frames after the last accepted signal");
+    ft::ZoomGate g2;
+    g2.signal(10, 0);
+    check(g2.step(11, 0, true, false) == ft::ZoomGate::FocusEnded && !g2.open, "the game saying FSS focus ended closes it at once");
+    ft::ZoomGate g3;
+    g3.signal(10, 0);
+    check(g3.step(20, ft::kChromeDropFrames, true, true) == ft::ZoomGate::Open && g3.step(21, ft::kChromeDropFrames + 1, true, true) == ft::ZoomGate::ChromeDropped && !g3.open,
+          "the chrome gone for more than 45 frames closes it");
+    check(ft::chromeHeld(0) && ft::chromeHeld(5) && !ft::chromeHeld(6) && !ft::chromeHeld(0xFFFFFFFFu), "the chrome is held within five frames");
+
+    // The timeline of flight e05b6be6 (docs/fss-scanner.md, "v6 flown"): the scanner screen up from f11890 with the chrome matching every frame, the zoom's departure
+    // jump at f13006 and its arrival jump at f13273, the GuiFocus 9 read only 6 frames after the arrival (late: the fast poll did not run), the exit jump at f15096 after the
+    // chrome stopped at f15090, with the stale focus still reading 9 until f15100.
+    struct Event { uint32_t frame; bool jump; };
+    const Event jumps[] = {{13006, true}, {13273, true}, {15096, true}};
+    ft::ZoomGate z;
+    uint32_t openedAt = 0, openedAtExit = 0, closedAt = 0;
+    ft::ZoomGate::Close why = ft::ZoomGate::Idle;
+    uint32_t lastChrome = 0;
+    int refused = 0, accepted = 0;
+    for (uint32_t f = 11890; f <= 15200; ++f) {
+        if (f < 15090) lastChrome = f;                                   // the chrome matches every frame until the scanner is left
+        const uint32_t ago = lastChrome ? f - lastChrome : 0xFFFFFFFFu;
+        const bool focusKnown = f >= 13279 && f < 15100 + 1 ? true : f > 15100;   // read at f13279, and again (ended) after f15100
+        const bool focus = f >= 13279 && f <= 15100;
+        const bool wasOpen = z.open;
+        for (const Event& e : jumps) {
+            if (e.frame != f) continue;
+            if (z.signal(f, ago) == ft::ZoomGate::Accepted) ++accepted; else ++refused;
+        }
+        const ft::ZoomGate::Close c = z.step(f, ago, focusKnown, focus);
+        if (z.open && !wasOpen && !openedAt) openedAt = f;
+        if (z.open && f >= 15096 && !wasOpen) openedAtExit = f;
+        if (c >= ft::ZoomGate::Expired && !closedAt) { closedAt = f; why = c; }
+    }
+    check(openedAt == 13006 && openedAtExit == 0 && z.startFrame == 13273, "with the departure flash counted too, the window opens at that first jump while the scanner is up, the arrival restarts its clock, and the exit jump opens nothing");
+    check(accepted == 2 && refused == 1, "the two jumps with the chrome held are accepted and the exit jump, with the chrome gone, is refused");
+    check(closedAt == 13273 + ft::kGateWindowFrames + 1 && why == ft::ZoomGate::Expired, "the window lives 600 frames from the arrival and is gone long before the exit");
+    // The same flight with only the arrival and the exit jumps (the departure flash not counted): the window opens at the arrival.
+    ft::ZoomGate arr;
+    uint32_t arrOpenedAt = 0, arrOpenedAtExit = 0;
+    {
+        uint32_t lc2 = 0;
+        for (uint32_t f = 13200; f <= 15200; ++f) {
+            if (f < 15090) lc2 = f;
+            const uint32_t ago = lc2 ? f - lc2 : 0xFFFFFFFFu;
+            const bool was = arr.open;
+            if (f == 13273 || f == 15096) arr.signal(f, ago);
+            arr.step(f, ago, f >= 13279, f >= 13279 && f <= 15100);
+            if (arr.open && !was && !arrOpenedAt) arrOpenedAt = f;
+            if (arr.open && !was && f >= 15096) arrOpenedAtExit = f;
+        }
+    }
+    check(arrOpenedAt == 13273 && arrOpenedAtExit == 0 && !arr.open, "replaying e05b6be6's arrival jump (late FSS focus) and exit jump: the window opens at the arrival, not at the exit");
+    // The exit with no arrival signal at all (the fast poll missed everything): nothing opens.
+    ft::ZoomGate none;
+    int acc = 0;
+    for (uint32_t f = 15090; f <= 15100; ++f) {
+        const uint32_t ago = f >= 15091 ? f - 15090 : 0;
+        if (f == 15096 && none.signal(f, ago) == ft::ZoomGate::Accepted) ++acc;
+        none.step(f, ago, true, true);
+    }
+    check(acc == 0 && !none.open, "an exit jump alone, with the chrome stopped six frames earlier, opens nothing");
+    // Leaving the scanner while a window is open closes it with the reason.
+    ft::ZoomGate leave;
+    leave.signal(13273, 0);
+    ft::ZoomGate::Close lc = ft::ZoomGate::Idle;
+    uint32_t leftAt = 0;
+    for (uint32_t f = 13274; f < 13500 && lc != ft::ZoomGate::ChromeDropped; ++f) {
+        const uint32_t ago = f < 13400 ? 0 : f - 13399;   // the chrome stops after f13399
+        lc = leave.step(f, ago, true, true);
+        if (lc == ft::ZoomGate::ChromeDropped) leftAt = f;
+    }
+    check(lc == ft::ZoomGate::ChromeDropped && leftAt == 13399 + ft::kChromeDropFrames + 1, "leaving the scanner closes an open window once the chrome has been gone 45 frames");
+    check(std::strcmp(ft::closeText(ft::ZoomGate::ChromeDropped), "the scanner chrome dropped (the scanner was left)") == 0 &&
+              std::strcmp(ft::closeText(ft::ZoomGate::FocusEnded), "the game says FSS focus ended") == 0,
+          "the close reasons read as the log says them");
+}
+
 void testKeyParsing() {
     edvr::EyeSync t = edvr::eyeSyncParse("tiles");
     check(t.tiles && t.recognised && t.healMode == 0 && !t.lockstep && !t.steady && !t.any(), "tiles is its own value: no heal, no composite freeze");
@@ -842,7 +930,8 @@ void testSourcePins(const std::string& root) {
     size_t n = 0, at = 0;
     while ((at = vs.find("fssTilesConfigure(cfg);", at)) != std::string::npos) { ++n; ++at; }
     check(n == 2, "both config sites (install and reload) configure fss_tiles");
-    check(has(vs, "fssTilesFrameBoundary(s->frameNo, open)"), "the frame boundary feeds fss_tiles the arrival window");
+    check(has(vs, "fssTilesFrameBoundary(s->frameNo, chromeAgo, journalFssFocusKnown(), journalFssFocus())"),
+          "the frame boundary hands fss_tiles the chrome age and the journal focus, and its own gate decides the window");
 
     {
         struct Pin { const char* fn; const char* call; };
@@ -887,9 +976,13 @@ void testSourcePins(const std::string& root) {
     const std::string dh = slurp(root + "/src/d3d11/device_hook.cpp");
     size_t nd = 0, ad = 0;
     while ((ad = dh.find("eyeSyncFromConfig(Config::get()).needsFssSignals()", ad)) != std::string::npos) { ++nd; ++ad; }
+    size_t nw = 0, aw = 0;
+    while ((aw = dh.find("eyeSyncFromConfig(Config::get()).needsFssSignals() || fssTilesWantsSignals();", aw)) != std::string::npos) { ++nw; ++aw; }
+    check(nw == 2, "at both sites the instrument alone is enough to run the fast Status poll and the zoom watchers, whatever fix.fss_eye_sync is");
     check(nd == 2 && !has(dh, "eyeSyncFromConfig(Config::get()).any()"),
           "the mode latch and the eager Status poll are wanted by needsFssSignals() at both sites, never by any()");
-    check(has(vs, "fssTilesNoteZoomSignal(s->frameNo, true)") && has(vs, "fssTilesNoteZoomSignal(s->frameNo, false)"),
+    check(has(vs, "fssTilesNoteZoomSignal(s->frameNo, true, chromeAgo)") && has(vs, "fssTilesNoteZoomSignal(s->frameNo, false, chromeAgo)") &&
+              has(vs, "const uint32_t chromeAgo = s->fssChromeFrame != 0 ? s->frameNo - s->fssChromeFrame : 0xFFFFFFFFu;") && has(vs, "fssTilesWantsChrome()"),
           "both zoom signals reach fss_tiles, which says why a zoom opened no window");
 
     const std::string rhs = slurp(root + "/src/d3d11/fss_ring_hook.cpp");
@@ -953,6 +1046,14 @@ void testSourcePins(const std::string& root) {
     check(has(cpp, "eye_final_capture::g_reduceLevel = kReduceLevel;") && has(cpp, "eye_final_capture::g_reduceLevel = 0;"),
           "the automatic eye run reduces the final images and the reduction is switched off again");
     check(has(cpp, "fss tiles: ring quad f=%u") && has(cpp, "Role::Ring0"), "the ring quad's own inputs are watched and its draws logged per eye");
+    check(has(cpp, "fss tiles: band event at f=%u refused: the scanner chrome is not held on this frame") &&
+              has(cpp, "fss tiles: automatic eye run %u refused at f=%u: the scanner chrome is not held") &&
+              has(cpp, "fss tiles: a %s at frame %u is not a window opener: the scanner chrome is not held") &&
+              has(cpp, "chrome held=%s, last matched %s"),
+          "the band event, each eye run and each jump or press the gate refuses is logged with its reason, and the window-opened line says whether the chrome was held");
+    check(has(cpp, "fss tiles: window %u gate closed at f=%u: %s.") && has(cpp, "The reveal capture ends with it, and any pending eye run is cancelled.") &&
+              has(cpp, "g.gate.step(frameNo, chromeAgo, focusKnown, focus)") && has(cpp, "if (!chromeHeld(chromeAgo)) {"),
+          "leaving the scanner or losing FSS focus closes the window and ends the capture, and an eye run waits for the chrome");
     check(has(cpp, "fss tiles: eye-dump key at f=%u") && has(cpp, "outside a capturing zoom window"), "the eye-dump key's reception is logged either way");
     check(has(cpp, "fss tiles: window %u opened") && has(cpp, "fss tiles: window %u closed") && has(cpp, "fss tiles: instrument armed"),
           "the instrument says it armed, opened and closed, so never-ran reads differently from zero");
@@ -982,6 +1083,7 @@ int main(int argc, char** argv) {
     testV4Pure();
     testRingCore(root);
     testLedger();
+    testGate();
     testFakeRestore();
 
     const auto createDevice = edvr::systemD3D11CreateDevice();

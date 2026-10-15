@@ -25,8 +25,14 @@ typedef void(__stdcall* FssTilesRealDispatchIndirect)(ID3D11DeviceContext*, ID3D
 // fix.fss_eye_sync = tiles. Read at install and on the ini reload path.
 void fssTilesConfigure(Config& cfg);
 
-// Once per frame at the boundary. `zoomOpen` is vscreen's arrival window (journal-gated, 600 frames from the zoom).
-void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen);
+// Once per frame at the boundary. `chromeAgo` is the frames since the scanner's chrome last matched (0xFFFFFFFF: never), the journal's FSS focus is
+// `focusKnown` / `focus`. The module's own gate (fss_tiles_core.h ZoomGate) decides from them whether a zoom window is open.
+void fssTilesFrameBoundary(uint32_t frameNo, uint32_t chromeAgo, bool focusKnown, bool focus);
+
+// The instrument is armed in every VR session, so the fast Status.json poll, the zoom watchers (gamepad included) and the chrome tracker run whatever
+// fix.fss_eye_sync is set to (flight e05b6be6: under `off` they did not, and the window opened on the FSS exit).
+bool fssTilesWantsSignals();
+bool fssTilesWantsChrome();
 
 // Record-only: a write to one of the window's buffers (the tile renderer's argument buffer, outputs, lists and tile-info
 // buffer). `call` indexes fsstiles::writeCallName. Owner context only (the caller tests foreignContext). One bool when no
@@ -50,9 +56,9 @@ inline void fssTilesNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
 // buffers of the next sixteen frames to edvr_logssstiles, beside the eye run, so the dump's black tiles can be read against them.
 void fssTilesNoteEyeDump();
 
-// A zoom was signalled (the player's zoom press, or a camera jump while the scanner's chrome is up) on this frame. If no
-// window is open by the frame boundary, the module says why, at most 6 times a session.
-void fssTilesNoteZoomSignal(uint32_t frameNo, bool press);
+// A camera jump or the player's zoom press on this frame, with the frames since the scanner's chrome last matched. The gate accepts it only while the chrome
+// is held; a refused one is logged with its reason.
+void fssTilesNoteZoomSignal(uint32_t frameNo, bool press, uint32_t chromeAgo);
 
 // A zoom window is open, a read-back is outstanding, or a summary is owed: the DispatchIndirect hook must call in.
 inline bool fssTilesActive() { return detail::g_fssTilesActive; }

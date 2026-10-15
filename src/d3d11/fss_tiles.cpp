@@ -232,6 +232,10 @@ struct State {
     bool     signalPress = false;
     uint32_t signalFrame = 0;
     uint32_t noWindowNotes = 0;
+    ZoomGate gate;
+    uint32_t chromeAgo = 0xFFFFFFFFu;
+    bool     refusedEventNoted = false;
+    bool     runRefusedNoted[2] = {};
 };
 
 State g;
@@ -284,6 +288,8 @@ void resetWindowTallies() {
     for (auto& r : g.gtot) for (auto& t : r) t = State::GTot();
     g.gbufLines = 0;
     g.rtvN = 0;
+    g.refusedEventNoted = false;
+    g.runRefusedNoted[0] = g.runRefusedNoted[1] = false;
     g.ledgerOn = false;
     g.ledgerFrames = g.framesWithDiff = g.pairedFrames = g.eyediffLines = g.unpaired = g.ringLines = 0;
     g.ledN = g.ledOverflow = g.ledOverflowTotal = g.viewN = g.soloN = g.ringFamN = 0;
@@ -496,7 +502,14 @@ void processBand(const Sample& sm, const D3D11_MAPPED_SUBRESOURCE* m, const bool
     if (g.bringCount < kBandBefore + 1) ++g.bringCount;
 
     const BandWatch::Reason why = g.bandWatch.feed(f.rec.large[0], f.rec.large[1]);
-    if (why == BandWatch::AllSmall && (g.win.open || g.win.capturing) && !g.windowEventFired && g.autoRunsPlanned < kMaxAutoRuns) {
+    if (why == BandWatch::AllSmall && (g.win.open || g.win.capturing) && !g.windowEventFired && g.autoRunsPlanned < kMaxAutoRuns && !chromeHeld(g.chromeAgo)) {
+        if (!g.refusedEventNoted) {
+            g.refusedEventNoted = true;
+            Log::get().note("fss tiles: band event at f=%u refused: the scanner chrome is not held on this frame (last matched %s). An all-small frame without the scanner "
+                            "is a transition (flight e05b6be6: the exit back to the cockpit), not the zoom; no reveal capture, no ledger and no eye run for it. Said once a window.",
+                            sm.frame, g.chromeAgo == 0xFFFFFFFFu ? "never" : "recently, more than 5 frames ago");
+        }
+    } else if (why == BandWatch::AllSmall && (g.win.open || g.win.capturing) && !g.windowEventFired && g.autoRunsPlanned < kMaxAutoRuns) {
         g.windowEventFired = true;
         ++g.windowEvents;
         g.afterLeft = kBandAfter;
@@ -1563,30 +1576,78 @@ void fssTilesNoteEyeDump() {
                     "edvr_logs\\fsstiles as f<frame>_e<eye>_<listL|listS|info>.bin, beside the eye run.", g.frame, kEyeDumpFrames);
 }
 
-void fssTilesNoteZoomSignal(uint32_t frameNo, bool press) {
-    g.signalPending = true;
+bool fssTilesWantsSignals() { return !runtimeFlatProfile(); }
+bool fssTilesWantsChrome() { return !runtimeFlatProfile(); }
+
+namespace {
+void agoText(char* out, size_t cap, uint32_t ago) {
+    if (ago == 0xFFFFFFFFu) std::snprintf(out, cap, "never");
+    else std::snprintf(out, cap, "%u frame(s) ago", ago);
+}
+}  // namespace
+
+void fssTilesNoteZoomSignal(uint32_t frameNo, bool press, uint32_t chromeAgo) {
+    const ZoomGate::Refusal r = g.gate.signal(frameNo, chromeAgo);
     g.signalPress = press;
     g.signalFrame = frameNo;
+    if (r == ZoomGate::Accepted) {
+        g.signalPending = true;
+        return;
+    }
+    if (g.noWindowNotes < 8) {
+        ++g.noWindowNotes;
+        char ago[40];
+        agoText(ago, sizeof(ago), chromeAgo);
+        Log::get().note("fss tiles: a %s at frame %u is not a window opener: the scanner chrome is not held (last matched %s). A window opens only on a jump or a zoom press "
+                        "while the scanner is up (flight e05b6be6: the exit jump back to the cockpit opened one). Said at most 8 times.",
+                        press ? "zoom press" : "camera jump", frameNo, ago);
+    }
 }
 
-void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
+void fssTilesFrameBoundary(uint32_t frameNo, uint32_t chromeAgo, bool focusKnown, bool focus) {
     if (g.win.capturing) {
         flushDraws(g.frame);
         flushLedger(g.frame);
     }
     g.frame = frameNo;
+    g.chromeAgo = chromeAgo;
     g.prevViews = g.views.n;
     g.views.reset();
     g.occ = 0;
+    const ZoomGate::Close gc = g.gate.step(frameNo, chromeAgo, focusKnown, focus);
+    const bool zoomOpen = g.gate.open;
     g.zoomOpen = zoomOpen;
     WindowMachine::Event ev = g.win.step(zoomOpen, frameNo, nowMs());
-    if (g.revealUntil) {
+    const bool exited = gc == ZoomGate::ChromeDropped || gc == ZoomGate::FocusEnded;
+    if (gc >= ZoomGate::Expired) {
+        Log::get().note("fss tiles: window %u gate closed at f=%u: %s.%s", g.windowNo, frameNo, closeText(gc),
+                        exited && g.revealUntil ? " The reveal capture ends with it, and any pending eye run is cancelled." : "");
+    }
+    if (g.revealUntil && exited) {
+        g.revealUntil = 0;
+        for (uint32_t k = 0; k < 2; ++k) {
+            if (g.runPending[k]) {
+                g.runPending[k] = false;
+                Log::get().note("fss tiles: automatic eye run %u cancelled at f=%u: %s.", k + 1, frameNo, closeText(gc));
+            }
+        }
+        if (g.win.capturing) {
+            g.win.capturing = false;
+            ev = WindowMachine::Closed;
+        }
+    } else if (g.revealUntil) {
         if (frameNo <= g.revealUntil) {
             // The reveal is still to be captured: the zoom window's end does not end the capture.
             if (ev == WindowMachine::Closed) ev = WindowMachine::None;
             g.win.capturing = true;
         } else {
             g.revealUntil = 0;
+            for (uint32_t k = 0; k < 2; ++k) {
+                if (g.runPending[k]) {
+                    g.runPending[k] = false;
+                    Log::get().note("fss tiles: automatic eye run %u never ran: the scanner chrome was not held on any frame from its due frame to the end of the capture.", k + 1);
+                }
+            }
             if (g.win.capturing) {
                 g.win.capturing = false;
                 ev = WindowMachine::Closed;
@@ -1596,10 +1657,12 @@ void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
     if (ev == WindowMachine::Opened) {
         g.windowNo = g.win.windows;
         resetWindowTallies();
-        Log::get().note("fss tiles: window %u opened at frame %u (the zoom window; lockstep=%s) -- logging the tile "
+        char ago[40];
+        agoText(ago, sizeof(ago), chromeAgo);
+        Log::get().note("fss tiles: window %u opened at frame %u (the zoom window; lockstep=%s; chrome held=%s, last matched %s) -- logging the tile "
                         "renderer's dispatches for up to %llu ms, at most %u lines. Band watch: armed, waiting for a whole-row move of a large list "
-                        "or one going to zero; only the zero arms the reveal capture (%u frames) and the automatic eye runs (at most %u a session).",
-                        g.windowNo, frameNo, g.lockstep ? "on" : "off", static_cast<unsigned long long>(kWindowMs),
+                        "or one going to zero; only the zero, with the scanner chrome held, arms the reveal capture (%u frames) and the automatic eye runs (at most %u a session).",
+                        g.windowNo, frameNo, g.lockstep ? "on" : "off", chromeHeld(chromeAgo) ? "yes" : "no", ago, static_cast<unsigned long long>(kWindowMs),
                         kMaxLinesPerWindow, kRevealFrames, kMaxAutoRuns);
     } else if (ev == WindowMachine::Closed) {
         g.summaryDue = true;
@@ -1609,6 +1672,16 @@ void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
     if (g.reduceUntil && frameNo > g.reduceUntil) { g.reduceUntil = 0; eye_final_capture::g_reduceLevel = 0; }
     for (uint32_t k = 0; k < 2; ++k) {
         if (g.runPending[k] && frameNo >= g.runDue[k]) {
+            if (!chromeHeld(chromeAgo)) {
+                if (!g.runRefusedNoted[k]) {
+                    g.runRefusedNoted[k] = true;
+                    char ago[40];
+                    agoText(ago, sizeof(ago), chromeAgo);
+                    Log::get().note("fss tiles: automatic eye run %u refused at f=%u: the scanner chrome is not held (last matched %s). It stays pending until the chrome is held or "
+                                    "the capture ends; an eye run without the scanner on show is a capture of the cockpit.", k + 1, frameNo, ago);
+                }
+                continue;
+            }
             g.runPending[k] = false;
             ++g.autoRuns;
             eye_final_capture::g_reduceLevel = kReduceLevel;   // the final-image rows of this run: the whole submitted eye at 1/4 size, not the 1400 px centre crop
@@ -1620,17 +1693,10 @@ void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
     }
     if (g.signalPending) {
         g.signalPending = false;
-        if (!g.win.open && g.noWindowNotes < 6) {
+        if (!g.win.open && g.win.windows >= kMaxWindows && g.noWindowNotes < 8) {
             ++g.noWindowNotes;
-            const char* why;
-            if (!journalFssFocusKnown()) why = "the journal's GuiFocus has not been read (Status.json unknown)";
-            else if (!journalFssFocus()) why = "the journal says the game is not in the FSS (GuiFocus is not 9)";
-            else if (g.win.windows >= kMaxWindows) why = "the session's window cap was reached";
-            else why = "the arrival window did not open for a reason this module cannot see";
-            Log::get().note("fss tiles: a zoom was signalled (%s at frame %u) but no window opened: %s; the FSS key watcher is %s. "
-                            "Said at most 6 times.",
-                            g.signalPress ? "your zoom press" : "a camera jump with the scanner up", g.signalFrame, why,
-                            eyeSyncFromConfig(Config::get()).needsFssSignals() ? "running" : "NOT running (fix.fss_eye_sync is off)");
+            Log::get().note("fss tiles: a %s at frame %u was accepted but the session's window cap (%u) was reached, so no window opened. Said at most 8 times.",
+                            g.signalPress ? "zoom press" : "camera jump", g.signalFrame, kMaxWindows);
         }
     }
     if (!g.win.open) {

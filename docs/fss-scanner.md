@@ -43,11 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next (after flight e05b6be6, v6):** under `off` the window opened at the
-  FSS EXIT, not the zoom: the eye runs show the cockpit, and the same holds
-  for v4 and v5. Their reveal conclusions are withdrawn ("v6 flown"). First
-  fix the instrument so a window opens only at the arrival, with the chrome
-  held. Then re-fly v6 unchanged. Fallback `mirror`. Not fixed: ~220 m remap.
+- **Next flight (2026-10-15 v7, built, not flown):** v6 unchanged, plus the
+  root-cause fix for flight e05b6be6: the signals run whatever `fss_eye_sync`
+  is, and a window opens only on a jump while the scanner chrome is held.
+  `off`, one zoom, no keys. Check first: `chrome held=yes`, the zoom's frame,
+  and eye-run images that show the scanner with the ring. v4-v6 conclusions
+  from `off` windows stay withdrawn. Fallback `mirror`. Not fixed: ~220 m remap.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -2550,6 +2551,72 @@ held on that frame. Log `window N opened ... chrome held=yes|no` so a reader
 can reject an exit capture from the log head. The proof is the eye run: the
 FinalCrisp rows must show the scanner view with the ring. Only then are the
 eyediff, ring quad and ring hook lines evidence.
+
+## 2026-10-15 (v7): the window opens only at the scanner's zoom (built, not flown)
+
+Flight e05b6be6 (read above): under `fix.fss_eye_sync = off` the instrument's
+windows opened at the FSS EXIT, the "all-small" band event was the exit's black
+frame, and the eye runs captured the cockpit. The cause is in the signals, not
+the instrument's maths: the fast Status.json poll and the zoom watchers ran
+only when `EyeSync::needsFssSignals()` was true (`any() || tiles`), which `off`
+makes false, so the arrival's camera jump landed before the FSS focus was known
+and set nothing, and the exit jump landed while the stale focus still read 9.
+v4-v6's conclusions drawn from `off` windows stay withdrawn until a v7 flight.
+v6 is otherwise unchanged.
+
+What v7 changes (root cause first):
+
+- THE SIGNALS. `fssModeLatchWanted` (the key and pad watchers, the mode latch,
+  the eager 100 ms Status.json poll) is now
+  `needsFssSignals() || fssTilesWantsSignals()` at both sites in
+  `device_hook.cpp`; the instrument is armed in every VR session, so the poll
+  and every zoom watcher, `Pos_GamePad_RTrigger` included, run whatever
+  `fss_eye_sync` is. The scanner-chrome tracker in `vscreen.cpp` runs for the
+  same reason (`fssTilesWantsChrome()`; it ran under `off` in flight N only
+  because the temporal pass asked).
+- THE GATE (`ZoomGate`, `fss_tiles_core.h`). A window opens only on a camera jump
+  or a zoom press while the scanner's chrome is held (the tracker matched within 5
+  frames). Every jump and press is offered to it with the chrome's age; a refused
+  one is logged (`not a window opener: the scanner chrome is not held`). A second
+  accepted signal inside an open window restarts its 600-frame clock (the zoom's
+  departure and arrival are two jumps).
+- THE BAND EVENT AND THE EYE RUNS. The all-small band event is refused unless
+  the chrome is held on that frame (`band event at f=N refused: ...`: no reveal
+  capture, no ledger, no eye run), and each automatic eye run is refused on any
+  frame the chrome is not held (`automatic eye run K refused at f=N: ...`; it
+  stays pending until the chrome is held or the capture ends, then logs that it
+  never ran).
+- THE EXIT. The window closes, with its reason, when the game says FSS focus
+  ended or the chrome has been gone more than 45 frames; the reveal capture
+  ends with it and pending eye runs are cancelled
+  (`window N gate closed at f=N: <reason>`, `automatic eye run K cancelled ...`).
+- THE LOG HEAD. The window-opened line now carries `chrome held=yes|no, last
+  matched <n> frame(s) ago`, so a reader rejects an exit capture from the first line.
+
+Rig (`tools\fss_tiles_test`): the gate's rules, and a replay of the e05b6be6
+timeline: the scanner up from f11890 with the chrome matching every frame, the
+zoom's departure jump at f13006 and arrival jump at f13273, `GuiFocus 9` read late
+(f13279), the exit jump at f15096 after the chrome stopped at f15090 with the stale
+focus still reading 9. With the arrival and exit jumps only, the window opens at
+f13273 and not at f15096; with the departure flash counted too, it opens at
+f13006, the arrival restarts its clock, and the exit jump is refused. Source pins
+for both device_hook sites, the chrome tracker, the vscreen calls and every
+refusal line.
+
+Flight plan (Sean, VR, a ringed planet, `off`, no keys): the same as v6.
+
+1. `fix.fss_eye_sync = off` in the ini before launching. The log head shows `ring
+   hook armed` and no `fss eye heal: armed`.
+2. Open the FSS, zoom a ringed planet once, wait for the reveal, press nothing,
+   leave the FSS afterwards. Say which eye shows the squares.
+3. The check, before any other line: the `window N opened` line says `chrome
+   held=yes`, its frame is the zoom's (not the exit), and the eye-run images
+   (`eye_*_FinalCrisp_L<nn>.bmp` / `_R<nn>.bmp`, the whole eye at 1/4 size) show the
+   scanner view with the ring, not the cockpit. If the images show the cockpit, or a
+   `refused` / `gate closed` line says why nothing ran, the capture is not the reveal
+   and nothing else in the log is evidence.
+4. Only then read `eyediff`, `ring quad`, `upstream`, `inputs` and the ring hook
+   lines as in the v6 entry.
 
 ## Open
 
