@@ -43,12 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next (v10, built, not flown):** `off`, one zoom, no keys. v9: both eyes
-  composite the same finished layer, same quad, after camera 1's draws,
-  depth-tested per eye; timing ruled out. v10 dumps, at arrival +0..+30, each
-  eye's composite target (before, after, frame end) and depth as 16 px
-  blocks, classifies the black blocks (rejected by depth, overwritten, never
-  covered) and logs the suspect quad families. Read `verdict`. Fallback `mirror`.
+- **Next (after flight 38aef250, v10, VALID):** the left composite leaves the
+  ring's near arc UNCOVERED at f18888-95 while the right covers it, from the
+  same draw and the same layer. Depth, a later overwrite and the suspect quads
+  are ruled out. Next: per eye at the composite, fingerprint every PS input
+  t0-t7 and read the VS/PS constants, to find the input that differs.
+  Fallback `mirror`.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -3117,6 +3117,99 @@ How to read it:
    layer or the composite's coverage.
 3. The grey images: `verdict` shows where the blocks are, `depth_min` what sits
    over them.
+
+## 2026-10-15 (v10 flown): flight 38aef250, the left composite leaves the near arc uncovered
+
+Flight on test build R (`v0.20.0-rc.1-108-g38aef250`, Frontier, VR;
+`edvr_gfx_20261015_122227.log`; `--expect-build 38aef250` matches). `off`,
+one zoom, no keys. Sean: the squares in the LEFT eye. Read-only analysis.
+
+**Validity: YES.**
+
+- `capture 4 valid=yes`, started by the ring arrival (ring+0x6b0 first set
+  at f18878). All 3 of 3 eye runs ran.
+- `ring dump armed at f=18879 until f=18909`: 44 eye-frames processed, none
+  dropped, 308 PGMs (`edvr_logs\fsstiles\v10_f188xx_e*`).
+- Captures 1-3 were zoom presses, restarted.
+- The layer and compositors repeat v9: camera 1 alone draws T39 (252^2),
+  then T95 (1008^2). Both eyes composite it with VS `953C8123` / PS
+  `A473A867` after the ring draws, in all frames.
+
+**Verdicts** (whole capture; per frame f18888-18895 alike), CONFIRMED:
+
+- **Rejected by depth: 0** in every frame, both eyes. The composite wrote
+  through block-minimum depth 0.000, and `depth_min` is 0 over the whole
+  eye. The depth is cleared under the ring.
+- **Overwritten after the composite:** 1-2 blocks a frame (14 left / 29
+  right over the capture), negligible.
+- **Black blocks:** left 318,762 never covered + 4,756 written black, right
+  315,162 + 6,568. Most of the eye is black FSS sky in both.
+- **Per frame:** e.g. f18890, the left composite changed 1,539 blocks and
+  the right 2,330.
+- **Asymmetry over 22 paired frames:** black in left only, never covered
+  19,236 and written black 1,502. Black in right only, never covered 17,586
+  and written black 1,353. Same-position pairing, so blurred by parallax.
+- **f18896-18908:** the composite changed 0 blocks in both eyes (`assumed: it
+  wrote nowhere`) and the final images hold no body (a gap at the T39 to T95
+  hand-over, INFERRED).
+
+**The images** (CONFIRMED; `rt_after` / `rt_final`, f18888-18895):
+
+- The LEFT eye's composite draws the body and only the upper and back part of
+  the ring. The ring's near arc, below and in front of the planet, is MISSING:
+  black, `never covered`.
+- The RIGHT eye's composite draws the full ellipse of the ring over the same
+  frames.
+- By f18909 both eyes show the full ring alike.
+- This is the observed bug: the left reveals, and the right "already filled".
+
+**Suspects:** symmetric, so ruled out.
+
+- All four families draw 2 a frame in each eye (8/8 per frame from capture
+  frame 9 on), all before the composite.
+- They have identical state in both eyes: depth GEQUAL, no write, stencil
+  ref 5, write mask 05, func 8, ops 1,1,3.
+- They have the same binding hashes in both eyes.
+- So the v9 "bursts" were not a per-eye difference in these draws.
+
+ruled out: the composite's depth test as the source, because in flight
+38aef250 the depth is 0 under the ring and 0 blocks were rejected in any frame.
+ruled out: a later draw overwriting the left eye's ring, because 1-2 blocks a
+frame were overwritten in either eye.
+ruled out: the suspect quad families (5DA53D8B / 4A0748B6), because both
+eyes draw 8 a frame with identical state and bindings.
+
+**Root cause: narrowed, OPEN.** CONFIRMED: the same composite draw, sampling
+the same layer, covers the ring's near arc in the right eye and not in the
+left for about 8 frames at the arrival. The per-eye difference is therefore
+in another input of that draw. INFERRED, in order:
+
+1. Its other PS textures. In v9's census the draw reads t0 plus three textures
+   in t1-t3. Only the one equal to the ring target was tracked. The ring is
+   usually drawn in two parts (behind and in front of the planet), so a
+   second layer for the near arc, empty or unfilled for the left, fits the
+   missing near arc exactly.
+2. Its constants: a per-eye UV or clip window into the layer.
+
+No RVA ties this to engine code yet. The producer of the differing input is
+the next thing to find.
+
+Next observation (one flight; instrument only): at arrival +0..+30, at the
+composite draw, per eye:
+
+- identity, size, format and a 16 px block fingerprint of every PS SRV t0-t7;
+- the VS and PS constant buffers b0-b2 (read back);
+- the vertex buffer's first 6 vertices.
+
+Then for the input that differs, name its producer draw and camera, as v8
+did for the ring target. If it is a second layer drawn by camera 1 only for
+the near arc, the RE's main-camera tests (0x3659a1d / 0x3659f78) and the
+material mode list (0x36597f0, modes 0-3) are where to look in Ghidra.
+
+Fix, once that input is named: make both eyes' composites read the same
+state of it. Sean wants the animation in both eyes, so the right eye should
+take the left's input for the reveal frames. The hook point is the composite
+draw, VS `953C8123` / PS `A473A867`, by shader identity. Not built.
 
 ## Open
 
