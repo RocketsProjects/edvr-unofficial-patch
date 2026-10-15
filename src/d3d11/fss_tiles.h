@@ -41,9 +41,9 @@ inline void fssTilesNoteWriteView(const void* view, uint32_t call) {
 
 // Record-only: a draw call on the owner context. Counts it when the bound render target is one of the window's per-eye input
 // textures (SRV slots 3 and 4 of the tile dispatch), with the viewport and scissor of the first and last sampled draw.
-void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, uint32_t weight);
-inline void fssTilesNoteDraw(ID3D11DeviceContext* ctx, uint32_t weight) {
-    if (detail::g_fssTilesDraws) fssTilesNoteDrawSlow(ctx, weight);
+void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances);
+inline void fssTilesNoteDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances) {
+    if (detail::g_fssTilesDraws) fssTilesNoteDrawSlow(ctx, kind, count, instances);
 }
 
 // The eye-dump key was pressed (temporal_pass.cpp, temporalPassArmEyeDump): inside a window, write the raw lists and tile-info

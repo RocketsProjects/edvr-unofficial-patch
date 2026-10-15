@@ -286,8 +286,8 @@ inline double splitPercent(uint32_t large, uint32_t smallCount) {
 }
 
 // The roles a window's buffer can have, for the write watch.
-enum class Role : uint8_t { None = 0, Args, Out, List, Info, Big, Gbuf8, Gbuf9, Gbuf10, Gbuf11 };
-constexpr uint32_t kRoles = 10;
+enum class Role : uint8_t { None = 0, Args, Out, List, Info, Big, Gbuf8, Gbuf9, Gbuf10, Gbuf11, Ring0, Ring1, Ring2, Ring3 };
+constexpr uint32_t kRoles = 14;
 inline const char* roleName(Role r) {
     switch (r) {
         case Role::Args: return "args";
@@ -299,6 +299,10 @@ inline const char* roleName(Role r) {
         case Role::Gbuf9: return "t9";
         case Role::Gbuf10: return "t10";
         case Role::Gbuf11: return "t11";
+        case Role::Ring0: return "ring_t0";
+        case Role::Ring1: return "ring_t1";
+        case Role::Ring2: return "ring_t2";
+        case Role::Ring3: return "ring_t3";
         default:         return "?";
     }
 }
@@ -468,6 +472,148 @@ inline int formatGrid(char* out, size_t cap, F&& at) {
     if (cap) out[n < cap ? n : cap - 1] = 0;
     return static_cast<int>(n);
 }
+
+// ---- v6: the eye-diff ledger and the ring quad (2026-10-15, after flight db982c64) ---------------------------------------------------
+// Flight db982c64: the ring pass at 0x36558A0 is not on the reveal's path (33,600 calls outside it, none inside), the scene G-buffer t9-t11 is symmetric
+// (62 + 1 draws a frame per eye), t8 is one shared texture. The tile pass is symmetric end to end. What is left is a producer after it, or the ring quad /
+// mesh renderer with its own t0-t3 ring G-buffer (rounds 16-18). v6 therefore lists every draw into the eye-sized and ring targets for 60 frames from the
+// all-small event, per eye, and logs only where the two eyes' lists differ; and it follows the ring family's own inputs.
+constexpr unsigned kReduceLevel = 2;           // the automatic eye run's final images: the whole eye at 1/4 size (mip level 2)
+constexpr uint32_t kLedgerFrames = 60;        // frames the ledger runs after the all-small event
+constexpr uint32_t kLedgerCap = 1024;         // distinct draw entries kept in one frame
+constexpr uint32_t kMaxEyediffLines = 80;     // eyediff lines a window
+constexpr uint32_t kMaxRingLines = 80;        // ring quad lines a window
+constexpr uint32_t kMinTargetWidth = 128;     // smaller render targets are not listed (icons, atlases)
+constexpr uint32_t kDiffCap = 64;
+constexpr uint32_t kRankCap = 64;
+
+// The ring family, hashes from docs/build-332753.md (verified there: the ring quad and the segment mesh) and the deferred-VS notes: the VS hashes of the
+// full-screen deferred quad and the segment mesh, the quad's PS and the ring mesh's index count. A draw matching any is tagged `ring`.
+constexpr uint64_t kRingVs[3] = {0x7E38A6AA1269C901ull, 0x0357BBB2DEE43C1Full, 0x53211E8C072CD02Eull};
+constexpr uint64_t kRingPs = 0x7CECABDE34FFBE9Eull;
+constexpr uint32_t kRingMeshIndices = 13248;
+inline bool isRingDraw(char kind, uint32_t count, uint64_t vs, uint64_t ps) {
+    for (uint64_t h : kRingVs) if (vs == h) return true;
+    return ps == kRingPs || (kind == 'X' && count == kRingMeshIndices);
+}
+
+// What names a draw across the two eyes: its kind, per-draw count, the shape of its render target, and its shaders. How many instances it ran, the shapes of
+// its pixel-shader inputs t0-t3 and its viewport are reported as data, the way tools/diff_draw_census.py does.
+struct DrawKey {
+    char     kind = 0;
+    uint32_t count = 0;
+    uint32_t rtShape = 0;
+    uint64_t vs = 0, ps = 0;
+    bool operator==(const DrawKey& o) const {
+        return kind == o.kind && count == o.count && rtShape == o.rtShape && vs == o.vs && ps == o.ps;
+    }
+};
+struct DrawStat {
+    DrawKey  k;
+    uint32_t n = 0;          // draws
+    uint32_t inst = 0;       // instances over them
+    uint32_t srvSig = 0;     // the pixel-shader inputs' shapes, hashed
+    uint32_t vpW = 0, vpH = 0;
+};
+struct DiffItem {
+    enum What : uint8_t { Only0 = 0, Only1, Draws, Instances, Inputs, Viewport } what = Only0;
+    DrawKey  k;
+    uint32_t a = 0, b = 0;   // the two eyes' values where both have the draw
+};
+
+// eye 0's entries against eye 1's, by key. Returns how many differences were written (at most cap).
+inline uint32_t diffEyes(const DrawStat* e0, uint32_t n0, const DrawStat* e1, uint32_t n1, DiffItem* out, uint32_t cap) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < n0 && n < cap; ++i) {
+        const DrawStat* m = nullptr;
+        for (uint32_t j = 0; j < n1; ++j) if (e1[j].k == e0[i].k) { m = &e1[j]; break; }
+        if (!m) { out[n].what = DiffItem::Only0; out[n].k = e0[i].k; out[n].a = e0[i].n; out[n].b = 0; ++n; continue; }
+        if (e0[i].n != m->n && n < cap) { out[n].what = DiffItem::Draws; out[n].k = e0[i].k; out[n].a = e0[i].n; out[n].b = m->n; ++n; }
+        if (e0[i].inst != m->inst && n < cap) { out[n].what = DiffItem::Instances; out[n].k = e0[i].k; out[n].a = e0[i].inst; out[n].b = m->inst; ++n; }
+        if (e0[i].srvSig != m->srvSig && n < cap) { out[n].what = DiffItem::Inputs; out[n].k = e0[i].k; out[n].a = e0[i].srvSig; out[n].b = m->srvSig; ++n; }
+        if ((e0[i].vpW != m->vpW || e0[i].vpH != m->vpH) && n < cap) {
+            out[n].what = DiffItem::Viewport; out[n].k = e0[i].k; out[n].a = (e0[i].vpW << 16) | (e0[i].vpH & 0xFFFFu); out[n].b = (m->vpW << 16) | (m->vpH & 0xFFFFu); ++n;
+        }
+    }
+    for (uint32_t j = 0; j < n1 && n < cap; ++j) {
+        bool found = false;
+        for (uint32_t i = 0; i < n0; ++i) if (e0[i].k == e1[j].k) { found = true; break; }
+        if (!found) { out[n].what = DiffItem::Only1; out[n].k = e1[j].k; out[n].a = 0; out[n].b = e1[j].n; ++n; }
+    }
+    return n;
+}
+
+inline int formatDiff(char* out, size_t cap, uint32_t frame, const char* pairText, const DiffItem* items, uint32_t n) {
+    static const char* const kNames[6] = {"only-eye0", "only-eye1", "draws differ", "instances differ", "inputs differ", "viewport differ"};
+    size_t at = static_cast<size_t>(std::snprintf(out, cap, "fss tiles: eyediff f=%u %s", frame, pairText));
+    bool firstCategory = true;
+    for (uint32_t w = 0; w < 6; ++w) {
+        uint32_t shown = 0, total = 0;
+        for (uint32_t i = 0; i < n; ++i) if (items[i].what == w) ++total;
+        if (!total) continue;
+        at += static_cast<size_t>(std::snprintf(out + at, cap > at ? cap - at : 0, "%s %s:", firstCategory ? "" : " |", kNames[w]));
+        firstCategory = false;
+        for (uint32_t i = 0; i < n && at + 1 < cap; ++i) {
+            const DiffItem& d = items[i];
+            if (d.what != w) continue;
+            if (shown == 5) break;
+            ++shown;
+            const unsigned long long vs = static_cast<unsigned long long>(d.k.vs >> 32), ps = static_cast<unsigned long long>(d.k.ps >> 32);
+            if (w == DiffItem::Only0 || w == DiffItem::Only1) {
+                at += static_cast<size_t>(std::snprintf(out + at, cap > at ? cap - at : 0, " %08llX/%08llX %c n=%u x%u (rt shape %u)", vs, ps, d.k.kind, d.k.count,
+                                                        w == DiffItem::Only0 ? d.a : d.b, d.k.rtShape));
+            } else if (w == DiffItem::Viewport) {
+                at += static_cast<size_t>(std::snprintf(out + at, cap > at ? cap - at : 0, " %08llX/%08llX %ux%u vs %ux%u", vs, ps, d.a >> 16, d.a & 0xFFFFu, d.b >> 16,
+                                                        d.b & 0xFFFFu));
+            } else if (w == DiffItem::Inputs) {
+                at += static_cast<size_t>(std::snprintf(out + at, cap > at ? cap - at : 0, " %08llX/%08llX %c n=%u inputs %08X vs %08X", vs, ps, d.k.kind, d.k.count, d.a, d.b));
+            } else {
+                at += static_cast<size_t>(std::snprintf(out + at, cap > at ? cap - at : 0, " %08llX/%08llX %c n=%u %u vs %u", vs, ps, d.k.kind, d.k.count, d.a, d.b));
+            }
+        }
+        if (total > shown) at += static_cast<size_t>(std::snprintf(out + at, cap > at ? cap - at : 0, " (+%u more)", total - shown));
+    }
+    return static_cast<int>(at);
+}
+
+// The window's ranking of differing draws: by how many frames each differed, then by the size of the difference.
+struct RankEntry {
+    DiffItem::What what = DiffItem::Only0;
+    DrawKey  k;
+    uint32_t frames = 0;
+    uint64_t total = 0;
+};
+struct Ranking {
+    RankEntry e[kRankCap];
+    uint32_t used = 0;
+    uint32_t dropped = 0;
+    void add(const DiffItem& d) {
+        const uint32_t delta = d.what == DiffItem::Only0 ? d.a : d.what == DiffItem::Only1 ? d.b : (d.a > d.b ? d.a - d.b : d.b - d.a);
+        for (uint32_t i = 0; i < used; ++i) {
+            if (e[i].what == d.what && e[i].k == d.k) { ++e[i].frames; e[i].total += delta; return; }
+        }
+        if (used < kRankCap) { e[used].what = d.what; e[used].k = d.k; e[used].frames = 1; e[used].total = delta; ++used; }
+        else ++dropped;
+    }
+    // Indices, best first.
+    uint32_t order(uint32_t* idx, uint32_t cap) const {
+        const uint32_t n = used < cap ? used : cap;
+        // a simple selection sort over all entries, keeping the best n
+        uint32_t all[kRankCap];
+        for (uint32_t i = 0; i < used; ++i) all[i] = i;
+        for (uint32_t i = 0; i < used; ++i) {
+            uint32_t best = i;
+            for (uint32_t j = i + 1; j < used; ++j) {
+                const RankEntry& a = e[all[j]];
+                const RankEntry& b = e[all[best]];
+                if (a.frames > b.frames || (a.frames == b.frames && a.total > b.total)) best = j;
+            }
+            const uint32_t t = all[i]; all[i] = all[best]; all[best] = t;
+        }
+        for (uint32_t i = 0; i < n; ++i) idx[i] = all[i];
+        return n;
+    }
+};
 
 // ---- the state-restoring substitution ------------------------------------------------------------------------------
 // Ops supplies: void* getSrv(uint32_t slot) (a reference the caller releases), void setSrv(uint32_t slot, void* view),
