@@ -67,7 +67,7 @@ uint64_t g_mapAskFrame = 0, g_mapAsksFrame = 0;           // the frame of the la
 FlatUiToneProof g_proof;
 bool g_sourceToneFirstNoted = false;
 FlatUiUnknownSourceToneLog g_unknownSourceToneLog;
-// First physical RTV for each distinct, HDR-qualified HUD target in the current frame. The E894 UI-only tone guard
+// First physical RTV for each distinct, HDR-qualified HUD target in the current frame. The E894 and EDHM 0D43 UI-only tone guard
 // requires this independent binding check before it may establish proof; references release at Present/device/resize.
 struct HudPhysical {
     const void* shadow = nullptr;
@@ -94,7 +94,7 @@ void observeHudPhysical(ID3D11DeviceContext* ctx, const FlatUiLayerDraw& d) {
     Ptr<ID3D11RenderTargetView> rtv; rtv.Attach(rawRtv);
     if (rtv) rtv->GetResource(&h.actual);
 }
-// Shared physical test for the two admitted E894 pairs and diagnostic-only
+// Shared physical test for the admitted E894 and EDHM 0D43 pairs and diagnostic-only
 // unknown pairs. The caller must hold FlatComputeInternalScope.
 bool sourceTonePhysicalShape(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
                              uint64_t vs, uint64_t ps, const void* cachedOutput,
@@ -343,7 +343,7 @@ bool flatUiLayerSourceToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, ui
         return false;  // no proof from a cached shadow or an unverified alias
     if (!g_sourceToneFirstNoted) {
         g_sourceToneFirstNoted = true;
-        Log::get().note("flat ui layer: first E894 source tone qualified -- frame %llu VS %016llX PS %016llX, "
+        Log::get().note("flat ui layer: first E894/0D43 source tone qualified -- frame %llu VS %016llX PS %016llX, "
                         "physical HUD t1=%p, LDR RTV=%p R=%ux%u, full viewport; flat UI proof only.",
                         static_cast<unsigned long long>(frame), static_cast<unsigned long long>(vs),
                         static_cast<unsigned long long>(ps), shape.hdrRes, shape.rtvRes, renderW, renderH);
