@@ -4840,6 +4840,8 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'D', count, 1);
     if (runtimeFlatProfile()) {
         if (flatStationSkipsDraw(self)) return;
+        // Planet patch motion (celestial_motion.h): the flat profile's capture of a colour-pass patch draw, before the game's own issue.
+        if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         ++g_state->thunkHits[kHitDraw];
         // Capture original game bindings before the temporal scope substitutes
         // the engine-motion PS/MRT or the output-copy SRV.
@@ -4915,6 +4917,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'I', count, 1);
     if (runtimeFlatProfile()) {
         if (flatStationSkipsDraw(self)) return;
+        if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         ++g_state->thunkHits[kHitDrawIndexed];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
         {
@@ -4971,6 +4974,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'N', perInstance, instances);
     if (runtimeFlatProfile()) {
         if (flatStationSkipsDraw(self)) return;
+        if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
         {
@@ -5039,6 +5043,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'X', perInstance, instances);
     if (runtimeFlatProfile()) {
         if (flatStationSkipsDraw(self)) return;
+        if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
         {
