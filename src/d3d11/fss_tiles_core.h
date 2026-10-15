@@ -1387,6 +1387,91 @@ inline void compareInputs(const InputsFacts& a, const InputsData& da, const Inpu
     if (v) r->any = true;
 }
 
+// ---- v12: the reveal fix: replay the first downsample before the first reveal composite (2026-10-15, after flight d7769063) ------------------------------------------------------
+// Flight d7769063 (v11): the reveal composite (VS 953C8123 / PS A473A867) shows a cell's coarse input, t1, until the cell is revealed. t1 is a 63 x 63 downsample of the ring layer (VS DEF19B03 /
+// PS 831DF02E). The left eye's pass draws that downsample between the ring's two draw groups, so the left t1 lacks the front arc and unrevealed cells show black; a second downsample, from the
+// finished layer, runs just before the right composite, so the right eye shows a blurry ring instead. Fix (Sean: both eyes get the right eye's look): at the first reveal composite of a frame, re-run
+// the frame's first downsample from the now finished layer, with the state it was issued with, so the left t1 includes the ring's second group too.
+//
+// PS 831DF02E is a generic colour-matrix copy, so the hashes alone never decide: a downsample is replayed only when its render target is the texture the reveal composite binds as t1 in the same
+// frame. This struct is the whole decision (the mechanism is fss_tiles_replay.h); the hook only feeds it.
+constexpr uint64_t kRevealCompVs = 0x953C8123AD8DC13Bull, kRevealCompPs = 0xA473A867BDDBC342ull;
+constexpr uint64_t kRevealDownVs = 0xDEF19B035D5EDEDCull, kRevealDownPs = 0x831DF02EBA8AE814ull;
+
+struct RevealReplay {
+    enum Decision : uint8_t { Replay = 0, DeclFlat, DeclNoRecord, DeclOtherTarget, DeclT1, DeclDone, kDecisions };
+    static constexpr uint32_t kRec = 4;
+    // this frame
+    const void* recRt[kRec] = {};
+    uint32_t    recN = 0;
+    bool        compSeen = false;
+    bool        fAny = false, fReplayed = false, fDecl[kDecisions] = {};
+    // the totals since the last resetTotals (a capture, in the log)
+    uint32_t    frames = 0, framesWithComposite = 0, framesReplayed = 0, framesDeclined[kDecisions] = {};
+    uint32_t    records = 0, recordDrops = 0, recordFailures = 0;
+    uint32_t    replays = 0, replayFailures = 0, verifiedOk = 0, verifiedBad = 0, t1Unresolved = 0;
+
+    // A downsample was issued into `rt` (hash match of both shaders). Returns the slot to store its state in, or -1 when the frame's table is full.
+    int record(const void* rt) {
+        fAny = true;
+        if (recN >= kRec) { ++recordDrops; return -1; }
+        recRt[recN] = rt;
+        ++records;
+        return static_cast<int>(recN++);
+    }
+    void recordFailed(int idx) {   // its state could not be captured: it can never be replayed
+        if (idx >= 0 && idx < static_cast<int>(kRec)) recRt[idx] = nullptr;
+        ++recordFailures;
+    }
+    // A reveal composite is about to draw. Only the first one of a frame decides; the rest are DeclDone (not tallied). On Replay, *idx is the record to replay.
+    Decision composite(bool flat, const void* t1Res, int* idx) {
+        fAny = true;
+        if (compSeen) return DeclDone;
+        compSeen = true;
+        Decision d;
+        if (flat) d = DeclFlat;
+        else if (!t1Res) { d = DeclT1; ++t1Unresolved; }
+        else {
+            d = recN ? DeclOtherTarget : DeclNoRecord;
+            for (uint32_t i = 0; i < recN; ++i) {
+                if (recRt[i] && recRt[i] == t1Res) { d = Replay; *idx = static_cast<int>(i); break; }
+            }
+        }
+        if (d == Replay) fReplayed = true;
+        else fDecl[d] = true;
+        return d;
+    }
+    // Once a frame: tally what this frame did and start the next one clean.
+    void endFrame() {
+        if (fAny) {
+            ++frames;
+            if (compSeen) ++framesWithComposite;
+            if (fReplayed) ++framesReplayed;
+            for (uint32_t i = 1; i < kDecisions; ++i) if (fDecl[i]) ++framesDeclined[i];
+        }
+        recN = 0;
+        for (uint32_t i = 0; i < kRec; ++i) recRt[i] = nullptr;
+        compSeen = false;
+        fAny = fReplayed = false;
+        for (bool& d : fDecl) d = false;
+    }
+    void resetTotals() {
+        frames = framesWithComposite = framesReplayed = 0;
+        for (uint32_t& x : framesDeclined) x = 0;
+        records = recordDrops = recordFailures = replays = replayFailures = verifiedOk = verifiedBad = t1Unresolved = 0;
+    }
+};
+inline const char* revealDecisionText(RevealReplay::Decision d) {
+    switch (d) {
+        case RevealReplay::Replay:          return "replayed";
+        case RevealReplay::DeclFlat:        return "declined: the flat profile never replays";
+        case RevealReplay::DeclNoRecord:    return "declined: no downsample was recorded this frame before the composite";
+        case RevealReplay::DeclOtherTarget: return "declined: the frame's recorded downsamples went to another texture than the composite's t1 (a hash-only match)";
+        case RevealReplay::DeclT1:          return "declined: the composite's t1 did not resolve to a texture";
+        default:                            return "?";
+    }
+}
+
 // ---- the state-restoring substitution ------------------------------------------------------------------------------
 // Ops supplies: void* getSrv(uint32_t slot) (a reference the caller releases), void setSrv(uint32_t slot, void* view),
 // void release(void* view), void dispatchIndirect(void* args, uint32_t off).

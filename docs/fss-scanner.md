@@ -43,12 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **ROOT CAUSE (flight d7769063, v11):** the reveal shader's coarse input t1
-  (a 63x63 downsample of the layer) is drawn in the left pass BETWEEN the
-  ring's two draw groups, so it lacks the ring's second group (the near arc).
-  It is drawn again before the right composite from the finished layer.
-  Unrevealed cells show t1, so they are black in the left only. Proposed fix
-  (not built): skip the second downsample, so both eyes reveal alike.
+- **ROOT CAUSE (flight d7769063, v11):** the reveal's coarse input t1 (a 63x63
+  downsample of the layer) is drawn in the left pass BETWEEN the ring's two
+  draw groups, so it lacks the near arc; it is drawn again before the right
+  composite. Unrevealed cells show t1: black in the left only. Fix v12 (built,
+  not flown; VR only, no key): replay the first downsample from the finished
+  layer before the first composite. Read `reveal replay`, t1 in `composite diff`.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -3502,6 +3502,100 @@ eyes, so make the right eye's reveal read the same t1 as the left's.
   - Log: a `composite diff` with no t1 line in frames +0..+27, and a fix
     counter of skipped draws equal to the frames of the reveal.
   - The eye-run images: the same black cells in both eyes.
+
+## 2026-10-15 (v12): the fix: replay the first downsample before the first reveal composite (built, not flown)
+
+Flight d7769063 named the cause: the left eye's reveal composite reads a coarse
+t1 (a 63x63 downsample of the ring layer, VS DEF19B03 / PS 831DF02E) that the
+left pass draws BEFORE the ring's second draw group (#216, group B at #217-218);
+a second downsample from the finished layer (#252) runs before the right
+composite (#253), so the right eye's t1 holds the whole ring and the left's
+does not. The first plan (skip the second downsample, so the right eye shows
+the squares too) was dropped before it was built: Sean wants the right eye's
+current look, blurry to sharp with no black squares, in BOTH eyes. So the
+LEFT eye's t1 is made complete instead.
+
+The fix, in the VR profile only, no new key (`fix.fss_eye_sync` untouched):
+
+- In `hookedDrawInstanced`, owner context, while the scanner is on show (chrome
+  held or the FSS latch open), before the instrument sees the draw:
+  - A draw with VS `DEF19B035D5EDEDC` + PS `831DF02EBA8AE814` (both whole
+    64-bit hashes) is a downsample. Its full pipeline state is kept for the
+    frame, keyed by its render target: input layout, vertex and index buffers,
+    topology, VS and PS, GS, vertex and pixel constant buffers b0-b3, vertex and
+    pixel textures and samplers, rasterizer, viewports, scissors, render targets
+    and depth, blend, depth-stencil, and the draw arguments. The constant
+    buffers are COPIED on the GPU timeline into private buffers at that draw,
+    so a Map between #216 and #219 cannot change what the replay reads.
+  - The first draw of the reveal composite (VS `953C8123AD8DC13B` + PS
+    `A473A867BDDBC342`) in the frame reads its t1 resource. If a downsample
+    recorded this frame rendered into that same resource, that downsample is
+    replayed: the state before is saved, the downsample's state is applied
+    (its inputs first, so T121 is never both an input and a target), the draw
+    is issued, and the state before is applied again (targets first, then the
+    inputs, so T121 is an input again). The composite then draws. Only the first
+    composite of a frame decides; the right composite, and the game's own second
+    downsample, are untouched.
+  - It never matches on the hashes alone: PS 831DF02E is a generic copy. A
+    downsample into any other texture is recorded and declined.
+- The replay goes through the game's un-hooked entry points (draw, render
+  targets, shaders, textures, constant buffers, blend, viewports), so none of
+  vscreen's state tracking sees it. The first 8 replays of a capture read the
+  whole context state back and compare it with the state before.
+- Flat is untouched: the check sits behind `!runtimeFlatProfile()`, and the
+  watch bool is false in flat.
+
+What the replay's inputs were checked against. The v11 log has no census line
+for the downsample (the census lists draws into eye-sized targets only) and the
+census table that names the composite's t1 shows it read only by the two
+composites, so "no cb contents changed between #216 and #219" could not be read
+from it. The design does not depend on it: constant buffers are snapshotted at
+#216, and the textures and states are held by reference. The layer SRV (t0) is
+the layer's own view; at #219 the layer holds group B (the whole point).
+Not covered: pixel-shader UAVs on the output merger (the composite binds none
+in any capture so far; a replay would unbind them).
+
+Logging (per capture, plus the v11 composite diff, unchanged):
+
+- `reveal replay f=F: ...` lines, at most 8 a capture: the replay done (with the
+  state check result), a composite that declined and why, a downsample whose
+  state could not be kept.
+- `window N reveal replay -- frames with draws of the reveal shaders A, with a
+  reveal composite B; downsample REPLAYED before the first composite in C
+  frame(s) (D replay(s), E failed); state read back after the first replays: F
+  equal, G DIFFERENT; downsamples recorded ...; composites declined, in frames:
+  no downsample recorded, recorded for another texture than t1 (hash-only
+  match), t1 unresolved, flat. <verdict>`. The verdict is one of: "the replay
+  fired"; "no reveal composite drew in this capture, so the replay had nothing
+  to do"; "THE REPLAY NEVER FIRED although reveal composites drew: this run did
+  not test the fix".
+
+Rig (fss_tiles_test, 337 checks): `RevealReplay` decisions (the stock order
+replays; a hash-only match on another target is declined; no replay without a
+recorded downsample that frame, including one recorded after the composite;
+an unresolved t1; flat never replays; a failed record is never replayed; only
+the first composite decides); and on a WARP device with the debug layer, the
+real `captureState` / `replayDraw`: the replay draws the downsample's colour
+from the private copy of the constant buffer after the original was rewritten,
+the composite's target is untouched, and every stage the draw touches (target,
+t1, constants, rasterizer, blend, depth-stencil, sampler, viewport, scissor,
+stencil reference, sample mask, blend factor) reads back equal to what it was.
+
+Proving flight: `fix.fss_eye_sync = off`, one zoom (the glare shader dump is no
+longer needed). Expected:
+
+1. `capture N valid=yes`, and `window N reveal replay -- ... replayed ... in
+   about as many frames as the reveal composite drew`, with 0 DIFFERENT state
+   reads.
+2. `window N composite diff t1` shows no content difference between the eyes
+   in frames +0..+27 (the v11 run had 22 of 25 frames differing), and the left
+   fingerprint of t1 equals the right.
+3. The eye runs: both eyes show the right eye's look, no black squares.
+4. If the summary says THE REPLAY NEVER FIRED, the match failed and the
+   declined counts say why.
+Risks: the replay is one extra tiny draw a frame; if the build ever draws
+different layer content per eye, the left t1 would show the finished layer (the
+right eye's own look).
 
 ## Open
 
