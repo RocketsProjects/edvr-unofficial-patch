@@ -43,7 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight (2026-10-15 v5 placeholder):** see "2026-10-15 (v5)".
+- **Next flight (2026-10-15 v5, built, not flown):** `off`, one zoom of a
+  ringed planet, no keys, wait for the reveal. Reads the G-buffer t8-t11 per eye
+  (v4 read depth and stencil by mistake) and the RE's read-only hook at
+  0x36558A0 (camera, role, pass, mode); tables in "2026-10-15 (v5)". Flight
+  bca9d6b8: `tiles` ruled out; only the LEFT eye shows the squares. Fallback
+  `fix.fss_eye_sync` = `mirror`. Not fixed: ~220 m remap; panel bit; sky drift.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -2204,6 +2209,103 @@ The six questions:
    If both eyes run the same pass and mode sequence, the CPU ring path is
    symmetric, and the next measurement is the dispatch's G-buffer (widen
    `fss tiles:` to slots 8-11).
+
+## 2026-10-15 (v5): the G-buffer t8-t11 and the ring pass observer (built, not flown)
+
+The engine RE above corrected v4: SRV slots 3 and 4 of the tile dispatch are
+each eye's scene depth and its stencil view (CONFIRMED, `tile-renderer-cs.asm`),
+not a ring G-buffer. The G-buffer the pass shades is t8-t11, which v4 never read
+(`kSrvSlots = 8`). v5 fixes the instrument and adds the RE's one observation.
+Read-only throughout; no key.
+
+What changed:
+
+- THE SLOTS. The dispatch's SRV capture now covers slots 0-11
+  (`kCaptureSlots = 12`; the substitution and the per-dispatch lines keep slots
+  0-7). The `input` fingerprints (every 10th frame, through the 600-frame
+  reveal capture) now read, per eye: slot 0, slot 3 and slot 4 (relabelled
+  `depth(slot3)` and `stencil(slot4)`, identity only: they are depth-stencil and
+  are not copied) and t8, t9, t10, t11 (identity, size, format and the 8 x 8 grid
+  of 16 x 16 boxes, as v4 did for slots 3 and 4). The draw count and the write
+  watch now follow t8-t11 (roles `t8` to `t11`), per eye: draws, instances,
+  viewport and scissor of the first and last sampled draw, through render target
+  0 (a G-buffer pass that binds the four as render targets 0-3 is caught by
+  whichever is target 0).
+- THE RING PASS OBSERVER. A read-only CodeHook at EliteDangerous64.exe+0x36558A0
+  (`FUN_1436558a0`, the ring pass entry), VR profile only, installed at startup
+  with the vertex resync's relay. It is pinned by build identity (PE stamp
+  1788384820 and image size 104894464, the pair every build-keyed hook checks)
+  and by the prologue `40 55 57 41 54 41 55 41 56 48 81 EC 90 00 00 00` from the
+  RE's hook-point table (three whole instructions, five bytes stolen). Inside the
+  zoom/reveal capture it logs per call the camera ID `[r8+0x8e8]`, the stereo
+  role `[[r8+0x8f8]+0x10]`, the pass `edx`, the body mode `[[rsp+0x40]+0x104]`
+  (the render data's `+0x104`), whether `ring+0x6b0` is set and `ring+0x718` /
+  `+0x71c` / `+0x720`; once a window the main camera's ID, asked the way the ring
+  code asks (`[ring+0x48]`, vtable `0xa8`, then `0x70`; two getter calls under
+  SEH, a fault absorbed and never retried). Every argument is forwarded
+  unchanged; nothing is written. If the build or the prologue differs, or
+  CodeHook refuses, it logs `ring hook inert -- <why>` once and stays out.
+
+Lines (new ones only):
+
+    fss tiles: ring hook armed at EliteDangerous64.exe+0x36558A0 (the ring pass entry, build 332841), stolen=5 bytes, prologue 16/16 bytes verified. Read-only: ...
+    fss tiles: ring hook inert -- <why>. (the build differs / the bytes differ / no memory in range / CodeHook refused; or nothing at all in the flat profile)
+    fss tiles: ring main camera id=N (window W, f=F; read through [ring+0x48] vtable 0xa8 then 0x70, the way the ring code asks)
+    fss tiles: ring f=F call=K cam=C role=R pass=P mode=M ring+0x6b0=set|clear alpha=A dir=D active=B (first frames|new combination|sample)
+    fss tiles: input f=N eyeE | slot0 B<id> <bytes> bytes nz16=<16> | depth(slot3) T<id> WxH fmtF (not sampled: ...) | stencil(slot4) T<id> ... | cube T<id> ...
+    fss tiles: input f=N eyeE G-buffer | t8 T<id> WxH fmtF nz8x8=<rows/of/8> | t9 ... | t10 ... | t11 ...
+    fss tiles: gbuf f=N eyeE tK T<id> draws=n instances=m viewport first (...) last (...) scissor first (...) last (...)
+    fss tiles: window N upstream -- draws into the per-eye G-buffer textures t8-t11 (render target 0): eyeE tK: frames with draws a, draws b (per frame lo..hi), instances c, viewport changes d | ...
+    fss tiles: window N inputs -- fingerprints read=n lines=m; sampled grids that differ between the eyes: slot0 a of b, depth ..., t8 ..., t9 ..., t10 ..., t11 ... frames; gbuf lines g
+    fss tiles: window N ring hook -- armed, T ring-pass call(s) since it armed, W inside this window's capture, K distinct combination(s): cam=.. role=.. pass=.. mode=.. 6b0=.. xN; ...; call lines n; main camera id known|not read|unreadable
+
+A hook that never ran is told from one that saw nothing: the closing line says
+`the entry has NOT been reached this session` when its total call count is zero,
+`none inside this window's capture` when calls happen outside it, and
+`inert (<why>)` when it never armed. Call lines are the first 12 frames of a
+window, every new combination, then one frame in 10; at most 200 a window.
+
+Flight plan (Sean, VR, a ringed planet, `off` only, no keys):
+
+1. Set `fix.fss_eye_sync = off` in the ini before launching. The log head must show
+   `ring hook armed` (an `inert` line means the build or the prologue differs: the
+   rest of the instrument still runs) and no `fss eye heal: armed`.
+2. Zoom a ringed planet once and wait for the reveal to finish (about ten
+   seconds). Press nothing. Say which eye shows the squares.
+3. Read the `ring`, `input ... G-buffer`, `gbuf` and the three `window N` lines.
+
+Reading the hook (the RE's table, restated). Compare the left eye's camera
+(the one with the squares) with the right's in the frames from the all-small band
+event on; the main camera ID printed once per window says which camera the
+main-only tests treat as primary:
+
+| What the `ring` lines show | Means | Next |
+|---|---|---|
+| Only the main camera's calls have `mode=2` and `ring+0x6b0=set` in the reveal frames; the other camera's calls have mode 0 or `clear` | The offscreen mono body layer is drawn for the main camera only (the `0x3659a1d` / `0x3659f78` tests): the squares are that layer's reveal, seen by one eye | Patch those two tests to answer "main" for the second eye; it draws the layer twice a frame from the FSS camera (double cost, a race on the one target), so only if the G-buffer lines agree |
+| The two cameras run the same passes and mode, with different `alpha` or `active` | The scan alpha ramp (`0x365b1c0`) is read at different moments, not different code | Not the lever for the squares; look at what advances it |
+| Role 2's calls lack a pass role 1's have (3 or 7, the hot spots and PlanetRingScan) | The role-aware path (`0x36540b0`, block+0x17) | Hook `0x36540b0`; low risk |
+| Both cameras run an identical pass / mode / `6b0` sequence | The CPU ring path is symmetric | The G-buffer t8-t11: see below |
+| `ring hook inert`, or `0 ... call(s)` with `NOT been reached` | The observer did not run; nothing is learned about the ring path | Fix the pin (the prologue, the identity), not the reading |
+
+Reading t8-t11 (the `input ... G-buffer` lines, the `gbuf` lines, `window N
+upstream` and `inputs`):
+
+- The grids: a `t8`-`t11` grid that is mostly `.` (unwritten) for eye 0 where
+  eye 1's is filled or partly filled, in the reveal frames, says eye 0's G-buffer
+  is incomplete when the tile pass reads it: the squares are unwritten G-buffer
+  tiles, and the producer is the next question. Identical grids and identities
+  for both eyes rule the G-buffer's CONTENT out as the difference (the sampling
+  is coarse: 64 boxes of 16 x 16 pixels).
+- The draws: `upstream` and the `gbuf` lines give each eye's draws, instances and
+  viewport/scissor into the four textures per frame. Fewer draws or a smaller
+  region for eye 0 during the reveal is round 27's budgeted subset made visible
+  and the producer is the ring's offscreen draw. Equal draws with different grids
+  point at what those draws read. `no render target of the window matched them`
+  says the G-buffer is not drawn into through render target 0 (a compute or
+  a UAV write): then the write watch (`writes` line, roles `t8`-`t11`) and the
+  RE's next hook are the way.
+- Slots 3 and 4: identity only. They are each eye's depth and stencil and differ
+  per eye by construction; do not read the squares into them.
 
 ## Open
 

@@ -16,6 +16,7 @@
 #include "fss_tiles_core.h"
 #include "fss_tiles_d3d.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the automatic eye run
+#include "fss_ring_hook.h"       // fssRingHookWindow / fssRingHookWindowSummary: the ring pass observer
 #include "binding_shadow.h"   // bindingGet, bindingResolveProbe: the render target of a draw
 #include "journal_watch.h"   // journalFssFocus: the zoom window's authority
 
@@ -103,7 +104,7 @@ struct State {
     WatchTable watch;
     uint32_t listLines = 0;
     uint32_t writeLines = 0;
-    uint32_t writes[kWriteCalls][8] = {};   // [call][Role]
+    uint32_t writes[kWriteCalls][kRoles] = {};   // [call][Role]
     uint32_t samplesRead = 0;
     uint32_t sampleFiles = 0;
     uint32_t dumpFramesLeft = 0;            // the eye dump asked for the next frames' raw buffers
@@ -125,7 +126,7 @@ struct State {
         uint32_t frame = 0;
         bool     used = false;
         bool     drained = true;
-        FpItem   it[6];                      // [eye * 3 + {slot 0, slot 3, slot 4}]
+        FpItem   it[2 * kFpItems];           // [eye * kFpItems + k], kFpSlots[k]
         uint32_t cube[2][5] = {};            // slot 6: id, w, h, layers, format
     };
     struct GDraw {
@@ -143,12 +144,12 @@ struct State {
         D3D11_VIEWPORT vp0{};
     };
     Fp       fp[kStagingRing];
-    ID3D11Resource* fpPool[kStagingRing][6] = {};
+    ID3D11Resource* fpPool[kStagingRing][2 * kFpItems] = {};
     uint32_t inputLines = 0, fpRead = 0;
-    uint32_t gridFrames[3] = {}, gridDiffer[3] = {};
+    uint32_t gridFrames[kFpItems] = {}, gridDiffer[kFpItems] = {};
     GDraw    gd[8];
     uint32_t gdN = 0;
-    GTot     gtot[3][2];
+    GTot     gtot[3][4];
     uint32_t gbufLines = 0;
     void*    rtvKey[48] = {};
     const void* rtvRes[48] = {};
@@ -271,7 +272,7 @@ void refreshActive() {
     detail::g_fssTilesWatch = g.win.capturing && g.watch.n > 0;
     g.watchGbuf = false;
     for (uint32_t i = 0; i < g.watch.n; ++i) {
-        if (g.watch.role[i] == Role::GbufA || g.watch.role[i] == Role::GbufB) g.watchGbuf = true;
+        if (g.watch.role[i] >= Role::Gbuf8 && g.watch.role[i] <= Role::Gbuf11) g.watchGbuf = true;
     }
     detail::g_fssTilesDraws = g.win.capturing && g.watchGbuf;
 }
@@ -635,8 +636,9 @@ void registerWatch(const Rec& r, ID3D11Buffer* args, const Slot* slot, const voi
     if (slot[0].isBuffer) g.watch.add(slot[0].res, Role::Big, r.eye);
     if (slot[1].isBuffer) g.watch.add(slot[1].res, Role::Info, r.eye);
     if (slot[2].isBuffer) g.watch.add(slot[2].res, Role::List, r.eye);
-    if (r.eye < 2 && slot[3].res && !slot[3].isBuffer) g.watch.add(slot[3].res, Role::GbufA, r.eye);
-    if (r.eye < 2 && slot[4].res && !slot[4].isBuffer) g.watch.add(slot[4].res, Role::GbufB, r.eye);
+    for (uint32_t k = 0; k < 4 && r.eye < 2; ++k) {
+        if (slot[8 + k].res && !slot[8 + k].isBuffer) g.watch.add(slot[8 + k].res, static_cast<Role>(static_cast<uint32_t>(Role::Gbuf8) + k), r.eye);
+    }
 }
 
 // ---- v4: the inputs ---------------------------------------------------------------------------------------------------
@@ -690,16 +692,15 @@ void queueFingerprint(ID3D11DeviceContext* ctx, const Rec& r, const Slot* slot) 
         fp.used = true;
         fp.drained = false;
     }
-    static const uint32_t kSlots[3] = {0, 3, 4};
-    for (uint32_t k = 0; k < 3; ++k) {
-        const uint32_t s = kSlots[k];
+    for (uint32_t k = 0; k < kFpItems; ++k) {
+        const uint32_t s = kFpSlots[k];
         if (!slot[s].res) continue;
         ID3D11Resource* res = static_cast<ID3D11Resource*>(const_cast<void*>(slot[s].res));
         D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
         res->GetType(&dim);
-        State::FpItem& it = fp.it[r.eye * 3 + k];
+        State::FpItem& it = fp.it[r.eye * kFpItems + k];
         it.id = g.ids.id(res);
-        ID3D11Resource** st = &g.fpPool[ring][r.eye * 3 + k];
+        ID3D11Resource** st = &g.fpPool[ring][r.eye * kFpItems + k];
         if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
             D3D11_BUFFER_DESC bd{};
             static_cast<ID3D11Buffer*>(res)->GetDesc(&bd);
@@ -769,19 +770,20 @@ void formatInputItem(char* out, size_t cap, const char* tag, const State::FpItem
 }
 
 void processFingerprint(State::Fp& fp, const D3D11_MAPPED_SUBRESOURCE* m) {
-    char grids[2][3][96] = {};
+    char grids[2][kFpItems][96] = {};
     for (uint32_t e = 0; e < 2; ++e) {
-        for (uint32_t k = 0; k < 3; ++k) {
-            const State::FpItem& it = fp.it[e * 3 + k];
+        for (uint32_t k = 0; k < kFpItems; ++k) {
+            const uint32_t at = e * kFpItems + k;
+            const State::FpItem& it = fp.it[at];
             if (!it.have) continue;
-            const uint8_t* p = static_cast<const uint8_t*>(m[e * 3 + k].pData);
+            const uint8_t* p = static_cast<const uint8_t*>(m[at].pData);
             if (!it.tex) {
                 char tmp[kBufRegions + 1];
                 for (uint32_t i = 0; i < kBufRegions; ++i) tmp[i] = nzChar(countNonzero(p + i * kBufRegionBytes, kBufRegionBytes), kBufRegionBytes);
                 tmp[kBufRegions] = 0;
                 std::snprintf(grids[e][k], sizeof(grids[e][k]), "%s", tmp);
             } else {
-                const uint32_t pitch = m[e * 3 + k].RowPitch;
+                const uint32_t pitch = m[at].RowPitch;
                 formatGrid(grids[e][k], sizeof(grids[e][k]), [&](uint32_t x, uint32_t y) {
                     uint32_t nz = 0;
                     for (uint32_t row = 0; row < kTilePx; ++row) {
@@ -793,23 +795,23 @@ void processFingerprint(State::Fp& fp, const D3D11_MAPPED_SUBRESOURCE* m) {
         }
     }
     ++g.fpRead;
-    static const char* const kTag[3] = {"slot0", "slot3", "slot4"};
-    for (uint32_t k = 0; k < 3; ++k) {
-        if (fp.it[k].have && fp.it[3 + k].have) {
+    static const char* const kTag[kFpItems] = {"slot0", "depth(slot3)", "stencil(slot4)", "t8", "t9", "t10", "t11"};
+    for (uint32_t k = 0; k < kFpItems; ++k) {
+        if (fp.it[k].have && fp.it[kFpItems + k].have) {
             ++g.gridFrames[k];
             if (std::strcmp(grids[0][k], grids[1][k]) != 0) ++g.gridDiffer[k];
         }
     }
-    if (g.inputLines + 2 > kMaxInputLines) return;
+    if (g.inputLines + 4 > kMaxInputLines) return;
     for (uint32_t e = 0; e < 2; ++e) {
-        char a[200], b[260], c[260], line[900];
-        formatInputItem(a, sizeof(a), kTag[0], fp.it[e * 3 + 0], grids[e][0]);
-        formatInputItem(b, sizeof(b), kTag[1], fp.it[e * 3 + 1], grids[e][1]);
-        formatInputItem(c, sizeof(c), kTag[2], fp.it[e * 3 + 2], grids[e][2]);
-        std::snprintf(line, sizeof(line), "fss tiles: input f=%u eye%u | %s | %s | %s | cube T%u %ux%ux%u fmt%u", fp.frame, e, a, b, c,
+        char part[kFpItems][280], lineA[900], lineB[1300];
+        for (uint32_t k = 0; k < kFpItems; ++k) formatInputItem(part[k], sizeof(part[k]), kTag[k], fp.it[e * kFpItems + k], grids[e][k]);
+        std::snprintf(lineA, sizeof(lineA), "fss tiles: input f=%u eye%u | %s | %s | %s | cube T%u %ux%ux%u fmt%u", fp.frame, e, part[0], part[1], part[2],
                       fp.cube[e][0], fp.cube[e][1], fp.cube[e][2], fp.cube[e][3], fp.cube[e][4]);
-        Log::get().note("%s", line);
-        ++g.inputLines;
+        std::snprintf(lineB, sizeof(lineB), "fss tiles: input f=%u eye%u G-buffer | %s | %s | %s | %s", fp.frame, e, part[3], part[4], part[5], part[6]);
+        Log::get().note("%s", lineA);
+        Log::get().note("%s", lineB);
+        g.inputLines += 2;
     }
 }
 
@@ -822,16 +824,16 @@ void drainFingerprints(ID3D11DeviceContext* ctx) {
         }
         if (!pick) return;
         const uint32_t ring = static_cast<uint32_t>(pick - g.fp);
-        D3D11_MAPPED_SUBRESOURCE m[6] = {};
-        bool mapped[6] = {};
+        D3D11_MAPPED_SUBRESOURCE m[2 * kFpItems] = {};
+        bool mapped[2 * kFpItems] = {};
         bool ok = true;
-        for (uint32_t i = 0; i < 6 && ok; ++i) {
+        for (uint32_t i = 0; i < 2 * kFpItems && ok; ++i) {
             if (!pick->it[i].have) continue;
             ok = SUCCEEDED(ctx->Map(g.fpPool[ring][i], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m[i]));
             mapped[i] = ok;
         }
         if (ok) processFingerprint(*pick, m);
-        for (uint32_t i = 0; i < 6; ++i) {
+        for (uint32_t i = 0; i < 2 * kFpItems; ++i) {
             if (mapped[i]) ctx->Unmap(g.fpPool[ring][i], 0);
         }
         if (ok) { pick->drained = true; continue; }
@@ -860,7 +862,7 @@ void flushDraws(uint32_t frame) {
     for (uint32_t i = 0; i < g.gdN; ++i) {
         State::GDraw& d = g.gd[i];
         if (!d.draws) continue;
-        State::GTot& t = g.gtot[d.eye > 1 ? 2 : d.eye][d.role == Role::GbufA ? 0 : 1];
+        State::GTot& t = g.gtot[d.eye > 1 ? 2 : d.eye][static_cast<uint32_t>(d.role) - static_cast<uint32_t>(Role::Gbuf8)];
         if (t.frames == 0 || d.draws < t.minDraws) t.minDraws = d.draws;
         if (d.draws > t.maxDraws) t.maxDraws = d.draws;
         ++t.frames;
@@ -872,9 +874,9 @@ void flushDraws(uint32_t frame) {
             ++t.vpVaries;
         }
         if (line) {
-            Log::get().note("fss tiles: gbuf f=%u eye%u slot%u T%u draws=%u instances=%u viewport first (%.0f,%.0f %.0fx%.0f) last (%.0f,%.0f %.0fx%.0f) "
+            Log::get().note("fss tiles: gbuf f=%u eye%u t%u T%u draws=%u instances=%u viewport first (%.0f,%.0f %.0fx%.0f) last (%.0f,%.0f %.0fx%.0f) "
                             "scissor first (%d,%d,%d,%d) last (%d,%d,%d,%d)",
-                            frame, d.eye, d.role == Role::GbufA ? 3u : 4u, g.ids.id(d.res), d.draws, d.weight, d.vp0.TopLeftX, d.vp0.TopLeftY,
+                            frame, d.eye, 8u + static_cast<uint32_t>(d.role) - static_cast<uint32_t>(Role::Gbuf8), g.ids.id(d.res), d.draws, d.weight, d.vp0.TopLeftX, d.vp0.TopLeftY,
                             d.vp0.Width, d.vp0.Height, d.vpN.TopLeftX, d.vpN.TopLeftY, d.vpN.Width, d.vpN.Height, d.sc0.left, d.sc0.top,
                             d.sc0.right, d.sc0.bottom, d.scN.left, d.scN.top, d.scN.right, d.scN.bottom);
             ++g.gbufLines;
@@ -924,7 +926,7 @@ void emitSummary() {
         size_t wa = 0;
         wb[0] = 0;
         for (uint32_t c = 0; c < kWriteCalls; ++c) {
-            for (uint32_t r = 1; r < 8; ++r) {
+            for (uint32_t r = 1; r < kRoles; ++r) {
                 if (!g.writes[c][r]) continue;
                 wa += static_cast<size_t>(std::snprintf(wb + wa, sizeof(wb) - wa, "%s%s->%s x%u", wa ? ", " : "",
                                                         writeCallName(c), roleName(static_cast<Role>(r)), g.writes[c][r]));
@@ -939,22 +941,24 @@ void emitSummary() {
                     g.windowNo, g.windowEvents, g.autoRuns, kMaxAutoRuns, g.bandWatch.lo[0], g.bandWatch.hi[0], g.bandWatch.lo[1],
                     g.bandWatch.hi[1], g.bandWatch.maxStep[0], g.bandWatch.maxStep[1], kGrid, g.bandLines, g.bandFiles);
     {
-        char gb[560];
+        char gb[900];
         size_t ga = 0;
         gb[0] = 0;
         for (uint32_t e = 0; e < 2; ++e) {
-            for (uint32_t k = 0; k < 2; ++k) {
+            for (uint32_t k = 0; k < 4; ++k) {
                 const State::GTot& t = g.gtot[e][k];
-                ga += static_cast<size_t>(std::snprintf(gb + ga, sizeof(gb) - ga, "%seye%u slot%u: frames with draws %u, draws %u (per frame %u..%u), instances %u, viewport changes %u",
-                                                        ga ? " | " : "", e, k ? 4u : 3u, t.frames, t.draws, t.minDraws, t.maxDraws, t.weight, t.vpVaries));
+                ga += static_cast<size_t>(std::snprintf(gb + ga, sizeof(gb) - ga, "%seye%u t%u: frames with draws %u, draws %u (per frame %u..%u), instances %u, viewport changes %u",
+                                                        ga ? " | " : "", e, 8 + k, t.frames, t.draws, t.minDraws, t.maxDraws, t.weight, t.vpVaries));
             }
         }
-        Log::get().note("fss tiles: window %u upstream -- draws into the per-eye textures of slots 3 and 4: %s", g.windowNo,
-                        g.watchGbuf ? gb : "no render target of the window matched them (the ring is not drawn into slot 3 or 4's resources through render target 0)");
-        Log::get().note("fss tiles: window %u inputs -- fingerprints read=%u lines=%u; sampled grids that differ between the eyes: slot0 %u of %u, slot3 %u of %u, "
-                        "slot4 %u of %u frames; gbuf lines %u",
-                        g.windowNo, g.fpRead, g.inputLines, g.gridDiffer[0], g.gridFrames[0], g.gridDiffer[1], g.gridFrames[1], g.gridDiffer[2],
-                        g.gridFrames[2], g.gbufLines);
+        Log::get().note("fss tiles: window %u upstream -- draws into the per-eye G-buffer textures t8-t11 (render target 0): %s", g.windowNo,
+                        g.watchGbuf ? gb : "no render target of the window matched them (the G-buffer is not drawn into t8-t11's resources through render target 0)");
+        Log::get().note("fss tiles: window %u inputs -- fingerprints read=%u lines=%u; sampled grids that differ between the eyes: slot0 %u of %u, depth %u of %u, stencil %u of %u, "
+                        "t8 %u of %u, t9 %u of %u, t10 %u of %u, t11 %u of %u frames; gbuf lines %u",
+                        g.windowNo, g.fpRead, g.inputLines, g.gridDiffer[0], g.gridFrames[0], g.gridDiffer[1], g.gridFrames[1], g.gridDiffer[2], g.gridFrames[2],
+                        g.gridDiffer[3], g.gridFrames[3], g.gridDiffer[4], g.gridFrames[4], g.gridDiffer[5], g.gridFrames[5], g.gridDiffer[6], g.gridFrames[6],
+                        g.gbufLines);
+        fssRingHookWindowSummary(g.windowNo);
     }
     char sl[200];
     size_t sa = 0;
@@ -984,8 +988,8 @@ void emitSummary() {
 
 // ---- one tile-renderer dispatch ---------------------------------------------------------------------------------------
 void describeBindings(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView** sr, Slot* slot, Rec& r, const void** uavRes) {
-    ctx->CSGetShaderResources(0, kSrvSlots, sr);
-    for (uint32_t i = 0; i < kSrvSlots; ++i) {
+    ctx->CSGetShaderResources(0, kCaptureSlots, sr);
+    for (uint32_t i = 0; i < kCaptureSlots; ++i) {
         if (!sr[i]) continue;
         slot[i].view = sr[i];
         ID3D11Resource* res = nullptr;
@@ -1000,9 +1004,11 @@ void describeBindings(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView** sr, S
             slot[i].isBuffer = true;
             slot[i].bytes = bd.ByteWidth;
         }
-        r.srvId[i] = g.ids.id(res);
-        r.srvKind[i] = slot[i].isBuffer ? 1 : 2;
-        r.srvBytes[i] = slot[i].bytes;
+        if (i < kSrvSlots) {
+            r.srvId[i] = g.ids.id(res);
+            r.srvKind[i] = slot[i].isBuffer ? 1 : 2;
+            r.srvBytes[i] = slot[i].bytes;
+        }
         res->Release();   // the view holds the resource; the pointer stays valid as an identity while the view is held
     }
     ID3D11UnorderedAccessView* uv[2] = {};
@@ -1037,8 +1043,8 @@ bool onTarget(ID3D11DeviceContext* ctx, ID3D11Buffer* args, UINT off, uint64_t h
     r.occ = g.occ++;
     r.argsId = g.ids.id(args);
 
-    ID3D11ShaderResourceView* sr[kSrvSlots] = {};
-    Slot slot[kSrvSlots];
+    ID3D11ShaderResourceView* sr[kCaptureSlots] = {};
+    Slot slot[kCaptureSlots];
     const void* uavRes[2] = {};
     describeBindings(ctx, sr, slot, r, uavRes);
     if (g.win.capturing) registerWatch(r, args, slot, uavRes);
@@ -1139,10 +1145,9 @@ bool onTarget(ID3D11DeviceContext* ctx, ID3D11Buffer* args, UINT off, uint64_t h
         }
     }
 
-    if (!keepViews) {
-        for (auto& v : sr) {
-            if (v) { v->Release(); v = nullptr; }
-        }
+    for (uint32_t i = 0; i < kCaptureSlots; ++i) {
+        // eye zero's record keeps slots 0-7 (kSrvSlots); the rest, and everything on another view, are released here
+        if (sr[i] && !(keepViews && i < kSrvSlots)) { sr[i]->Release(); sr[i] = nullptr; }
     }
     return consumed;
 }
@@ -1200,7 +1205,7 @@ void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, uint32_t weight) {
         const int i = g.watch.find(res);
         if (i < 0) return;
         const Role role = g.watch.role[i];
-        if (role != Role::GbufA && role != Role::GbufB) return;
+        if (role < Role::Gbuf8 || role > Role::Gbuf11) return;
         State::GDraw* d = nullptr;
         for (uint32_t k = 0; k < g.gdN; ++k) {
             if (g.gd[k].res == res) d = &g.gd[k];
@@ -1323,6 +1328,7 @@ void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
                         "(CS %016llX / %016llX); the closing summary lists the other indirect compute shaders.",
                         g.windowNo, static_cast<unsigned long long>(kCsLarge), static_cast<unsigned long long>(kCsSmall));
     }
+    fssRingHookWindow(g.win.capturing, g.windowNo, frameNo);
     if (g.summaryDue && (!pendingReadbacks() || frameNo >= g.summaryAfterFrame)) emitSummary();
     refreshActive();
 }

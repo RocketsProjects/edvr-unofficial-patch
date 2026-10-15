@@ -27,6 +27,7 @@ namespace fsstiles {
 constexpr uint64_t kCsLarge = 0x5998146D464F5C0Eull;   // args+0
 constexpr uint64_t kCsSmall = 0xEB0245DE0BB23BB6ull;   // args+12
 constexpr uint32_t kSrvSlots = 8;
+constexpr uint32_t kCaptureSlots = 12;       // v5: the dispatch's SRV slots read, 0-11 (t8-t11 are the G-buffer the pass shades)
 constexpr uint32_t kMaxViews = 4;            // distinct argument buffers tracked in one frame
 constexpr uint32_t kMaxPerFrame = 16;        // dispatches read back per frame
 constexpr uint32_t kStagingRing = 4;         // one staging buffer per frame in flight
@@ -285,7 +286,8 @@ inline double splitPercent(uint32_t large, uint32_t smallCount) {
 }
 
 // The roles a window's buffer can have, for the write watch.
-enum class Role : uint8_t { None = 0, Args, Out, List, Info, Big, GbufA, GbufB };
+enum class Role : uint8_t { None = 0, Args, Out, List, Info, Big, Gbuf8, Gbuf9, Gbuf10, Gbuf11 };
+constexpr uint32_t kRoles = 10;
 inline const char* roleName(Role r) {
     switch (r) {
         case Role::Args: return "args";
@@ -293,8 +295,10 @@ inline const char* roleName(Role r) {
         case Role::List: return "list";
         case Role::Info: return "info";
         case Role::Big:  return "t0";
-        case Role::GbufA: return "slot3";
-        case Role::GbufB: return "slot4";
+        case Role::Gbuf8: return "t8";
+        case Role::Gbuf9: return "t9";
+        case Role::Gbuf10: return "t10";
+        case Role::Gbuf11: return "t11";
         default:         return "?";
     }
 }
@@ -414,12 +418,14 @@ struct BandWatch {
 constexpr uint32_t kRevealFrames = 600;      // frames captured after the all-small event
 constexpr uint32_t kRunOffsets[2] = {20, 150};   // the two automatic eye runs, in frames after the event
 constexpr uint32_t kFingerEvery = 10;        // fingerprint and gbuf lines: one frame in this many
-constexpr uint32_t kMaxInputLines = 130;     // input lines a window
+constexpr uint32_t kMaxInputLines = 260;     // input lines a window (four a sampled frame)
 constexpr uint32_t kMaxGbufLines = 130;      // gbuf lines a window
 constexpr uint32_t kTileGrid = 8;            // sampled boxes per axis in a texture
 constexpr uint32_t kTilePx = 16;             // box size in pixels (the squares' own size)
 constexpr uint32_t kBufRegions = 16;         // sampled regions of the 21 MB buffer
 constexpr uint32_t kBufRegionBytes = 256;
+constexpr uint32_t kFpItems = 7;             // per eye: slot 0, slot 3 (depth), slot 4 (stencil), slots 8-11 (the G-buffer)
+constexpr uint32_t kFpSlots[kFpItems] = {0, 3, 4, 8, 9, 10, 11};
 
 // Bytes per pixel for the colour formats this can sample; 0 for anything else (depth, block-compressed, unknown).
 inline uint32_t bytesPerPixel(uint32_t f) {
