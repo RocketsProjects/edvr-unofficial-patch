@@ -23,7 +23,7 @@ void fssRingHookWindow(bool active, uint32_t windowNo, uint32_t frame);
 void fssRingHookWindowSummary(uint32_t windowNo);
 
 // v8 (flight 0dbd3964): the hook finds the ARRIVAL itself. While the scanner is on show (`wanted`: the chrome is held and the FSS latch is open) every ring-pass call
-// is checked, capture or not, and the first call in body mode 2 with the scan alpha ramping up (below 1, direction 0) is a trigger. `wanted == false` re-arms the trigger.
+// is checked, capture or not, and the first call with ring+0x6b0 set is a trigger (the scan alpha reads 1.000 from the first call; flight f5c7ad89). `wanted == false` re-arms it.
 void fssRingHookScan(bool wanted);
 // The pending trigger, once: the frame, the alpha and the camera of the call that saw it.
 bool fssRingHookTakeArrival(uint32_t* frame, float* alpha, int* camera);

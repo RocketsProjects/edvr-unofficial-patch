@@ -351,7 +351,7 @@ inline const char* writeCallName(uint32_t i) {
 constexpr uint32_t kGrid = 17;
 constexpr uint32_t kBandBefore = 10;         // frames logged before the event
 constexpr uint32_t kBandAfter = 60;          // frames logged after it
-constexpr uint32_t kMaxAutoRuns = 2;         // automatic eye runs a session
+constexpr uint32_t kMaxAutoRuns = 9;         // automatic eye runs a session (three a capture)
 constexpr uint32_t kMaxBandLines = 100;      // band lines a window
 constexpr uint32_t kBandRaw = 4096;          // raw bytes kept per list (the list is 2312)
 
@@ -429,8 +429,8 @@ struct BandWatch {
 // the all-small event and starts the eye runs inside that stretch, (2) fingerprints each eye's inputs to the tile dispatch
 // (slot 0, the buffer of 21,936,256 bytes; slots 3 and 4, the per-eye textures; slot 6, the cube array) by sampling small
 // regions, and (3) counts the draws that render into slots 3 and 4, per eye, with their viewports and scissors.
-constexpr uint32_t kRevealFrames = 600;      // frames captured after the all-small event
-constexpr uint32_t kRunOffsets[2] = {20, 150};   // the two automatic eye runs, in frames after the event
+constexpr uint32_t kRevealFrames = 600;      // frames captured after the arrival (or the all-small event)
+constexpr uint32_t kRunOffsets[3] = {0, 30, 270};   // the three automatic eye runs, in frames after the capture starts: they bracket the arrival
 constexpr uint32_t kFingerEvery = 10;        // fingerprint and gbuf lines: one frame in this many
 constexpr uint32_t kMaxInputLines = 260;     // input lines a window (four a sampled frame)
 constexpr uint32_t kMaxGbufLines = 130;      // gbuf lines a window
@@ -690,7 +690,7 @@ struct LatchGuard {
 // What a capture has to show to be the reveal.
 struct Validity {
     bool     chromeAtStart = false;   // the scanner chrome was held when it started
-    uint32_t arrivalFrame = 0;        // the first frame the ring pass showed mode 2 with alpha below 1 inside the capture (0: never)
+    uint32_t arrivalFrame = 0;        // the first frame the ring pass showed ring+0x6b0 set inside the capture (0: never)
     uint32_t runsRan = 0;
     uint32_t runsPlanned = 0;
     const char* endedBy = "";         // "" when it ran its course; otherwise why it was cut short
@@ -705,12 +705,211 @@ inline int formatValidity(char* out, size_t cap, uint32_t n, const char* started
         size_t at = 0;
         at += static_cast<size_t>(std::snprintf(why + at, sizeof(why) - at, "; not valid because:"));
         if (!v.chromeAtStart) at += static_cast<size_t>(std::snprintf(why + at, sizeof(why) - at, " the scanner chrome was not held at the start;"));
-        if (!v.arrivalFrame) at += static_cast<size_t>(std::snprintf(why + at, sizeof(why) - at, " the ring pass never showed mode 2 with alpha below 1 inside it;"));
+        if (!v.arrivalFrame) at += static_cast<size_t>(std::snprintf(why + at, sizeof(why) - at, " the ring pass never showed ring+0x6b0 set inside it;"));
         if (v.runsRan < 1) at += static_cast<size_t>(std::snprintf(why + at, sizeof(why) - at, " no eye run ran;"));
         if (v.endedBy[0]) at += static_cast<size_t>(std::snprintf(why + at, sizeof(why) - at, " it was cut short (%s);", v.endedBy));
     }
-    return std::snprintf(out, cap, "fss tiles: capture %u valid=%s (started by %s, mode 2 alpha<1 seen at %s, eye runs ran: %u of %u planned%s%s%s)", n, v.valid() ? "yes" : "no", startedBy,
+    return std::snprintf(out, cap, "fss tiles: capture %u valid=%s (started by %s, ring+0x6b0 set seen at %s, eye runs ran: %u of %u planned%s%s%s)", n, v.valid() ? "yes" : "no", startedBy,
                          seen, v.runsRan, v.runsPlanned, v.endedBy[0] ? ", ended by: " : "", v.endedBy, why);
+}
+
+// ---- v9: the capture starts at the ring layer, and its decisions live here so a replay can prove them (2026-10-15, after flight f5c7ad89) ----------------------------------
+// Flight f5c7ad89 (v8): the scan alpha reads 1.000 from the first ring-pass call, so the v8 trigger (alpha below 1) never fired, the capture was invalid and no eye run ran. Three flights in a
+// row missed the arrival. Every decision that missed it is now a pure function of its inputs: the trigger (fss_ring_core.h: isArrival, ArrivalLatch), the capture / restart / eye-run
+// machine (RevealMachine), the offscreen target's identity (TargetTracker) and a compositor draw's place among camera 1's ring draws (orderOf). The glue only feeds them, and
+// tools/fss_tiles_test replays the f5c7ad89 sequence through them.
+constexpr uint32_t kRunCount = 3;
+constexpr uint32_t kFillEvery = 5;                // the offscreen target's 8 x 8 fingerprint: one frame in this many through the capture
+
+inline uint32_t popCount(uint32_t v) {
+    uint32_t n = 0;
+    for (; v; v &= v - 1) ++n;
+    return n;
+}
+
+// The automatic eye runs of one capture, at kRunOffsets frames after it starts. A run waits for the scanner chrome; at most one starts a frame.
+struct RunPlan {
+    bool     pending[kRunCount] = {};
+    uint32_t due[kRunCount] = {};
+    bool     refusedNoted[kRunCount] = {};
+    uint32_t sessionPlanned = 0;              // across the session, capped at kMaxAutoRuns
+    uint32_t planned = 0;                     // this capture
+    uint32_t ran = 0;
+    uint32_t arm(uint32_t frame) {
+        for (uint32_t k = 0; k < kRunCount; ++k) { pending[k] = false; refusedNoted[k] = false; }
+        planned = ran = 0;
+        const uint32_t room = kMaxAutoRuns > sessionPlanned ? kMaxAutoRuns - sessionPlanned : 0;
+        const uint32_t plan = room < kRunCount ? room : kRunCount;
+        for (uint32_t k = 0; k < plan; ++k) {
+            pending[k] = true;
+            due[k] = frame + kRunOffsets[k];
+        }
+        sessionPlanned += plan;
+        planned = plan;
+        return plan;
+    }
+    // Cancels every pending run; returns a bit per run that was pending.
+    uint32_t cancel() {
+        uint32_t mask = 0;
+        for (uint32_t k = 0; k < kRunCount; ++k) {
+            if (pending[k]) mask |= 1u << k;
+            pending[k] = false;
+        }
+        return mask;
+    }
+    // Once a frame. Returns the bit of the run that starts now (0: none). `newlyRefused` gets the bits of runs that are due but wait for the chrome, once each.
+    uint32_t step(uint32_t frame, bool chrome, uint32_t* newlyRefused) {
+        uint32_t fire = 0;
+        for (uint32_t k = 0; k < kRunCount; ++k) {
+            if (!pending[k] || frame < due[k]) continue;
+            if (!chrome) {
+                if (!refusedNoted[k]) {
+                    refusedNoted[k] = true;
+                    if (newlyRefused) *newlyRefused |= 1u << k;
+                }
+                continue;
+            }
+            if (fire) continue;               // one run a frame; the next one starts on the next
+            pending[k] = false;
+            ++ran;
+            fire = 1u << k;
+        }
+        return fire;
+    }
+};
+
+// Everything that starts, restarts and ends a capture, once a frame. Inputs are plain numbers, so a replay of a flight's frames can drive it.
+struct RevealMachine {
+    ZoomGate      gate;
+    WindowMachine win;
+    RunPlan       runs;
+    uint32_t      revealUntil = 0;
+    bool          ledgerOn = false;
+    uint32_t      ledgerUntil = 0;
+    bool          restartRequested = false;   // a later accepted press or jump found the gate open (set by the glue's signal handler)
+    enum Start : uint8_t { StartNone = 0, StartGate, StartArrival, StartRestart };
+    struct In {
+        uint32_t frame = 0;
+        uint64_t ms = 0;
+        uint32_t chromeAgo = 0xFFFFFFFFu;
+        bool     focusKnown = false, focus = false;
+        bool     arrivalOffered = false;      // the ring hook's trigger, taken this frame
+    };
+    struct Out {
+        ZoomGate::Close gateClose = ZoomGate::Idle;
+        bool     exited = false;
+        bool     arrivalAccepted = false, arrivalRefused = false;
+        bool     restarted = false;           // an earlier capture was running and is over
+        bool     restartIgnored = false;      // a later press or jump while the arrival's reveal capture runs
+        Start    start = StartNone;
+        WindowMachine::Event ev = WindowMachine::None;
+        bool     armed = false;
+        uint32_t armedRuns = 0;
+        uint32_t cancelledRestart = 0, cancelledExit = 0, cancelledOver = 0;   // masks of runs cancelled, by reason
+        const char* endedBy = "";             // set when this frame ended the capture early
+        uint32_t fire = 0, refused = 0;       // run bits
+    };
+    // The reveal capture's arming: 600 frames, the ledger, the eye runs. The arrival and the band event both call it.
+    uint32_t arm(uint32_t frame) {
+        revealUntil = frame + kRevealFrames;
+        ledgerOn = true;
+        ledgerUntil = frame + kLedgerFrames;
+        return runs.arm(frame);
+    }
+    Out step(const In& in) {
+        Out o;
+        o.gateClose = gate.step(in.frame, in.chromeAgo, in.focusKnown, in.focus);
+        o.exited = o.gateClose == ZoomGate::ChromeDropped || o.gateClose == ZoomGate::FocusEnded;
+        const bool chrome = chromeHeld(in.chromeAgo);
+        if (in.arrivalOffered) {
+            if (chrome) {
+                o.arrivalAccepted = true;
+                gate.signal(in.frame, in.chromeAgo);   // the gate is open for it, restarting its clock
+            } else {
+                o.arrivalRefused = true;
+            }
+        }
+        // A later press or jump restarts a capture that has not found the arrival yet; it never kills the reveal capture the arrival armed (the departure and the
+        // arrival of a zoom are two jumps, and the second must not wipe the first's data).
+        const bool restart = o.arrivalAccepted || (restartRequested && !revealUntil);
+        o.restartIgnored = restartRequested && revealUntil && !o.arrivalAccepted;
+        restartRequested = false;
+        if (restart) {
+            o.start = o.arrivalAccepted ? StartArrival : StartRestart;
+            if (win.capturing || win.open) {
+                o.restarted = true;
+                o.cancelledRestart = runs.cancel();
+                revealUntil = 0;
+                ledgerOn = false;
+            }
+            o.ev = win.restart(in.frame, in.ms);
+        } else {
+            o.ev = win.step(gate.open, in.frame, in.ms);
+            o.start = StartGate;
+        }
+        if (revealUntil && o.exited) {
+            revealUntil = 0;
+            o.cancelledExit = runs.cancel();
+            if (win.capturing || o.ev == WindowMachine::Closed) {   // the window machine may have closed it already this frame, on the gate going shut
+                o.endedBy = closeText(o.gateClose);
+                win.capturing = false;
+                o.ev = WindowMachine::Closed;
+            }
+        } else if (revealUntil) {
+            if (in.frame <= revealUntil) {
+                // The reveal is still to be captured: the zoom window's end does not end the capture.
+                if (o.ev == WindowMachine::Closed) o.ev = WindowMachine::None;
+                win.capturing = true;
+            } else {
+                revealUntil = 0;
+                o.cancelledOver = runs.cancel();
+                if (win.capturing) {
+                    win.capturing = false;
+                    o.ev = WindowMachine::Closed;
+                }
+            }
+        }
+        if (o.ev == WindowMachine::Opened && o.start == StartArrival) {
+            o.armed = true;
+            o.armedRuns = arm(in.frame);
+        }
+        if (ledgerOn && in.frame > ledgerUntil) ledgerOn = false;
+        o.fire = runs.step(in.frame, chrome, &o.refused);
+        return o;
+    }
+};
+
+// The offscreen ring layer's identity: the render target of the draws made inside a ring-pass call with ring+0x6b0 set. It changes (flight f5c7ad89: T42 252x252, then
+// T43 1008x1008 from f18905), and everything that samples it must follow.
+struct TargetTracker {
+    enum Result : uint8_t { Same = 0, First, Changed };
+    const void* cur = nullptr;
+    uint32_t    changes = 0;
+    Result observe(const void* res) {
+        if (!res || res == cur) return Same;
+        const bool first = cur == nullptr;
+        cur = res;
+        if (!first) ++changes;
+        return first ? First : Changed;
+    }
+    void reset() { cur = nullptr; changes = 0; }
+};
+
+// Where a draw made anywhere in the frame falls among camera 1's ring draws of the same frame, by the order index of every draw noted in the frame.
+enum class RingOrder : uint8_t { NoRingDraws = 0, Before, Between, After };
+inline RingOrder orderOf(uint32_t seq, uint32_t firstRing, uint32_t lastRing, uint32_t ringDraws) {
+    if (!ringDraws) return RingOrder::NoRingDraws;
+    if (seq < firstRing) return RingOrder::Before;
+    if (seq > lastRing) return RingOrder::After;
+    return RingOrder::Between;
+}
+inline const char* orderText(RingOrder o) {
+    switch (o) {
+        case RingOrder::Before:  return "BEFORE camera 1's ring draws (it reads the layer as the previous frame left it)";
+        case RingOrder::Between: return "BETWEEN camera 1's ring draws (the layer is half drawn)";
+        case RingOrder::After:   return "AFTER camera 1's ring draws (this frame's layer)";
+        default:                 return "no camera-1 ring draw in this frame";
+    }
 }
 
 // ---- the state-restoring substitution ------------------------------------------------------------------------------

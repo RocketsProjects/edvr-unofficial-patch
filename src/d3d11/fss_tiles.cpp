@@ -85,7 +85,7 @@ struct State {
     bool     lockstep = false;               // fix.fss_eye_sync = tiles
     bool     armedNoted = false;
     bool     lastLockstepNoted = false;
-    WindowMachine win;
+    RevealMachine rv;                        // v9: the gate, the window, the eye runs and the reveal capture's clock (fss_tiles_core.h)
     bool     zoomOpen = false;
     uint32_t frame = 0;
     uint32_t windowNo = 0;
@@ -128,7 +128,7 @@ struct State {
         uint32_t frame = 0;
         bool     used = false;
         bool     drained = true;
-        FpItem   it[2 * kFpItems + 1];       // [eye * kFpItems + k], kFpSlots[k]; the last is the ring's offscreen target
+        FpItem   it[2 * kFpItems];           // [eye * kFpItems + k], kFpSlots[k]
         uint32_t cube[2][5] = {};            // slot 6: id, w, h, layers, format
     };
     struct GDraw {
@@ -146,7 +146,7 @@ struct State {
         D3D11_VIEWPORT vp0{};
     };
     Fp       fp[kStagingRing];
-    ID3D11Resource* fpPool[kStagingRing][2 * kFpItems + 1] = {};
+    ID3D11Resource* fpPool[kStagingRing][2 * kFpItems] = {};
     uint32_t inputLines = 0, fpRead = 0;
     uint32_t gridFrames[kFpItems] = {}, gridDiffer[kFpItems] = {};
     GDraw    gd[16];
@@ -157,11 +157,7 @@ struct State {
     const void* rtvRes[48] = {};
     uint32_t rtvN = 0;
     bool     watchGbuf = false;
-    uint32_t revealUntil = 0;
     uint32_t eventFrame = 0;
-    uint32_t runDue[2] = {};
-    bool     runPending[2] = {};
-    uint32_t autoRunsPlanned = 0;
     // v6
     struct ShapeRec { uint32_t w = 0, h = 0, fmt = 0; };
     struct TgtRec { const void* res = nullptr; uint32_t shape = 0, order = 0; };
@@ -182,8 +178,7 @@ struct State {
     RingFam  ringFam[8];
     uint32_t ringFamN = 0;
     Ranking  rank;
-    bool     ledgerOn = false;
-    uint32_t ledgerUntil = 0, ledgerFrames = 0, framesWithDiff = 0, pairedFrames = 0, eyediffLines = 0, unpaired = 0, ringLines = 0;
+    uint32_t ledgerFrames = 0, framesWithDiff = 0, pairedFrames = 0, eyediffLines = 0, unpaired = 0, ringLines = 0;
     uint32_t ringFrames[3] = {}, ringDrawTotal[3] = {}, ringBoth[4] = {}, ringShared[4] = {};
     uint32_t rtvShape[48] = {};
     uint32_t reduceUntil = 0;
@@ -233,16 +228,13 @@ struct State {
     bool     signalPress = false;
     uint32_t signalFrame = 0;
     uint32_t noWindowNotes = 0;
-    ZoomGate gate;
     uint32_t chromeAgo = 0xFFFFFFFFu;
     // v8
     LatchGuard latch;
-    bool     restartRequested = false;
     char     restartWhy[100] = "";
     char     pendingStartedBy[100] = "";
     char     startedBy[140] = "";
     Validity cap;
-    uint32_t runsRanThisCapture = 0, runsPlannedThisCapture = 0;
     struct RPEnt { int cam = 0; unsigned role = 255; bool scratch = false; const void* target = nullptr; uint32_t draws = 0, inst = 0, tw = 0, th = 0, tfmt = 0, srvIds[4] = {}, vpW = 0, vpH = 0; };
     struct RPTot { int cam = 0; unsigned role = 255; bool scratch = false; uint32_t targetId = 0, tw = 0, th = 0, tfmt = 0, frames = 0, draws = 0, minD = 0, maxD = 0, samplesOffscreen = 0; };
     RPEnt    rp[48];
@@ -252,11 +244,27 @@ struct State {
     ID3D11Resource* ringTargetRef = nullptr;
     uint32_t ringTargetId = 0, ringTargetW = 0, ringTargetH = 0, ringTargetFmt = 0;
     uint32_t rpLines = 0;
-    struct RingFill { uint32_t frame = 0, boxes = 0; };
-    RingFill ringFill[64];
+    struct RingFill { uint32_t frame = 0, boxes = 0, id = 0; };
+    RingFill ringFill[160];
     uint32_t ringFillN = 0;
+    // v9
+    TargetTracker tracker;
+    struct TgtHist { uint32_t id = 0, w = 0, h = 0, fmt = 0, frame = 0; };
+    TgtHist  tgtHist[8];
+    uint32_t tgtHistN = 0, tgtChangeLines = 0;
+    struct RingSnap { bool used = false, drained = true; uint32_t frame = 0, id = 0, w = 0, h = 0, fmt = 0, bpp = 0; };
+    RingSnap snap;
+    ID3D11Resource* snapStage = nullptr;
+    uint32_t snapSkipped = 0;
+    bool     snapWarned = false;
+    struct CompEnt { const void* rt = nullptr; uint64_t vs = 0, ps = 0; uint32_t slot = 0, eye = 3, draws = 0, inst = 0, firstSeq = 0, lastSeq = 0, w = 0, h = 0, fmt = 0, vpW = 0, vpH = 0, tgt = 0; };
+    struct CompTot { uint64_t vs = 0, ps = 0; uint32_t rtId = 0, slot = 0, eye = 3, w = 0, h = 0, fmt = 0, frames = 0, draws = 0, order[4] = {}; };
+    CompEnt  comp[48];
+    uint32_t compN = 0;
+    CompTot  ctot[24];
+    uint32_t ctotN = 0, compLines = 0;
+    uint32_t drawSeq = 0, ringSeqFirst = 0, ringSeqLast = 0, ringSeqN = 0;
     bool     refusedEventNoted = false;
-    bool     runRefusedNoted[2] = {};
 };
 
 State g;
@@ -314,10 +322,12 @@ void resetWindowTallies() {
     g.rpN = g.rptotN = g.rpLines = g.ringFillN = 0;
     for (auto& t : g.rptot) t = State::RPTot();
     g.cap = Validity();
-    g.runsRanThisCapture = g.runsPlannedThisCapture = 0;
+    g.tracker.reset();
+    g.tgtHistN = g.compN = g.ctotN = g.compLines = g.snapSkipped = 0;
+    for (auto& t : g.ctot) t = State::CompTot();
+    g.drawSeq = g.ringSeqFirst = g.ringSeqLast = g.ringSeqN = 0;
+    g.snapWarned = false;
     g.refusedEventNoted = false;
-    g.runRefusedNoted[0] = g.runRefusedNoted[1] = false;
-    g.ledgerOn = false;
     g.ledgerFrames = g.framesWithDiff = g.pairedFrames = g.eyediffLines = g.unpaired = g.ringLines = 0;
     g.ledN = g.ledOverflow = g.ledOverflowTotal = g.viewN = g.soloN = g.ringFamN = 0;
     g.shapeN = g.tgtN = 0;
@@ -332,18 +342,19 @@ bool pendingReadbacks() {
     for (const FrameBuf& f : g.fb) if (f.used && !f.drained) return true;
     for (const Sample& f : g.smp) if (f.used && !f.drained) return true;
     for (const State::Fp& f : g.fp) if (f.used && !f.drained) return true;
+    if (g.snap.used && !g.snap.drained) return true;
     return false;
 }
 
 void refreshActive() {
     detail::g_fssTilesActive =
-        g.win.capturing || (g.lockstep && g.win.open) || g.summaryDue || pendingReadbacks();
-    detail::g_fssTilesWatch = g.win.capturing && g.watch.n > 0;
+        g.rv.win.capturing || (g.lockstep && g.rv.win.open) || g.summaryDue || pendingReadbacks();
+    detail::g_fssTilesWatch = g.rv.win.capturing && g.watch.n > 0;
     g.watchGbuf = false;
     for (uint32_t i = 0; i < g.watch.n; ++i) {
         if (g.watch.role[i] >= Role::Gbuf8 && g.watch.role[i] <= Role::Ring3) g.watchGbuf = true;
     }
-    detail::g_fssTilesDraws = g.win.capturing;   // v8: the draws made inside the ring pass are recorded for the whole capture
+    detail::g_fssTilesDraws = g.rv.win.capturing;   // v8: the draws made inside the ring pass are recorded for the whole capture
 }
 
 bool ensureStaging(ID3D11DeviceContext* ctx) {
@@ -505,24 +516,20 @@ void logBandFrame(const State::BandFrame& f) {
     ++g.bandLines;
 }
 
-// The reveal capture's start. The arrival (the ring pass in mode 2 with the scan alpha ramping up) and the all-small band event arm the same things: the 600-frame capture,
-// the ledger, the eye runs at +20 and +150. Returns how many eye runs were planned.
-uint32_t armReveal(uint32_t eventFrame) {
+// The glue's half of arming the reveal capture (the machine's half is RevealMachine::arm): the band-event bookkeeping and a fresh ledger. The arrival and the all-small
+// band event both come through here.
+void armGlue(uint32_t eventFrame) {
     g.windowEventFired = true;
     ++g.windowEvents;
     g.afterLeft = kBandAfter;
     g.eventFrame = eventFrame;
-    g.revealUntil = g.frame + kRevealFrames;
-    g.ledgerOn = true;
-    g.ledgerUntil = g.frame + kLedgerFrames;
     ledgerReset();
-    const uint32_t plan = kMaxAutoRuns - g.autoRunsPlanned < 2 ? kMaxAutoRuns - g.autoRunsPlanned : 2;
-    for (uint32_t k = 0; k < plan; ++k) {
-        g.runPending[k] = true;
-        g.runDue[k] = g.frame + kRunOffsets[k];
-    }
-    g.autoRunsPlanned += plan;
-    g.runsPlannedThisCapture = plan;
+}
+
+// The band event's start of the reveal capture (the secondary trigger). Returns how many eye runs were planned.
+uint32_t armReveal(uint32_t eventFrame) {
+    const uint32_t plan = g.rv.arm(g.frame);
+    armGlue(eventFrame);
     return plan;
 }
 
@@ -550,21 +557,21 @@ void processBand(const Sample& sm, const D3D11_MAPPED_SUBRESOURCE* m, const bool
     if (g.bringCount < kBandBefore + 1) ++g.bringCount;
 
     const BandWatch::Reason why = g.bandWatch.feed(f.rec.large[0], f.rec.large[1]);
-    if (why == BandWatch::AllSmall && (g.win.open || g.win.capturing) && !g.windowEventFired && g.autoRunsPlanned < kMaxAutoRuns && !chromeHeld(g.chromeAgo)) {
+    if (why == BandWatch::AllSmall && (g.rv.win.open || g.rv.win.capturing) && !g.windowEventFired && g.rv.runs.sessionPlanned < kMaxAutoRuns && !chromeHeld(g.chromeAgo)) {
         if (!g.refusedEventNoted) {
             g.refusedEventNoted = true;
             Log::get().note("fss tiles: band event at f=%u refused: the scanner chrome is not held on this frame (last matched %s). An all-small frame without the scanner "
                             "is a transition (flight e05b6be6: the exit back to the cockpit), not the zoom; no reveal capture, no ledger and no eye run for it. Said once a window.",
                             sm.frame, g.chromeAgo == 0xFFFFFFFFu ? "never" : "recently, more than 5 frames ago");
         }
-    } else if (why == BandWatch::AllSmall && (g.win.open || g.win.capturing) && !g.windowEventFired && g.autoRunsPlanned < kMaxAutoRuns) {
+    } else if (why == BandWatch::AllSmall && (g.rv.win.open || g.rv.win.capturing) && !g.windowEventFired && g.rv.runs.sessionPlanned < kMaxAutoRuns) {
         const uint32_t plan = armReveal(sm.frame);
         Log::get().note("fss tiles: band event at f=%u (a large list went to zero: every cell is now the small shader's): eye0 L=%u (row %.2f), "
                         "eye1 L=%u (row %.2f). The 10 frames before, this one and the 60 after are logged as `band` lines and their raw lists "
                         "written to edvr_logs\\fsstiles. Capture continues until f=%u (%u frames); %u automatic eye run(s) at f=%u%s (planned "
                         "%u of %u this session); input and gbuf lines every %u frames.",
-                        sm.frame, f.rec.large[0], rowOfLarge(f.rec.large[0]), f.rec.large[1], rowOfLarge(f.rec.large[1]), g.revealUntil,
-                        kRevealFrames, plan, plan ? g.runDue[0] : 0u, plan > 1 ? " and the second later" : "", g.autoRunsPlanned,
+                        sm.frame, f.rec.large[0], rowOfLarge(f.rec.large[0]), f.rec.large[1], rowOfLarge(f.rec.large[1]), g.rv.revealUntil,
+                        kRevealFrames, plan, plan ? g.rv.runs.due[0] : 0u, plan > 1 ? " and the others later" : "", g.rv.runs.sessionPlanned,
                         kMaxAutoRuns, kFingerEvery);
         // the frames before, oldest first (the ring holds this frame last)
         const uint32_t n = g.bringCount;
@@ -604,7 +611,7 @@ void processSample(Sample& sm, const D3D11_MAPPED_SUBRESOURCE* m) {
     }
     const bool moved = haveSp && (sp[0] - g.lastSplit[0] > 10.0 || g.lastSplit[0] - sp[0] > 10.0 || sp[1] - g.lastSplit[1] > 10.0 ||
                                   g.lastSplit[1] - sp[1] > 10.0);
-    const uint32_t d = sm.frame - g.win.startFrame;
+    const uint32_t d = sm.frame - g.rv.win.startFrame;
     const bool wanted = d < kDetailFrames || d % kDetailEvery == 0 || moved;
     if (wanted && g.listLines + 3 <= kMaxListLines) {
         if (haveSp) { g.lastSplit[0] = sp[0]; g.lastSplit[1] = sp[1]; }
@@ -691,7 +698,7 @@ void queueSample(ID3D11DeviceContext* ctx, const Rec& r, const Slot* slot) {
         sm.frame = g.frame;
         sm.used = true;
         sm.drained = false;
-        sm.files = g.dumpFramesLeft > 0 || g.frame - g.win.startFrame < 3;
+        sm.files = g.dumpFramesLeft > 0 || g.frame - g.rv.win.startFrame < 3;
         if (g.dumpFramesLeft > 0) --g.dumpFramesLeft;
     }
     auto take = [&](uint32_t region, uint32_t slotIdx) {
@@ -844,39 +851,6 @@ void queueFingerprint(ID3D11DeviceContext* ctx, const Rec& r, const Slot* slot) 
             fp.cube[r.eye][4] = td.Format;
         }
     }
-    // The ring's offscreen target (identified from the draws made inside the ring pass with ring+0x6b0 set): the same coarse sample, once a frame of eye 0's dispatch.
-    if (r.eye == 0 && g.ringTargetRef) {
-        State::FpItem& it = fp.it[2 * kFpItems];
-        ID3D11Resource* res = g.ringTargetRef;
-        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-        res->GetType(&dim);
-        it.id = g.ringTargetId;
-        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-            D3D11_TEXTURE2D_DESC td{};
-            static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
-            it.tex = true;
-            it.w = td.Width;
-            it.h = td.Height;
-            it.fmt = td.Format;
-            it.bpp = bytesPerPixel(td.Format);
-            ID3D11Resource** st = &g.fpPool[ring][2 * kFpItems];
-            if (!((td.BindFlags & D3D11_BIND_DEPTH_STENCIL) || td.SampleDesc.Count > 1 || td.Width < kTileGrid * kTilePx || td.Height < kTileGrid * kTilePx || !it.bpp ||
-                  !ensureFpTexture(dev, td.Format, st))) {
-                for (uint32_t gy = 0; gy < kTileGrid; ++gy) {
-                    for (uint32_t gx = 0; gx < kTileGrid; ++gx) {
-                        D3D11_BOX box{};
-                        box.left = (td.Width - kTilePx) * gx / (kTileGrid - 1);
-                        box.top = (td.Height - kTilePx) * gy / (kTileGrid - 1);
-                        box.right = box.left + kTilePx;
-                        box.bottom = box.top + kTilePx;
-                        box.back = 1;
-                        ctx->CopySubresourceRegion(*st, 0, gx * kTilePx, gy * kTilePx, 0, res, 0, &box);
-                    }
-                }
-                it.have = true;
-            }
-        }
-    }
     dev->Release();
 }
 
@@ -923,27 +897,6 @@ void processFingerprint(State::Fp& fp, const D3D11_MAPPED_SUBRESOURCE* m) {
             if (std::strcmp(grids[0][k], grids[1][k]) != 0) ++g.gridDiffer[k];
         }
     }
-    {
-        const State::FpItem& it = fp.it[2 * kFpItems];
-        if (it.have && it.tex) {
-            const uint8_t* p = static_cast<const uint8_t*>(m[2 * kFpItems].pData);
-            const uint32_t pitch = m[2 * kFpItems].RowPitch;
-            char rg[96];
-            uint32_t boxes = 0;
-            formatGrid(rg, sizeof(rg), [&](uint32_t x, uint32_t y) {
-                uint32_t nz = 0;
-                for (uint32_t row = 0; row < kTilePx; ++row) nz += countNonzero(p + (y * kTilePx + row) * pitch + x * kTilePx * it.bpp, kTilePx * it.bpp);
-                const char c = nzChar(nz, kTilePx * kTilePx * it.bpp);
-                if (c != '.') ++boxes;
-                return c;
-            });
-            if (g.ringFillN < 64) { g.ringFill[g.ringFillN].frame = fp.frame; g.ringFill[g.ringFillN].boxes = boxes; ++g.ringFillN; }
-            if (g.inputLines + 1 <= kMaxInputLines) {
-                Log::get().note("fss tiles: input f=%u ring offscreen target T%u %ux%u fmt%u nz8x8=%s (boxes written %u of 64)", fp.frame, it.id, it.w, it.h, it.fmt, rg, boxes);
-                ++g.inputLines;
-            }
-        }
-    }
     if (g.inputLines + 4 > kMaxInputLines) return;
     for (uint32_t e = 0; e < 2; ++e) {
         char part[kFpItems][280], lineA[900], lineB[1300];
@@ -966,16 +919,16 @@ void drainFingerprints(ID3D11DeviceContext* ctx) {
         }
         if (!pick) return;
         const uint32_t ring = static_cast<uint32_t>(pick - g.fp);
-        D3D11_MAPPED_SUBRESOURCE m[2 * kFpItems + 1] = {};
-        bool mapped[2 * kFpItems + 1] = {};
+        D3D11_MAPPED_SUBRESOURCE m[2 * kFpItems] = {};
+        bool mapped[2 * kFpItems] = {};
         bool ok = true;
-        for (uint32_t i = 0; i < 2 * kFpItems + 1 && ok; ++i) {
+        for (uint32_t i = 0; i < 2 * kFpItems && ok; ++i) {
             if (!pick->it[i].have) continue;
             ok = SUCCEEDED(ctx->Map(g.fpPool[ring][i], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m[i]));
             mapped[i] = ok;
         }
         if (ok) processFingerprint(*pick, m);
-        for (uint32_t i = 0; i < 2 * kFpItems + 1; ++i) {
+        for (uint32_t i = 0; i < 2 * kFpItems; ++i) {
             if (mapped[i]) ctx->Unmap(g.fpPool[ring][i], 0);
         }
         if (ok) { pick->drained = true; continue; }
@@ -1094,7 +1047,7 @@ void ledgerReset() {
 }
 
 void flushLedger(uint32_t frame) {
-    if (!g.ledgerOn && g.ledN == 0) return;
+    if (!g.rv.ledgerOn && g.ledN == 0) return;
     ++g.ledgerFrames;
     DrawStat a[256], b[256];
     bool anyDiff = false, pairedThisFrame = false;
@@ -1202,11 +1155,39 @@ const void* rtvResource(void* rtv, uint32_t* shapeOut) {
     return res;
 }
 
-// ---- v8: the draws made inside the ring pass ---------------------------------------------------------------------------------------------
+// ---- v8/v9: the draws made inside the ring pass, the offscreen ring layer, and the draws that sample it --------------------------------------------------------
 constexpr uint32_t kRingFirstFrames = 12;     // every frame's ring-path lines for this many frames after a capture starts
 constexpr uint32_t kMaxRpLines = 400;
+constexpr uint32_t kCompFirstFrames = 40;     // every frame's compositor lines for this many frames after a capture starts, then one frame in kFingerEvery
+constexpr uint32_t kMaxCompLines = 500;
+constexpr uint32_t kMaxFillLines = 160;
 
-void ringPathRecord(ID3D11DeviceContext* ctx, void* rtv, const void* res, const ringhook::Current& rc, uint32_t instances) {
+void adoptRingTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt, const ringhook::Current& rc) {
+    const TargetTracker::Result tr = g.tracker.observe(res);
+    if (tr == TargetTracker::Same) return;
+    const uint32_t oldId = g.ringTargetId, ow = g.ringTargetW, oh = g.ringTargetH, of = g.ringTargetFmt;
+    if (g.ringTargetRef) g.ringTargetRef->Release();
+    ID3D11Resource* r = static_cast<ID3D11Resource*>(const_cast<void*>(res));
+    r->AddRef();
+    g.ringTargetRef = r;
+    g.ringTargetId = g.ids.id(res);
+    g.ringTargetW = w;
+    g.ringTargetH = h;
+    g.ringTargetFmt = fmt;
+    if (g.tgtHistN < 8) g.tgtHist[g.tgtHistN++] = {g.ringTargetId, w, h, fmt, g.frame};
+    if (tr == TargetTracker::First) {
+        Log::get().note("fss tiles: ring offscreen target identified: T%u %ux%u fmt%u, render target 0 of the first draw made inside a ring-pass call with ring+0x6b0 set "
+                        "(camera %d, role %u, pass %d, f=%u); its contents are sampled every %u frames from here on.",
+                        g.ringTargetId, w, h, fmt, rc.camera, rc.role, rc.pass, g.frame, kFillEvery);
+    } else if (g.tgtChangeLines < 40) {
+        ++g.tgtChangeLines;
+        Log::get().note("fss tiles: ring offscreen target CHANGED at f=%u: T%u %ux%u fmt%u -> T%u %ux%u fmt%u (change %u; camera %d, role %u, pass %d); the fill series, the "
+                        "fingerprints and the compositor search follow the new target.",
+                        g.frame, oldId, ow, oh, of, g.ringTargetId, w, h, fmt, g.tracker.changes, rc.camera, rc.role, rc.pass);
+    }
+}
+
+void ringPathRecord(ID3D11DeviceContext* ctx, void* rtv, const void* res, const ringhook::Current& rc, uint32_t instances, uint32_t seq) {
     State::RPEnt* e = nullptr;
     for (uint32_t i = 0; i < g.rpN; ++i) {
         State::RPEnt& x = g.rp[i];
@@ -1215,6 +1196,7 @@ void ringPathRecord(ID3D11DeviceContext* ctx, void* rtv, const void* res, const 
     if (!e) {
         if (g.rpN >= 48) return;
         e = &g.rp[g.rpN++];
+        *e = State::RPEnt();   // the entries are reused every frame: start each one clean, or `draws` runs on across frames (flight f5c7ad89)
         e->cam = rc.camera;
         e->role = rc.role;
         e->scratch = rc.scratch;
@@ -1231,25 +1213,193 @@ void ringPathRecord(ID3D11DeviceContext* ctx, void* rtv, const void* res, const 
         ctx->RSGetViewports(&nv, &vp);
         e->vpW = static_cast<uint32_t>(vp.Width);
         e->vpH = static_cast<uint32_t>(vp.Height);
-        if (rc.scratch && !g.ringTargetRef && e->tw >= kTileGrid * kTilePx) {
-            ID3D11Resource* r = static_cast<ID3D11Resource*>(const_cast<void*>(res));
-            r->AddRef();
-            g.ringTargetRef = r;
-            g.ringTargetId = g.ids.id(res);
-            g.ringTargetW = e->tw;
-            g.ringTargetH = e->th;
-            g.ringTargetFmt = e->tfmt;
-            Log::get().note("fss tiles: ring offscreen target identified: T%u %ux%u fmt%u, render target 0 of the first draw made inside a ring-pass call with ring+0x6b0 set "
-                            "(camera %d, role %u, pass %d, f=%u); its contents are sampled from here on.",
-                            g.ringTargetId, e->tw, e->th, e->tfmt, rc.camera, rc.role, rc.pass, g.frame);
+        if (rc.scratch && e->tw >= kMinTargetWidth) adoptRingTarget(res, e->tw, e->th, e->tfmt, rc);   // every change of the layer's target, not only the first
+    }
+    ++e->draws;
+    e->inst += instances;
+    if (rc.scratch) {
+        if (!g.ringSeqN) g.ringSeqFirst = seq;
+        g.ringSeqLast = seq;
+        ++g.ringSeqN;
+    }
+}
+
+// Any draw outside the ring pass that samples the current offscreen layer: pixel-shader slots t0-t3 of every draw (the binding shadow, free), and t4-t15 of draws that have a pixel
+// shader and a render target at least kMinTargetWidth wide (a PSGetShaderResources each).
+void compositorCheck(ID3D11DeviceContext* ctx, void* rtv, const void* res, uint32_t shape, uint32_t instances, uint32_t seq) {
+    int slot = -1;
+    for (uint32_t k = 0; k < 4 && slot < 0; ++k) {
+        void* v = bindingGet(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + k));
+        const State::ViewRec* vr = v ? viewInfo(v) : nullptr;
+        if (vr && vr->res == g.ringTargetRef) slot = static_cast<int>(k);
+    }
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs), ps = bindingShaderHash(BindSlot::Ps);
+    if (slot < 0 && shape && ps) {
+        ID3D11ShaderResourceView* sv[12] = {};
+        ctx->PSGetShaderResources(4, 12, sv);
+        for (uint32_t i = 0; i < 12; ++i) {
+            if (!sv[i]) continue;
+            ID3D11Resource* r = nullptr;
+            sv[i]->GetResource(&r);
+            if (r) {
+                if (r == g.ringTargetRef && slot < 0) slot = static_cast<int>(4 + i);
+                r->Release();
+            }
+            sv[i]->Release();
         }
     }
+    if (slot < 0) return;
+    State::CompEnt* e = nullptr;
+    uint32_t eye = 3;
+    if (shape) {
+        const uint32_t ord = targetOrder(res, shape);
+        eye = shapeTargets(shape) == 2 ? ord : 3u;
+    }
+    for (uint32_t i = 0; i < g.compN; ++i) {
+        State::CompEnt& x = g.comp[i];
+        if (x.rt == res && x.vs == vs && x.ps == ps && x.slot == static_cast<uint32_t>(slot)) { e = &x; break; }
+    }
+    if (!e) {
+        if (g.compN >= 48) return;
+        e = &g.comp[g.compN++];
+        *e = State::CompEnt();
+        e->rt = res;
+        e->vs = vs;
+        e->ps = ps;
+        e->slot = static_cast<uint32_t>(slot);
+        e->eye = eye;
+        e->firstSeq = seq;
+        ResourceInfo ri;
+        if (bindingResolveProbe(rtv, &ri) && ri.isTexture2D) { e->w = ri.a; e->h = ri.b; e->fmt = ri.fmt; }
+        UINT nv = 1;
+        D3D11_VIEWPORT vp{};
+        ctx->RSGetViewports(&nv, &vp);
+        e->vpW = static_cast<uint32_t>(vp.Width);
+        e->vpH = static_cast<uint32_t>(vp.Height);
+    }
+    e->lastSeq = seq;
     ++e->draws;
     e->inst += instances;
 }
 
+void flushCompositors(uint32_t frame) {
+    const bool sample = frame - g.rv.win.startFrame < kCompFirstFrames || frame % kFingerEvery == 0;
+    for (uint32_t i = 0; i < g.compN; ++i) {
+        State::CompEnt& c = g.comp[i];
+        c.tgt = g.ids.id(c.rt);
+        const RingOrder ord = orderOf(c.firstSeq, g.ringSeqFirst, g.ringSeqLast, g.ringSeqN);
+        State::CompTot* t = nullptr;
+        for (uint32_t k = 0; k < g.ctotN; ++k) {
+            State::CompTot& x = g.ctot[k];
+            if (x.vs == c.vs && x.ps == c.ps && x.rtId == c.tgt && x.slot == c.slot && x.eye == c.eye) { t = &x; break; }
+        }
+        bool isNew = false;
+        if (!t && g.ctotN < 24) {
+            t = &g.ctot[g.ctotN++];
+            t->vs = c.vs; t->ps = c.ps; t->rtId = c.tgt; t->slot = c.slot; t->eye = c.eye; t->w = c.w; t->h = c.h; t->fmt = c.fmt;
+            isNew = true;
+        }
+        if (t) {
+            ++t->frames;
+            t->draws += c.draws;
+            ++t->order[static_cast<uint32_t>(ord)];
+        }
+        if ((sample || isNew) && g.compLines < kMaxCompLines) {
+            char eyeText[8];
+            if (c.eye < 2) std::snprintf(eyeText, sizeof(eyeText), "eye%u", c.eye);
+            else std::snprintf(eyeText, sizeof(eyeText), "eye?");
+            Log::get().note("fss tiles: compositor f=%u %s draw #%u..#%u (%u draws, %u instances) vs %016llX ps %016llX into T%u %ux%u fmt%u (viewport %ux%u) samples the offscreen ring "
+                            "layer T%u in PS t%u; %s [camera 1's ring draws this frame: %u, #%u..#%u]%s",
+                            frame, eyeText, c.firstSeq, c.lastSeq, c.draws, c.inst, static_cast<unsigned long long>(c.vs), static_cast<unsigned long long>(c.ps), c.tgt, c.w, c.h, c.fmt,
+                            c.vpW, c.vpH, g.ringTargetId, c.slot, orderText(ord), g.ringSeqN, g.ringSeqFirst, g.ringSeqLast, isNew ? " (first sighting)" : "");
+            ++g.compLines;
+        }
+    }
+    g.compN = 0;
+}
+
+// ---- v9: the offscreen layer's 8 x 8 fingerprint, every kFillEvery frames, taken at the end of the frame (after the frame's ring draws) --------------------------------
+void ringSnapshot(uint32_t frame) {
+    if (!g.ringTargetRef || frame % kFillEvery != 0) return;
+    if (g.snap.used && !g.snap.drained) { ++g.snapSkipped; return; }
+    ID3D11Device* dev = nullptr;
+    g.ringTargetRef->GetDevice(&dev);
+    if (!dev) return;
+    ID3D11DeviceContext* ctx = nullptr;
+    dev->GetImmediateContext(&ctx);
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    g.ringTargetRef->GetType(&dim);
+    if (ctx && dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        D3D11_TEXTURE2D_DESC td{};
+        static_cast<ID3D11Texture2D*>(g.ringTargetRef)->GetDesc(&td);
+        const uint32_t bpp = bytesPerPixel(td.Format);
+        if ((td.BindFlags & D3D11_BIND_DEPTH_STENCIL) || td.SampleDesc.Count > 1 || td.Width < kTileGrid * kTilePx || td.Height < kTileGrid * kTilePx || !bpp ||
+            !ensureFpTexture(dev, td.Format, &g.snapStage)) {
+            if (!g.snapWarned) {
+                g.snapWarned = true;
+                Log::get().note("fss tiles: ring offscreen target T%u %ux%u fmt%u is not fingerprinted (depth, multisampled, too small or an unknown format).", g.ringTargetId, td.Width, td.Height, td.Format);
+            }
+        } else {
+            for (uint32_t gy = 0; gy < kTileGrid; ++gy) {
+                for (uint32_t gx = 0; gx < kTileGrid; ++gx) {
+                    D3D11_BOX box{};
+                    box.left = (td.Width - kTilePx) * gx / (kTileGrid - 1);
+                    box.top = (td.Height - kTilePx) * gy / (kTileGrid - 1);
+                    box.right = box.left + kTilePx;
+                    box.bottom = box.top + kTilePx;
+                    box.back = 1;
+                    ctx->CopySubresourceRegion(g.snapStage, 0, gx * kTilePx, gy * kTilePx, 0, g.ringTargetRef, 0, &box);
+                }
+            }
+            g.snap.used = true;
+            g.snap.drained = false;
+            g.snap.frame = frame;
+            g.snap.id = g.ringTargetId;
+            g.snap.w = td.Width;
+            g.snap.h = td.Height;
+            g.snap.fmt = td.Format;
+            g.snap.bpp = bpp;
+        }
+    }
+    if (ctx) ctx->Release();
+    dev->Release();
+}
+
+void drainRingSnap(uint32_t frame) {
+    if (!g.snap.used || g.snap.drained || !g.snapStage || frame < g.snap.frame + kReadbackDelay) return;
+    ID3D11Device* dev = nullptr;
+    g.snapStage->GetDevice(&dev);
+    if (!dev) { g.snap.drained = true; return; }
+    ID3D11DeviceContext* ctx = nullptr;
+    dev->GetImmediateContext(&ctx);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (ctx && SUCCEEDED(ctx->Map(g.snapStage, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m))) {
+        const uint8_t* p = static_cast<const uint8_t*>(m.pData);
+        const uint32_t pitch = m.RowPitch, bpp = g.snap.bpp;
+        char rg[96];
+        uint32_t boxes = 0;
+        formatGrid(rg, sizeof(rg), [&](uint32_t x, uint32_t y) {
+            uint32_t nz = 0;
+            for (uint32_t row = 0; row < kTilePx; ++row) nz += countNonzero(p + (y * kTilePx + row) * pitch + x * kTilePx * bpp, kTilePx * bpp);
+            const char c = nzChar(nz, kTilePx * kTilePx * bpp);
+            if (c != '.') ++boxes;
+            return c;
+        });
+        ctx->Unmap(g.snapStage, 0);
+        if (g.ringFillN < 160) { g.ringFill[g.ringFillN].frame = g.snap.frame; g.ringFill[g.ringFillN].boxes = boxes; g.ringFill[g.ringFillN].id = g.snap.id; ++g.ringFillN; }
+        if (g.ringFillN <= kMaxFillLines) {
+            Log::get().note("fss tiles: ring fill f=%u T%u %ux%u fmt%u nz8x8=%s (boxes written %u of 64)", g.snap.frame, g.snap.id, g.snap.w, g.snap.h, g.snap.fmt, rg, boxes);
+        }
+        g.snap.drained = true;
+    } else if (frame > g.snap.frame + 40) {
+        g.snap.drained = true;
+    }
+    if (ctx) ctx->Release();
+    dev->Release();
+}
+
 void flushRingPath(uint32_t frame) {
-    const bool sample = frame % kFingerEvery == 0 || frame - g.win.startFrame < kRingFirstFrames;
+    const bool sample = frame % kFingerEvery == 0 || frame - g.rv.win.startFrame < kRingFirstFrames;
     for (uint32_t i = 0; i < g.rpN; ++i) {
         State::RPEnt& e = g.rp[i];
         const uint32_t tid = g.ids.id(e.target);
@@ -1283,7 +1433,9 @@ void flushRingPath(uint32_t frame) {
 }
 
 void flushDraws(uint32_t frame) {
+    flushCompositors(frame);
     flushRingPath(frame);
+    g.drawSeq = g.ringSeqFirst = g.ringSeqLast = g.ringSeqN = 0;
     const bool line = frame % kFingerEvery == 0 && g.gbufLines < kMaxGbufLines;
     for (uint32_t i = 0; i < g.gdN; ++i) {
         State::GDraw& d = g.gd[i];
@@ -1328,8 +1480,8 @@ void emitSummary() {
     {
         Validity v = g.cap;
         v.arrivalFrame = fssRingHookArrivalInWindow();
-        v.runsRan = g.runsRanThisCapture;
-        v.runsPlanned = g.runsPlannedThisCapture;
+        v.runsRan = g.rv.runs.ran;
+        v.runsPlanned = g.rv.runs.planned;
         char vl[700];
         formatValidity(vl, sizeof(vl), g.windowNo, g.startedBy[0] ? g.startedBy : "(unknown)", v);
         Log::get().note("%s", vl);
@@ -1480,15 +1632,46 @@ void emitSummary() {
                             g.windowNo, tgt, !g.ringTargetRef ? "nothing seen" : (mainDraws && !otherDraws ? "the role-1 (main, left eye) camera only" : (mainDraws ? "both cameras" : "the other camera only")),
                             otherSamples ? "sample it" : (g.rptotN ? "do not sample it (they render directly, or into something else)" : "were not seen"),
                             haveMain ? "known" : "not read", g.rptotN ? rt : "no draw was made inside a ring-pass call");
-            char fl[600];
-            size_t fa2 = 0;
-            fl[0] = 0;
-            const uint32_t from = g.ringFillN > 20 ? g.ringFillN - 20 : 0;
-            for (uint32_t i = g.ringFillN < 12 ? 0 : 0; i < g.ringFillN && fa2 + 20 < sizeof(fl); ++i) {
-                if (i >= 12 && i < from) continue;
-                fa2 += static_cast<size_t>(std::snprintf(fl + fa2, sizeof(fl) - fa2, "%sf%u:%u", fa2 ? " " : "", g.ringFill[i].frame, g.ringFill[i].boxes));
+            // the targets the layer had, in order
+            char th[400];
+            size_t ta = 0;
+            th[0] = 0;
+            for (uint32_t i = 0; i < g.tgtHistN; ++i) {
+                ta += static_cast<size_t>(std::snprintf(th + ta, sizeof(th) - ta, "%sT%u %ux%u fmt%u from f=%u", i ? "; " : "", g.tgtHist[i].id, g.tgtHist[i].w, g.tgtHist[i].h, g.tgtHist[i].fmt,
+                                                         g.tgtHist[i].frame));
             }
-            Log::get().note("fss tiles: window %u ring offscreen target fill -- sampled boxes written (of 64) over the capture, frame:boxes: %s", g.windowNo, g.ringFillN ? fl : "no samples");
+            Log::get().note("fss tiles: window %u ring offscreen target history -- %u change(s) after the first: %s", g.windowNo, g.tracker.changes, g.tgtHistN ? th : "no target");
+            // the compositors: draws outside the ring pass that sampled the layer
+            if (!g.ctotN) {
+                Log::get().note("fss tiles: window %u compositors -- no draw outside the ring pass sampled the offscreen ring layer (checked: PS t0-t3 of every draw, t4-t15 of draws with a "
+                                "pixel shader into a render target at least %u wide; vertex-shader and compute reads are not checked).", g.windowNo, kMinTargetWidth);
+            } else {
+                for (uint32_t i = 0; i < g.ctotN; ++i) {
+                    const State::CompTot& t = g.ctot[i];
+                    char eyeText[8];
+                    if (t.eye < 2) std::snprintf(eyeText, sizeof(eyeText), "eye%u", t.eye);
+                    else std::snprintf(eyeText, sizeof(eyeText), "eye?");
+                    Log::get().note("fss tiles: window %u compositor %u of %u -- %s vs %016llX ps %016llX into T%u %ux%u fmt%u, samples the layer in PS t%u: %u frames, %u draws; "
+                                    "per frame its first draw came before camera 1's ring draws %u, between them %u, after them %u, with no ring draw in the frame %u",
+                                    g.windowNo, i + 1, g.ctotN, eyeText, static_cast<unsigned long long>(t.vs), static_cast<unsigned long long>(t.ps), t.rtId, t.w, t.h, t.fmt, t.slot,
+                                    t.frames, t.draws, t.order[1], t.order[2], t.order[3], t.order[0]);
+                }
+            }
+            // the fill series, kFillEvery frames apart, in lines of 24
+            if (!g.ringFillN) {
+                Log::get().note("fss tiles: window %u ring offscreen target fill -- no samples (no target, or none sampleable); %u skipped for a read-back still pending.", g.windowNo, g.snapSkipped);
+            } else {
+                for (uint32_t i = 0; i < g.ringFillN; i += 24) {
+                    char fl[700];
+                    size_t fa2 = 0;
+                    fl[0] = 0;
+                    for (uint32_t k = i; k < g.ringFillN && k < i + 24 && fa2 + 24 < sizeof(fl); ++k) {
+                        fa2 += static_cast<size_t>(std::snprintf(fl + fa2, sizeof(fl) - fa2, "%sf%u:T%u:%u", k > i ? " " : "", g.ringFill[k].frame, g.ringFill[k].id, g.ringFill[k].boxes));
+                    }
+                    Log::get().note("fss tiles: window %u ring offscreen target fill (every %u frames; frame:target:boxes written of 64) %u-%u of %u: %s", g.windowNo, kFillEvery, i + 1,
+                                    i + 24 < g.ringFillN ? i + 24 : g.ringFillN, g.ringFillN, fl);
+                }
+            }
         }
     }
     char sl[200];
@@ -1578,13 +1761,13 @@ bool onTarget(ID3D11DeviceContext* ctx, ID3D11Buffer* args, UINT off, uint64_t h
     Slot slot[kCaptureSlots];
     const void* uavRes[2] = {};
     describeBindings(ctx, sr, slot, r, uavRes);
-    if (g.win.capturing) registerWatch(r, args, slot, uavRes);
+    if (g.rv.win.capturing) registerWatch(r, args, slot, uavRes);
 
     // ---- the candidate ----
     bool sub = false;
     uint32_t mask = 0;
     bool keepViews = false;   // eye zero's views are kept by the record
-    if (g.lockstep && g.win.open) {
+    if (g.lockstep && g.rv.win.open) {
         EyeZero& z = g.e0[ci];
         if (r.eye == 0) {
             releaseEyeZero(z);
@@ -1623,12 +1806,12 @@ bool onTarget(ID3D11DeviceContext* ctx, ID3D11Buffer* args, UINT off, uint64_t h
     }
 
     // ---- the read-back copy (before the dispatch; it reads the arguments as this view's dispatch will) ----
-    if (g.win.capturing) {
+    if (g.rv.win.capturing) {
         r.substituted = sub;
         queueSample(ctx, r, slot);
         queueFingerprint(ctx, r, slot);
     }
-    if (g.win.capturing && ensureStaging(ctx)) {
+    if (g.rv.win.capturing && ensureStaging(ctx)) {
         FrameBuf& fb = g.fb[g.frame % kStagingRing];
         if (!fb.used || fb.frame != g.frame) {
             if (fb.used && !fb.drained) g.dropped += fb.n;
@@ -1636,7 +1819,7 @@ bool onTarget(ID3D11DeviceContext* ctx, ID3D11Buffer* args, UINT off, uint64_t h
             fb.used = true;
             fb.drained = false;
             fb.n = 0;
-            fb.logFrame = g.win.wantsDetail(g.frame);
+            fb.logFrame = g.rv.win.wantsDetail(g.frame);
         }
         if (fb.n < kMaxPerFrame) {
             D3D11_BOX box{};
@@ -1704,7 +1887,7 @@ void fssTilesConfigure(Config& cfg) {
 }
 
 void fssTilesNoteWriteSlow(const void* p, bool isView, uint32_t call) {
-    if (!g.win.capturing || call >= kWriteCalls || !p) return;
+    if (!g.rv.win.capturing || call >= kWriteCalls || !p) return;
     guardedBudget(g.budget, [&] {
         const void* res = p;
         ID3D11Resource* got = nullptr;
@@ -1727,15 +1910,17 @@ void fssTilesNoteWriteSlow(const void* p, bool isView, uint32_t call) {
 }
 
 void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances) {
-    if (!g.win.capturing) return;
+    if (!g.rv.win.capturing) return;
     guardedBudget(g.budget, [&] {
+        const uint32_t seq = ++g.drawSeq;   // the draw's order index in the frame, every draw noted
         void* rtv = bindingGet(BindSlot::Rtv0);
         if (!rtv) return;
         uint32_t shape = 0;
         const void* res = rtvResource(rtv, &shape);
         if (!res) return;
         ringhook::Current rc;
-        if (fssRingHookCurrent(&rc)) ringPathRecord(ctx, rtv, res, rc, instances);
+        if (fssRingHookCurrent(&rc)) ringPathRecord(ctx, rtv, res, rc, instances, seq);
+        else if (g.ringTargetRef) compositorCheck(ctx, rtv, res, shape, instances, seq);
         const int i = g.watch.find(res);
         if (g.watchGbuf && i >= 0 && g.watch.role[i] >= Role::Gbuf8 && g.watch.role[i] <= Role::Ring3) {
             const Role role = g.watch.role[i];
@@ -1769,7 +1954,7 @@ void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
                 }
             }
         }
-        if (g.ledgerOn && shape) ledgerRecord(ctx, res, shape, kind, count, instances);
+        if (g.rv.ledgerOn && shape) ledgerRecord(ctx, res, shape, kind, count, instances);
     });
 }
 
@@ -1779,7 +1964,7 @@ void fssTilesNoteEyeDump() {
                         "raw lists of the frames around the event are in edvr_logs\\fsstiles.", g.frame);
         return;
     }
-    if (!g.win.capturing) {
+    if (!g.rv.win.capturing) {
         if (g.eyeDumpNotes < 3) {
             ++g.eyeDumpNotes;
             Log::get().note("fss tiles: the eye-dump key was pressed outside a capturing zoom window (f=%u): no raw buffers are "
@@ -1817,8 +2002,8 @@ void fssTilesNoteZoomSignal(uint32_t frameNo, bool press, uint32_t chromeAgo) {
         }
         return;
     }
-    const bool wasOpen = g.gate.open;
-    const ZoomGate::Refusal r = g.gate.signal(frameNo, chromeAgo);
+    const bool wasOpen = g.rv.gate.open;
+    const ZoomGate::Refusal r = g.rv.gate.signal(frameNo, chromeAgo);
     if (r != ZoomGate::Accepted) {
         if (g.noWindowNotes < 8) {
             ++g.noWindowNotes;
@@ -1830,7 +2015,7 @@ void fssTilesNoteZoomSignal(uint32_t frameNo, bool press, uint32_t chromeAgo) {
     }
     if (wasOpen) {
         // The gate is already open (flight 0dbd3964: a press 0.5 s after the capture closed found it open and started nothing): a later accepted press or jump restarts the capture.
-        g.restartRequested = true;
+        g.rv.restartRequested = true;
         std::snprintf(g.restartWhy, sizeof(g.restartWhy), "%s at f=%u (a restart: the gate was open)", press ? "zoom press" : "camera jump", frameNo);
     } else {
         g.signalPending = true;
@@ -1839,7 +2024,8 @@ void fssTilesNoteZoomSignal(uint32_t frameNo, bool press, uint32_t chromeAgo) {
 }
 
 void fssTilesFrameBoundary(uint32_t frameNo, uint32_t chromeAgo, bool focusKnown, bool focus) {
-    if (g.win.capturing) {
+    if (g.rv.win.capturing) {
+        ringSnapshot(g.frame);   // the offscreen layer at the end of the frame, after the frame's ring draws
         flushDraws(g.frame);
         flushLedger(g.frame);
     }
@@ -1850,134 +2036,100 @@ void fssTilesFrameBoundary(uint32_t frameNo, uint32_t chromeAgo, bool focusKnown
     g.occ = 0;
     const bool latchOpen = deviceHookFssModeLatch();
     g.latch.update(latchOpen, nowMs());
-    // While the scanner is on show (chrome held, latch open) the ring pass hook looks for the arrival itself, capture or not.
-    const bool scanWanted = chromeHeld(chromeAgo) && latchOpen;
-    fssRingHookScan(scanWanted);
-    const ZoomGate::Close gc = g.gate.step(frameNo, chromeAgo, focusKnown, focus);
-    const bool exited = gc == ZoomGate::ChromeDropped || gc == ZoomGate::FocusEnded;
-    if (gc >= ZoomGate::Expired) {
-        Log::get().note("fss tiles: window %u gate closed at f=%u: %s.%s", g.windowNo, frameNo, closeText(gc),
-                        exited && g.revealUntil ? " The reveal capture ends with it, and any pending eye run is cancelled." : "");
-    }
-    // The arrival: the ring pass showed body mode 2 with the scan alpha ramping up while the scanner was on show.
-    bool arrival = false;
+    // While the scanner chrome is held the ring pass hook looks for the arrival itself (the first call with ring+0x6b0 set), capture or not.
+    fssRingHookScan(chromeHeld(chromeAgo));
+    RevealMachine::In in;
+    in.frame = frameNo;
+    in.ms = nowMs();
+    in.chromeAgo = chromeAgo;
+    in.focusKnown = focusKnown;
+    in.focus = focus;
     uint32_t aFrame = 0;
     float aAlpha = 0.0f;
     int aCam = 0;
-    if (fssRingHookTakeArrival(&aFrame, &aAlpha, &aCam)) {
-        if (scanWanted) {
-            arrival = true;
-            g.gate.signal(frameNo, chromeAgo);   // the gate is open for it, restarting its clock
-        } else if (g.noWindowNotes < 8) {
-            ++g.noWindowNotes;
-            Log::get().note("fss tiles: an arrival signature at f=%u (camera %d, alpha %.3f) is refused: the scanner is not on show (chrome held %s, FSS latch %s). Said at most 8 times.",
-                            aFrame, aCam, static_cast<double>(aAlpha), chromeHeld(chromeAgo) ? "yes" : "no", latchOpen ? "open" : "closed");
-        }
+    in.arrivalOffered = fssRingHookTakeArrival(&aFrame, &aAlpha, &aCam);
+    const RevealMachine::Out o = g.rv.step(in);   // every decision that starts, restarts, ends or arms a capture; tools/fss_tiles_test replays flight f5c7ad89 through it
+    g.zoomOpen = g.rv.gate.open;
+    if (o.gateClose >= ZoomGate::Expired) {
+        const bool pending = o.cancelledExit || o.endedBy[0];
+        Log::get().note("fss tiles: window %u gate closed at f=%u: %s.%s", g.windowNo, frameNo, closeText(o.gateClose),
+                        o.exited && pending ? " The reveal capture ends with it, and any pending eye run is cancelled." : "");
     }
-    const bool zoomOpen = g.gate.open;
-    g.zoomOpen = zoomOpen;
-    const bool restart = arrival || g.restartRequested;
+    if (o.arrivalRefused && g.noWindowNotes < 8) {
+        ++g.noWindowNotes;
+        Log::get().note("fss tiles: an arrival signature at f=%u (camera %d, ring+0x6b0 set) is refused: the scanner chrome is not held on this frame. Said at most 8 times.", aFrame, aCam);
+    }
+    if (o.restartIgnored) {
+        Log::get().note("fss tiles: a later zoom press or camera jump (%s) at f=%u does not restart the capture: the reveal capture the arrival armed is running (until f=%u).",
+                        g.restartWhy, frameNo, g.rv.revealUntil);
+    }
     char startedBy[140] = "";
-    WindowMachine::Event ev = WindowMachine::None;
-    if (restart) {
-        if (arrival) std::snprintf(startedBy, sizeof(startedBy), "ring arrival (mode 2, scan alpha %.3f ramping up, camera %d, seen at f=%u)", static_cast<double>(aAlpha), aCam, aFrame);
-        else std::snprintf(startedBy, sizeof(startedBy), "%s", g.restartWhy);
-        g.restartRequested = false;
-        if (g.win.capturing || g.win.open) {
-            // The running capture is over: say so (its validity line says why it was cut short), and start the new one.
-            g.cap.endedBy = arrival ? "restarted by the arrival" : "restarted by a later zoom press or jump";
-            for (uint32_t k = 0; k < 2; ++k) {
-                if (g.runPending[k]) {
-                    g.runPending[k] = false;
-                    Log::get().note("fss tiles: automatic eye run %u cancelled at f=%u: the capture was restarted.", k + 1, frameNo);
-                }
-            }
-            g.revealUntil = 0;
-            g.ledgerOn = false;
-            emitSummary();
-        }
-        ev = g.win.restart(frameNo, nowMs());
+    if (o.start == RevealMachine::StartArrival) {
+        std::snprintf(startedBy, sizeof(startedBy), "ring arrival (the first ring-pass call with ring+0x6b0 set, camera %d, scan alpha %.3f, seen at f=%u)", aCam, static_cast<double>(aAlpha), aFrame);
+    } else if (o.start == RevealMachine::StartRestart) {
+        std::snprintf(startedBy, sizeof(startedBy), "%s", g.restartWhy);
     } else {
-        ev = g.win.step(zoomOpen, frameNo, nowMs());
         std::snprintf(startedBy, sizeof(startedBy), "%s", g.pendingStartedBy[0] ? g.pendingStartedBy : "the gate");
     }
-    if (g.revealUntil && exited) {
-        g.revealUntil = 0;
-        for (uint32_t k = 0; k < 2; ++k) {
-            if (g.runPending[k]) {
-                g.runPending[k] = false;
-                Log::get().note("fss tiles: automatic eye run %u cancelled at f=%u: %s.", k + 1, frameNo, closeText(gc));
-            }
+    const auto cancelNote = [&](uint32_t mask, const char* why) {
+        for (uint32_t k = 0; k < kRunCount; ++k) {
+            if (mask & (1u << k)) Log::get().note("fss tiles: automatic eye run %u cancelled at f=%u: %s.", k + 1, frameNo, why);
         }
-        if (g.win.capturing) {
-            g.cap.endedBy = closeText(gc);
-            g.win.capturing = false;
-            ev = WindowMachine::Closed;
-        }
-    } else if (g.revealUntil) {
-        if (frameNo <= g.revealUntil) {
-            // The reveal is still to be captured: the zoom window's end does not end the capture.
-            if (ev == WindowMachine::Closed) ev = WindowMachine::None;
-            g.win.capturing = true;
-        } else {
-            g.revealUntil = 0;
-            for (uint32_t k = 0; k < 2; ++k) {
-                if (g.runPending[k]) {
-                    g.runPending[k] = false;
-                    Log::get().note("fss tiles: automatic eye run %u never ran: the scanner chrome was not held on any frame from its due frame to the end of the capture.", k + 1);
-                }
-            }
-            if (g.win.capturing) {
-                g.win.capturing = false;
-                ev = WindowMachine::Closed;
+    };
+    cancelNote(o.cancelledRestart, "the capture was restarted");
+    cancelNote(o.cancelledExit, o.exited ? closeText(o.gateClose) : "the capture ended");
+    if (o.cancelledOver) {
+        for (uint32_t k = 0; k < kRunCount; ++k) {
+            if (o.cancelledOver & (1u << k)) {
+                Log::get().note("fss tiles: automatic eye run %u never ran: the scanner chrome was not held on any frame from its due frame to the end of the capture.", k + 1);
             }
         }
     }
-    if (ev == WindowMachine::Opened) {
-        g.windowNo = g.win.windows;
+    if (o.restarted) {
+        // The running capture is over: say so (its validity line says why it was cut short), and start the new one.
+        g.cap.endedBy = o.start == RevealMachine::StartArrival ? "restarted by the arrival" : "restarted by a later zoom press or jump";
+        emitSummary();
+    }
+    if (o.endedBy[0]) g.cap.endedBy = o.endedBy;
+    if (o.ev == WindowMachine::Opened) {
+        g.windowNo = g.rv.win.windows;
         resetWindowTallies();
         std::snprintf(g.startedBy, sizeof(g.startedBy), "%s", startedBy);
         g.cap.chromeAtStart = chromeHeld(chromeAgo);
         g.cap.endedBy = "";
         g.pendingStartedBy[0] = 0;
+        if (!o.armed) g.rv.runs.planned = g.rv.runs.ran = 0;
         char ago[40];
         agoText(ago, sizeof(ago), chromeAgo);
         Log::get().note("fss tiles: window %u opened at frame %u (started by %s; lockstep=%s; chrome held=%s, last matched %s) -- logging the tile "
                         "renderer's dispatches for up to %llu ms, at most %u lines. Band watch: armed, waiting for a whole-row move of a large list "
-                        "or one going to zero; the ring pass hook's arrival (mode 2, alpha below 1) starts the reveal capture (%u frames) and the automatic eye runs (at most %u a session) at once.",
+                        "or one going to zero; the ring pass hook's arrival (the first call with ring+0x6b0 set) starts the reveal capture (%u frames) and the automatic eye runs (at most %u a session) at once.",
                         g.windowNo, frameNo, startedBy, g.lockstep ? "on" : "off", chromeHeld(chromeAgo) ? "yes" : "no", ago, static_cast<unsigned long long>(kWindowMs),
                         kMaxLinesPerWindow, kRevealFrames, kMaxAutoRuns);
-        if (arrival) {
-            g.frame = frameNo;
-            const uint32_t plan = armReveal(frameNo);
-            Log::get().note("fss tiles: arrival at f=%u (the ring pass, camera %d: body mode 2, scan alpha %.3f ramping up, scanner chrome held): the capture starts here. Capture continues "
-                            "until f=%u (%u frames); %u automatic eye run(s) at f=%u%s (planned %u of %u this session); ledger %u frames; input, gbuf, ring path and ring call lines follow.",
-                            frameNo, aCam, static_cast<double>(aAlpha), g.revealUntil, kRevealFrames, plan, plan ? g.runDue[0] : 0u, plan > 1 ? " and the second later" : "",
-                            g.autoRunsPlanned, kMaxAutoRuns, kLedgerFrames);
+        if (o.armed) {
+            armGlue(frameNo);
+            Log::get().note("fss tiles: arrival at f=%u (the ring pass, camera %d: ring+0x6b0 set, scan alpha %.3f, scanner chrome held): the capture starts here. Capture continues "
+                            "until f=%u (%u frames); %u automatic eye run(s), the first at f=%u (offsets %u, %u, %u; planned %u of %u this session); ledger %u frames; fill series every %u frames; "
+                            "input, gbuf, ring path, ring call and compositor lines follow.",
+                            frameNo, aCam, static_cast<double>(aAlpha), g.rv.revealUntil, kRevealFrames, o.armedRuns, o.armedRuns ? g.rv.runs.due[0] : 0u, kRunOffsets[0], kRunOffsets[1],
+                            kRunOffsets[2], g.rv.runs.sessionPlanned, kMaxAutoRuns, kLedgerFrames, kFillEvery);
         }
-    } else if (ev == WindowMachine::Closed) {
+    } else if (o.ev == WindowMachine::Closed) {
         g.summaryDue = true;
         g.summaryAfterFrame = frameNo + kReadbackDelay + 6;
-    } else if (restart && ev == WindowMachine::None) {
+    } else if (o.start != RevealMachine::StartGate && o.ev == WindowMachine::None) {
         Log::get().note("fss tiles: a restart at f=%u (%s) found no window left (the session's %u-window cap).", frameNo, startedBy, kMaxWindows);
     }
-    if (g.ledgerOn && frameNo > g.ledgerUntil) g.ledgerOn = false;
     if (g.reduceUntil && frameNo > g.reduceUntil) { g.reduceUntil = 0; eye_final_capture::g_reduceLevel = 0; }
-    for (uint32_t k = 0; k < 2; ++k) {
-        if (g.runPending[k] && frameNo >= g.runDue[k]) {
-            if (!chromeHeld(chromeAgo)) {
-                if (!g.runRefusedNoted[k]) {
-                    g.runRefusedNoted[k] = true;
-                    char ago[40];
-                    agoText(ago, sizeof(ago), chromeAgo);
-                    Log::get().note("fss tiles: automatic eye run %u refused at f=%u: the scanner chrome is not held (last matched %s). It stays pending until the chrome is held or "
-                                    "the capture ends; an eye run without the scanner on show is a capture of the cockpit.", k + 1, frameNo, ago);
-                }
-                continue;
-            }
-            g.runPending[k] = false;
+    for (uint32_t k = 0; k < kRunCount; ++k) {
+        if (o.refused & (1u << k)) {
+            char ago[40];
+            agoText(ago, sizeof(ago), chromeAgo);
+            Log::get().note("fss tiles: automatic eye run %u refused at f=%u: the scanner chrome is not held (last matched %s). It stays pending until the chrome is held or "
+                            "the capture ends; an eye run without the scanner on show is a capture of the cockpit.", k + 1, frameNo, ago);
+        }
+        if (o.fire & (1u << k)) {
             ++g.autoRuns;
-            ++g.runsRanThisCapture;
             eye_final_capture::g_reduceLevel = kReduceLevel;   // the final-image rows of this run: the whole submitted eye at 1/4 size, not the 1400 px centre crop
             g.reduceUntil = frameNo + 40;
             g.autoArming = true;
@@ -1987,22 +2139,23 @@ void fssTilesFrameBoundary(uint32_t frameNo, uint32_t chromeAgo, bool focusKnown
     }
     if (g.signalPending) {
         g.signalPending = false;
-        if (!g.win.open && g.win.windows >= kMaxWindows && g.noWindowNotes < 8) {
+        if (!g.rv.win.open && g.rv.win.windows >= kMaxWindows && g.noWindowNotes < 8) {
             ++g.noWindowNotes;
             Log::get().note("fss tiles: a %s at frame %u was accepted but the session's window cap (%u) was reached, so no window opened. Said at most 8 times.",
                             g.signalPress ? "zoom press" : "camera jump", g.signalFrame, kMaxWindows);
         }
     }
-    if (!g.win.open) {
+    if (!g.rv.win.open) {
         for (EyeZero& z : g.e0) if (z.valid) releaseEyeZero(z);
     }
-    if (g.win.capturing && !g.noTargetNoted && frameNo - g.win.startFrame == 30 && g.targetDispatches == 0) {
+    if (g.rv.win.capturing && !g.noTargetNoted && frameNo - g.rv.win.startFrame == 30 && g.targetDispatches == 0) {
         g.noTargetNoted = true;
         Log::get().note("fss tiles: 30 frames into window %u and no dispatch of the tile renderer's shaders has been seen "
                         "(CS %016llX / %016llX); the closing summary lists the other indirect compute shaders.",
                         g.windowNo, static_cast<unsigned long long>(kCsLarge), static_cast<unsigned long long>(kCsSmall));
     }
-    fssRingHookWindow(g.win.capturing, g.windowNo, frameNo);
+    fssRingHookWindow(g.rv.win.capturing, g.windowNo, frameNo);
+    drainRingSnap(frameNo);
     if (g.summaryDue && (!pendingReadbacks() || frameNo >= g.summaryAfterFrame)) emitSummary();
     refreshActive();
 }
@@ -2012,10 +2165,10 @@ bool fssTilesDispatchIndirect(ID3D11DeviceContext* ctx, ID3D11Buffer* args, unsi
     if (!g.budget.shouldRun() || !args) return false;
     guardedBudget(g.budget, [&] { drainAll(ctx); });
     if (!isTileCs(csHash)) {
-        if (g.win.capturing) noteOther(csHash);
+        if (g.rv.win.capturing) noteOther(csHash);
         return false;
     }
-    if (!g.win.capturing && !(g.lockstep && g.win.open)) return false;
+    if (!g.rv.win.capturing && !(g.lockstep && g.rv.win.open)) return false;
     bool consumed = false;
     g.dispatched = false;
     const bool ok = guardedBudget(g.budget, [&] { consumed = onTarget(ctx, args, off, csHash, real); });

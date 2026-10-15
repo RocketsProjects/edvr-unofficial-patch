@@ -43,11 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next (v8, built, not flown):** `off`, one zoom, no keys, press zoom once.
-  The capture now starts at the arrival (ring pass, mode 2, alpha ramping
-  up), restarts on a later press or jump, refuses an exit jump. Read the
-  `capture N valid=` line first, then `ring path` and the offscreen target
-  lines (entry "2026-10-15 (v8)"). Fallback `mirror`.
+- **Next (v9, built, not flown):** `off`, one zoom, no keys, press zoom once.
+  v8 was invalid (alpha 1.000 from the first ring call; ONE ring image, drawn
+  by camera 1 into T42 then T43). v9 arms on the first ring call with
+  ring+0x6b0 set, runs eye runs at +0/+30/+270, follows the target across
+  changes, logs every pixel-shader compositor per eye against camera 1's
+  draws. Read `capture N valid=`, then `compositor`. Fallback `mirror`.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -2760,6 +2761,176 @@ How to read it:
 4. If the offscreen target is not identified, no draw happened inside a call
    with ring+0x6b0 set: the RE's draw/target model is wrong and the ring
    hook call lines (cam, role, 6b0) are the evidence.
+
+## 2026-10-15 (v8 flown): flight f5c7ad89, the ring is drawn by the left camera only
+
+Flight on test build P (`v0.20.0-rc.1-102-gf5c7ad89`, Frontier, VR;
+`edvr_gfx_20261015_110639.log`; `--expect-build f5c7ad89` matches). `off`,
+no other keys. Sean: the squares in the LEFT eye only. Read-only analysis.
+
+**Validity: NO.** All four captures say `valid=no`:
+
+- Captures 1-3 (f17844, f17845, f18037) started on zoom presses in the sky
+  view. 1 and 2 were cut short by the next press. None saw a ring-pass call.
+- Capture 4 (press at f18832) holds the zoom: the first ring-pass call came
+  at f18855, 23 frames after the press. It is still `valid=no` because the
+  arrival trigger never fired: every ring call in the window read
+  **alpha=1.000, dir=0, active=1**, from the first call on, so "mode 2 with
+  alpha below 1" cannot happen. No band event, so **no eye run, no images**.
+  CONFIRMED: `gPlanetRingScanAlpha` (ring+0x718) is already 1.0 when the ring
+  first draws, so it is not the reveal's clock.
+
+What capture 4 does show (in flight, at the zoom; CONFIRMED unless marked):
+
+- **Who draws the ring.** `ring offscreen target identified: T42 252x252
+  fmt26` at f18856, the render target of the first draw inside a ring-pass
+  call with ring+0x6b0 set, made by camera 1 (role 1, the main camera, id 1
+  read through the ring's own getter). From about f18905 the same draws go
+  into **T43 1008 x 1008** (half the 2016 eye: Finding 2's mono body layer).
+  The window summary: `drawn into by the role-1 (main, left eye) camera
+  only`. Per camera, only `cam=1 role=1 6b0=set` has draws: 4 a frame (one
+  per round with 0x6b0 set), each sampling the ring G-buffer T38-T41.
+- **The other cameras draw no ring.** Camera 22 (role 2) makes the same
+  calls (passes 0, 1, 2, 5, 6, 8, mode 2, 0x6b0 clear then set, about
+  2,300 of each), and so does a third camera, 8 (role 0, about 125 calls of
+  each), but neither issues a single draw inside a ring-pass call. This is
+  the RE's main-camera test at 0x3659a1d / 0x3659f78, now seen live: in
+  mode 2 with 0x6b0 set, only the main camera draws; the rest return.
+- Tile pass: lists identical in both eyes and static (240 / 269 groups). The
+  eye-sized scene does not carry the zoomed body. t9 11 draws a frame in both
+  eyes.
+- Offscreen fill: the coarse 8 x 8 grid of T42 reads 42, then 45 of 64 boxes,
+  flat. That series kept sampling T42 after the draws moved to T43, so it
+  says nothing about the reveal (an instrument fault). Also, the `ring path`
+  `draws=` figures and the summary's "per frame 4..184 / 188..2308" are
+  RUNNING TOTALS (they climb by 4 a frame), not per-frame counts.
+
+How the right eye gets its ring: not from a ring draw of its own (none
+exists). INFERRED: from the composite of the same mono layer T43 that
+Finding 1 described, a draw outside the ring pass that v8 does not watch.
+The eye diff did not run (no all-small event).
+
+ruled out: the right eye drawing its own complete ring (and the left a
+progressive one) in the ring pass, because in flight f5c7ad89 only camera 1
+draws, into the offscreen layer, and cameras 22 and 8 draw nothing inside
+any ring-pass call.
+ruled out: the scan alpha ring+0x718 as the reveal's clock, because it reads
+1.000 from the first ring call of the zoom.
+ruled out (instrument): the v8 arrival trigger (mode 2 with alpha below 1),
+because the alpha is never below 1.
+
+Root cause: OPEN, but narrowed. One ring image is made (camera 1, into T43),
+so any left-only difference must come from how each eye USES it: a different
+composite draw, a different moment (the left eye compositing T43 mid-fill in
+its own pass, the right after it is complete), or a left-only producer
+outside the ring pass. The proposed fixes ("composite the same target into
+the right eye") wait on knowing what each eye samples.
+
+Next observation (one flight, instrument changes only):
+
+- Trigger the capture on the first ring-pass call with ring+0x6b0 set (here
+  f18855), and run the eye runs at +0, +30 and +270 so they bracket the
+  arrival.
+- Log every draw anywhere in the frame (not only inside ring calls) whose
+  pixel shader samples the offscreen target (T42 or T43, re-identified on
+  each change), per eye, with its order relative to camera 1's four draws
+  into it.
+- Fingerprint the target the draw actually uses, and fix the running totals.
+
+Reading: the left eye's composite sampling T43 before camera 1's draws
+complete in the frame, while the right samples it after, is the ordering
+cause. The fix is then to defer the left composite or have it sample last
+frame's layer. A left-only draw outside the ring pass is a different
+producer, named by its hashes.
+
+## 2026-10-15 (v9): the trigger is the ring layer; the compositors are searched (built, not flown)
+
+Flight f5c7ad89 (v8) was invalid because the scan alpha is 1.000 from the first
+ring call, so the "alpha below 1" trigger never fired. Three flights in a row
+missed the arrival, so this build makes the decisions that missed it pure
+functions and replays the failing flight through them in the rig. Branch
+`claude/fss-tile-lockstep`; full `build.bat` green, fss_tiles_test 235 checks.
+
+What changed:
+
+- **Trigger.** The first ring-pass call with ring+0x6b0 set while the scanner
+  chrome is held (`isArrival`, `ArrivalLatch`). One trigger per zoom; the latch
+  re-arms when the layer is away for more than 60 frames or the scanner is
+  left. The FSS latch no longer gates it (chrome alone does).
+- **The machine.** Arming, restart, exit and the eye runs moved from the
+  frame boundary into `RevealMachine` (fss_tiles_core.h), a pure function of
+  frame, time, chrome age, focus and the trigger. The boundary only feeds it
+  and acts on its output. Eye runs now fire at +0, +30 and +270 frames from the
+  arrival (`kRunOffsets`), one a frame, each waiting for the chrome;
+  `kMaxAutoRuns` is 9 a session, `kMaxWindows` 10.
+- **A later press or jump** restarts a capture that has not found the arrival.
+  It does not restart the reveal capture the arrival armed (the departure and
+  the arrival of a zoom are two jumps; the second must not wipe the first's
+  data). Logged as "does not restart the capture".
+- **Bug fixed (found by the replay).** When the gate closed on leaving the
+  scanner, the window machine had already cleared `capturing`, so the validity
+  line never said "ended by". It does now.
+- **Rig.** `testV9Replay` replays capture 4 of f5c7ad89: a press at f18832, ring
+  calls from f18855 (cameras 1, 22 and 8, 6b0 clear then set, alpha 1.000), T42
+  then T43 from f18905, chrome held throughout. It requires one trigger at
+  f18855, the capture armed at f18856 replacing the press-started one, runs at
+  f18856, f18886 and f19126, a late press ignored, the capture ending at
+  f19457, the target re-identified once, and a valid capture. Further cases:
+  arrival without chrome refused, exit cancels the third run, a run waits for a
+  lost chrome, the latch re-arms, the order classification.
+
+New and changed log lines (all inside a capture):
+
+- `ring offscreen target identified: T.. WxH fmtN` once, then
+  `ring offscreen target CHANGED at f=..: T42 .. -> T43 ..` on every change.
+  Window summary `ring offscreen target history -- N change(s): T.. from f=..`.
+- `ring path f=.. cam= role= 6b0=set|clear: draws=D ...` now counts draws of
+  that frame. v8's figure ran on across frames (the entry was not cleared), as
+  was the summary's "per frame a..b".
+- `ring fill f=F T<id> WxH fmtN nz8x8=<grid> (boxes written N of 64)` every 5
+  frames, taken at the end of the frame after camera 1's draws, of the target
+  current at that frame. The summary lists `frame:target:boxes` for all of them.
+  This replaces v8's `input .. ring offscreen target` line, which sampled at
+  eye 0's tile dispatch and kept reading T42 after the draws moved to T43.
+- `compositor f=.. eyeN draw #a..#b (n draws) vs .. ps .. into T.. WxH fmt
+  (viewport ..) samples the offscreen ring layer T.. in PS t<slot>; BEFORE |
+  BETWEEN | AFTER camera 1's ring draws | no camera-1 ring draw in this frame
+  [camera 1's ring draws this frame: n, #a..#b]`. Every draw outside the ring
+  pass whose pixel shader reads the current layer, every frame for 40 frames,
+  then one in ten, and on first sighting. `#` is the draw's order index among
+  all draws noted that frame. Eye comes from the order the render target
+  appeared among same-sized targets (as the ledger does); `eye?` means more or
+  fewer than two such targets, so read the target id.
+- Summary: `window N compositor k of n -- ..: F frames, D draws; per frame its
+  first draw came before camera 1's ring draws X, between them Y, after them Z,
+  with no ring draw in the frame W`, or `window N compositors -- no draw
+  outside the ring pass sampled the offscreen ring layer (checked: ..)`.
+
+Limits, said in the log too: the search covers pixel-shader reads (t0-t3 of
+every draw; t4-t15 only for draws with a pixel shader into a target 128+
+wide). Vertex-shader and compute reads are not checked, so "no compositor"
+means none of these. The wide scan costs a `PSGetShaderResources` per such
+draw while a capture runs.
+
+Flight plan, unchanged: `fix.fss_eye_sync = off`, one zoom, no keys, do not
+press zoom twice. Fly into the zoom from the scanner view and wait.
+
+How to read it:
+
+1. `capture N valid=` for the capture that began at the arrival. `valid=no`
+   voids the rest. Three `eye run` lines should follow the arrival.
+2. `ring offscreen target history`: which targets the layer had, and `ring fill`
+   against them. The boxes written (of 64) per sample says when the layer
+   fills; the series should follow T42, then T43.
+3. The compositor lines say who reads the layer, per eye, and when relative to
+   camera 1's four draws. The ordering cause predicts the left eye's compositor
+   BEFORE or BETWEEN the draws while the right's is AFTER. If both are AFTER
+   and identical, the asymmetry is not ordering; compare their vs/ps and
+   viewports. If only one eye has a compositor, the other is fed by something
+   the search does not see (a vertex-shader or compute read, or a copy).
+4. If the summary says no compositors, the layer reaches the eyes through a
+   path outside pixel-shader reads, and the next instrument is copies and
+   compute reads of the target.
 
 ## Open
 
