@@ -9,6 +9,10 @@
 //   0357BBB2DEE43C1F / 81812EF97FB4A361, 8289669D93A18C1D / C6E6E419DA9F6FAD, A1B7CFCD0BE7493E / 2DB678B6B558B604   the deferred LIGHT VOLUMES (a 14-index box,
 //     an 84-index sphere or cone, smaller instanced volumes; gpu_pass_profile.cpp:68). They are the scene's lighting: they are additive and cover every
 //     lit pixel, so hiding history under them would remove anti-aliasing from the whole frame.
+//   B75A6FF2CA9FA5D6 / D56F859BE4781431   the anchor billboard (flat_projection_recipes.h: "Billboard VS reads CB0 only at instructions 5-7 for anchor xyw"): it was on this
+//     list on build D (v0.20.0-rc.1-39-gd3013197) and the census said 5.6-7.2 MILLION covered pixels per draw, about 2 draws a frame: it draws across the whole sky
+//     (stars, the sun billboard, glare elements), and hiding history under it made the skybox shimmer. RULED OUT as an effect-only pair
+//     (docs/dlss-blur-elements-2026-10-14.md). The inspector's per-draw coverage is how a pair is judged before it is added: a few thousand pixels, not millions.
 //   124D7F3F649138D4 / 8085AE8DD1906CDC   an alpha quad over the G-buffer (the force field, cap 4): its output is albedo into four render targets, not light, so
 //     "supplies a share of the pixel's light" does not describe it.
 #include <cstddef>
@@ -26,10 +30,6 @@ constexpr EffectPair kEffectHistoryPairs[] = {
     // curve over the particle's age; the PS is lit, cb1[91], three material textures). Additive. Seen in inspector caps 5 and 6 (flight
     // v0.20.0-rc.1-4): sparks and trails that move on their own.
     {0x68DDDEF04D9894AFull, 0x06332CA168B6DA63ull, "particle-billboard"},
-    // An anchor billboard with a depth-occlusion sample (flat_projection_recipes.h: "Billboard VS reads CB0 only at instructions 5-7 for anchor xyw";
-    // its PS samples t0 conditionally with the screen position): the light halos and flares of lamps and engines. Additive, with 7-9 overlapping sprites at the
-    // view centre in caps 3, 5, 6 and 7.
-    {0xB75A6FF2CA9FA5D6ull, 0xD56F859BE4781431ull, "halo-billboard"},
 };
 constexpr uint32_t kEffectHistoryPairCount = static_cast<uint32_t>(sizeof(kEffectHistoryPairs) / sizeof(kEffectHistoryPairs[0]));
 

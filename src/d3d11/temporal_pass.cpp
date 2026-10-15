@@ -5051,6 +5051,7 @@ void temporalPassConfigure(Config& cfg) {
                                         : "");
         }
         skyRingConfigure(cfg.getString("diag.sky_ring", "off") == "on");
+        effectHistoryConfigure(cfg.getString("advanced.effect_history", "on") != "off");   // TEMPORARY A/B key (docs/dlss-blur-elements-2026-10-14.md)
     }
     // The same test native_temporal.cpp's Settings::dlaa makes (flags bit 1
     // at the treat): only an external engine (dlaa, dlss, fsr) touches NGX

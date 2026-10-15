@@ -17,6 +17,7 @@
 namespace edvr {
 namespace detail {
 std::atomic<bool> g_effectNvidia{false};
+std::atomic<bool> g_effectEnabled{true};
 }
 
 namespace {
@@ -412,8 +413,8 @@ void effectHistoryInstall(const EffectHistoryEnv& env) {
                                                static_cast<unsigned long long>(kEffectHistoryPairs[i].vs),
                                                static_cast<unsigned long long>(kEffectHistoryPairs[i].ps)));
     Log::get().note("effect history: %s. On NVIDIA's upscaler, %u listed effect draw pairs (%s) are drawn once more into a private target; where one supplies at "
-                    "least %.2f of a pixel's light (and more than %.3f luma) DLSS is told to start that pixel's history afresh. No key: the rule is on whenever the "
-                    "pass runs DLSS. The line every 30 s reports it.",
+                    "least %.2f of a pixel's light (and more than %.3f luma) DLSS is told to start that pixel's history afresh. TEMPORARY key advanced.effect_history (default on) turns it off live: the rule runs whenever the "
+                    "pass runs DLSS and the key is on. The line every 30 s reports it.",
                     g_installed ? "installed" : "NOT installed (missing hooks)", kEffectHistoryPairCount, names, static_cast<double>(kEffectHideShare),
                     static_cast<double>(kEffectHideFloor));
 }
@@ -425,6 +426,28 @@ void effectHistoryShutdown() {
     for (EyeSlot& s : g_mod->eye) s = EyeSlot();
     for (QuerySlot& q : g_mod->ring) q = QuerySlot();
     g_mod->states.clear();
+}
+
+void effectHistoryConfigure(bool on) noexcept {
+    const bool was = detail::g_effectEnabled.exchange(on, std::memory_order_relaxed);
+    static bool said = false;
+    if (said && was == on) return;
+    said = true;
+    try {
+        Log::get().note("effect history (advanced.effect_history, TEMPORARY A/B key): %s%s", on ? "on" : "off",
+                        on ? "" : " -- no listed draw is replicated and no pixel is hidden by the effect rule; the kind-4 depth check is not part of this key");
+    } catch (...) {
+    }
+}
+
+void effectHistoryNoteSubstituted(uint64_t vs, uint64_t ps) noexcept {
+    const int pair = effectPairIndex(vs, ps);
+    if (pair < 0) return;
+    try {
+        std::lock_guard<std::mutex> lock(g_mu);
+        ++g_win.substituted[pair];
+    } catch (...) {
+    }
 }
 
 void effectHistorySetNvidia(bool on) noexcept {
@@ -441,7 +464,7 @@ void effectHistoryDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint64_t ps, Effec
 }
 
 bool effectHistoryViews(const void* sceneDepth, uint32_t w, uint32_t h, ID3D11ShaderResourceView** light, ID3D11ShaderResourceView** frame) noexcept {
-    if (!sceneDepth || !light || !frame) return false;
+    if (!sceneDepth || !light || !frame || !detail::g_effectEnabled.load(std::memory_order_relaxed)) return false;
     try {
         std::lock_guard<std::mutex> lock(g_mu);
         EyeSlot* sp = nullptr;

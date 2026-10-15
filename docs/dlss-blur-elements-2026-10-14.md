@@ -34,17 +34,16 @@
     producer FUN_14369C9C0 which is counted and never stamped, the primary). One capture of the railing mid-cycle settles whether it is a mover no hook reaches.
   - *Adverts.* 46546443FD3C3F88 and 95D01BA609BF7500 joined the hologram depth pass's world markers (holo_families.h): their own depth, so the camera term
     gives them parallax. Mechanism: the pass stamps depth into the AA depth copy; it writes no mask.
-  - *Decided against, from the evidence:* the force field (a G-buffer draw: the pass compares its light contribution with the lit frame, which an albedo write
-    breaks), the light volumes, `B75A6FF2`, and the particle pair (no velocity source, and a post-DLSS take would lose scene occlusion).
+  - *Decided against (superseded below for the particle pair):* the force field (a G-buffer albedo write), the light volumes, `B75A6FF2`; a post-DLSS take (loses occlusion).
 - **Built on `claude/effect-history` (option A):** where a listed glow supplies >= 0.35 of a pixel's light (and > 0.002 luma), the motion shader writes the
   out-of-range vector (`hidden`), so DLSS starts that pixel's history afresh. The sentinel is what preset K honours: flown on the background-uncovered case
-  (`backgroundHistoryHidden`) and for masked engine pixels (temporal_shader_source.h `hidden`; dlaa.cpp:711 says K ignores the mask, not the vector). List: effect_history_pairs.h (particle-billboard 68DDDEF0/06332CA1, halo-billboard
-  B75A6FF2/D56F859B; never the light volumes or the force field's G-buffer quad). Each listed eye draw is replicated before the game's, into a private R11G11B10 target
+  (`backgroundHistoryHidden`) and for masked engine pixels (temporal_shader_source.h `hidden`; dlaa.cpp:711 says K ignores the mask, not the vector). List: effect_history_pairs.h (particle-billboard 68DDDEF0/06332CA1 alone since
+  build D; the halo B75A6FF2 was REMOVED, see Ruled out; never the light volumes or the force field's quad). TEMPORARY key `advanced.effect_history = on|off` (default on, live)
+  A/Bs the rule in one session; remove it when the arc closes. A draw a fix substitutes (verdict, UI layer, engine substitution) is never replicated, and counted. Each listed eye draw is replicated before the game's, into a private R11G11B10 target
   (own blend, the game's depth view tested, nothing written to the game's targets, state restored), per eye, found by the scene depth it tests against; the pass binds
-  it at t5 and the game's HDR target at t16 (probe.w bit 32768). Census every 30 s: `effect history: last 30 s ...`. No key. Inspector: `effect rule:` line,
+  it at t5 and the game's HDR target at t16 (probe.w bit 32768). Census every 30 s: `effect history: last 30 s ...`. Inspector: `effect rule:` line,
   `HIDDEN(effect rule)`, magenta in path.png, CSV column `effect_hidden`. Tests: tools\effect_history_test (WARP, in build.bat).
-- **Build B captures (14:55-14:56):** all three boxes missed. Advert: no 4654/95D0 draw, but 117 world-marker draws/frame in the census (pass live). Pad (cap2): 17
-  overlapping B75A6FF2 sprites (listed) plus 1C506222/2519C905 (additive, depth-only: a hologram-volume candidate, NOT listed). Railing: kind 4 on 256/256 (cap3) and 183 (cap2) box pixels.
+- **Build B captures:** boxes missed. Advert: no 4654/95D0 draw (pass live: 117 world markers/frame). Pad: 1C506222/2519C905 (additive, depth-only) a candidate, NOT listed. Railing: kind 4 on 256/256 and 183 px.
 - **Flat comparison (Sean, test build D, flat + DLAA native): pad holograms and railings are fine; both blur in VR (HMD Quality 0.5, 2016 -> 4032, K).**
   (2) The railing, from code: kind 4 = a marker whose depth is not the scene's. Flat's prep treats the same pixel differently (flat_mono_shader_source.h:142,
   flat_mono_resolve.cpp:972 "steady detail"): it REFUSES history unless last frame's depth confirms the camera term (`historyDepthMatches`, both directions, 1%).
@@ -56,7 +55,8 @@
   `HIDDEN(kind4 depth)`, orange in path.png; the 30 s `kind-4 depth check:` line tens of px per eye-frame with a moving pad, near none still (high on a still scene = refusing real surfaces).
 - **Open:** a pad-hologram capture that names its draws; an advert capture with the box on it; weapons fire, flares (option A, NOT FLOWN); the force field.
 - **Ruled out:** railing motion mismatch (tool label bug); the 2026-09-29 pad-into-layer rule (9122f31e); reactive bias or sharpening (docs/hologram-depth-2026-09-24.md);
-  light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (4); FUN_14369C9C0 as the railing's writer (hooked, 0 calls since launch).
+  light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (4); FUN_14369C9C0 as the railing's writer (hooked, 0 calls since launch);
+  B75A6FF2 as an effect-only pair: it covers ~7M px per draw (the sky), hiding it made the skybox shimmer (flight d3013197).
 - **Next flight:** `effect history:` census line (hidden px per eye-frame, covered px per draw, GPU ms per replica, `HDR target ... readable`; COULD NOT BE READ = the game's HDR target was not bound or not the eye's size); on a glow
   capture the box stats' `by the effect rule N` and the `effect rule:` line. Aim: press the inspector key once (a "+" shows at the head-forward point), then again within 3 s; the box is 48 px.
 
@@ -211,3 +211,16 @@ arrived (a menu, no VR), none was a candidate, or none reached the window.
   inspector's box stats (decision value 65536, CSV column `kind4_hidden`). Tests: effect_history_test (the rule against its HLSL on 1024 cases; the production
   wrapper extracted from the shader and run over a real previous-depth texture: confirming keeps, non-confirming hides, three cannot-judge cases keep). No shader
   golden was re-pinned by this change; the stale-marker rule is new text, and the only pin touched is the terrain A/B rig's reading of the shader, if the build shows one.
+
+- **2026-10-14, the halo pair removed from option A (flight d3013197, build E, VR, Pimax).** Sean reported shimmer with DLSS on, the skybox shimmering and the sun
+  billboard appearing to ride his head (sun_glare = vivid). The 30 s census from 20:02 said `halo-billboard: 1.82-2.00 draws/frame, 5.6-7.2 million covered pixels per
+  draw` and `pixels hidden: 10-14k per eye-frame`. ruled out: B75A6FF2/D56F859B as an effect-only pair, because it covers about 7M px per draw (the sky: stars, the sun
+  billboard, glare elements) and hiding it made the skybox shimmer. My reading of the build B pad capture ("17 overlapping sprites at the centre, so a halo layer")
+  was wrong: that capture's box coverage (4090 samples of 256) was the first sign of a sky-wide draw. The lesson is now in effect_history_pairs.h: a pair is
+  judged by its covered pixels per draw before it is listed. Now: the list is the particle billboard alone; the TEMPORARY key `advanced.effect_history` (default on,
+  live) A/Bs the rule in one session; and a draw a fix substitutes or takes (any non-none verdict: sun glare clamp/steady, particle, holo, ...; the UI layer; an
+  engine-record substitution) is never replicated and is counted per pair (`N/frame left alone (a fix substitutes them)`). Checked against the sun glare: the replica
+  runs only for a verdict-none draw, before the game's issue and through the real entry point (below every EDVR hook), so it cannot consume the glare wrapper's per-draw
+  substitution; what it did on build E was hide history under the sun's pixels. Consequence, said plainly: with the default `fix.particle_billboard = steady` the
+  particle pair's draws carry a verdict, so the rule is inert by default until a flight shows the count and a replica inside that wrapper is justified. The kind-4
+  depth check read 2-99 px per eye-frame on that flight: not a plausible cause of sky shimmer, and not part of the new key.

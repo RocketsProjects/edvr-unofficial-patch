@@ -89,14 +89,14 @@ using namespace edvr;
 // =============================================================================================================================
 
 void testList() {
-    // The two starting pairs, by pair: both hashes must match.
-    check(kEffectHistoryPairCount == 2, "the list starts with two pairs");
+    // The list is the particle billboard alone (the halo billboard was removed on build D, see effect_history_pairs.h); both hashes must match.
+    check(kEffectHistoryPairCount == 1, "the list is one pair");
     check(effectPairIndex(0x68DDDEF04D9894AFull, 0x06332CA168B6DA63ull) == 0, "the particle billboard is pair 0");
-    check(effectPairIndex(0xB75A6FF2CA9FA5D6ull, 0xD56F859BE4781431ull) == 1, "the halo billboard is pair 1");
-    check(effectPairIndex(0x68DDDEF04D9894AFull, 0xD56F859BE4781431ull) == -1, "a listed vertex shader with another listed pair's pixel shader is not a pair");
+    check(effectPairIndex(0xB75A6FF2CA9FA5D6ull, 0xD56F859BE4781431ull) == -1 && !effectVsListed(0xB75A6FF2CA9FA5D6ull), "the halo/anchor billboard B75A6FF2/D56F859B is NOT listed (it covers the whole sky: ruled out as an effect-only pair)");
+    check(effectPairIndex(0x68DDDEF04D9894AFull, 0xD56F859BE4781431ull) == -1, "a listed vertex shader with another pair's pixel shader is not a pair");
     check(effectPairIndex(0xB75A6FF2CA9FA5D6ull, 0x06332CA168B6DA63ull) == -1, "...either way round");
     check(effectPairIndex(0x68DDDEF04D9894AFull, 0) == -1 && effectPairIndex(0, 0) == -1, "zero hashes are not on the list");
-    check(effectVsListed(0x68DDDEF04D9894AFull) && effectVsListed(0xB75A6FF2CA9FA5D6ull), "the draw path's first test knows both vertex shaders");
+    check(effectVsListed(0x68DDDEF04D9894AFull), "the draw path's first test knows the vertex shader");
     check(!effectVsListed(0) && !effectVsListed(0x06332CA168B6DA63ull), "...and not a pixel shader's hash");
     // NOT on the list, on purpose: the deferred light volumes and the force field's G-buffer quad.
     const struct {
@@ -154,11 +154,9 @@ void testCensus() {
     w.frames = 2700;
     w.eyeFrames = 5380;
     w.draws[0] = 4000;
-    w.draws[1] = 21000;
     w.samples[0] = 4000ull * 12345;
     w.sampled[0] = 4000;
-    w.samples[1] = 20000ull * 98765;
-    w.sampled[1] = 20000;
+    w.substituted[0] = 5400;
     w.gpuMs = 31.5;
     w.gpuSamples = 25000;
     w.gpuSkipped = 3;
@@ -174,8 +172,7 @@ void testCensus() {
     check(n > 0 && n < 1200, "the census line fits the log's 1200 bytes");
     const std::string s(line);
     check(s.rfind("effect history: last 30 s, 2700 frames, 5380 eye-frames with a listed draw;", 0) == 0, "the census line's signature");
-    check(has(s, "particle-billboard: 1.48 draws/frame, 12345 covered pixels per draw (4000 sampled);"), "per-pair draws per frame and coverage");
-    check(has(s, "halo-billboard: 7.78 draws/frame, 98765 covered pixels per draw (20000 sampled);"), "...for each pair");
+    check(has(s, "particle-billboard: 1.48 draws/frame, 12345 covered pixels per draw (4000 sampled), 2.00/frame left alone (a fix substitutes them);"), "per-pair draws per frame, coverage, and the draws a fix substituted");
     check(has(s, "pixels hidden: 24691 per eye-frame with a listed draw, 45725 per frame (both eyes; 5000 eye-frames counted);"), "the hidden-pixel figures");
     check(has(s, "replica GPU 0.001 ms per replicated draw (25000 timed, 3 skipped, 1 invalid)"), "the GPU cost");
     check(has(s, "12 refused, 7 unanswered queries; private targets 31.0 MiB; the game's HDR target was readable."), "refusals, gaps, memory, readability");
@@ -1031,9 +1028,10 @@ void runDevice() {
 
     g_lines.clear();
     effectHistoryInstall(makeEnv());
-    check(!lineWith(0, "effect history: installed. On NVIDIA's upscaler, 2 listed effect draw pairs").empty(), "install says what is listed, in one line");
-    check(has(lineWith(0, "effect history: installed"), "particle-billboard 68DDDEF04D9894AF/06332CA168B6DA63") && has(lineWith(0, "effect history: installed"), "halo-billboard B75A6FF2CA9FA5D6/D56F859BE4781431"),
-          "the install line names the pairs");
+    check(!lineWith(0, "effect history: installed. On NVIDIA's upscaler, 1 listed effect draw pairs").empty(), "install says what is listed, in one line");
+    check(has(lineWith(0, "effect history: installed"), "particle-billboard 68DDDEF04D9894AF/06332CA168B6DA63") && !has(lineWith(0, "effect history: installed"), "halo-billboard"),
+          "the install line names the pair, and not the halo");
+    check(has(lineWith(0, "effect history: installed"), "advanced.effect_history"), "...and the temporary key");
     check(has(lineWith(0, "effect history: installed"), "0.35") && has(lineWith(0, "effect history: installed"), "0.002"), "...and the share and the floor");
 
     // The module is off until the pass says NVIDIA's.
@@ -1110,7 +1108,8 @@ void runDevice() {
     beginFrame(r, 0.1f);
     plainDraw(r, {{0, 0, 32, 64, 0.2f, {0.0f, 0.0f, 0.0f, 1}}, 0, 0});
     check(effectDraw(r, {{36, 8, 52, 24, 0.5f, {0.125f, 0.125f, 0.125f, 1.0f}}, 1, 1}) == 1, "a listed draw is replicated once");
-    check(effectDraw(r, {{36, 8, 52, 24, 0.5f, {0.125f, 0.125f, 0.125f, 1.0f}}, 1, 1}, kVs1, kPs1) == 1, "a draw of the other listed pair is replicated too");
+    check(effectDraw(r, {{36, 8, 52, 24, 0.5f, {0.125f, 0.125f, 0.125f, 1.0f}}, 1, 1}) == 1, "a second draw of the pair is replicated too");
+    check(effectDraw(r, {{36, 8, 52, 24, 0.5f, {0.125f, 0.125f, 0.125f, 1.0f}}, 1, 1}, kVs1, kPs1) == 0, "the halo/anchor billboard (not listed) is not replicated");
     {
         Decision d;
         check(runDecision(r, kSize, kSize, kEffectHideShare, kEffectHideFloor, &d), "two draws, one pair of views");
@@ -1227,7 +1226,10 @@ void runDevice() {
     beginFrame(r, 0.1f);
     setCounter(1000, 5000);
     for (int i = 0; i < 3; ++i) effectDraw(r, {{16, 16, 32, 32, 0.5f, {0.25f, 0.25f, 0.25f, 1.0f}}, 1, 1});          // 3 draws of pair 0, each 16x16 = 256 pixels
-    effectDraw(r, {{16, 16, 32, 32, 0.5f, {0.25f, 0.25f, 0.25f, 1.0f}}, 1, 1}, kVs1, kPs1);                       // 1 of pair 1
+    effectDraw(r, {{16, 16, 32, 32, 0.5f, {0.25f, 0.25f, 0.25f, 1.0f}}, 1, 1}, kVs1, kPs1);                       // the halo: not listed, not counted
+    effectHistoryNoteSubstituted(kVs0, kPs0);   // two listed draws a fix substituted: left alone, counted
+    effectHistoryNoteSubstituted(kVs0, kPs0);
+    effectHistoryNoteSubstituted(kVs1, kPs1);   // an unlisted pair: ignored
     {
         ID3D11ShaderResourceView *l = nullptr, *f = nullptr;
         check(effectHistoryViews(g_eyeTarget,kSize, kSize, &l, &f), "an eye-frame handed to the shader (the counter's baseline)");
@@ -1248,7 +1250,8 @@ void runDevice() {
     effectHistoryCensusNow();
     const std::string census = lineWith(0, "effect history: last");
     check(!census.empty(), "E6: the census line is written");
-    checkf(has(census, "particle-billboard: ") && has(census, "halo-billboard: "), "E6: both pairs named in %s", census.c_str());
+    checkf(has(census, "particle-billboard: ") && !has(census, "halo-billboard"), "E6: the listed pair is named, the halo is not, in %s", census.c_str());
+    checkf(has(census, "/frame left alone (a fix substitutes them)") && !has(census, " 0.00/frame left alone"), "E6: the draws a fix substituted are counted (%s)", census.c_str());
     checkf(has(census, "256 covered pixels per draw (4 sampled)") || has(census, "256 covered pixels per draw (3 sampled)") || has(census, "256 covered pixels per draw (1 sampled)"),
            "E6: the covered pixels per draw are exact on a pixel-aligned quad (%s)", census.c_str());
     checkf(has(census, "pixels hidden: 5000 per eye-frame with a listed draw"), "E6: the hidden-pixel counter's growth over the eye-frames it was counted for (%s)", census.c_str());
@@ -1257,6 +1260,21 @@ void runDevice() {
     checkf(has(census4, "100.0 pixels hidden per eye-frame (3 eye-frames counted)"), "E6: the kind-4 census: the second counter's growth (300) over the pass's eye-frames (3): %s", census4.c_str());
     check(has(census4, "within 1%"), "E6: the kind-4 line says the tolerance");
     check(has(census, "private targets 0.0 MiB") || has(census, "private targets 0.") || has(census, "private targets 1."), "E6: the memory held is said");
+    // The key: off stops the views (and, in the draw path, every offer); on again restores them. Said in the log.
+    {
+        const size_t from = g_lines.size();
+        effectHistorySetNvidia(true);
+        check(effectHistoryLive(), "the key defaults on");
+        effectDraw(r, {{16, 16, 32, 32, 0.5f, {0.25f, 0.25f, 0.25f, 1.0f}}, 1, 1});
+        effectHistoryConfigure(false);
+        check(!effectHistoryLive(), "advanced.effect_history = off: not live, though the pass is on NVIDIA's path");
+        ID3D11ShaderResourceView *l = nullptr, *f = nullptr;
+        check(!effectHistoryViews(g_eyeTarget, kSize, kSize, &l, &f), "...and a replica made before it is turned off is not handed to the shader");
+        check(has(lineWith(from, "effect history (advanced.effect_history, TEMPORARY A/B key): off"), "no listed draw is replicated"), "...and the log says so");
+        effectHistoryConfigure(true);
+        check(effectHistoryLive(), "on again");
+        check(!lineWith(from, "effect history (advanced.effect_history, TEMPORARY A/B key): on").empty(), "...said too");
+    }
     // The lapse: the pass stops saying NVIDIA's path.
     effectHistorySetNvidia(true);
     check(effectHistoryLive(), "live");
