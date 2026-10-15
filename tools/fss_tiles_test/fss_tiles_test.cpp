@@ -26,12 +26,17 @@
 
 #include "../../src/common/eye_sync.h"
 #include "../../src/common/system_d3d11.h"
+#include "../../src/d3d11/eye_final_capture.h"
 #include "../../src/d3d11/fss_ring_core.h"
 #include "../../src/d3d11/fss_tiles_core.h"
 #include "../../src/d3d11/fss_tiles_d3d.h"
 
 using Microsoft::WRL::ComPtr;
 namespace ft = edvr::fsstiles;
+
+namespace edvr {
+int guardFilter(unsigned long, const char*) { return EXCEPTION_EXECUTE_HANDLER; }   // the rigs that include guard.h without linking guard.cpp stub it
+}  // namespace edvr
 
 namespace {
 
@@ -265,9 +270,12 @@ void testV4Pure() {
     check(ft::kRevealFrames == 600 && ft::kRunOffsets[0] == 20 && ft::kRunOffsets[1] == 150 && ft::kFingerEvery == 10 && ft::kTileGrid == 8 &&
               ft::kTilePx == 16 && ft::kBufRegions * ft::kBufRegionBytes == 4096,
           "the numbers the task named");
-    check(std::strcmp(ft::roleName(ft::Role::Gbuf8), "t8") == 0 && std::strcmp(ft::roleName(ft::Role::Gbuf11), "t11") == 0 && ft::kRoles == 10 &&
+    check(std::strcmp(ft::roleName(ft::Role::Gbuf8), "t8") == 0 && std::strcmp(ft::roleName(ft::Role::Gbuf11), "t11") == 0 && ft::kRoles == 14 &&
               static_cast<int>(ft::Role::Gbuf11) == 9,
           "the write watch names the G-buffer textures t8-t11");
+    check(std::strcmp(ft::roleName(ft::Role::Ring0), "ring_t0") == 0 && std::strcmp(ft::roleName(ft::Role::Ring3), "ring_t3") == 0 &&
+              static_cast<int>(ft::Role::Ring3) == 13,
+          "and the ring quad's own inputs ring_t0-t3");
     check(ft::kCaptureSlots == 12 && ft::kSrvSlots == 8 && ft::kFpItems == 7 && ft::kFpSlots[0] == 0 && ft::kFpSlots[1] == 3 && ft::kFpSlots[2] == 4 &&
               ft::kFpSlots[3] == 8 && ft::kFpSlots[6] == 11,
           "the dispatch's slots 0-11 are read, and the fingerprint covers 0, depth 3, stencil 4 and the G-buffer 8-11");
@@ -314,6 +322,64 @@ void testRingCore(const std::string& root) {
     check(std::strcmp(tup, "cam=3 role=1 pass=7 mode=2 6b0=set x3; cam=3 role=2 pass=7 mode=2 6b0=set x2") == 0, "the combinations line");
     rh::formatTuples(tup, 20, t);
     check(std::strlen(tup) < 20, "a short buffer is cut, never overrun");
+}
+
+void testLedger() {
+    auto stat = [](char kind, uint32_t count, uint32_t shape, uint64_t vs, uint64_t ps, uint32_t n, uint32_t inst, uint32_t sig, uint32_t vw, uint32_t vh) {
+        ft::DrawStat d;
+        d.k.kind = kind; d.k.count = count; d.k.rtShape = shape; d.k.vs = vs; d.k.ps = ps;
+        d.n = n; d.inst = inst; d.srvSig = sig; d.vpW = vw; d.vpH = vh;
+        return d;
+    };
+    const uint64_t V1 = 0x1111111122222222ull, P1 = 0x3333333344444444ull, V2 = 0x5555555566666666ull, P2 = 0x7777777788888888ull;
+    ft::DrawStat e0[4], e1[4];
+    e0[0] = stat('X', 100, 1, V1, P1, 62, 62, 7, 2016, 2016);
+    e1[0] = stat('X', 100, 1, V1, P1, 62, 62, 7, 2016, 2016);
+    e0[1] = stat('N', 4, 1, V2, P2, 1, 1, 9, 2016, 2016);        // only in eye 0
+    e0[2] = stat('X', 7, 1, V2, P1, 3, 30, 5, 2016, 2016);       // instances and inputs and viewport differ
+    e1[1] = stat('X', 7, 1, V2, P1, 3, 36, 6, 1008, 1008);
+    e1[2] = stat('D', 3, 1, V1, P2, 2, 2, 1, 2016, 2016);        // only in eye 1
+    ft::DiffItem items[ft::kDiffCap];
+    const uint32_t n = ft::diffEyes(e0, 3, e1, 3, items, ft::kDiffCap);
+    uint32_t cnt[6] = {};
+    for (uint32_t i = 0; i < n; ++i) ++cnt[items[i].what];
+    check(n == 5 && cnt[ft::DiffItem::Only0] == 1 && cnt[ft::DiffItem::Only1] == 1 && cnt[ft::DiffItem::Instances] == 1 && cnt[ft::DiffItem::Inputs] == 1 &&
+              cnt[ft::DiffItem::Viewport] == 1 && cnt[ft::DiffItem::Draws] == 0,
+          "the eye diff finds the draw only one eye has, and the instances, inputs and viewport of a draw both have");
+    check(ft::diffEyes(e0, 1, e1, 1, items, ft::kDiffCap) == 0, "identical lists differ in nothing");
+    check(ft::diffEyes(e0, 0, e1, 0, items, ft::kDiffCap) == 0, "two empty lists differ in nothing");
+    ft::DrawStat f0 = stat('X', 100, 1, V1, P1, 62, 62, 7, 2016, 2016), f1 = stat('X', 100, 1, V1, P1, 61, 62, 7, 2016, 2016);
+    check(ft::diffEyes(&f0, 1, &f1, 1, items, ft::kDiffCap) == 1 && items[0].what == ft::DiffItem::Draws && items[0].a == 62 && items[0].b == 61, "a draw one eye runs 61 times and the other 62");
+    char line[800];
+    ft::diffEyes(e0, 3, e1, 3, items, ft::kDiffCap);
+    ft::formatDiff(line, sizeof(line), 13152, "pair=2016x2016 fmt28", items, n);
+    check(std::strstr(line, "fss tiles: eyediff f=13152 pair=2016x2016 fmt28 only-eye0: 55555555/77777777 N n=4 x1") != nullptr,
+          "the line starts as documented: eyediff, the frame, the pair, then the categories");
+    check(std::strstr(line, "| only-eye1:") != nullptr && std::strstr(line, "| instances differ:") != nullptr && std::strstr(line, "| inputs differ:") != nullptr &&
+              std::strstr(line, "| viewport differ:") != nullptr && std::strstr(line, "2016x2016 vs 1008x1008") != nullptr,
+          "each category is named once, separated by bars");
+    char tiny[40];
+    ft::formatDiff(tiny, sizeof(tiny), 1, "p", items, n);
+    check(std::strlen(tiny) < 40, "a short buffer is cut, never overrun");
+
+    ft::Ranking r;
+    ft::DiffItem a;
+    a.what = ft::DiffItem::Only0; a.k = e0[1].k; a.a = 1;
+    ft::DiffItem b;
+    b.what = ft::DiffItem::Instances; b.k = e0[2].k; b.a = 30; b.b = 36;
+    r.add(a); r.add(a); r.add(a); r.add(b); r.add(b);
+    uint32_t idx[8];
+    const uint32_t m = r.order(idx, 8);
+    check(m == 2 && r.e[idx[0]].what == ft::DiffItem::Only0 && r.e[idx[0]].frames == 3 && r.e[idx[1]].frames == 2 && r.e[idx[1]].total == 12,
+          "the ranking puts the draw that differed in most frames first and sums the differences");
+    ft::Ranking full;
+    for (uint32_t i = 0; i < ft::kRankCap + 5; ++i) { ft::DiffItem d; d.k.count = i; full.add(d); }
+    check(full.used == ft::kRankCap && full.dropped == 5, "a full ranking counts what it cannot hold");
+
+    check(ft::isRingDraw('N', 4, 0x7E38A6AA1269C901ull, 0) && ft::isRingDraw('X', 14, 0x0357BBB2DEE43C1Full, 0) && ft::isRingDraw('N', 3, 0x53211E8C072CD02Eull, 0) &&
+              ft::isRingDraw('N', 4, 0, 0x7CECABDE34FFBE9Eull) && ft::isRingDraw('X', 13248, 0, 0) && !ft::isRingDraw('N', 13248, 0, 0) && !ft::isRingDraw('X', 100, 1, 2),
+          "the ring family: the 332753 vertex hashes, the quad's pixel shader, the 13248-index mesh, and nothing else");
+    check(ft::kLedgerFrames == 60 && ft::kReduceLevel == 2 && ft::kMaxEyediffLines == 80, "the numbers the task named");
 }
 
 void testKeyParsing() {
@@ -698,6 +764,56 @@ void testSampling(Gpu& g) {
     }
 }
 
+// The automatic eye run's reduced capture, through the production Run: a 256 x 256 R8G8B8A8_TYPELESS eye, left half white and right half black, captured whole at
+// 1/4 size by the mip chain. The written image is 64 x 64 with the half and half preserved, and the unreduced path is unchanged.
+void testReducedCapture(Gpu& g) {
+    ID3D11Device* d = g.dev.Get();
+    std::vector<uint32_t> px(256 * 256);
+    for (uint32_t y = 0; y < 256; ++y) for (uint32_t x = 0; x < 256; ++x) px[y * 256 + x] = x < 128 ? 0xFFFFFFFFu : 0xFF000000u;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = td.Height = 256; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS; td.SampleDesc.Count = 1; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA sd{px.data(), 256 * 4, 0};
+    ComPtr<ID3D11Texture2D> src;
+    check(SUCCEEDED(d->CreateTexture2D(&td, &sd, &src)), "a typeless eye texture");
+    const uint32_t region[4] = {0, 0, 256, 256};
+    namespace efc = edvr::eye_final_capture;
+    efc::g_reduceLevel = ft::kReduceLevel;
+    {
+        efc::Run run;
+        run.arm();
+        run.schedule(0, 1);
+        run.capture(1, 1, 0, g.ctx.Get(), src.Get(), region, false, false, false);
+        efc::Image& im = run.rows[0].eye[0];
+        check(!std::strcmp(im.status, "copied") && im.staging && im.crop[0] == 0 && im.crop[1] == 0 && im.crop[2] == 64 && im.crop[3] == 64,
+              "the reduced row image is staged at 1/4 size and records its own size");
+        if (im.staging) {
+            D3D11_TEXTURE2D_DESC sdsc{};
+            im.staging->GetDesc(&sdsc);
+            check(sdsc.Width == 64 && sdsc.Height == 64, "the staging twin is 64 x 64");
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (SUCCEEDED(g.ctx->Map(im.staging, 0, D3D11_MAP_READ, 0, &m))) {
+                const uint32_t* row = reinterpret_cast<const uint32_t*>(static_cast<const char*>(m.pData) + 32 * m.RowPitch);
+                const uint8_t left = reinterpret_cast<const uint8_t*>(&row[8])[0], right = reinterpret_cast<const uint8_t*>(&row[56])[0];
+                g.ctx->Unmap(im.staging, 0);
+                check(left > 240 && right < 16, "the half of the eye that was white is white and the half that was black is black after the reduction");
+            } else {
+                check(false, "the reduced staging maps");
+            }
+        }
+        run.reset();
+    }
+    efc::g_reduceLevel = 0;
+    {
+        efc::Run run;
+        run.arm();
+        run.schedule(0, 1);
+        run.capture(1, 1, 0, g.ctx.Get(), src.Get(), region, false, false, false);
+        efc::Image& im = run.rows[0].eye[0];
+        check(!std::strcmp(im.status, "copied") && im.crop[2] - im.crop[0] == 256 && im.crop[3] - im.crop[1] == 256, "with the level at 0 the row image is the unreduced crop of an eye this small");
+        run.reset();
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // 4. Source pins
 
@@ -747,12 +863,12 @@ void testSourcePins(const std::string& root) {
     }
     {
         struct DPin { const char* fn; const char* call; };
-        const DPin dpins[] = {{"hookedDraw", "fssTilesNoteDraw(self, 1)"},
-                              {"hookedDrawIndexed", "fssTilesNoteDraw(self, 1)"},
-                              {"hookedDrawInstanced", "fssTilesNoteDraw(self, instances)"},
-                              {"hookedDrawIndexedInstanced", "fssTilesNoteDraw(self, instances)"},
-                              {"hookedDrawIndexedInstancedIndirect", "fssTilesNoteDraw(self, 1)"},
-                              {"hookedDrawInstancedIndirect", "fssTilesNoteDraw(self, 1)"}};
+        const DPin dpins[] = {{"hookedDraw", "fssTilesNoteDraw(self, 'D', count, 1)"},
+                              {"hookedDrawIndexed", "fssTilesNoteDraw(self, 'I', count, 1)"},
+                              {"hookedDrawInstanced", "fssTilesNoteDraw(self, 'N', perInstance, instances)"},
+                              {"hookedDrawIndexedInstanced", "fssTilesNoteDraw(self, 'X', perInstance, instances)"},
+                              {"hookedDrawIndexedInstancedIndirect", "fssTilesNoteDraw(self, 'Z', 0, 0)"},
+                              {"hookedDrawInstancedIndirect", "fssTilesNoteDraw(self, 'Y', 0, 0)"}};
         for (const DPin& pin : dpins) {
             const size_t f = vs.find(std::string("void STDMETHODCALLTYPE ") + pin.fn + "(");
             const size_t c = vs.find(pin.call, f);
@@ -827,6 +943,16 @@ void testSourcePins(const std::string& root) {
           "the viewport and scissor are read for the first draws and one in sixteen, not for every draw");
     check(has(cpp, "td.BindFlags & D3D11_BIND_DEPTH_STENCIL") && has(cpp, "td.SampleDesc.Count > 1"),
           "depth-stencil and multisampled textures are named, never copied");
+    check(has(cpp, "fss tiles: window %u eyediff --") && has(cpp, "fss tiles: window %u eyediff unpaired --") && has(cpp, "fss tiles: window %u ring quad --") &&
+              has(cpp, "never armed: no all-small event in this window") && has(cpp, "none: the two eyes' lists matched in every compared frame") &&
+              has(cpp, "no draw matched the ring family"),
+          "every window says what the eye diff compared and found, what went to unpaired targets, and what the ring family did, none included");
+    check(has(cpp, "g.ledgerOn = true;") && has(cpp, "g.ledgerUntil = g.frame + kLedgerFrames;") && has(cpp, "if (g.ledgerOn && frameNo > g.ledgerUntil) g.ledgerOn = false;") &&
+              has(cpp, "flushLedger(g.frame);"),
+          "the ledger starts at the all-small event, runs kLedgerFrames and is flushed once a frame at the boundary");
+    check(has(cpp, "eye_final_capture::g_reduceLevel = kReduceLevel;") && has(cpp, "eye_final_capture::g_reduceLevel = 0;"),
+          "the automatic eye run reduces the final images and the reduction is switched off again");
+    check(has(cpp, "fss tiles: ring quad f=%u") && has(cpp, "Role::Ring0"), "the ring quad's own inputs are watched and its draws logged per eye");
     check(has(cpp, "fss tiles: eye-dump key at f=%u") && has(cpp, "outside a capturing zoom window"), "the eye-dump key's reception is logged either way");
     check(has(cpp, "fss tiles: window %u opened") && has(cpp, "fss tiles: window %u closed") && has(cpp, "fss tiles: instrument armed"),
           "the instrument says it armed, opened and closed, so never-ran reads differently from zero");
@@ -855,6 +981,7 @@ int main(int argc, char** argv) {
     testBand();
     testV4Pure();
     testRingCore(root);
+    testLedger();
     testFakeRestore();
 
     const auto createDevice = edvr::systemD3D11CreateDevice();
@@ -873,6 +1000,7 @@ int main(int argc, char** argv) {
             testWarp(g);
             testStagingLike(g);
             testSampling(g);
+            testReducedCapture(g);
             ComPtr<ID3D11InfoQueue> q;
             if (SUCCEEDED(g.dev.As(&q))) {
                 const UINT64 cnt = q->GetNumStoredMessagesAllowedByRetrievalFilter();

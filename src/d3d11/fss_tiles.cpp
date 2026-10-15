@@ -16,6 +16,7 @@
 #include "fss_tiles_core.h"
 #include "fss_tiles_d3d.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the automatic eye run
+#include "eye_final_capture.h"   // g_reduceLevel: the automatic eye run covers the whole eye at reduced size
 #include "fss_ring_hook.h"       // fssRingHookWindow / fssRingHookWindowSummary: the ring pass observer
 #include "binding_shadow.h"   // bindingGet, bindingResolveProbe: the render target of a draw
 #include "journal_watch.h"   // journalFssFocus: the zoom window's authority
@@ -147,9 +148,9 @@ struct State {
     ID3D11Resource* fpPool[kStagingRing][2 * kFpItems] = {};
     uint32_t inputLines = 0, fpRead = 0;
     uint32_t gridFrames[kFpItems] = {}, gridDiffer[kFpItems] = {};
-    GDraw    gd[8];
+    GDraw    gd[16];
     uint32_t gdN = 0;
-    GTot     gtot[3][4];
+    GTot     gtot[3][8];
     uint32_t gbufLines = 0;
     void*    rtvKey[48] = {};
     const void* rtvRes[48] = {};
@@ -160,6 +161,32 @@ struct State {
     uint32_t runDue[2] = {};
     bool     runPending[2] = {};
     uint32_t autoRunsPlanned = 0;
+    // v6
+    struct ShapeRec { uint32_t w = 0, h = 0, fmt = 0; };
+    struct TgtRec { const void* res = nullptr; uint32_t shape = 0, order = 0; };
+    struct ViewRec { void* view = nullptr; uint32_t shape = 0; const void* res = nullptr; };
+    struct LEnt { DrawStat s; const void* target = nullptr; bool ring = false; uint32_t srvIds[4] = {}; };
+    struct Solo { DrawKey k; uint32_t draws = 0, frames = 0; bool ring = false; };
+    struct RingFam { uint64_t vs = 0, ps = 0; uint32_t draws = 0; };
+    ShapeRec shapes[64];
+    uint32_t shapeN = 0;
+    TgtRec   tgts[64];
+    uint32_t tgtN = 0;
+    ViewRec  views2[128];
+    uint32_t viewN = 0;
+    LEnt     led[kLedgerCap];
+    uint32_t ledN = 0, ledOverflow = 0;
+    Solo     solo[32];
+    uint32_t soloN = 0;
+    RingFam  ringFam[8];
+    uint32_t ringFamN = 0;
+    Ranking  rank;
+    bool     ledgerOn = false;
+    uint32_t ledgerUntil = 0, ledgerFrames = 0, framesWithDiff = 0, pairedFrames = 0, eyediffLines = 0, unpaired = 0, ringLines = 0;
+    uint32_t ringFrames[3] = {}, ringDrawTotal[3] = {}, ringBoth[4] = {}, ringShared[4] = {};
+    uint32_t rtvShape[48] = {};
+    uint32_t reduceUntil = 0;
+    uint32_t ledOverflowTotal = 0;
     struct BandFrame {
         BandRec  rec;
         uint32_t rawBytes[4] = {};          // [eye * 2 + role]
@@ -257,6 +284,15 @@ void resetWindowTallies() {
     for (auto& r : g.gtot) for (auto& t : r) t = State::GTot();
     g.gbufLines = 0;
     g.rtvN = 0;
+    g.ledgerOn = false;
+    g.ledgerFrames = g.framesWithDiff = g.pairedFrames = g.eyediffLines = g.unpaired = g.ringLines = 0;
+    g.ledN = g.ledOverflow = g.ledOverflowTotal = g.viewN = g.soloN = g.ringFamN = 0;
+    g.shapeN = g.tgtN = 0;
+    g.rank = Ranking();
+    for (auto& x : g.ringFrames) x = 0;
+    for (auto& x : g.ringDrawTotal) x = 0;
+    for (auto& x : g.ringBoth) x = 0;
+    for (auto& x : g.ringShared) x = 0;
 }
 
 bool pendingReadbacks() {
@@ -272,9 +308,9 @@ void refreshActive() {
     detail::g_fssTilesWatch = g.win.capturing && g.watch.n > 0;
     g.watchGbuf = false;
     for (uint32_t i = 0; i < g.watch.n; ++i) {
-        if (g.watch.role[i] >= Role::Gbuf8 && g.watch.role[i] <= Role::Gbuf11) g.watchGbuf = true;
+        if (g.watch.role[i] >= Role::Gbuf8 && g.watch.role[i] <= Role::Ring3) g.watchGbuf = true;
     }
-    detail::g_fssTilesDraws = g.win.capturing && g.watchGbuf;
+    detail::g_fssTilesDraws = g.win.capturing && (g.watchGbuf || g.ledgerOn);
 }
 
 bool ensureStaging(ID3D11DeviceContext* ctx) {
@@ -385,6 +421,7 @@ void drain(ID3D11DeviceContext* ctx) {
 }
 
 void drainAll(ID3D11DeviceContext* ctx);
+void ledgerReset();
 
 // ---- v2: the lists and the tile-info buffer ---------------------------------------------------------------------------
 const char* const kRegionFile[3] = {"listL", "listS", "info"};
@@ -465,6 +502,9 @@ void processBand(const Sample& sm, const D3D11_MAPPED_SUBRESOURCE* m, const bool
         g.afterLeft = kBandAfter;
         g.eventFrame = sm.frame;
         g.revealUntil = g.frame + kRevealFrames;
+        g.ledgerOn = true;
+        g.ledgerUntil = g.frame + kLedgerFrames;
+        ledgerReset();
         const uint32_t plan = kMaxAutoRuns - g.autoRunsPlanned < 2 ? kMaxAutoRuns - g.autoRunsPlanned : 2;
         for (uint32_t k = 0; k < plan; ++k) {
             g.runPending[k] = true;
@@ -843,17 +883,220 @@ void drainFingerprints(ID3D11DeviceContext* ctx) {
 }
 
 // ---- v4: the draws into slots 3 and 4 -----------------------------------------------------------------------------------
-const void* rtvResource(void* rtv) {
-    for (uint32_t i = 0; i < g.rtvN; ++i) {
-        if (g.rtvKey[i] == rtv) return g.rtvRes[i];
+const void* rtvResource(void* rtv, uint32_t* shapeOut);
+// ---- v6: the ledger of draws into eye-sized and ring targets, diffed between the eyes ---------------------------------------------------
+uint32_t shapeOf(uint32_t w, uint32_t h, uint32_t fmt) {
+    for (uint32_t i = 0; i < g.shapeN; ++i) {
+        if (g.shapes[i].w == w && g.shapes[i].h == h && g.shapes[i].fmt == fmt) return i + 1;
+    }
+    if (g.shapeN < 64) {
+        g.shapes[g.shapeN] = {w, h, fmt};
+        return ++g.shapeN;
+    }
+    return 0;
+}
+
+// The order in which a render target first appeared among the textures of its shape: 0 is the first (eye 0 where two eyes share a shape), 1 the second.
+uint32_t targetOrder(const void* res, uint32_t shape) {
+    uint32_t sameShape = 0;
+    for (uint32_t i = 0; i < g.tgtN; ++i) {
+        if (g.tgts[i].res == res) return g.tgts[i].order;
+        if (g.tgts[i].shape == shape) ++sameShape;
+    }
+    if (g.tgtN < 64) {
+        g.tgts[g.tgtN] = {res, shape, sameShape};
+        ++g.tgtN;
+    }
+    return sameShape;
+}
+
+uint32_t shapeTargets(uint32_t shape) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < g.tgtN; ++i) n += g.tgts[i].shape == shape;
+    return n;
+}
+
+const State::ViewRec* viewInfo(void* view) {
+    for (uint32_t i = 0; i < g.viewN; ++i) {
+        if (g.views2[i].view == view) return &g.views2[i];
     }
     ResourceInfo ri;
-    const void* res = bindingResolveProbe(rtv, &ri) ? ri.resource : nullptr;
+    State::ViewRec r;
+    r.view = view;
+    if (bindingResolveProbe(view, &ri)) {
+        r.res = ri.resource;
+        r.shape = ri.isTexture2D ? shapeOf(ri.a, ri.b, ri.fmt) : shapeOf(ri.a, 0, 0xFFFFu);
+    }
+    if (g.viewN < 128) {
+        g.views2[g.viewN] = r;
+        return &g.views2[g.viewN++];
+    }
+    return nullptr;
+}
+
+void ledgerRecord(ID3D11DeviceContext* ctx, const void* tgt, uint32_t rtShape, char kind, uint32_t count, uint32_t instances) {
+    DrawKey key;
+    key.kind = kind;
+    key.count = count;
+    key.rtShape = rtShape;
+    key.vs = bindingShaderHash(BindSlot::Vs);
+    key.ps = bindingShaderHash(BindSlot::Ps);
+    uint32_t sig = 2166136261u;
+    uint32_t srvIds[4] = {};
+    const void* srvRes[4] = {};
+    for (uint32_t i = 0; i < 4; ++i) {
+        void* v = bindingGet(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + i));
+        const State::ViewRec* vr = v ? viewInfo(v) : nullptr;
+        const uint32_t sh = vr ? vr->shape : 0;
+        srvRes[i] = vr ? vr->res : nullptr;
+        srvIds[i] = srvRes[i] ? g.ids.id(srvRes[i]) : 0;
+        sig = (sig ^ sh) * 16777619u;
+    }
+    State::LEnt* e = nullptr;
+    for (uint32_t i = 0; i < g.ledN; ++i) {
+        if (g.led[i].target == tgt && g.led[i].s.k == key) { e = &g.led[i]; break; }
+    }
+    if (!e) {
+        if (g.ledN >= kLedgerCap) { ++g.ledOverflow; return; }
+        e = &g.led[g.ledN++];
+        e->target = tgt;
+        e->s.k = key;
+        e->s.srvSig = sig;
+        UINT nv = 1;
+        D3D11_VIEWPORT vp{};
+        ctx->RSGetViewports(&nv, &vp);
+        e->s.vpW = static_cast<uint32_t>(vp.Width);
+        e->s.vpH = static_cast<uint32_t>(vp.Height);
+        e->ring = isRingDraw(kind, count, key.vs, key.ps);
+        for (uint32_t i = 0; i < 4; ++i) e->srvIds[i] = srvIds[i];
+        if (e->ring) {
+            // the ring quad's own inputs t0-t3: watched, so a clear, copy or draw into them is counted, in the eye the draw's target belongs to
+            const uint32_t ord = targetOrder(tgt, rtShape);
+            const uint32_t eye = shapeTargets(rtShape) == 2 ? ord : 3u;
+            for (uint32_t i = 0; i < 4; ++i) {
+                if (!srvRes[i]) continue;
+                const int at = g.watch.find(srvRes[i]);
+                if (at >= 0 && g.watch.role[at] >= Role::Ring0 && g.watch.eye[at] == 3 && eye != 3) g.watch.eye[at] = static_cast<uint8_t>(eye);
+                else if (at < 0) g.watch.add(srvRes[i], static_cast<Role>(static_cast<uint32_t>(Role::Ring0) + i), eye);
+            }
+        }
+    }
+    ++e->s.n;
+    e->s.inst += instances;
+}
+
+void ledgerReset() {
+    g.ledN = 0;
+    g.ledOverflow = 0;
+    g.viewN = 0;
+}
+
+void flushLedger(uint32_t frame) {
+    if (!g.ledgerOn && g.ledN == 0) return;
+    ++g.ledgerFrames;
+    DrawStat a[256], b[256];
+    bool anyDiff = false, pairedThisFrame = false;
+    uint32_t ringDraws[3] = {}, ringIds[3][4] = {};
+    uint64_t ringVs[3] = {}, ringPs[3] = {};
+    for (uint32_t sh = 1; sh <= g.shapeN; ++sh) {
+        const uint32_t nt = shapeTargets(sh);
+        const void* t0 = nullptr;
+        const void* t1 = nullptr;
+        for (uint32_t i = 0; i < g.tgtN; ++i) {
+            if (g.tgts[i].shape != sh) continue;
+            if (g.tgts[i].order == 0) t0 = g.tgts[i].res;
+            if (g.tgts[i].order == 1) t1 = g.tgts[i].res;
+        }
+        uint32_t na = 0, nb = 0;
+        for (uint32_t i = 0; i < g.ledN; ++i) {
+            const State::LEnt& e = g.led[i];
+            if (e.s.k.rtShape != sh) continue;
+            if (nt != 2) {
+                g.unpaired += e.s.n;
+                State::Solo* so = nullptr;
+                for (uint32_t k = 0; k < g.soloN; ++k) if (g.solo[k].k == e.s.k) { so = &g.solo[k]; break; }
+                if (!so && g.soloN < 32) { so = &g.solo[g.soloN++]; so->k = e.s.k; }
+                if (so) { so->draws += e.s.n; ++so->frames; so->ring = so->ring || e.ring; }
+            } else if (e.target == t0 && na < 256) {
+                a[na++] = e.s;
+            } else if (e.target == t1 && nb < 256) {
+                b[nb++] = e.s;
+            }
+            if (e.ring) {
+                const uint32_t eye = nt == 2 ? (e.target == t0 ? 0u : 1u) : 2u;
+                ringDraws[eye] += e.s.n;
+                if (!ringVs[eye]) { ringVs[eye] = e.s.k.vs; ringPs[eye] = e.s.k.ps; for (uint32_t k = 0; k < 4; ++k) ringIds[eye][k] = e.srvIds[k]; }
+                bool known = false;
+                for (uint32_t k = 0; k < g.ringFamN; ++k) if (g.ringFam[k].vs == e.s.k.vs && g.ringFam[k].ps == e.s.k.ps) { g.ringFam[k].draws += e.s.n; known = true; break; }
+                if (!known && g.ringFamN < 8) { g.ringFam[g.ringFamN++] = {e.s.k.vs, e.s.k.ps, e.s.n}; }
+            }
+        }
+        if (nt != 2 || na + nb == 0) continue;
+        pairedThisFrame = true;
+        DiffItem items[kDiffCap];
+        const uint32_t n = diffEyes(a, na, b, nb, items, kDiffCap);
+        if (!n) continue;
+        anyDiff = true;
+        for (uint32_t i = 0; i < n; ++i) g.rank.add(items[i]);
+        if (g.eyediffLines < kMaxEyediffLines) {
+            char pairText[80];
+            std::snprintf(pairText, sizeof(pairText), "pair=%ux%u fmt%u", g.shapes[sh - 1].w, g.shapes[sh - 1].h, g.shapes[sh - 1].fmt);
+            char line[1500];
+            formatDiff(line, sizeof(line), frame, pairText, items, n);
+            Log::get().note("%s", line);
+            ++g.eyediffLines;
+        }
+    }
+    if (pairedThisFrame) ++g.pairedFrames;
+    if (anyDiff) ++g.framesWithDiff;
+    // the ring family, per eye
+    const bool ringSeen = ringDraws[0] || ringDraws[1] || ringDraws[2];
+    if (ringSeen) {
+        for (uint32_t eye = 0; eye < 3; ++eye) {
+            if (ringDraws[eye]) { ++g.ringFrames[eye]; g.ringDrawTotal[eye] += ringDraws[eye]; }
+        }
+        if (ringDraws[0] && ringDraws[1]) {
+            for (uint32_t k = 0; k < 4; ++k) {
+                if (ringIds[0][k] && ringIds[1][k]) {
+                    ++g.ringBoth[k];
+                    if (ringIds[0][k] == ringIds[1][k]) ++g.ringShared[k];
+                }
+            }
+        }
+        if (frame % kFingerEvery == 0 && g.ringLines < kMaxRingLines) {
+            char part[3][260];
+            for (uint32_t eye = 0; eye < 3; ++eye) {
+                if (!ringDraws[eye]) { std::snprintf(part[eye], sizeof(part[eye]), "eye%u none", eye); continue; }
+                std::snprintf(part[eye], sizeof(part[eye]), "eye%u draws=%u (vs %08llX ps %08llX) t0-t3 = T%u,T%u,T%u,T%u", eye, ringDraws[eye],
+                              static_cast<unsigned long long>(ringVs[eye] >> 32), static_cast<unsigned long long>(ringPs[eye] >> 32), ringIds[eye][0], ringIds[eye][1],
+                              ringIds[eye][2], ringIds[eye][3]);
+            }
+            Log::get().note("fss tiles: ring quad f=%u %s | %s | unpaired-target draws: %s", frame, part[0], part[1], part[2]);
+            ++g.ringLines;
+        }
+    }
+    g.ledOverflowTotal += g.ledOverflow;
+    ledgerReset();
+}
+
+const void* rtvResource(void* rtv, uint32_t* shapeOut) {
+    for (uint32_t i = 0; i < g.rtvN; ++i) {
+        if (g.rtvKey[i] == rtv) { *shapeOut = g.rtvShape[i]; return g.rtvRes[i]; }
+    }
+    ResourceInfo ri;
+    const void* res = nullptr;
+    uint32_t shape = 0;
+    if (bindingResolveProbe(rtv, &ri)) {
+        res = ri.resource;
+        if (ri.isTexture2D && ri.a >= kMinTargetWidth) shape = shapeOf(ri.a, ri.b, ri.fmt);
+    }
     if (g.rtvN < 48) {
         g.rtvKey[g.rtvN] = rtv;
         g.rtvRes[g.rtvN] = res;
+        g.rtvShape[g.rtvN] = shape;
         ++g.rtvN;
     }
+    *shapeOut = shape;
     return res;
 }
 
@@ -862,7 +1105,8 @@ void flushDraws(uint32_t frame) {
     for (uint32_t i = 0; i < g.gdN; ++i) {
         State::GDraw& d = g.gd[i];
         if (!d.draws) continue;
-        State::GTot& t = g.gtot[d.eye > 1 ? 2 : d.eye][static_cast<uint32_t>(d.role) - static_cast<uint32_t>(Role::Gbuf8)];
+        const uint32_t ri = static_cast<uint32_t>(d.role) - static_cast<uint32_t>(Role::Gbuf8);
+        State::GTot& t = g.gtot[d.eye > 1 ? 2 : d.eye][ri];
         if (t.frames == 0 || d.draws < t.minDraws) t.minDraws = d.draws;
         if (d.draws > t.maxDraws) t.maxDraws = d.draws;
         ++t.frames;
@@ -874,9 +1118,12 @@ void flushDraws(uint32_t frame) {
             ++t.vpVaries;
         }
         if (line) {
-            Log::get().note("fss tiles: gbuf f=%u eye%u t%u T%u draws=%u instances=%u viewport first (%.0f,%.0f %.0fx%.0f) last (%.0f,%.0f %.0fx%.0f) "
+            char what[16];
+            if (ri < 4) std::snprintf(what, sizeof(what), "t%u", 8 + ri);
+            else std::snprintf(what, sizeof(what), "ring_t%u", ri - 4);
+            Log::get().note("fss tiles: gbuf f=%u eye%u %s T%u draws=%u instances=%u viewport first (%.0f,%.0f %.0fx%.0f) last (%.0f,%.0f %.0fx%.0f) "
                             "scissor first (%d,%d,%d,%d) last (%d,%d,%d,%d)",
-                            frame, d.eye, 8u + static_cast<uint32_t>(d.role) - static_cast<uint32_t>(Role::Gbuf8), g.ids.id(d.res), d.draws, d.weight, d.vp0.TopLeftX, d.vp0.TopLeftY,
+                            frame, d.eye, what, g.ids.id(d.res), d.draws, d.weight, d.vp0.TopLeftX, d.vp0.TopLeftY,
                             d.vp0.Width, d.vp0.Height, d.vpN.TopLeftX, d.vpN.TopLeftY, d.vpN.Width, d.vpN.Height, d.sc0.left, d.sc0.top,
                             d.sc0.right, d.sc0.bottom, d.scN.left, d.scN.top, d.scN.right, d.scN.bottom);
             ++g.gbufLines;
@@ -941,23 +1188,80 @@ void emitSummary() {
                     g.windowNo, g.windowEvents, g.autoRuns, kMaxAutoRuns, g.bandWatch.lo[0], g.bandWatch.hi[0], g.bandWatch.lo[1],
                     g.bandWatch.hi[1], g.bandWatch.maxStep[0], g.bandWatch.maxStep[1], kGrid, g.bandLines, g.bandFiles);
     {
-        char gb[900];
+        char gb[1800];
         size_t ga = 0;
         gb[0] = 0;
         for (uint32_t e = 0; e < 2; ++e) {
-            for (uint32_t k = 0; k < 4; ++k) {
+            for (uint32_t k = 0; k < 8; ++k) {
                 const State::GTot& t = g.gtot[e][k];
-                ga += static_cast<size_t>(std::snprintf(gb + ga, sizeof(gb) - ga, "%seye%u t%u: frames with draws %u, draws %u (per frame %u..%u), instances %u, viewport changes %u",
-                                                        ga ? " | " : "", e, 8 + k, t.frames, t.draws, t.minDraws, t.maxDraws, t.weight, t.vpVaries));
+                char nm[12];
+                if (k < 4) std::snprintf(nm, sizeof(nm), "t%u", 8 + k);
+                else std::snprintf(nm, sizeof(nm), "ring_t%u", k - 4);
+                ga += static_cast<size_t>(std::snprintf(gb + ga, sizeof(gb) - ga, "%seye%u %s: frames with draws %u, draws %u (per frame %u..%u), instances %u, viewport changes %u",
+                                                        ga ? " | " : "", e, nm, t.frames, t.draws, t.minDraws, t.maxDraws, t.weight, t.vpVaries));
             }
         }
-        Log::get().note("fss tiles: window %u upstream -- draws into the per-eye G-buffer textures t8-t11 (render target 0): %s", g.windowNo,
-                        g.watchGbuf ? gb : "no render target of the window matched them (the G-buffer is not drawn into t8-t11's resources through render target 0)");
+        Log::get().note("fss tiles: window %u upstream -- draws into the per-eye G-buffer textures t8-t11 and the ring quad's own inputs ring_t0-t3 (render target 0): %s", g.windowNo,
+                        g.watchGbuf ? gb : "no render target of the window matched them (not drawn into through render target 0)");
         Log::get().note("fss tiles: window %u inputs -- fingerprints read=%u lines=%u; sampled grids that differ between the eyes: slot0 %u of %u, depth %u of %u, stencil %u of %u, "
                         "t8 %u of %u, t9 %u of %u, t10 %u of %u, t11 %u of %u frames; gbuf lines %u",
                         g.windowNo, g.fpRead, g.inputLines, g.gridDiffer[0], g.gridFrames[0], g.gridDiffer[1], g.gridFrames[1], g.gridDiffer[2], g.gridFrames[2],
                         g.gridDiffer[3], g.gridFrames[3], g.gridDiffer[4], g.gridFrames[4], g.gridDiffer[5], g.gridFrames[5], g.gridDiffer[6], g.gridFrames[6],
                         g.gbufLines);
+        // the eye diff
+        char rk[1400];
+        size_t ra = 0;
+        rk[0] = 0;
+        uint32_t idx[8];
+        const uint32_t nr = g.rank.order(idx, 8);
+        static const char* const kWhat[6] = {"only-eye0", "only-eye1", "draws differ", "instances differ", "inputs differ", "viewport differ"};
+        for (uint32_t i = 0; i < nr; ++i) {
+            const RankEntry& re = g.rank.e[idx[i]];
+            ra += static_cast<size_t>(std::snprintf(rk + ra, sizeof(rk) - ra, "%s[%u] %s %08llX/%08llX %c n=%u rt-shape %u in %u frame(s), total %llu", i ? "; " : "", i + 1,
+                                                    kWhat[re.what], static_cast<unsigned long long>(re.k.vs >> 32), static_cast<unsigned long long>(re.k.ps >> 32), re.k.kind,
+                                                    re.k.count, re.k.rtShape, re.frames, static_cast<unsigned long long>(re.total)));
+        }
+        Log::get().note("fss tiles: window %u eyediff -- ledger ran %u frame(s) from the all-small event (%s), twin-target pairs compared in %u, frames with a difference %u, eyediff lines %u; "
+                        "ledger entries that did not fit %u; ranked differences (%u kinds%s): %s",
+                        g.windowNo, g.ledgerFrames, g.windowEvents ? "armed by it" : "never armed: no all-small event in this window", g.pairedFrames, g.framesWithDiff,
+                        g.eyediffLines, g.ledOverflowTotal, g.rank.used, g.rank.dropped ? ", more than the table holds" : "", nr ? rk : "none: the two eyes' lists matched in every compared frame");
+        char so[900];
+        size_t sa = 0;
+        so[0] = 0;
+        bool taken[32] = {};
+        uint32_t bestIdx[6] = {};
+        uint32_t nb = 0;
+        for (uint32_t t = 0; t < 6; ++t) {
+            int best = -1;
+            for (uint32_t i = 0; i < g.soloN; ++i) {
+                if (taken[i]) continue;
+                if (best < 0 || g.solo[i].draws > g.solo[best].draws) best = static_cast<int>(i);
+            }
+            if (best < 0) break;
+            taken[best] = true;
+            bestIdx[nb++] = static_cast<uint32_t>(best);
+        }
+        for (uint32_t i = 0; i < nb; ++i) {
+            const State::Solo& sl = g.solo[bestIdx[i]];
+            sa += static_cast<size_t>(std::snprintf(so + sa, sizeof(so) - sa, "%s%08llX/%08llX %c n=%u rt-shape %u x%u in %u frame(s)%s", i ? "; " : "",
+                                                    static_cast<unsigned long long>(sl.k.vs >> 32), static_cast<unsigned long long>(sl.k.ps >> 32), sl.k.kind, sl.k.count,
+                                                    sl.k.rtShape, sl.draws, sl.frames, sl.ring ? " [ring]" : ""));
+        }
+        Log::get().note("fss tiles: window %u eyediff unpaired -- %u draw(s) went to render targets of a shape that does not hold exactly two textures (a shared or mono target, "
+                        "so no eye to diff); the biggest families: %s", g.windowNo, g.unpaired, nb ? so : "none");
+        char rf[500];
+        size_t fa = 0;
+        rf[0] = 0;
+        for (uint32_t i = 0; i < g.ringFamN; ++i) {
+            fa += static_cast<size_t>(std::snprintf(rf + fa, sizeof(rf) - fa, "%s%08llX/%08llX x%u", i ? "; " : "", static_cast<unsigned long long>(g.ringFam[i].vs >> 32),
+                                                    static_cast<unsigned long long>(g.ringFam[i].ps >> 32), g.ringFam[i].draws));
+        }
+        Log::get().note("fss tiles: window %u ring quad -- ring-family draws (the 332753 VS hashes, the quad PS, the 13248-index mesh): eye0 in %u frame(s) %u draws | eye1 in %u frame(s) %u "
+                        "draws | unpaired target %u frame(s) %u draws; ring PS t0-t3 the same resource in both eyes: t0 %u of %u, t1 %u of %u, t2 %u of %u, t3 %u of %u frames; "
+                        "families: %s%s",
+                        g.windowNo, g.ringFrames[0], g.ringDrawTotal[0], g.ringFrames[1], g.ringDrawTotal[1], g.ringFrames[2], g.ringDrawTotal[2], g.ringShared[0], g.ringBoth[0],
+                        g.ringShared[1], g.ringBoth[1], g.ringShared[2], g.ringBoth[2], g.ringShared[3], g.ringBoth[3], g.ringFamN ? rf : "none",
+                        g.ringFamN ? "" : " (no draw matched the ring family: the hashes may have changed since build 332753; the top differing and unpaired draws above are the candidates)");
         fssRingHookWindowSummary(g.windowNo);
     }
     char sl[200];
@@ -1195,45 +1499,48 @@ void fssTilesNoteWriteSlow(const void* p, bool isView, uint32_t call) {
     });
 }
 
-void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, uint32_t weight) {
-    if (!g.win.capturing || !g.watchGbuf) return;
+void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances) {
+    if (!g.win.capturing) return;
     guardedBudget(g.budget, [&] {
         void* rtv = bindingGet(BindSlot::Rtv0);
         if (!rtv) return;
-        const void* res = rtvResource(rtv);
+        uint32_t shape = 0;
+        const void* res = rtvResource(rtv, &shape);
         if (!res) return;
         const int i = g.watch.find(res);
-        if (i < 0) return;
-        const Role role = g.watch.role[i];
-        if (role < Role::Gbuf8 || role > Role::Gbuf11) return;
-        State::GDraw* d = nullptr;
-        for (uint32_t k = 0; k < g.gdN; ++k) {
-            if (g.gd[k].res == res) d = &g.gd[k];
-        }
-        if (!d && g.gdN < 8) {
-            d = &g.gd[g.gdN++];
-            d->res = res;
-            d->eye = g.watch.eye[i];
-            d->role = role;
-        }
-        if (!d) return;
-        ++d->draws;
-        d->weight += weight;
-        if (d->draws <= 2 || (d->draws & 15u) == 0) {
-            UINT nv = 1;
-            D3D11_VIEWPORT vp{};
-            ctx->RSGetViewports(&nv, &vp);
-            UINT ns = 1;
-            D3D11_RECT sc{};
-            ctx->RSGetScissorRects(&ns, &sc);
-            if (!d->haveVp) {
-                d->vp0 = vp;
-                d->sc0 = sc;
-                d->haveVp = true;
+        if (g.watchGbuf && i >= 0 && g.watch.role[i] >= Role::Gbuf8 && g.watch.role[i] <= Role::Ring3) {
+            const Role role = g.watch.role[i];
+            State::GDraw* d = nullptr;
+            for (uint32_t k = 0; k < g.gdN; ++k) {
+                if (g.gd[k].res == res) d = &g.gd[k];
             }
-            d->vpN = vp;
-            d->scN = sc;
+            if (!d && g.gdN < 16) {
+                d = &g.gd[g.gdN++];
+                d->res = res;
+                d->eye = g.watch.eye[i];
+                d->role = role;
+            }
+            if (d) {
+                ++d->draws;
+                d->weight += instances;
+                if (d->draws <= 2 || (d->draws & 15u) == 0) {
+                    UINT nv = 1;
+                    D3D11_VIEWPORT vp{};
+                    ctx->RSGetViewports(&nv, &vp);
+                    UINT ns = 1;
+                    D3D11_RECT sc{};
+                    ctx->RSGetScissorRects(&ns, &sc);
+                    if (!d->haveVp) {
+                        d->vp0 = vp;
+                        d->sc0 = sc;
+                        d->haveVp = true;
+                    }
+                    d->vpN = vp;
+                    d->scN = sc;
+                }
+            }
         }
+        if (g.ledgerOn && shape) ledgerRecord(ctx, res, shape, kind, count, instances);
     });
 }
 
@@ -1263,7 +1570,10 @@ void fssTilesNoteZoomSignal(uint32_t frameNo, bool press) {
 }
 
 void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
-    if (g.win.capturing) flushDraws(g.frame);
+    if (g.win.capturing) {
+        flushDraws(g.frame);
+        flushLedger(g.frame);
+    }
     g.frame = frameNo;
     g.prevViews = g.views.n;
     g.views.reset();
@@ -1295,10 +1605,14 @@ void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
         g.summaryDue = true;
         g.summaryAfterFrame = frameNo + kReadbackDelay + 6;
     }
+    if (g.ledgerOn && frameNo > g.ledgerUntil) g.ledgerOn = false;
+    if (g.reduceUntil && frameNo > g.reduceUntil) { g.reduceUntil = 0; eye_final_capture::g_reduceLevel = 0; }
     for (uint32_t k = 0; k < 2; ++k) {
         if (g.runPending[k] && frameNo >= g.runDue[k]) {
             g.runPending[k] = false;
             ++g.autoRuns;
+            eye_final_capture::g_reduceLevel = kReduceLevel;   // the final-image rows of this run: the whole submitted eye at 1/4 size, not the 1400 px centre crop
+            g.reduceUntil = frameNo + 40;
             g.autoArming = true;
             temporalPassArmEyeDump();   // the eye run, from the Present tick like the key's own press
             g.autoArming = false;

@@ -43,12 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight (2026-10-15 v5, built, not flown):** `off`, one zoom of a
-  ringed planet, no keys, wait for the reveal. Reads the G-buffer t8-t11 per eye
-  (v4 read depth and stencil by mistake) and the RE's read-only hook at
-  0x36558A0 (camera, role, pass, mode); tables in "2026-10-15 (v5)". Flight
-  bca9d6b8: `tiles` ruled out; only the LEFT eye shows the squares. Fallback
-  `fix.fss_eye_sync` = `mirror`. Not fixed: ~220 m remap; panel bit; sky drift.
+- **Next flight (2026-10-15 v6, built, not flown):** `off`, one zoom of a ringed
+  planet, no keys, wait for the reveal. 60 frames from the all-small event: every
+  draw into eye-sized and ring targets is listed per eye and only the
+  differences are logged (`eyediff`), the ring quad's t0-t3 are compared per
+  eye, and the eye run now captures the whole eye at 1/4 size. Reading rules in
+  "2026-10-15 (v6)". Fallback `mirror`. Not fixed: ~220 m remap; panel bit.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -2306,6 +2306,171 @@ upstream` and `inputs`):
   RE's next hook are the way.
 - Slots 3 and 4: identity only. They are each eye's depth and stencil and differ
   per eye by construction; do not read the squares into them.
+
+## 2026-10-15 (v5 flown): flight db982c64, the ring pass is not on the reveal's path
+
+Flight on test build M (`v0.20.0-rc.1-93-gdb982c64`, Frontier, VR;
+`edvr_gfx_20261015_092018.log`; `--expect-build db982c64` matches; eye runs
+`eye_092239_*` and `eye_092243_*`). `fix.fss_eye_sync = off` (window 1
+`lockstep=off`), one zoom onto a ringed planet, no keys. Sean: the LEFT eye
+shows the black squares and the RIGHT eye shows none. On this rig the eyes
+render at 2016 x 2016, and the temporal pass outputs 4032 x 4032. Read-only
+analysis.
+
+Did it run: window 1 opened at f14043, and the band event (both large lists
+to zero) fired at f14045. The 600-frame reveal capture ran to f14647 with two
+automatic eye runs (f14067 and f14197). The ring hook armed at startup
+(prologue 16/16) and counted **33,600 calls since arming, none inside the
+605-frame capture**. The closing line's branch for that is driven only by
+calls that arrive while the capture flag is set, and the flag is refreshed
+every frame from `g.win.capturing` (`fss_tiles.cpp:1331`), so the zero is a
+measurement, not a dead instrument.
+
+What the data say:
+
+- READ: `FUN_1436558a0` (0x36558a0, the StellarBodyEffects ring pass) is
+  not entered at any point during the zoom and reveal. It runs outside the
+  FSS (about 2.4 calls a frame before the zoom). So no row of the RE table
+  applies to the reveal: the main-camera tests at 0x3659a1d / 0x3659f78, the
+  role copy at 0x36540b0, and the ring's mode 2 offscreen draw all live under
+  that entry. INFERRED: the FSS ring is drawn by another renderer (the ring
+  quad and ring mesh of rounds 16-18, `fss-ring-ps.asm` /
+  `fss-ring-mesh-ps.asm`, whose own t0-t3 are a ring G-buffer).
+- READ, t8-t11: t8 is ONE shared 512 x 512 texture (fmt 33, the same T28 in
+  both eyes, identical grids in all 60 samples), so it is not a per-eye
+  G-buffer. t9, t10 and t11 are per eye (2016 x 2016; T22-T24 and T25-T27).
+  Draws into them through render target 0: t9 had 62 draws a frame in BOTH
+  eyes at every sampled frame (window totals 37,443 and 37,442), and t11 had 1
+  a frame in both. t10 had none through RT0 (it is a later target of the same
+  pass). Every viewport was the full 2016 x 2016 with no scissor. Each eye
+  cleared t9-t11 once a frame (1,208 clears each).
+- READ, coverage: in the 8 x 8 sampled grid, the boxes written in t9 track
+  each other through the whole reveal: eye 0 27-46 of 64 and eye 1 29-48. Both
+  rose together at f14380 and again at f14610. Neither eye shows a
+  progressive fill. "Differ 60 of 60" is the stereo offset of a coarse sample;
+  no fill difference shows in it.
+- READ, the eye runs (1400 px centre crop): run 1 (f14068-14083) is the
+  transit void fading up in both eyes (mean 0.0 to 8.3 left, 0.0 to 10.1
+  right). Run 2 (f14197-) has no isolated hard-black 16 or 32 px blocks in
+  either eye. The crop did not catch the squares (the ring may lie outside
+  it), so the dumps neither confirm nor refute the left-only squares.
+
+ruled out: the StellarBodyEffects ring pass (0x36558a0 and the RE table's
+branches under it) as the reveal's producer, because flight db982c64's hook
+saw 33,600 calls outside the zoom and none in the 605 frames of zoom and
+reveal.
+ruled out: the scene G-buffer t9-t11 filling progressively in the left eye,
+because both eyes draw 62 + 1 calls a frame into it at full viewport and its
+sampled coverage tracks between the eyes through the reveal.
+ruled out: t8 as a per-eye input, because it is one shared texture.
+
+Where that leaves it: the tile pass's schedule (lists, arguments, clears),
+its depth and stencil, and its G-buffer draws are now all symmetric between
+the eyes. The left-only squares therefore enter after the tile pass, or
+through a ring renderer that does not draw into t9-t11. Round 27's "budgeted
+16 x 16 tile subsets over a cleared target" was measured on the ring quad's
+OWN offscreen G-buffer (its t0-t3), and that is the one producer no
+instrument has read per eye in the reveal frames. Root cause: OPEN.
+
+Next observation (one flight; the census exists, so the build only re-arms
+it): arm the draw census at the band event, not the press, for the 60 frames
+after it, and diff the two eyes' draw lists. The producer is the draw that is
+present only in eye 0, or that has a different instance count, viewport,
+scissor or input identity there. Read in particular the ring quad's t0-t3:
+whether they are one texture shared by both eyes or one per eye, and the
+draws into them per eye per frame. If one shared ring G-buffer is filled
+during eye 0's pass and read by both, the asymmetry is ordering. If there is
+one per eye and only eye 0's is reset at the zoom, the fix is the reset.
+
+## 2026-10-15 (v6): the eye diff, the ring quad's G-buffer and a whole-eye run (built, not flown)
+
+Flight db982c64 (read above): the ring pass at 0x36558A0 is not on the
+reveal's path, the scene G-buffer t9-t11 is symmetric, t8 is shared; the tile
+pass is symmetric end to end. What is left is a producer after it, or the ring
+quad / mesh renderer with its own t0-t3 ring G-buffer (rounds 16-18). v6 lists
+the draws, per eye, and diffs them. Read-only; no key; the ring pass hook of v5
+stays in.
+
+What it does:
+
+- THE EYE DIFF (replaces arming the DCO census, which has no in-process
+  structured form and covers a few frames; the eye runs still arm their own
+  census at +20 and +150). From the all-small band event, for 60 frames, every
+  draw into a render target that is a texture at least 128 wide is recorded
+  by the draw hooks (kind, per-draw count, vertex and pixel shader hashes, the
+  shape of the target, the shapes of pixel-shader inputs t0-t3, instance count,
+  viewport). A "pair" is a size/format that exactly two textures have rendered
+  into in the window; the first to appear is eye 0, the second eye 1. Per frame
+  and pair, the two lists are compared by (kind, count, shaders, target shape) and
+  only the differences are logged: draws only one eye has, draw counts,
+  instance counts, input shapes and viewports that differ. Draws into a shape that
+  does not hold exactly two textures (a shared or mono target, for instance the
+  FSS body layer) cannot be assigned an eye; they are counted and ranked in an
+  `unpaired` line, so a mono producer is visible.
+- THE RING QUAD. Draws matching the ring family (the 332753 vertex hashes
+  `7E38A6AA1269C901`, `0357BBB2DEE43C1F`, `53211E8C072CD02E`, the quad's pixel
+  shader `7CECABDE34FFBE9E`, or an indexed draw of 13,248 indices) are tagged.
+  Their pixel-shader inputs t0-t3 (the ring's own G-buffer) are logged per eye as
+  resource ids, so "shared or per eye" reads off the line and the closing
+  count; the textures are watched (roles `ring_t0` to `ring_t3`), so every draw
+  into them is counted per eye per frame with viewport and scissor
+  (`gbuf` lines), and every clear, copy or update of them is counted in the
+  `writes` line with the eye it belongs to.
+- THE EYE RUN COVERS THE EYE. The two automatic runs capture their final-image
+  rows (`eye_<stamp>_FinalCrisp_L<nn>.bmp` / `_R<nn>.bmp`) as the WHOLE
+  submitted eye at 1/4 size (1008 x 1008 for 4032 x 4032), made by a mip chain,
+  instead of the 1400 px centre crop that missed the ring in flights J, K and M.
+  The manifest's `crop` is the written image's own size; the overview stays full
+  size; the raw and treated crops are unchanged. A 16 px square is 4 px.
+
+Lines (new ones only):
+
+    fss tiles: eyediff f=N pair=WxH fmtF only-eye0: <vs8>/<ps8> X n=K xM (rt shape S) | only-eye1: ... | draws differ: ... a vs b | instances differ: ... | inputs differ: ... | viewport differ: ... WxH vs WxH
+    fss tiles: ring quad f=N eye0 draws=a (vs H ps H) t0-t3 = T..,T..,T..,T.. | eye1 draws=b (...) ... | unpaired-target draws: eye2 ...
+    fss tiles: gbuf f=N eyeE ring_tK T<id> draws=n instances=m viewport first (...) last (...) scissor ...
+    fss tiles: window N eyediff -- ledger ran F frame(s) from the all-small event, twin-target pairs compared in P, frames with a difference D, eyediff lines L; ledger entries that did not fit O; ranked differences: [1] only-eye0 <vs>/<ps> X n=K rt-shape S in F frame(s), total T; ...
+    fss tiles: window N eyediff unpaired -- U draw(s) went to render targets of a shape that does not hold exactly two textures ...; the biggest families: ...
+    fss tiles: window N ring quad -- ring-family draws: eye0 in a frame(s) b draws | eye1 in c frame(s) d draws | unpaired target ...; ring PS t0-t3 the same resource in both eyes: t0 x of y, t1 ..., frames; families: <vs>/<ps> xN; ...
+    fss tiles: window N upstream -- draws into ... t8-t11 and the ring quad's own inputs ring_t0-t3 (render target 0): eyeE t8..., ring_t0: frames with draws a, draws b ...
+
+All of them print whether or not they matched: the eyediff line says when the
+ledger never armed, `none: the two eyes' lists matched in every compared frame`
+when it ran clean, and the ring quad line says when no draw matched the family.
+
+Flight plan (Sean, VR, a ringed planet, `off`, no keys): the same as v5.
+
+1. `fix.fss_eye_sync = off` in the ini before launching; the log head shows `ring
+   hook armed` and no `fss eye heal: armed`.
+2. Zoom a ringed planet once, wait for the reveal to finish, press nothing. Say
+   which eye shows the squares (flight db982c64: the left).
+3. Read the `window N eyediff`, `eyediff unpaired`, `ring quad` and `upstream`
+   lines, then the `eyediff`, `ring quad` and `gbuf` lines around the band event,
+   then the whole-eye images.
+
+Reading rules:
+
+- `window N eyediff`, the ranked list: a draw `only-eye0` (or with an `instances`,
+  `inputs` or `viewport` difference that is eye 0's) in most of the 60 frames is
+  the producer candidate: one the left eye has and the right does not. Look the
+  hashes up in the census of the same frames (the eye runs arm one). Draws that
+  differ only in the first frame or two are the transit. `none: ... matched in every
+  compared frame` and a non-empty `unpaired` list says the eye-sized draws are
+  symmetric and the producer draws into a shared target: the mono FSS body
+  layer, composited into each eye (rounds 7-14 found the composite byte-equal).
+- `ring quad`: with `t0-t3 the same resource in both eyes` N of N frames, the ring's
+  G-buffer is one shared texture. Then the asymmetry is ordering or a reset:
+  read the `writes` line for `ring_t0`-`ring_t3` (a clear or copy into them, and
+  in which eye) and the `gbuf` lines (draws per eye into them and when). A clear
+  only in eye 0, at the zoom, is the reset to fix. With 0 of N (per eye), compare
+  the two eyes' `gbuf` lines: fewer draws, a smaller viewport or scissor for eye 0
+  is round 27's budgeted subset, and the budget is what to find. `no draw matched
+  the ring family` means the hashes changed since build 332753: use the ranked
+  and unpaired candidates and the census instead.
+- The whole-eye images (`FinalCrisp_L00`..): black 4 x 4 px blocks inside the ring
+  in the left images against the right's (frame numbers in `eye_*_FinalCrisp.json`,
+  set against the ledger's frames). Left-only blocks in frames where the diff
+  shows a difference confirm the producer; blocks in neither eye mean the run was
+  too early or too late: the two runs are at +20 and +150 frames.
 
 ## Open
 
