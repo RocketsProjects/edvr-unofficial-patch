@@ -1174,17 +1174,23 @@ int main(int argc, char** argv) {
         const char* why = "";
         check(se::sunStep(si, &sun, &why) && sun.off, "floor sun: aboard, the pad moving in, the skip goes on");
         si.aboard = false;
-        si.floorHold = true;   // the disembark onto the floor
-        check(!se::sunStep(si, &sun, &why) && sun.off, "floor sun: on foot on the floor the skip STANDS (the hangar leak stays out)");
+        si.onFootInHangar = true;   // the disembark: Status says on foot and in the hangar
+        check(!se::sunStep(si, &sun, &why) && sun.off, "split sun: on foot in the hangar (Status) the skip STANDS (the hangar leak stays out)");
         si.r0 = 0;
         si.inHangar = false;   // the pad's state does not matter on foot
-        check(!se::sunStep(si, &sun, &why) && sun.off, "floor sun: the pad's r1 going away does not release it on foot on the floor");
-        si.floorHold = false;  // the ride starts
-        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "off the hangar floor") != nullptr, "floor sun: the camera rising off the floor releases it, with that reason");
-        si.floorHold = true;   // back on the floor after the ride down
-        check(se::sunStep(si, &sun, &why) && sun.off && std::strstr(why, "on foot on the hangar floor") != nullptr, "floor sun: back on the floor it is restored");
+        check(!se::sunStep(si, &sun, &why) && sun.off, "split sun: the pad's r1 going away does not release it on foot in the hangar");
+        // the lift ride: the camera leaves the floor (the SEAL releases there, below), but Status in-hangar stays 1 through the shaft: the skip stands
+        for (int i = 0; i < 40; ++i) check(!se::sunStep(si, &sun, &why) && sun.off, "split sun: through the lift ride (in-hangar 1) the skip stands");
+        si.onFootInHangar = false;   // the concourse's frame: Status in-hangar drops (0.5 s after the camera jump in the flown trace)
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "out of the hangar") != nullptr && std::strstr(why, "on foot") != nullptr,
+              "split sun: Status in-hangar dropping (the concourse) releases it, with that reason");
+        si.onFootInHangar = true;   // back in the hangar frame (the shaft's top, or the floor)
+        check(se::sunStep(si, &sun, &why) && sun.off && std::strstr(why, "on foot in the hangar") != nullptr, "split sun: in-hangar back to 1 on foot, it is restored");
         si.hangarChanged = true;
-        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "hangar changed") != nullptr, "floor sun: a hangar change still releases it");
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "hangar changed") != nullptr, "split sun: a hangar change still releases it");
+        si.hangarChanged = false;
+        si.docked = false;
+        check(!se::sunStep(si, &sun, &why) && !sun.off, "split sun: undocked it stays off");
         // the seal
         se::SealState st;
         se::SealInputs in = inHangar(0);
@@ -1196,9 +1202,77 @@ int main(int argc, char** argv) {
         check(se::sealStep(in, &st, &rw) == se::SealAction::kNone && rw == se::ReleaseWhy::kNone, "floor seal: held on the floor stays held");
         in.onFloor = false;   // the ride
         check(se::sealStep(in, &st, &rw) == se::SealAction::kRelease && rw == se::ReleaseWhy::kOnFoot, "floor seal: rising off the floor releases it, reason kOnFoot");
+        // the split: at this same ride the sun skip above stands (in-hangar 1) while the seal is released here; they are logged separately (the sun line and the seal release line)
         in.held = false;
         st = se::SealState{};
         check(firstEngage(&st, in, 2000, 12000) == 0, "floor seal: on foot off the floor never seals");
+    }
+
+    // ---- Load-in on foot, the concourse load-in and the lift down, and the ride-speed gate (test build E, edvr_gfx_20261014_195451.log) ---------------------------------------
+    {
+        // Load-in on foot in the hangar: the first eligible sample holds (the pad's box may not be built yet: unknown height), the floor is taken after a second, and the log says why.
+        se::FloorHold f;
+        f.startWhy = "load-in on foot";
+        bool changed = f.step(true, true, 0.99f, false, 1000, false, 0.0f);
+        check(changed && f.holding && std::strcmp(f.why, "load-in on foot") == 0, "load-in: on foot in the hangar, the first sample arms the hold with the reason 'load-in on foot'");
+        uint64_t ms = 1000;
+        for (int i = 0; i < 12; ++i) f.step(true, true, 0.99f, false, ms += 100, true, 14.4f);
+        check(f.holding && f.haveFloor && std::fabs(f.floorU - 0.99f) < 0.001f, "load-in: after a second still the floor is taken at the standing height, still holding");
+        // the ride start releases it at a ride's speed (log: 0.62 m at 3.6 m/s)
+        f.step(true, true, 1.20f, false, ms += 100, true, 14.6f);   // 2.1 m/s over 0.1 s, 0.21 m: holds
+        check(f.holding, "load-in: the first 0.21 m of the ride still holds");
+        f.step(true, true, 1.61f, false, ms += 100, true, 15.0f);   // 4.1 m/s, 0.62 m
+        check(!f.holding && std::strstr(f.why, "rose 0.62 m") != nullptr, "load-in: 0.62 m at 4 m/s releases, as in the flown log");
+    }
+    {
+        // Load-in in the CONCOURSE, then the lift down: the hangar frame returns at the top of the shaft (padRel about -104), the ride has stops at -46, -56, -99 and the bottom is +14.4.
+        se::FloorHold f;
+        f.startWhy = "load-in on foot";
+        uint64_t ms = 1000;
+        for (int i = 0; i < 50; ++i) f.step(false, true, 0.0f, false, ms += 100, false, 0.0f);   // in the concourse: in-hangar 0
+        check(!f.holding && f.strict && !f.haveFloor, "concourse load-in: not eligible, not holding; the next floor needs the pad's height");
+        // back in the hangar frame at the top of the shaft, still for 8 s, with the pad height unknown (the box flickers) and then known
+        for (int i = 0; i < 40; ++i) f.step(true, true, 123.1f, false, ms += 100, false, 0.0f);
+        check(!f.holding && !f.haveFloor, "concourse load-in: at the shaft's top with the pad height unknown nothing is held and no floor is taken");
+        for (int i = 0; i < 40; ++i) f.step(true, true, 123.1f, false, ms += 100, true, -103.7f);
+        check(!f.holding && !f.haveFloor && std::strstr(f.why, "shaft") != nullptr, "concourse load-in: at the shaft's top (104 m under the pad) nothing is held");
+        // the ride down with a 15 s stop at -46 m: no floor there either
+        float z = 123.1f;
+        for (int i = 0; i < 20; ++i) { z -= 0.7f; f.step(true, true, z, false, ms += 100, true, -103.7f + (123.1f - z) * 0.96f); }
+        for (int i = 0; i < 150; ++i) f.step(true, true, z, false, ms += 100, true, -103.7f + (123.1f - z) * 0.96f);
+        check(!f.holding && !f.haveFloor, "concourse load-in: a stop in the shaft, however long, is not a floor");
+        // down to the bottom: the lift platform (0.43), the camera passes the pad plane going down to +14.4
+        const float zBottom = 0.43f;
+        while (z > zBottom + 0.7f) { z -= 0.7f; f.step(true, true, z, false, ms += 100, true, 14.4f - (z - zBottom) * 0.96f); }
+        f.step(true, true, zBottom, false, ms += 100, true, 14.4f);
+        check(f.holding, "concourse load-in: reaching the bottom (pad level or above) arms the hold");
+        for (int i = 0; i < 12; ++i) f.step(true, true, zBottom, false, ms += 100, true, 14.4f);
+        check(f.holding && f.haveFloor && std::fabs(f.floorU - zBottom) < 0.001f, "concourse load-in: the floor is taken on the lift's bottom platform after a second still");
+        // stepping off the platform: +0.56 m over 0.3 s (1.9 m/s): no release
+        float zz = zBottom;
+        for (int i = 0; i < 3; ++i) { zz += 0.187f; f.step(true, true, zz, false, ms += 100, true, 14.4f + (zz - zBottom)); }
+        check(f.holding, "concourse load-in: stepping off the lift platform onto the floor (+0.56 m, 1.9 m/s) does not release");
+        for (int i = 0; i < 12; ++i) f.step(true, true, zz, false, ms += 100, true, 14.4f + (zz - zBottom));
+        check(f.holding && std::fabs(f.floorU - zz) < 0.001f, "concourse load-in: and the floor follows to the new level");
+    }
+    {
+        // The ride-speed gate: a step, a ramp and a ride.
+        auto riseAt = [](float metres, float seconds, float startRise) {
+            se::FloorHold f;
+            uint64_t ms = 1000;
+            for (int i = 0; i < 14; ++i) f.step(true, true, 0.0f, false, ms += 100);   // floor taken at u = 0
+            const int n = static_cast<int>(seconds * 10.0f + 0.5f);
+            for (int i = 1; i <= n; ++i) {
+                f.step(true, true, startRise + metres * static_cast<float>(i) / static_cast<float>(n), false, ms += 100);
+                if (!f.holding) return false;
+            }
+            return true;
+        };
+        check(riseAt(0.56f, 0.3f, 0.0f), "ride gate: a 0.56 m step in 0.3 s (1.9 m/s) holds");
+        check(riseAt(0.9f, 1.0f, 0.0f), "ride gate: 0.9 m climbed at 0.9 m/s (a steep ramp) holds");
+        check(!riseAt(1.2f, 2.0f, 0.0f), "ride gate: a slow rise past a step (1.2 m at 0.6 m/s) releases at last (no floor rises that far)");
+        check(!riseAt(1.5f, 0.5f, 0.0f), "ride gate: 1.5 m in 0.5 s (3 m/s) releases");
+        check(se::kFloorRideMps > 1.7f && se::kFloorRideMps < 3.0f, "ride gate: the speed sits between the measured step (1.7 m/s) and the ride's first full sample (3.0 m/s)");
     }
 
     // ---- TEMPORARY: the lift trace (ride detection, holder tracking, line formats) ---------------------------------------------------------------------
@@ -1333,7 +1407,7 @@ int main(int argc, char** argv) {
             check(st.find("if (!on) return;") != std::string::npos && st.find("s.traceOn = g_traceOn;") != std::string::npos, "lift trace pins: off, the tick returns at once and the callbacks see traceOn false");
             // the floor hold feeds the sun skip and the seal, runs after the Status words and before the inputs are made, and every reset path drops it
             const size_t fcall = st.find("floorHoldTick();   // after the Status words");
-            const size_t sunIn = st.find("su.floorHold = g_floorHolding;");
+            const size_t sunIn = st.find("su.onFootInHangar = g_onFootInHangarNow;");
             const size_t sealIn = st.find("in.onFloor = g_floorHolding;");
             check(fcall != std::string::npos && words != std::string::npos && fcall > words && sunIn != std::string::npos && sealIn != std::string::npos && fcall < sealIn && fcall < sunIn,
                   "floor pins: the floor hold runs after the Status words and before the sun and seal inputs read it");
