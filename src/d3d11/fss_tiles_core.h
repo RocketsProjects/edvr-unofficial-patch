@@ -912,6 +912,274 @@ inline const char* orderText(RingOrder o) {
     }
 }
 
+// ---- v10: what is under and after the composite, per eye (2026-10-15, after flight aba75537) ----------------------------------------------------------------------------
+// Flight aba75537 (v9, the first valid capture): both eyes composite the same finished ring layer with the same fullscreen quad (VS 953C8123 / PS A473A867) after camera 1's ring
+// draws, depth-tested GREATER_EQUAL against each eye's own depth (left @40, right @44, no depth write, stencil off). Timing and a second ring image are ruled out. What is left is what
+// the eye's depth holds under the quad, and what is drawn into the eye's target after it. v10 snapshots, at arrival +0..+30, per eye: the composite's render target just before and just after
+// the composite draw and again at the end of the frame, and the bound depth and stencil at the composite, each reduced to 16 x 16 pixel blocks; it classifies every block that is black at
+// the end of the frame, and logs the suspect fullscreen-quad families that write stencil under the same depth. Everything below is pure so the rig can run it on synthetic data.
+constexpr uint32_t kDumpFrames = 31;              // arrival +0 .. +30
+constexpr uint32_t kBlockLevel = 4;               // mip level of a 16 x 16 pixel block
+constexpr uint32_t kBlockPx = 1u << kBlockLevel;
+constexpr uint32_t kBlockSample = 4;              // depth and stencil: every 4th texel in x and y inside a block (16 samples a block)
+constexpr uint32_t kMaxBlocks = 128;              // blocks an axis; a larger target is not dumped
+constexpr uint32_t kMaxCbSamples = 12;            // constant-buffer reads a frame (the suspects' first draws)
+constexpr uint32_t kCbBytes = 64;
+
+inline uint32_t hi32(uint64_t h) { return static_cast<uint32_t>(h >> 32); }
+
+struct SuspectPair { uint32_t vs, ps; };
+constexpr SuspectPair kSuspects[4] = {{0x5DA53D8Bu, 0xE23C4525u}, {0x5DA53D8Bu, 0xBF0CE0DAu}, {0x4A0748B6u, 0x1E1E004Bu}, {0x4A0748B6u, 0x4411D5EFu}};
+// The first eight hex digits of the 64-bit content hashes (the census prints them whole: vh=5DA53D8B0133341E).
+inline int suspectIndex(uint64_t vs, uint64_t ps) {
+    for (int i = 0; i < 4; ++i) {
+        if (hi32(vs) == kSuspects[i].vs && hi32(ps) == kSuspects[i].ps) return i;
+    }
+    return -1;
+}
+constexpr uint32_t kCompositeVsHi = 0x953C8123u, kCompositePsHi = 0xA473A867u;   // the composite, for the log; the draw is FOUND as the eye-sized draw that samples the layer
+
+// ---- the composite's before / after / end-of-frame schedule --------------------------------------------------------------------------------------------------------------------
+// "Just after" a draw is the next draw the hook sees (a copy issued there runs after the composite and before that draw); a composite that is the frame's last draw is covered at the boundary.
+struct SnapSchedule {
+    bool     pendingAfter[2] = {false, false};
+    bool     seen[2] = {false, false};
+    uint32_t compositeSeq[2] = {0, 0};
+    void newFrame() {
+        for (uint32_t e = 0; e < 2; ++e) { pendingAfter[e] = false; seen[e] = false; compositeSeq[e] = 0; }
+    }
+    // Returns false when this eye's composite was already taken this frame (a second draw of the same kind is not snapshotted).
+    bool composite(uint32_t eye, uint32_t seq) {
+        if (eye > 1 || seen[eye]) return false;
+        seen[eye] = true;
+        compositeSeq[eye] = seq;
+        pendingAfter[eye] = true;
+        return true;
+    }
+    // Once on every draw, before it is classified: the eyes whose "after" snapshot is due (bit per eye).
+    uint32_t takeAfter() {
+        uint32_t m = 0;
+        for (uint32_t e = 0; e < 2; ++e) {
+            if (pendingAfter[e]) { m |= 1u << e; pendingAfter[e] = false; }
+        }
+        return m;
+    }
+};
+
+// ---- a render-target texel's brightness, without a shader --------------------------------------------------------------------------------------------------------------
+inline float halfToFloat(uint16_t h) {
+    const uint32_t e = (h >> 10) & 31u, m = h & 1023u;
+    float v;
+    if (e == 0) v = static_cast<float>(m) * (1.0f / 1024.0f) * (1.0f / 16384.0f);
+    else if (e == 31) v = 1.0e9f;
+    else v = (1.0f + static_cast<float>(m) * (1.0f / 1024.0f)) * (e >= 15 ? static_cast<float>(1u << (e - 15)) : 1.0f / static_cast<float>(1u << (15 - e)));
+    return v;
+}
+inline float small11(uint32_t bits, uint32_t mantBits) {   // an unsigned 11 or 10 bit float: 5 exponent bits, `mantBits` mantissa bits
+    const uint32_t e = bits >> mantBits, m = bits & ((1u << mantBits) - 1u);
+    const float mm = static_cast<float>(m) / static_cast<float>(1u << mantBits);
+    if (e == 0) return mm * (1.0f / 16384.0f);
+    if (e == 31) return 1.0e9f;
+    return (1.0f + mm) * (e >= 15 ? static_cast<float>(1u << (e - 15)) : 1.0f / static_cast<float>(1u << (15 - e)));
+}
+// The brightest colour channel of one texel (alpha ignored). `known` is false for a format the table does not decode; the caller then treats any non-zero byte as bright.
+inline float texelPeak(uint32_t fmt, const uint8_t* p, bool* known) {
+    *known = true;
+    auto u16 = [&](uint32_t i) { uint16_t v; std::memcpy(&v, p + 2 * i, 2); return v; };
+    auto mx = [](float a, float b) { return a > b ? a : b; };
+    switch (fmt) {
+        case 10: return mx(mx(halfToFloat(u16(0)), halfToFloat(u16(1))), halfToFloat(u16(2)));                         // R16G16B16A16_FLOAT
+        case 11: return static_cast<float>(mx(mx(static_cast<float>(u16(0)), static_cast<float>(u16(1))), static_cast<float>(u16(2)))) / 65535.0f;   // R16G16B16A16_UNORM
+        case 2: { float f[3]; std::memcpy(f, p, 12); return mx(mx(f[0], f[1]), f[2]); }                                 // R32G32B32A32_FLOAT
+        case 26: {                                                                                                       // R11G11B10_FLOAT
+            uint32_t v;
+            std::memcpy(&v, p, 4);
+            return mx(mx(small11(v & 2047u, 6), small11((v >> 11) & 2047u, 6)), small11(v >> 22, 5));
+        }
+        case 24: { uint32_t v; std::memcpy(&v, p, 4); return static_cast<float>(mx(mx(static_cast<float>(v & 1023u), static_cast<float>((v >> 10) & 1023u)), static_cast<float>((v >> 20) & 1023u))) / 1023.0f; }   // R10G10B10A2_UNORM
+        case 28: case 29: return static_cast<float>(mx(mx(static_cast<float>(p[0]), static_cast<float>(p[1])), static_cast<float>(p[2]))) / 255.0f;    // R8G8B8A8_UNORM(_SRGB)
+        case 87: case 91: case 88: return static_cast<float>(mx(mx(static_cast<float>(p[0]), static_cast<float>(p[1])), static_cast<float>(p[2]))) / 255.0f;   // B8G8R8A8 / X8
+        default: *known = false; return 0.0f;
+    }
+}
+inline uint32_t texelBytes(uint32_t fmt) {
+    switch (fmt) {
+        case 2: return 16;
+        case 10: case 11: return 8;
+        case 24: case 26: case 28: case 29: case 87: case 88: case 91: return 4;
+        default: return 0;
+    }
+}
+// A brightness class, 0 (exactly black) to 9: one character in the log, class * 28 in the grey image.
+inline uint8_t peakClass(float v) {
+    if (!(v > 0.0f)) return 0;
+    if (v < 1e-3f) return 1;
+    if (v < 1e-2f) return 2;
+    if (v < 3e-2f) return 3;
+    if (v < 0.1f) return 4;
+    if (v < 0.3f) return 5;
+    if (v < 1.0f) return 6;
+    if (v < 3.0f) return 7;
+    if (v < 10.0f) return 8;
+    return 9;
+}
+constexpr float kBlackBelow = 1e-3f;   // a block whose brightest channel mean is below this is black (class 0 or 1)
+
+// One block per texel of a mip-4 staging texture. `peak` is the brightest channel of the block's mean colour.
+inline void colorBlocks(const uint8_t* base, uint32_t pitch, uint32_t fmt, uint32_t bw, uint32_t bh, float* peak) {
+    const uint32_t bpp = texelBytes(fmt);
+    for (uint32_t y = 0; y < bh; ++y) {
+        const uint8_t* row = base + static_cast<size_t>(y) * pitch;
+        for (uint32_t x = 0; x < bw; ++x) {
+            bool known = true;
+            float v = bpp ? texelPeak(fmt, row + static_cast<size_t>(x) * bpp, &known) : 0.0f;
+            if (!bpp || !known) {   // an unknown format: any non-zero byte is bright
+                v = 0.0f;
+                for (uint32_t i = 0; i < (bpp ? bpp : 4u); ++i) if (row[static_cast<size_t>(x) * (bpp ? bpp : 4u) + i]) v = 1.0f;
+            }
+            peak[y * bw + x] = v;
+        }
+    }
+}
+
+// ---- the bound depth and stencil -----------------------------------------------------------------------------------------------------------------------------------------
+enum class DepthKind : uint8_t { None = 0, D32, D32S8, D24S8, D16 };
+inline DepthKind depthKind(uint32_t fmt) {
+    switch (fmt) {
+        case 39: case 40: return DepthKind::D32;      // R32_TYPELESS, D32_FLOAT
+        case 19: case 20: return DepthKind::D32S8;    // R32G8X24_TYPELESS, D32_FLOAT_S8X24_UINT
+        case 44: case 45: return DepthKind::D24S8;    // R24G8_TYPELESS, D24_UNORM_S8_UINT
+        case 53: case 55: return DepthKind::D16;      // R16_TYPELESS, D16_UNORM
+        default: return DepthKind::None;
+    }
+}
+inline uint32_t depthTexelBytes(DepthKind k) {
+    switch (k) {
+        case DepthKind::D32: case DepthKind::D24S8: return 4;
+        case DepthKind::D32S8: return 8;
+        case DepthKind::D16: return 2;
+        default: return 0;
+    }
+}
+inline bool hasStencil(DepthKind k) { return k == DepthKind::D32S8 || k == DepthKind::D24S8; }
+inline void depthTexel(DepthKind k, const uint8_t* p, float* d, uint8_t* s) {
+    switch (k) {
+        case DepthKind::D32: std::memcpy(d, p, 4); *s = 0; break;
+        case DepthKind::D32S8: std::memcpy(d, p, 4); *s = p[4]; break;
+        case DepthKind::D24S8: { uint32_t v; std::memcpy(&v, p, 4); *d = static_cast<float>(v & 0xFFFFFFu) / 16777215.0f; *s = static_cast<uint8_t>(v >> 24); break; }
+        case DepthKind::D16: { uint16_t v; std::memcpy(&v, p, 2); *d = static_cast<float>(v) / 65535.0f; *s = 0; break; }
+        default: *d = 0.0f; *s = 0; break;
+    }
+}
+// Min and max depth and the largest stencil value of each 16 x 16 block, from every kBlockSample-th texel.
+inline void depthBlocks(const uint8_t* base, uint32_t pitch, DepthKind k, uint32_t w, uint32_t h, uint32_t bw, uint32_t bh, float* dmin, float* dmax, uint8_t* smax) {
+    const uint32_t tb = depthTexelBytes(k);
+    for (uint32_t by = 0; by < bh; ++by) {
+        for (uint32_t bx = 0; bx < bw; ++bx) {
+            float lo = 3.0e38f, hi = -3.0e38f;
+            uint8_t sm = 0;
+            for (uint32_t sy = 0; sy < kBlockPx; sy += kBlockSample) {
+                const uint32_t y = by * kBlockPx + sy;
+                if (y >= h) break;
+                for (uint32_t sx = 0; sx < kBlockPx; sx += kBlockSample) {
+                    const uint32_t x = bx * kBlockPx + sx;
+                    if (x >= w) break;
+                    float d;
+                    uint8_t s;
+                    depthTexel(k, base + static_cast<size_t>(y) * pitch + static_cast<size_t>(x) * tb, &d, &s);
+                    if (d < lo) lo = d;
+                    if (d > hi) hi = d;
+                    if (s > sm) sm = s;
+                }
+            }
+            dmin[by * bw + bx] = lo;
+            dmax[by * bw + bx] = hi;
+            smax[by * bw + bx] = sm;
+        }
+    }
+}
+
+// ---- the verdict on every block that is black at the end of the frame --------------------------------------------------------------------------------------------------------
+enum BlockClass : uint8_t { kNotBlack = 0, kRejected, kOverwritten, kNeverCovered, kWroteBlack, kNoDepth, kClassCount };
+inline const char* blockClassName(uint32_t c) {
+    static const char* const n[kClassCount] = {"not black", "rejected by depth at the composite", "overwritten after the composite", "never covered by the composite",
+                                               "written black by the composite", "black with no depth to judge by"};
+    return c < kClassCount ? n[c] : "?";
+}
+struct Verdict {
+    uint32_t blocks = 0, black = 0, wrote = 0;
+    uint32_t count[kClassCount] = {};
+    float    qz = 0.0f;               // the largest block-minimum depth under a block the composite changed: a lower bound of the quad's depth; 0 when it wrote nowhere
+    bool     qzSeen = false;
+};
+// before / after / fin are per-block brightness (peak of the mean colour) of the composite's target just before the composite, just after it and at the end of the frame;
+// dmin / dmax the depth under each block at the composite. The composite is GREATER_EQUAL on a reversed-Z depth with no depth write: it writes only where the buffer's depth is at or
+// below the quad's. `kl` gets each block's class.
+inline Verdict classifyBlocks(const float* before, const float* after, const float* fin, const float* dmin, const float* dmax, bool haveDepth, uint32_t n, uint8_t* kl) {
+    (void)dmax;   // kept for the caller's symmetry; the bound uses the block minimum
+    Verdict v;
+    v.blocks = n;
+    float qz = 0.0f;
+    bool seen = false;
+    for (uint32_t b = 0; b < n; ++b) {
+        if (after[b] != before[b]) {
+            ++v.wrote;
+            if (haveDepth && (!seen || dmin[b] > qz)) { qz = dmin[b]; seen = true; }   // a written pixel's depth is at or below the quad's, so a written block's MINIMUM is a lower bound
+        }
+    }
+    v.qz = seen ? qz : 0.0f;
+    v.qzSeen = seen;
+    for (uint32_t b = 0; b < n; ++b) {
+        uint8_t c = kNotBlack;
+        if (fin[b] < kBlackBelow) {
+            ++v.black;
+            if (after[b] != before[b]) c = after[b] < kBlackBelow ? kWroteBlack : kOverwritten;
+            else if (!haveDepth) c = kNoDepth;
+            else if (dmin[b] > v.qz + 1e-6f) c = kRejected;
+            else c = kNeverCovered;
+        }
+        kl[b] = c;
+        ++v.count[c];
+    }
+    return v;
+}
+// Blocks that are black in this eye and not black in the other, by class.
+inline void asymmetric(const uint8_t* klThis, const uint8_t* klOther, uint32_t n, uint32_t* out /* kClassCount */) {
+    for (uint32_t c = 0; c < kClassCount; ++c) out[c] = 0;
+    for (uint32_t b = 0; b < n; ++b) {
+        if (klThis[b] != kNotBlack && klOther[b] == kNotBlack) ++out[klThis[b]];
+    }
+}
+inline int formatVerdict(char* out, size_t cap, uint32_t frame, uint32_t eye, uint32_t rtId, uint32_t depthId, uint32_t bw, uint32_t bh, const Verdict& v) {
+    return std::snprintf(out, cap,
+                         "fss tiles: verdict f=%u eye%u composite target T%u, depth T%u, %ux%u blocks of %u px: black at the end of the frame %u; the composite changed %u block(s) (largest block-minimum depth it wrote through %.6f%s); "
+                         "of the black blocks: depth above everything it wrote through (rejected) %u, overwritten after the composite %u, never covered %u, written black by the composite %u, no depth to judge %u",
+                         frame, eye, rtId, depthId, bw, bh, kBlockPx, v.black, v.wrote, static_cast<double>(v.qz), v.qzSeen ? "" : ", assumed: it wrote nowhere", v.count[kRejected], v.count[kOverwritten],
+                         v.count[kNeverCovered], v.count[kWroteBlack], v.count[kNoDepth]);
+}
+// A binary PGM header; the caller appends w * h bytes.
+inline int pgmHeader(char* out, size_t cap, uint32_t w, uint32_t h) { return std::snprintf(out, cap, "P5\n%u %u\n255\n", w, h); }
+
+// ---- the suspect families, aggregated per frame ----------------------------------------------------------------------------------------------------------------------------
+// FNV-1a over 32-bit words: the cheap per-draw hash of what a draw binds.
+inline uint32_t fnvStep(uint32_t h, uint32_t w) {
+    for (int i = 0; i < 4; ++i) { h ^= (w >> (8 * i)) & 0xFFu; h *= 16777619u; }
+    return h;
+}
+constexpr uint32_t kFnvBasis = 2166136261u;
+struct DriverTally {
+    static constexpr uint32_t kCap = 6;
+    uint32_t hash[kCap] = {}, n[kCap] = {};
+    uint32_t used = 0, distinct = 0;
+    void add(uint32_t h) {
+        for (uint32_t i = 0; i < used; ++i) {
+            if (hash[i] == h) { ++n[i]; return; }
+        }
+        ++distinct;
+        if (used < kCap) { hash[used] = h; n[used] = 1; ++used; }
+    }
+};
+
 // ---- the state-restoring substitution ------------------------------------------------------------------------------
 // Ops supplies: void* getSrv(uint32_t slot) (a reference the caller releases), void setSrv(uint32_t slot, void* view),
 // void release(void* view), void dispatchIndirect(void* args, uint32_t off).

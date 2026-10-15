@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <d3d11.h>
+#include <d3d11_1.h>
 
 #include <cstdio>
 #include <cstring>
@@ -264,6 +265,50 @@ struct State {
     CompTot  ctot[24];
     uint32_t ctotN = 0, compLines = 0;
     uint32_t drawSeq = 0, ringSeqFirst = 0, ringSeqLast = 0, ringSeqN = 0;
+    // v10
+    uint32_t dumpTo = 0;                    // the last frame of the dump window (arrival +30); 0: none
+    SnapSchedule sched;
+    struct EyeCap {
+        bool     used = false, drained = true;
+        uint32_t frame = 0, eye = 0, rtId = 0, depthId = 0, bw = 0, bh = 0, rtFmt = 0, depthFmt = 0, depthW = 0, depthH = 0, compSeq = 0;
+        bool     have[4] = {};              // before, after, end of frame, depth
+        ID3D11Texture2D* st[3] = {};        // the three block stagings (kept between uses)
+        ID3D11Texture2D* dst = nullptr;     // the depth staging twin (kept)
+        ID3D11Texture2D* rt = nullptr;      // the composite's target, held for the frame
+    };
+    EyeCap   eyeCap[2][3];
+    BlockReducer red[2];
+    const void* compRt[2] = {};
+    const void* eyeDepth[2] = {};
+    uint32_t capNotes = 0, capsQueued = 0, capSkipped = 0, capsDone = 0, capIncomplete = 0, dumpFiles = 0, asymFrames = 0;
+    uint32_t asymTotal[2][kClassCount] = {}, verdictTotal[2][kClassCount] = {};
+    struct FrameRes { uint32_t frame = 0, n = 0; bool have[2] = {}; uint8_t kl[2][kMaxBlocks * kMaxBlocks]; };
+    FrameRes fres[4];
+    struct DsInfo { bool have = false, depthEnable = false, depthWrite = false, stencilEnable = false; uint32_t depthFunc = 0, ref = 0, rmask = 0, wmask = 0, func = 0, ops[3] = {}; };
+    struct SusEnt {
+        const void* rt = nullptr; const void* dsv = nullptr;
+        uint32_t fam = 0, draws = 0, inst = 0, firstSeq = 0, lastSeq = 0, after = 0, rtW = 0, rtH = 0, rtFmt = 0, stateKey = 0;
+        float vp[4] = {}; int sc[4] = {};
+        DsInfo ds; bool stateVaries = false; DriverTally drv;
+    };
+    struct SusTot { uint32_t frames = 0, draws = 0, before = 0, after = 0, inst = 0, maxDraws = 0; };
+    SusEnt   sus[16];
+    uint32_t susN = 0, susLines = 0;
+    uint32_t susSeries[2][64] = {};
+    SusTot   susTot[2][4];
+    struct CbJob {
+        struct One { uint32_t seq = 0, fam = 0, rtId = 0, depthId = 0, id[2] = {}, first[2] = {}; bool have[2] = {}; };
+        bool used = false, drained = true;
+        uint32_t frame = 0, n = 0;
+        One one[kMaxCbSamples];
+        ID3D11Buffer* st = nullptr;
+    };
+    CbJob    cbJob[4];
+    uint32_t cbN = 0, cbLines = 0;
+    const void* cbDsv[2] = {};
+    uint32_t cbPerDsv[2] = {};
+    ID3D11DeviceContext1* ctx1 = nullptr;
+    bool     ctx1Tried = false;
     bool     refusedEventNoted = false;
 };
 
@@ -285,6 +330,9 @@ void releaseEyeZero(EyeZero& z) {
     }
     z = EyeZero();
 }
+
+void capReleaseAll();
+bool capsPending();
 
 void resetWindowTallies() {
     g.framesSeen = 0;
@@ -321,6 +369,17 @@ void resetWindowTallies() {
     g.ringTargetId = g.ringTargetW = g.ringTargetH = g.ringTargetFmt = 0;
     g.rpN = g.rptotN = g.rpLines = g.ringFillN = 0;
     for (auto& t : g.rptot) t = State::RPTot();
+    capReleaseAll();
+    g.dumpTo = 0;
+    g.sched.newFrame();
+    g.compRt[0] = g.compRt[1] = g.eyeDepth[0] = g.eyeDepth[1] = nullptr;
+    g.capNotes = g.capsQueued = g.capSkipped = g.capsDone = g.capIncomplete = g.dumpFiles = g.asymFrames = 0;
+    for (auto& r : g.asymTotal) for (auto& x : r) x = 0;
+    for (auto& r : g.verdictTotal) for (auto& x : r) x = 0;
+    for (auto& f : g.fres) f.frame = 0, f.have[0] = f.have[1] = false;
+    g.susN = g.susLines = g.cbN = g.cbLines = 0;
+    for (auto& r : g.susSeries) for (auto& x : r) x = 0;
+    for (auto& r : g.susTot) for (auto& t : r) t = State::SusTot();
     g.cap = Validity();
     g.tracker.reset();
     g.tgtHistN = g.compN = g.ctotN = g.compLines = g.snapSkipped = 0;
@@ -343,6 +402,7 @@ bool pendingReadbacks() {
     for (const Sample& f : g.smp) if (f.used && !f.drained) return true;
     for (const State::Fp& f : g.fp) if (f.used && !f.drained) return true;
     if (g.snap.used && !g.snap.drained) return true;
+    if (capsPending()) return true;
     return false;
 }
 
@@ -1226,7 +1286,8 @@ void ringPathRecord(ID3D11DeviceContext* ctx, void* rtv, const void* res, const 
 
 // Any draw outside the ring pass that samples the current offscreen layer: pixel-shader slots t0-t3 of every draw (the binding shadow, free), and t4-t15 of draws that have a pixel
 // shader and a render target at least kMinTargetWidth wide (a PSGetShaderResources each).
-void compositorCheck(ID3D11DeviceContext* ctx, void* rtv, const void* res, uint32_t shape, uint32_t instances, uint32_t seq) {
+void compositorCheck(ID3D11DeviceContext* ctx, void* rtv, const void* res, uint32_t shape, uint32_t instances, uint32_t seq, bool* composite) {
+    if (composite) *composite = false;
     int slot = -1;
     for (uint32_t k = 0; k < 4 && slot < 0; ++k) {
         void* v = bindingGet(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + k));
@@ -1277,6 +1338,8 @@ void compositorCheck(ID3D11DeviceContext* ctx, void* rtv, const void* res, uint3
         e->vpW = static_cast<uint32_t>(vp.Width);
         e->vpH = static_cast<uint32_t>(vp.Height);
     }
+    // the composite proper: the eye-sized draw (a target at least 512 square), not the small downsample
+    if (composite) *composite = shape != 0 && e->w >= 512 && e->h >= 512;
     e->lastSeq = seq;
     ++e->draws;
     e->inst += instances;
@@ -1398,6 +1461,512 @@ void drainRingSnap(uint32_t frame) {
     dev->Release();
 }
 
+// ---- v10: the composite's target and depth per eye at the arrival, the verdict on the black blocks, and the suspect quad families ---------------------------------------------
+constexpr uint32_t kMaxSusLines = 700;
+constexpr uint32_t kMaxCbLines = 240;
+
+void capReleaseAll() {
+    for (auto& e : g.eyeCap) {
+        for (auto& c : e) {
+            for (auto*& s : c.st) { if (s) { s->Release(); s = nullptr; } }
+            if (c.dst) { c.dst->Release(); c.dst = nullptr; }
+            if (c.rt) { c.rt->Release(); c.rt = nullptr; }
+            c = State::EyeCap();
+        }
+    }
+    for (auto& r : g.red) r.release();
+    if (g.ctx1) { g.ctx1->Release(); g.ctx1 = nullptr; }
+    g.ctx1Tried = false;
+    for (auto& j : g.cbJob) {
+        if (j.st) { j.st->Release(); j.st = nullptr; }
+        j = State::CbJob();
+    }
+}
+
+bool capsPending() {
+    for (const auto& e : g.eyeCap) for (const auto& c : e) if (c.used && !c.drained) return true;
+    for (const auto& j : g.cbJob) if (j.used && !j.drained) return true;
+    return false;
+}
+
+uint32_t compositeEye(const void* res) {
+    for (uint32_t e = 0; e < 2; ++e) if (g.compRt[e] == res) return e;
+    for (uint32_t e = 0; e < 2; ++e) {
+        if (!g.compRt[e]) { g.compRt[e] = res; return e; }
+    }
+    return 3;
+}
+
+void capNote(const char* what, const char* why) {
+    if (g.capNotes >= 12) return;
+    ++g.capNotes;
+    Log::get().note("fss tiles: ring dump f=%u: %s refused: %s. Said at most 12 times.", g.frame, what, why);
+}
+
+// Just before the composite draw: the composite target reduced to 16 px blocks, and the bound depth copied whole.
+void snapBefore(ID3D11DeviceContext* ctx, const void* rtRes, uint32_t eye, uint32_t seq) {
+    State::EyeCap& c = g.eyeCap[eye][g.frame % 3];
+    if (c.used && !c.drained) { ++g.capSkipped; return; }
+    ID3D11Texture2D* rt = static_cast<ID3D11Texture2D*>(const_cast<void*>(rtRes));
+    ID3D11Device* dev = nullptr;
+    rt->GetDevice(&dev);
+    if (!dev) return;
+    for (bool& h : c.have) h = false;
+    c.used = false;
+    c.drained = true;
+    const char* why = "";
+    uint32_t bw = 0, bh = 0;
+    DXGI_FORMAT typed = DXGI_FORMAT_UNKNOWN;
+    if (!g.red[eye].reduce(dev, ctx, rt, &c.st[0], &bw, &bh, &typed, &why)) {
+        capNote("the composite target's snapshot", why);
+        dev->Release();
+        return;
+    }
+    c.have[0] = true;
+    c.bw = bw;
+    c.bh = bh;
+    c.rtFmt = static_cast<uint32_t>(typed);
+    ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11DepthStencilView* dsv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, &dsv);
+    c.depthId = 0;
+    if (dsv) {
+        ID3D11Resource* dres = nullptr;
+        dsv->GetResource(&dres);
+        if (dres) {
+            g.eyeDepth[eye] = dres;
+            c.depthId = g.ids.id(dres);
+            D3D11_TEXTURE2D_DESC dd{};
+            if (queueDepthCopy(dev, ctx, dres, &c.dst, &dd, &why)) {
+                c.have[3] = true;
+                c.depthFmt = dd.Format;
+                c.depthW = dd.Width;
+                c.depthH = dd.Height;
+            } else {
+                capNote("the bound depth's copy", why);
+            }
+            dres->Release();
+        }
+        dsv->Release();
+    } else {
+        capNote("the bound depth's copy", "no depth view is bound at the composite");
+    }
+    if (rtv) rtv->Release();
+    if (c.rt) c.rt->Release();
+    rt->AddRef();
+    c.rt = rt;
+    c.rtId = g.ids.id(rtRes);
+    c.frame = g.frame;
+    c.eye = eye;
+    c.compSeq = seq;
+    c.used = true;
+    c.drained = false;
+    ++g.capsQueued;
+    dev->Release();
+}
+
+void snapReduce(ID3D11DeviceContext* ctx, uint32_t eye, State::EyeCap& c, uint32_t which) {
+    ID3D11Device* dev = nullptr;
+    c.rt->GetDevice(&dev);
+    if (!dev) return;
+    uint32_t bw = 0, bh = 0;
+    DXGI_FORMAT typed = DXGI_FORMAT_UNKNOWN;
+    const char* why = "";
+    if (g.red[eye].reduce(dev, ctx, c.rt, &c.st[which], &bw, &bh, &typed, &why) && bw == c.bw && bh == c.bh) c.have[which] = true;
+    else capNote(which == 1 ? "the after-composite snapshot" : "the end-of-frame snapshot", why[0] ? why : "the target changed shape");
+    dev->Release();
+}
+
+// Just after: the first draw the hook sees after the composite. `mask` has a bit per eye.
+void snapAfter(ID3D11DeviceContext* ctx, uint32_t mask) {
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        if (!(mask & (1u << eye))) continue;
+        State::EyeCap& c = g.eyeCap[eye][g.frame % 3];
+        if (!c.used || c.drained || c.frame != g.frame || !c.have[0] || !c.rt) continue;
+        snapReduce(ctx, eye, c, 1);
+    }
+}
+
+// At the boundary, before the frame is flushed: an "after" owed to a composite that was the frame's last draw, then the end-of-frame snapshot of each eye's composite target.
+void finishFrameSnaps(uint32_t frame) {
+    if (!g.dumpTo || frame > g.dumpTo) return;
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        State::EyeCap& c = g.eyeCap[eye][frame % 3];
+        if (!c.used || c.drained || c.frame != frame || !c.have[0] || !c.rt) continue;
+        ID3D11Device* dev = nullptr;
+        c.rt->GetDevice(&dev);
+        if (!dev) continue;
+        ID3D11DeviceContext* ctx = nullptr;
+        dev->GetImmediateContext(&ctx);
+        if (ctx) {
+            if (g.sched.pendingAfter[eye]) { g.sched.pendingAfter[eye] = false; snapReduce(ctx, eye, c, 1); }
+            snapReduce(ctx, eye, c, 2);
+            ctx->Release();
+        }
+        dev->Release();
+    }
+}
+
+void writePgm(uint32_t frame, uint32_t eye, const char* name, uint32_t w, uint32_t h, const uint8_t* data) {
+    if (!g.dirMade) {
+        g.dirMade = true;
+        CreateDirectoryW((Log::get().dir() + L"\\fsstiles").c_str(), nullptr);
+    }
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\fsstiles\\v10_f%u_e%u_%S.pgm", Log::get().dir().c_str(), frame, eye, name);
+    HANDLE hf = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return;
+    char head[48];
+    const int hn = pgmHeader(head, sizeof(head), w, h);
+    DWORD wrote = 0;
+    WriteFile(hf, head, static_cast<DWORD>(hn), &wrote, nullptr);
+    WriteFile(hf, data, w * h, &wrote, nullptr);
+    CloseHandle(hf);
+    ++g.dumpFiles;
+}
+
+struct DumpWork {
+    float    col[3][kMaxBlocks * kMaxBlocks];
+    float    dmin[kMaxBlocks * kMaxBlocks], dmax[kMaxBlocks * kMaxBlocks];
+    uint8_t  smax[kMaxBlocks * kMaxBlocks];
+    uint8_t  img[kMaxBlocks * kMaxBlocks];
+    uint8_t  kl[kMaxBlocks * kMaxBlocks];
+};
+DumpWork g_work;
+
+void processCap(State::EyeCap& c, const D3D11_MAPPED_SUBRESOURCE* m) {
+    const uint32_t n = c.bw * c.bh;
+    if (!n || c.bw > kMaxBlocks || c.bh > kMaxBlocks) return;
+    DumpWork& w = g_work;
+    for (uint32_t k = 0; k < 3; ++k) colorBlocks(static_cast<const uint8_t*>(m[k].pData), m[k].RowPitch, c.rtFmt, c.bw, c.bh, w.col[k]);
+    bool haveDepth = false;
+    const DepthKind dk = depthKind(c.depthFmt);
+    if (c.have[3] && dk != DepthKind::None) {
+        depthBlocks(static_cast<const uint8_t*>(m[3].pData), m[3].RowPitch, dk, c.depthW, c.depthH, c.bw, c.bh, w.dmin, w.dmax, w.smax);
+        haveDepth = true;
+    }
+    const Verdict v = classifyBlocks(w.col[0], w.col[1], w.col[2], w.dmin, w.dmax, haveDepth, n, w.kl);
+    char line[900];
+    formatVerdict(line, sizeof(line), c.frame, c.eye, c.rtId, c.depthId, c.bw, c.bh, v);
+    Log::get().note("%s%s", line, haveDepth ? "" : " (the depth could not be read)");
+    ++g.capsDone;
+    // the grey images: brightness class * 28 for the three snapshots, depth * 255, stencil as is, and the verdict class * 40
+    static const char* const kNames[3] = {"rt_before", "rt_after", "rt_final"};
+    for (uint32_t k = 0; k < 3; ++k) {
+        for (uint32_t i = 0; i < n; ++i) w.img[i] = static_cast<uint8_t>(peakClass(w.col[k][i]) * 28u);
+        writePgm(c.frame, c.eye, kNames[k], c.bw, c.bh, w.img);
+    }
+    if (haveDepth) {
+        for (uint32_t i = 0; i < n; ++i) { const float d = w.dmin[i]; w.img[i] = static_cast<uint8_t>(d <= 0.0f ? 0 : d >= 1.0f ? 255 : d * 255.0f); }
+        writePgm(c.frame, c.eye, "depth_min", c.bw, c.bh, w.img);
+        for (uint32_t i = 0; i < n; ++i) { const float d = w.dmax[i]; w.img[i] = static_cast<uint8_t>(d <= 0.0f ? 0 : d >= 1.0f ? 255 : d * 255.0f); }
+        writePgm(c.frame, c.eye, "depth_max", c.bw, c.bh, w.img);
+        if (hasStencil(dk)) writePgm(c.frame, c.eye, "stencil_max", c.bw, c.bh, w.smax);
+    }
+    for (uint32_t i = 0; i < n; ++i) w.img[i] = static_cast<uint8_t>(w.kl[i] * 40u);
+    writePgm(c.frame, c.eye, "verdict", c.bw, c.bh, w.img);
+    // the pair: blocks black in one eye and not in the other
+    State::FrameRes& fr = g.fres[c.frame % 4];
+    if (fr.frame != c.frame) { fr = State::FrameRes(); fr.frame = c.frame; }
+    fr.n = n;
+    fr.have[c.eye] = true;
+    std::memcpy(fr.kl[c.eye], w.kl, n);
+    if (fr.have[0] && fr.have[1]) {
+        uint32_t a0[kClassCount], a1[kClassCount];
+        asymmetric(fr.kl[0], fr.kl[1], n, a0);
+        asymmetric(fr.kl[1], fr.kl[0], n, a1);
+        Log::get().note("fss tiles: verdict f=%u pair -- black in eye0 and not in eye1 (blocks at the same position): rejected by depth %u, overwritten after the composite %u, never covered %u, "
+                        "written black by the composite %u, no depth %u | black in eye1 and not in eye0: rejected by depth %u, overwritten %u, never covered %u, written black %u, no depth %u",
+                        c.frame, a0[kRejected], a0[kOverwritten], a0[kNeverCovered], a0[kWroteBlack], a0[kNoDepth], a1[kRejected], a1[kOverwritten], a1[kNeverCovered], a1[kWroteBlack], a1[kNoDepth]);
+        for (uint32_t k = 0; k < kClassCount; ++k) { g.asymTotal[0][k] += a0[k]; g.asymTotal[1][k] += a1[k]; }
+        ++g.asymFrames;
+    }
+    for (uint32_t k = 0; k < kClassCount; ++k) g.verdictTotal[c.eye < 2 ? c.eye : 0][k] += v.count[k];
+}
+
+void drainCaps(uint32_t frame) {
+    for (auto& e : g.eyeCap) {
+        for (auto& c : e) {
+            if (!c.used || c.drained || frame < c.frame + kReadbackDelay + 1) continue;
+            if (!c.have[0] || !c.have[1] || !c.have[2]) {
+                if (frame > c.frame + 3) { c.drained = true; ++g.capIncomplete; }
+                continue;
+            }
+            ID3D11Device* dev = nullptr;
+            c.st[0]->GetDevice(&dev);
+            ID3D11DeviceContext* ctx = nullptr;
+            if (dev) dev->GetImmediateContext(&ctx);
+            if (!ctx) { c.drained = true; if (dev) dev->Release(); continue; }
+            D3D11_MAPPED_SUBRESOURCE m[4] = {};
+            bool mapped[4] = {};
+            bool ok = true;
+            for (uint32_t i = 0; i < 4 && ok; ++i) {
+                ID3D11Texture2D* st = i < 3 ? c.st[i] : c.dst;
+                if (i == 3 && !c.have[3]) continue;
+                ok = st && SUCCEEDED(ctx->Map(st, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m[i]));
+                mapped[i] = ok;
+            }
+            if (ok) processCap(c, m);
+            for (uint32_t i = 0; i < 4; ++i) {
+                if (mapped[i]) ctx->Unmap(i < 3 ? c.st[i] : c.dst, 0);
+            }
+            if (ok) c.drained = true;
+            else if (frame > c.frame + 40) { c.drained = true; ++g.capIncomplete; }
+            ctx->Release();
+            dev->Release();
+        }
+    }
+}
+
+// ---- the suspect families ----------------------------------------------------------------------------------------------------------------------------------------------
+uint32_t packState(const State::DsInfo& s) {
+    uint32_t h = kFnvBasis;
+    h = fnvStep(h, (s.depthEnable ? 1u : 0u) | (s.depthWrite ? 2u : 0u) | (s.stencilEnable ? 4u : 0u) | (s.depthFunc << 4));
+    h = fnvStep(h, s.ref | (s.rmask << 8) | (s.wmask << 16));
+    h = fnvStep(h, s.func | (s.ops[0] << 4) | (s.ops[1] << 8) | (s.ops[2] << 12));
+    return h;
+}
+
+void cbSample(ID3D11DeviceContext* ctx, uint32_t seq, int fam, uint32_t rtId, const void* dsvRes) {
+    if (!g.ctx1 && !g.ctx1Tried) {
+        g.ctx1Tried = true;
+        ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&g.ctx1));
+    }
+    if (!g.ctx1 || g.cbN >= kMaxCbSamples) return;
+    // the first kMaxCbSamples / 2 suspect draws of each depth buffer (each eye has its own), so one eye's burst does not use them all
+    uint32_t slot = 2;
+    for (uint32_t k = 0; k < 2; ++k) {
+        if (g.cbDsv[k] == dsvRes) { slot = k; break; }
+        if (!g.cbDsv[k]) { g.cbDsv[k] = dsvRes; slot = k; break; }
+    }
+    if (slot > 1 || g.cbPerDsv[slot] >= kMaxCbSamples / 2) return;
+    ++g.cbPerDsv[slot];
+    State::CbJob& j = g.cbJob[g.frame % 4];
+    if (j.used && !j.drained && j.frame != g.frame) return;
+    ID3D11Buffer* vcb = nullptr;
+    ID3D11Buffer* pcb = nullptr;
+    UINT vf = 0, vn = 0, pf = 0, pn = 0;
+    g.ctx1->VSGetConstantBuffers1(0, 1, &vcb, &vf, &vn);
+    g.ctx1->PSGetConstantBuffers1(0, 1, &pcb, &pf, &pn);
+    ID3D11Buffer* bufs[2] = {vcb, pcb};
+    const UINT firsts[2] = {vf, pf};
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (dev && (vcb || pcb)) {
+        if (j.frame != g.frame || !j.used) {
+            j.frame = g.frame;
+            j.n = 0;
+            j.used = true;
+            j.drained = false;
+            if (!j.st) {
+                D3D11_BUFFER_DESC d{};
+                d.ByteWidth = kMaxCbSamples * 2 * kCbBytes;
+                d.Usage = D3D11_USAGE_STAGING;
+                d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                if (FAILED(dev->CreateBuffer(&d, nullptr, &j.st))) j.st = nullptr;
+            }
+        }
+        if (j.st && j.n < kMaxCbSamples) {
+            State::CbJob::One& o = j.one[j.n];
+            o = State::CbJob::One();
+            o.seq = seq;
+            o.fam = static_cast<uint32_t>(fam);
+            o.rtId = rtId;
+            o.depthId = dsvRes ? g.ids.id(dsvRes) : 0u;
+            for (uint32_t k = 0; k < 2; ++k) {
+                if (!bufs[k]) continue;
+                D3D11_BUFFER_DESC bd{};
+                bufs[k]->GetDesc(&bd);
+                const UINT off = firsts[k] * 16u;
+                if (off + kCbBytes > bd.ByteWidth) continue;
+                D3D11_BOX box{};
+                box.left = off;
+                box.right = off + kCbBytes;
+                box.bottom = box.back = 1;
+                ctx->CopySubresourceRegion(j.st, 0, (j.n * 2 + k) * kCbBytes, 0, 0, bufs[k], 0, &box);
+                o.have[k] = true;
+                o.id[k] = g.ids.id(bufs[k]);
+                o.first[k] = firsts[k];
+            }
+            ++j.n;
+            ++g.cbN;
+        }
+    }
+    if (dev) dev->Release();
+    if (vcb) vcb->Release();
+    if (pcb) pcb->Release();
+}
+
+void drainCb(uint32_t frame) {
+    for (auto& j : g.cbJob) {
+        if (!j.used || j.drained || frame < j.frame + kReadbackDelay + 1 || !j.st) continue;
+        ID3D11Device* dev = nullptr;
+        j.st->GetDevice(&dev);
+        ID3D11DeviceContext* ctx = nullptr;
+        if (dev) dev->GetImmediateContext(&ctx);
+        if (ctx) {
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (SUCCEEDED(ctx->Map(j.st, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m))) {
+                const uint8_t* p = static_cast<const uint8_t*>(m.pData);
+                for (uint32_t i = 0; i < j.n; ++i) {
+                    const State::CbJob::One& o = j.one[i];
+                    for (uint32_t k = 0; k < 2; ++k) {
+                        if (!o.have[k] || g.cbLines >= kMaxCbLines) continue;
+                        const uint8_t* q = p + (i * 2 + k) * kCbBytes;
+                        uint32_t u[16], hash = kFnvBasis;
+                        std::memcpy(u, q, kCbBytes);
+                        for (uint32_t d = 0; d < 16; ++d) hash = fnvStep(hash, u[d]);
+                        float f[8];
+                        std::memcpy(f, q, sizeof(f));
+                        Log::get().note("fss tiles: suspect cb f=%u draw #%u family %u into T%u (depth T%u): %s constant buffer 0 B%u from constant %u, 64 bytes hash %08X, floats %g %g %g %g %g %g %g %g | ints %u %u %u %u",
+                                        j.frame, o.seq, o.fam, o.rtId, o.depthId, k ? "pixel" : "vertex", o.id[k], o.first[k], hash, static_cast<double>(f[0]), static_cast<double>(f[1]),
+                                        static_cast<double>(f[2]), static_cast<double>(f[3]), static_cast<double>(f[4]), static_cast<double>(f[5]), static_cast<double>(f[6]),
+                                        static_cast<double>(f[7]), u[8], u[9], u[10], u[11]);
+                        ++g.cbLines;
+                    }
+                }
+                ctx->Unmap(j.st, 0);
+                j.drained = true;
+            } else if (frame > j.frame + 40) {
+                j.drained = true;
+            }
+            ctx->Release();
+        } else {
+            j.drained = true;
+        }
+        if (dev) dev->Release();
+    }
+}
+
+void suspectRecord(ID3D11DeviceContext* ctx, void* rtv, const void* res, int fam, uint32_t instances, uint32_t seq) {
+    void* dsvView = bindingGet(BindSlot::Dsv0);
+    const State::ViewRec* dv = dsvView ? viewInfo(dsvView) : nullptr;
+    const void* dsvRes = dv ? dv->res : nullptr;
+    State::DsInfo ds;
+    {
+        ID3D11DepthStencilState* dss = nullptr;
+        UINT ref = 0;
+        ctx->OMGetDepthStencilState(&dss, &ref);
+        if (dss) {
+            D3D11_DEPTH_STENCIL_DESC dd{};
+            dss->GetDesc(&dd);
+            ds.have = true;
+            ds.depthEnable = dd.DepthEnable != 0;
+            ds.depthWrite = dd.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL;
+            ds.depthFunc = static_cast<uint32_t>(dd.DepthFunc);
+            ds.stencilEnable = dd.StencilEnable != 0;
+            ds.ref = ref;
+            ds.rmask = dd.StencilReadMask;
+            ds.wmask = dd.StencilWriteMask;
+            ds.func = static_cast<uint32_t>(dd.FrontFace.StencilFunc);
+            ds.ops[0] = static_cast<uint32_t>(dd.FrontFace.StencilFailOp);
+            ds.ops[1] = static_cast<uint32_t>(dd.FrontFace.StencilDepthFailOp);
+            ds.ops[2] = static_cast<uint32_t>(dd.FrontFace.StencilPassOp);
+            dss->Release();
+        }
+    }
+    // what the draw binds, as one cheap hash: the pixel shader's t0-t7 and vertex constant buffer 0 by identity
+    uint32_t drv = kFnvBasis;
+    for (uint32_t k = 0; k < 4; ++k) {
+        void* v = bindingGet(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + k));
+        const State::ViewRec* vr = v ? viewInfo(v) : nullptr;
+        drv = fnvStep(drv, vr && vr->res ? g.ids.id(vr->res) : 0u);
+    }
+    {
+        ID3D11ShaderResourceView* sv[4] = {};
+        ctx->PSGetShaderResources(4, 4, sv);
+        for (uint32_t k = 0; k < 4; ++k) {
+            uint32_t id = 0;
+            if (sv[k]) {
+                ID3D11Resource* r = nullptr;
+                sv[k]->GetResource(&r);
+                if (r) { id = g.ids.id(r); r->Release(); }
+                sv[k]->Release();
+            }
+            drv = fnvStep(drv, id);
+        }
+    }
+    {
+        void* cb = bindingGet(BindSlot::VsCb0);
+        drv = fnvStep(drv, cb ? g.ids.id(cb) : 0u);
+    }
+    State::SusEnt* e = nullptr;
+    for (uint32_t i = 0; i < g.susN; ++i) {
+        State::SusEnt& x = g.sus[i];
+        if (x.fam == static_cast<uint32_t>(fam) && x.rt == res && x.dsv == dsvRes) { e = &x; break; }
+    }
+    if (!e) {
+        if (g.susN >= 16) return;
+        e = &g.sus[g.susN++];
+        *e = State::SusEnt();
+        e->fam = static_cast<uint32_t>(fam);
+        e->rt = res;
+        e->dsv = dsvRes;
+        e->firstSeq = seq;
+        ResourceInfo ri;
+        if (bindingResolveProbe(rtv, &ri) && ri.isTexture2D) { e->rtW = ri.a; e->rtH = ri.b; e->rtFmt = ri.fmt; }
+        UINT nv = 1;
+        D3D11_VIEWPORT vp{};
+        ctx->RSGetViewports(&nv, &vp);
+        e->vp[0] = vp.TopLeftX; e->vp[1] = vp.TopLeftY; e->vp[2] = vp.Width; e->vp[3] = vp.Height;
+        UINT ns = 1;
+        D3D11_RECT sc{};
+        ctx->RSGetScissorRects(&ns, &sc);
+        e->sc[0] = sc.left; e->sc[1] = sc.top; e->sc[2] = sc.right; e->sc[3] = sc.bottom;
+        e->ds = ds;
+        e->stateKey = packState(ds);
+    } else if (packState(ds) != e->stateKey) {
+        e->stateVaries = true;
+    }
+    e->lastSeq = seq;
+    ++e->draws;
+    e->inst += instances;
+    e->drv.add(drv);
+    // "after the composite": this draw's depth buffer belongs to an eye whose composite has already been drawn this frame
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        if (dsvRes && g.eyeDepth[eye] == dsvRes && g.sched.seen[eye] && seq > g.sched.compositeSeq[eye]) { ++e->after; break; }
+    }
+    if (g.frame - g.rv.win.startFrame < 40) cbSample(ctx, seq, fam, g.ids.id(res), dsvRes);
+}
+
+void flushSuspects(uint32_t frame) {
+    const uint32_t since = frame - g.rv.win.startFrame;
+    const bool line = since < 40 || frame % kFingerEvery == 0;
+    for (uint32_t i = 0; i < g.susN; ++i) {
+        State::SusEnt& e = g.sus[i];
+        uint32_t eye = 3;
+        for (uint32_t k = 0; k < 2; ++k) if (e.dsv && g.eyeDepth[k] == e.dsv) eye = k;
+        const uint32_t before = e.draws - e.after;
+        if (eye < 2) {
+            if (since < 64) g.susSeries[eye][since] += e.draws;
+            State::SusTot& t = g.susTot[eye][e.fam];
+            ++t.frames; t.draws += e.draws; t.before += before; t.after += e.after; t.inst += e.inst;
+            if (e.draws > t.maxDraws) t.maxDraws = e.draws;
+        }
+        if (line && g.susLines < kMaxSusLines) {
+            char top[160];
+            size_t ta = 0;
+            top[0] = 0;
+            for (uint32_t k = 0; k < e.drv.used && ta + 24 < sizeof(top); ++k) ta += static_cast<size_t>(std::snprintf(top + ta, sizeof(top) - ta, "%s%08X x%u", k ? ", " : "", e.drv.hash[k], e.drv.n[k]));
+            char eyeText[8];
+            if (eye < 2) std::snprintf(eyeText, sizeof(eyeText), "eye%u", eye);
+            else std::snprintf(eyeText, sizeof(eyeText), "eye?");
+            Log::get().note("fss tiles: suspect f=%u %s family %u (vs %08X ps %08X) into T%u %ux%u fmt%u, depth T%u: draws=%u (before the composite %u, after %u) instances=%u draw #%u..#%u "
+                            "viewport (%.0f,%.0f %.0fx%.0f) scissor (%d,%d,%d,%d) | depth %s func %u write %s, stencil %s ref %u read %02X write %02X func %u ops %u,%u,%u%s | "
+                            "bindings: %u distinct hash(es) (top: %s)",
+                            frame, eyeText, e.fam, kSuspects[e.fam].vs, kSuspects[e.fam].ps, g.ids.id(e.rt), e.rtW, e.rtH, e.rtFmt, e.dsv ? g.ids.id(e.dsv) : 0u, e.draws, before, e.after, e.inst,
+                            e.firstSeq, e.lastSeq, e.vp[0], e.vp[1], e.vp[2], e.vp[3], e.sc[0], e.sc[1], e.sc[2], e.sc[3], e.ds.depthEnable ? "on" : "off", e.ds.depthFunc,
+                            e.ds.depthWrite ? "yes" : "no", e.ds.stencilEnable ? "on" : "off", e.ds.ref, e.ds.rmask, e.ds.wmask, e.ds.func, e.ds.ops[0], e.ds.ops[1], e.ds.ops[2],
+                            e.stateVaries ? " [the state VARIES between draws]" : "", e.drv.distinct, top);
+            ++g.susLines;
+        }
+    }
+    g.susN = 0;
+    g.cbN = 0;
+    g.cbDsv[0] = g.cbDsv[1] = nullptr;
+    g.cbPerDsv[0] = g.cbPerDsv[1] = 0;
+}
+
 void flushRingPath(uint32_t frame) {
     const bool sample = frame % kFingerEvery == 0 || frame - g.rv.win.startFrame < kRingFirstFrames;
     for (uint32_t i = 0; i < g.rpN; ++i) {
@@ -1434,8 +2003,10 @@ void flushRingPath(uint32_t frame) {
 
 void flushDraws(uint32_t frame) {
     flushCompositors(frame);
+    flushSuspects(frame);
     flushRingPath(frame);
     g.drawSeq = g.ringSeqFirst = g.ringSeqLast = g.ringSeqN = 0;
+    g.sched.newFrame();
     const bool line = frame % kFingerEvery == 0 && g.gbufLines < kMaxGbufLines;
     for (uint32_t i = 0; i < g.gdN; ++i) {
         State::GDraw& d = g.gd[i];
@@ -1656,6 +2227,43 @@ void emitSummary() {
                                     g.windowNo, i + 1, g.ctotN, eyeText, static_cast<unsigned long long>(t.vs), static_cast<unsigned long long>(t.ps), t.rtId, t.w, t.h, t.fmt, t.slot,
                                     t.frames, t.draws, t.order[1], t.order[2], t.order[3], t.order[0]);
                 }
+            }
+            // v10: the suspect quad families, per eye
+            {
+                bool any = false;
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    for (uint32_t f = 0; f < 4; ++f) {
+                        const State::SusTot& t = g.susTot[eye][f];
+                        if (!t.frames) continue;
+                        any = true;
+                        Log::get().note("fss tiles: window %u suspect family %u (vs %08X ps %08X) eye%u -- frames %u, draws %u (most in a frame %u, mean %.1f), before the composite %u, after it %u, instances %u",
+                                        g.windowNo, f, kSuspects[f].vs, kSuspects[f].ps, eye, t.frames, t.draws, t.maxDraws, static_cast<double>(t.draws) / static_cast<double>(t.frames),
+                                        t.before, t.after, t.inst);
+                    }
+                }
+                if (!any) Log::get().note("fss tiles: window %u suspects -- none of the four suspect families (VS 5DA53D8B / 4A0748B6 with the PS prefixes E23C4525, BF0CE0DA, 1E1E004B, 4411D5EF) drew in this capture", g.windowNo);
+                else {
+                    uint32_t last = 0;
+                    for (uint32_t i = 0; i < 64; ++i) if (g.susSeries[0][i] || g.susSeries[1][i]) last = i + 1;
+                    for (uint32_t i = 0; i < last; i += 16) {
+                        char sr[400];
+                        size_t sra = 0;
+                        sr[0] = 0;
+                        for (uint32_t k = i; k < last && k < i + 16 && sra + 20 < sizeof(sr); ++k) sra += static_cast<size_t>(std::snprintf(sr + sra, sizeof(sr) - sra, "%s%u:%u/%u", k > i ? " " : "", k, g.susSeries[0][k], g.susSeries[1][k]));
+                        Log::get().note("fss tiles: window %u suspect draws a frame, eye0/eye1, by frames since the capture started, %u-%u: %s", g.windowNo, i, (i + 16 < last ? i + 16 : last) - 1, sr);
+                    }
+                }
+                Log::get().note("fss tiles: window %u ring dump -- %u eye-frame(s) queued (arrival +0..+%u), %u processed, %u skipped (the slot's read-back still pending), %u incomplete or dropped; %u grey image(s) in edvr_logs\\fsstiles "
+                                "as v10_f<frame>_e<eye>_<rt_before|rt_after|rt_final|depth_min|depth_max|stencil_max|verdict>.pgm, one texel a %u px block (colour class x28, depth x255, stencil as is, verdict class x40: "
+                                "0 not black, 1 rejected by depth, 2 overwritten after the composite, 3 never covered, 4 written black, 5 no depth)",
+                                g.windowNo, g.capsQueued, kDumpFrames - 1, g.capsDone, g.capSkipped, g.capIncomplete, g.dumpFiles, kBlockPx);
+                for (uint32_t eye = 0; eye < 2; ++eye) {
+                    Log::get().note("fss tiles: window %u verdict totals eye%u over the processed frames -- black blocks: rejected by depth %u, overwritten after the composite %u, never covered %u, written black %u, no depth %u",
+                                    g.windowNo, eye, g.verdictTotal[eye][kRejected], g.verdictTotal[eye][kOverwritten], g.verdictTotal[eye][kNeverCovered], g.verdictTotal[eye][kWroteBlack], g.verdictTotal[eye][kNoDepth]);
+                }
+                Log::get().note("fss tiles: window %u verdict asymmetry over %u frame(s) with both eyes -- black in eye0 and not eye1: rejected %u, overwritten %u, never covered %u, written black %u, no depth %u | black in eye1 and not eye0: "
+                                "rejected %u, overwritten %u, never covered %u, written black %u, no depth %u", g.windowNo, g.asymFrames, g.asymTotal[0][kRejected], g.asymTotal[0][kOverwritten], g.asymTotal[0][kNeverCovered],
+                                g.asymTotal[0][kWroteBlack], g.asymTotal[0][kNoDepth], g.asymTotal[1][kRejected], g.asymTotal[1][kOverwritten], g.asymTotal[1][kNeverCovered], g.asymTotal[1][kWroteBlack], g.asymTotal[1][kNoDepth]);
             }
             // the fill series, kFillEvery frames apart, in lines of 24
             if (!g.ringFillN) {
@@ -1913,6 +2521,11 @@ void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
     if (!g.rv.win.capturing) return;
     guardedBudget(g.budget, [&] {
         const uint32_t seq = ++g.drawSeq;   // the draw's order index in the frame, every draw noted
+        const bool dumping = g.dumpTo != 0 && g.frame <= g.dumpTo;
+        if (dumping) {   // "just after the composite" is just before the next draw
+            const uint32_t due = g.sched.takeAfter();
+            if (due) snapAfter(ctx, due);
+        }
         void* rtv = bindingGet(BindSlot::Rtv0);
         if (!rtv) return;
         uint32_t shape = 0;
@@ -1920,7 +2533,18 @@ void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
         if (!res) return;
         ringhook::Current rc;
         if (fssRingHookCurrent(&rc)) ringPathRecord(ctx, rtv, res, rc, instances, seq);
-        else if (g.ringTargetRef) compositorCheck(ctx, rtv, res, shape, instances, seq);
+        else if (g.ringTargetRef) {
+            bool isComposite = false;
+            compositorCheck(ctx, rtv, res, shape, instances, seq, &isComposite);
+            if (isComposite) {   // known all through the capture (the suspects' before / after), snapshotted only inside the dump window
+                const uint32_t eye = compositeEye(res);
+                if (eye < 2 && g.sched.composite(eye, seq) && dumping) snapBefore(ctx, res, eye, seq);
+            }
+        }
+        if (!fssRingHookCurrent(&rc)) {
+            const int fam = suspectIndex(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));
+            if (fam >= 0) suspectRecord(ctx, rtv, res, fam, instances, seq);
+        }
         const int i = g.watch.find(res);
         if (g.watchGbuf && i >= 0 && g.watch.role[i] >= Role::Gbuf8 && g.watch.role[i] <= Role::Ring3) {
             const Role role = g.watch.role[i];
@@ -2025,6 +2649,7 @@ void fssTilesNoteZoomSignal(uint32_t frameNo, bool press, uint32_t chromeAgo) {
 
 void fssTilesFrameBoundary(uint32_t frameNo, uint32_t chromeAgo, bool focusKnown, bool focus) {
     if (g.rv.win.capturing) {
+        finishFrameSnaps(g.frame);   // v10: the end-of-frame snapshot of each eye's composite target
         ringSnapshot(g.frame);   // the offscreen layer at the end of the frame, after the frame's ring draws
         flushDraws(g.frame);
         flushLedger(g.frame);
@@ -2108,6 +2733,8 @@ void fssTilesFrameBoundary(uint32_t frameNo, uint32_t chromeAgo, bool focusKnown
                         kMaxLinesPerWindow, kRevealFrames, kMaxAutoRuns);
         if (o.armed) {
             armGlue(frameNo);
+            g.dumpTo = frameNo + kDumpFrames - 1;
+            Log::get().note("fss tiles: ring dump armed at f=%u until f=%u: per eye, the composite's target just before, just after and at the end of the frame, and the bound depth and stencil, as %u px blocks.", frameNo, g.dumpTo, kBlockPx);
             Log::get().note("fss tiles: arrival at f=%u (the ring pass, camera %d: ring+0x6b0 set, scan alpha %.3f, scanner chrome held): the capture starts here. Capture continues "
                             "until f=%u (%u frames); %u automatic eye run(s), the first at f=%u (offsets %u, %u, %u; planned %u of %u this session); ledger %u frames; fill series every %u frames; "
                             "input, gbuf, ring path, ring call and compositor lines follow.",
@@ -2156,6 +2783,9 @@ void fssTilesFrameBoundary(uint32_t frameNo, uint32_t chromeAgo, bool focusKnown
     }
     fssRingHookWindow(g.rv.win.capturing, g.windowNo, frameNo);
     drainRingSnap(frameNo);
+    drainCaps(frameNo);
+    drainCb(frameNo);
+    if (g.dumpTo && frameNo > g.dumpTo + 45 && !capsPending()) { capReleaseAll(); g.dumpTo = 0; }
     if (g.summaryDue && (!pendingReadbacks() || frameNo >= g.summaryAfterFrame)) emitSummary();
     refreshActive();
 }
