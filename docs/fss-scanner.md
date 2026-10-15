@@ -43,12 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next (after flight 38aef250, v10, VALID):** the left composite leaves the
-  ring's near arc UNCOVERED at f18888-95 while the right covers it, from the
-  same draw and the same layer. Depth, a later overwrite and the suspect quads
-  are ruled out. The missing region is the ring's front arc, not a crop.
-  Static analysis cannot reach the shader bytecode. Next flight (v11): set
-  `advanced.glare_shader_dump = 1` too; read the composite's t1-t3 per eye.
+- **Next (v11, built, not flown):** the left composite leaves the ring's near
+  arc uncovered at f18888-95, the right covers it; same draw and layer. Depth,
+  overwrite and the suspect quads are ruled out. v11 logs every input of the
+  composite per eye (PS t0-t7 fingerprinted, t1-t3 in every frame +9..+17;
+  cb0-cb2; vertices; samplers), their diff, and the producers of t1-t3. Flight:
+  `off`, one zoom, plus `advanced.glare_shader_dump = 1`. Read `composite diff`.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -3289,6 +3289,94 @@ filled.
 Fix direction, unchanged: hook the composite by shader identity and give the
 right eye's composite the left eye's state of the differing input for the
 reveal frames, so both eyes animate. Not built.
+
+## 2026-10-15 (v11): every input of the composite draw, per eye (built, not flown)
+
+Flight 38aef250 (v10): for about 8 arrival frames the left eye's composite
+(VS 953C8123 / PS A473A867), sampling the same layer, leaves the ring's near
+arc uncovered while the right eye's covers it. Depth, overwrite, ordering and
+the suspect quads are ruled out. The static pass (above) could not reach the
+shader and named one deciding field: the composite binds four pixel-shader
+textures (the v9 census: `@60,@221,@221,@221` at the first arrival frame, later
+`@70,@224,@225,@226`), and only the ring layer in one of them was ever read.
+v11 reads all of them. Same arrival trigger as v9 (the replay case is kept).
+Full `build.bat` green, fss_tiles_test, no config key.
+
+Flight plan: `fix.fss_eye_sync = off`, one zoom, no other keys, plus
+`advanced.glare_shader_dump = 1` (Sean sets it; it writes every VS/PS the game
+creates to `edvr_logs\shaders` by hash, so the composite's bytecode lands the
+same session and says what each slot means; set it back to 0 afterwards).
+
+At the composite draw of each eye, arrival +0..+30 (the v10 dump window):
+
+- **Pixel-shader textures t0-t7.** Identity (resource id), size, format,
+  resource mips and array size, the view's dimension, format, mip range and
+  slice range, and a 16 px block reduction of the mip and slice the view reads
+  (mip chain, GPU), read back without waiting. Per slot: an exact hash of the
+  block texels, the number of blocks that are not black and the span of those
+  blocks (`lit blocks span x a-b y c-d`, or `NO block is lit`). A buffer view
+  or a compressed or multisampled texture says why it has no fingerprint.
+- **Constant buffers.** Vertex cb0-cb2 and pixel cb0-cb2, the bound range
+  (first constant, constants bound), up to 512 bytes each, read back. Floats
+  logged in full at arrival +0 and +5, 16 words a line.
+- **Vertices.** The draw's kind and count, topology, input layout id, vertex
+  buffer (id, stride, offset, size), index buffer, viewport and scissor, and
+  the first 6 vertices (up to 8 floats each; by index for an indexed draw).
+  "No vertex buffer is bound" is said when the vertex shader makes the quad.
+- **Samplers s0-s3:** filter, address modes, border colour, LOD, anisotropy,
+  comparison.
+
+Log lines:
+
+- `composite inputs f=F eyeE t3 T95 1008x1008 fmt26 (...) view dim 4 fmt 26 mip
+  0+1 slice 0+1 | blocks 63x63 fingerprint H, N not black, lit blocks span ..`:
+  every bound slot at arrival +0 and +5; later only a slot that changed since
+  that eye's last frame; and t1-t3 in EVERY frame +9..+17 (the deciding field),
+  at the full 16 px block resolution. Also `composite inputs ... sN ...`,
+  `... vs|ps cbN ...` (header and words) and `... vertices: ...`.
+- `composite diff f=F (arrival +N): ...`: one line a frame naming every input
+  that differs between the eyes (identity, view, shape, content with both
+  fingerprints, `[the SAME resource changed between the two draws]`, a
+  constant buffer's range, a sampler, the vertex stage), or "no input differs
+  between the eyes". Then for each constant buffer that differs
+  `composite diff f=F <stage cbN> words that differ, eye0 | eye1`: the first 12
+  words, hex and float.
+- `window N composite diff tK -- ...`, `... <stage cbN> -- ...` and
+  `window N composite diff -- inputs that DIFFERED between the eyes: ... |
+  inputs that never differed: ...`: the per-capture summary naming each one.
+- Images in `edvr_logs\fsstiles`: `v11_f<frame>_e<eye>_t<slot>.pgm` (one texel a
+  16 px block, brightness class x28) for every input whose identity or content
+  differs between the eyes, and for t1, t2 and t3 of both eyes in every frame
+  +9..+17 whether they differ or not.
+
+Producers (who should have filled an input). While the dump window runs,
+every draw into any render target is tallied for the frame by target, VS, PS,
+depth buffer and, inside a ring-pass call, camera and role. At the end of each
+dump frame, for each eye's composite and each distinct texture in its t1-t3:
+
+- `composite producer f=F eyeE's t1,t2 T224 WxH fmtN: vs .. ps .., N draw(s)
+  #a..#b, inside the ring pass, camera C role R | outside the ring pass, with
+  eye 0's|eye 1's depth T..; BEFORE|AFTER eye 0's composite (#n) and
+  BEFORE|AFTER eye 1's (#m)`, up to six producer entries a texture; or
+  `NO draw rendered into it this frame (it was filled earlier, by a compute
+  shader, a copy or a clear, or never)`.
+- Limit: draws only. A texture filled by a dispatch, a copy or a clear shows as
+  "no draw". The tile-renderer dispatches are logged elsewhere in the capture.
+
+How to read it:
+
+1. `capture N valid=yes`, three eye runs, `ring dump armed`.
+2. `composite diff` per frame: which inputs differ and in which frames. Frames
+   +9..+17 of the arrival are the ones that matter (the v10 gap was f18888-95).
+3. If t1, t2 or t3 is lit over the near-arc blocks in the right eye and not in
+   the left (`lit blocks span`, the `.pgm` pair), that slot is the cause. The
+   producer lines for it name the draw, the camera and whether it came before
+   the composite; a producer that is absent, late (AFTER the composite) or only
+   in one eye's depth is the finding.
+4. If t1-t3 match per eye, the constant words that differ are next
+   (`words that differ`); then the shader bytecode, from the dump.
+5. If t1-t3 are the same texture as t2 at +0..+8 and three textures later, the
+   identity columns show the change frame.
 
 ## Open
 
