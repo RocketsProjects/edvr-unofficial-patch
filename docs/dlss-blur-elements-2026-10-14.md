@@ -57,8 +57,8 @@
   light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (4); FUN_14369C9C0 as the railing's writer (hooked, 0 calls since launch);
   B75A6FF2 as an effect-only pair (~7M px/draw, the sky; flight d3013197); 68DDDEF0 as a weapons-only pair (constant ~200k px/draw background particles; hiding them
   shimmered the stars, flight 40b6dbc0). Option A has no safe pair left.
-- **Next flight:** rim: `fix.sun_glare = off` against vivid (does the rim shimmer persist?), then HMD Quality 1.0. Aim: press the inspector key once (a "+" shows at
-  the head-forward point), then again within 3 s; the box is 48 px. Option A: `effect history:` census line, key `advanced.effect_history`.
+- **Cockpit rim (static outline crawls against a star, converges never):** ruled out: sun glare (persists with fix.sun_glare = off); upscale ratio (persists at HMD Quality
+  1.0); motion, 10 m split, kind-4, history reset (capture 04:54). Open: the jitter the rim is drawn with (journal 2026-10-15, jitter check). Next: a temporary jitter A/B key.
 
 ## Triage
 
@@ -236,3 +236,18 @@ arrived (a menu, no VR), none was a candidate, or none reached the window.
   0.0003 px of expect_world; the layers differ by 0.025 px. So the rim is not a motion error, not the 10 m split (2.5 m), not kind-4. The one translucent draw over it that
   moves differently is #250, VS 94D5C556DFD6D705 (the sun-glare train, verdict glare-steady, additive, depth test off, 15 instances, 5 layers at the centre), also taken as
   `holo=cockpit` by the generic hologram pass, with no pixel on path 8.
+
+- **2026-10-15, the jitter check for the cockpit rim (read-only).** Sean: the outline crawls against the star with no movement, facing the star; it persists with
+  fix.sun_glare = off and at HMD Quality 1.0 (ruled out: sun glare, upscale ratio). Numeric check from the 04:45:43 log (render 2016x2017) and the code. Frame 2785 mod 8
+  + 1 = 2: Halton(2,2)-0.5 = -0.25, Halton(2,3)-0.5 = +0.1667 px, as published. Tangent shift (temporal_math.h temporalJitterToTangents) dx = -jx (r-l)/w = 0.000264001,
+  dy = jy (b-t)/h = 0.000175997: (r-l)/w = (b-t)/h = 0.001056, square pixels, both eyes equal; (r-l) = 2.129 at 2016. DLSS is handed px = -dx w/(r-l) = jx exactly
+  (native_temporal.cpp:508-511; signX = signY = 1, lag off: readConfig hard-codes them, the old advanced.temporal_aa_jitter_sign/_lag instruments are gone), the
+  convention being content displaced right/down by the jitter, as UE's. The game's projection took the shift: the light-grid probe's row-2 deltas are 2 d(dx)/(r-l) =
+  0.25 x 2/2016 = 0.000248016 (logged 0.00024803) and 0.3333 x 2/2017 = 0.00033052 (logged 0.000330441), same sign. Caveats: that probe compares consecutive cluster-
+  builder calls (the main camera), so it does not show what the cockpit draw's projection carries; the sign convention was settled on tools\smoke's rig and never flown.
+  Timing: begin() stores the shift for the sequence and treat() of the same sequence reads it, so no off-by-one. Pimax asymmetric frusta: the mapping uses the spans, correct
+  for off-centre tangents. History: capture 04:54 reads hidden 0, engine kind none, no coverage or bias mask, history_reset 0 on all 2304 box pixels; K ignores the
+  bias mask in any case. Remaining candidates: (1) the cockpit shell is drawn with a projection that does not carry the jitter, so its edge stays still while DLSS
+  removes a jitter that was never there (a crawl of the jitter's amplitude, relative to the jittered star: the symptom); (2) the sign convention is wrong for the
+  game's rows; (3) the input is LDR (hdr=0, pre-exposure 1.0, no exposure texture): a clipped star at 1.0 beside a dark rim does not conserve energy between phases.
+  Discriminating A/B: jitter off (the edge should be perfectly still if (1) or (2)); then flip_y, flip_x, flip_both. Not built.
