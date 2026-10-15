@@ -312,6 +312,9 @@ struct State {
     // The prep's refusal census in flat: sampled for a bounded window after the census key (NumLock), so the per-class
     // line names what the finish shows raw instead of the backend's result.
     uint32_t refusalCensusFrames = 0;
+    // advanced.flat_refusal_view: paint the prep's classes into the resolved image. Read once a Present; refusalViewRead makes the first read
+    // say its value, so a refused key shows in the log as "off" rather than as silence.
+    bool refusalView = false, refusalViewRead = false;
     // The camera term's translation precision (design doc section 104): row 275 is the render origin the camera term subtracts
     // frame to frame (cameraBefore, flat_mono_shader_source.h). One 5 s window over the non-reset frames handed to the resolver.
     struct CameraOriginWindow { uint64_t frames = 0, moved = 0; float maxAbs = 0, maxStep = 0, minStep = 0; float last[3] = {}; };
@@ -3740,6 +3743,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const bool enabled = temporalModeEnabled(mode);
     const auto model = Config::get().getString("fix.temporal_aa_model", "k");
     const auto preset = temporalPresetFor(model);
+    const bool refusalViewWanted = Config::get().getBool("advanced.flat_refusal_view", false);
+    if (refusalViewWanted != s.refusalView || !s.refusalViewRead) {
+        s.refusalView = refusalViewWanted; s.refusalViewRead = true;
+        Log::get().note("flat runtime: refusal view %s (advanced.flat_refusal_view): %s", refusalViewWanted ? "on" : "off", flatMonoViewLegend());
+    }
     if (s.preset != preset.full) {
         s.preset = preset.full;
         dlaaSetPreset(preset.full);
@@ -6153,7 +6161,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight; f.frame = s.prefix.frame; f.mode = s.engine;
     f.jitterCycle=s.phase.phaseCount;
     // The refusal census on the copy route too (render below the output: DLSS or FSR upscaling), as on the HDR route.
-    f.refusalView = 0u;
+    f.refusalView = s.refusalView ? 1u : 0u;
     f.refusalCensus = s.refusalCensusFrames > 0;
     if (s.refusalCensusFrames) --s.refusalCensusFrames;
     nativeScale.store(f.renderWidth >= f.outputWidth && f.renderHeight >= f.outputHeight,
@@ -6528,7 +6536,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         return false;
     };
     FlatMonoResolveFrame f{}; f.color = hdrView.Get(); f.depth = s.depthView.Get(); f.hdr = true;
-    f.refusalView = 0u;
+    f.refusalView = s.refusalView ? 1u : 0u;
     f.refusalCensus = s.refusalCensusFrames > 0;
     if (s.refusalCensusFrames) --s.refusalCensusFrames;
     if(selected.mixedCamera) {
