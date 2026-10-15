@@ -5998,6 +5998,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // the game's tonemap re-issued over it, and at the output copy the door and the composite. Every decision is made
     // here, after the scope has planned everything else it does with this draw (a draw it does anything else with is
     // refused, and stays in H as stock).
+    // The back-off trail (log only; flat_ui_layer_math.h's FlatUiTrail): each tone-shaped draw of the frame, with the layer on or off,
+    // and the branch the chain below takes for it.
+    const bool trailDraw = (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) || tone ||
+                           flatUiSourceTonePair(k.vs, k.ps) || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u;
+    if (trailDraw) flatUiTrailNoteDraw(s.prefix.frame, k.vs, k.ps, kind, count, flatUiLayerOn(), hdrTrigger, s.hdrTreated);
     if (flatUiLayerOn()) {
         FlatUiLayerAsk ask = FlatUiLayerAsk::kNotAsked;
         if (copy) {
@@ -6027,8 +6032,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                                                            s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
                                         : "no-plan";
             };
-            if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; }
-            else if (ask == FlatUiLayerAsk::kRefused) {}   // a HUD draw left in H: never also a tone candidate
+            if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kHudAsk); }
+            else if (ask == FlatUiLayerAsk::kRefused) { if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kHudAsk); }   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
             // The registry's tone pass, map tonemap, or the physically verified E894 and EDHM 0D43 LDR-source writers.
@@ -6036,11 +6041,13 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             else if (tone || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u || flatUiSourceTonePair(k.vs, k.ps)) {
                 const char* route = routeSoFar();
                 if (flatUiSourceTonePair(k.vs, k.ps)) {
+                    if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kNamed);
                     // Each physical capture (E894 and 0D43) issued one fullscreen triangle. Keep a partial draw from bootstrapping proof.
                     if ((kind == 'D' || kind == 'N') && count == 3 && instances == 1 && startInstance == 0)
                         uiTone = flatUiLayerSourceToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
                                                                 k.color, k.width, k.height, route);
                 } else {
+                    if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, tone ? FlatUiTrailBranch::kRegistry : FlatUiTrailBranch::kMap);
                     const uint32_t slot = tone ? flat_mono_detail::toneHdrSlot(k.vs, k.ps) : flatUiMapToneSlotOf(k.vs, k.ps);
                     uiTone = flatUiLayerToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, static_cast<int>(slot), k.vs, k.ps,
                                                       slot < 2 ? k.srvResource[slot] : nullptr, k.width, k.height, route);
@@ -6050,6 +6057,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             // Its source is read from the context, not the binding shadow: when this copy is the HDR route's trigger, the
             // resolve ran inside this scope (treatHdr) and the shadow no longer names the draw's bindings (13:23 flight).
             else if (k.ps == flat_mono_detail::kCopyPs) {
+                if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kCopy);
                 FlatComputeInternalScope readGuard;
                 Ptr<ID3D11ShaderResourceView> copySrv;
                 ctx->PSGetShaderResources(0, 1, &copySrv);
@@ -6063,9 +6071,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             else if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) {
                 bool shapeAdmitted = false;
                 if (flatUiLayerShapeToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps, k.color, k.width, k.height,
-                                                  startInstance, routeSoFar(), shapeAdmitted))
+                                                  startInstance, routeSoFar(), shapeAdmitted)) {
                     uiTone = shapeAdmitted;
-                else {
+                    if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kShape);
+                } else {
+                    if (trailDraw) flatUiTrailNoteBranch(s.prefix.frame, FlatUiTrailBranch::kUnknown);
                     flatUiLayerProbeUnknownSourceTone(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
                         k.color, k.width, k.height, kind, count, instances, startInstance);
                     uiTone = flatUiLayerToneAdmit(ctx, s.prefix.frame, k.width, k.height, kind, count, instances, startInstance);
