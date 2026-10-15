@@ -18,6 +18,7 @@ namespace detail {
 extern bool g_fssTilesActive;
 extern bool g_fssTilesWatch;   // a window is capturing and has buffers to watch
 extern bool g_fssTilesDraws;   // ... and has the per-eye textures of the tile dispatch to count draws into
+extern bool g_fssRevealWatch;  // VR profile, the scanner is on show: the reveal fix looks at DrawInstanced calls
 }  // namespace detail
 
 typedef void(__stdcall* FssTilesRealDispatchIndirect)(ID3D11DeviceContext*, ID3D11Buffer*, unsigned int);
@@ -59,6 +60,17 @@ void fssTilesNoteEyeDump();
 // A camera jump or the player's zoom press on this frame, with the frames since the scanner's chrome last matched. The gate accepts it only while the chrome
 // is held; a refused one is logged with its reason.
 void fssTilesNoteZoomSignal(uint32_t frameNo, bool press, uint32_t chromeAgo);
+
+// The reveal fix (flight d7769063): the left eye's reveal composite reads a 63 x 63 downsample of the ring layer drawn before the ring's second draw group. At the first reveal composite
+// of a frame, the frame's first downsample into that same texture is replayed from the finished layer (fss_tiles_replay.h), so the left t1 matches the right one. The game's own un-hooked
+// entry points are passed so the replay is invisible to the hooks (any may be null). Called for every DrawInstanced on the owner context, VR profile only; one bool when the scanner is not
+// on show. The decision is fsstiles::RevealReplay (fss_tiles_core.h).
+struct FssRealCalls {
+    void* vsSetCb = nullptr; void* psSetCb = nullptr; void* psSetSrv = nullptr; void* vsSetSrv = nullptr; void* vsSetShader = nullptr; void* psSetShader = nullptr;
+    void* omSetRts = nullptr; void* omSetBlend = nullptr; void* rsSetViewports = nullptr; void* drawInstanced = nullptr;
+};
+void fssRevealOnDrawSlow(ID3D11DeviceContext* ctx, const FssRealCalls& calls, uint32_t perInstance, uint32_t instances, uint32_t startVertex, uint32_t startInstance);
+inline bool fssRevealWatching() { return detail::g_fssRevealWatch; }
 
 // A zoom window is open, a read-back is outstanding, or a summary is owed: the DispatchIndirect hook must call in.
 inline bool fssTilesActive() { return detail::g_fssTilesActive; }

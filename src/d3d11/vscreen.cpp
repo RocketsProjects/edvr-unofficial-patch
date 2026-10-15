@@ -4975,6 +4975,22 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    // The reveal fix (VR profile only; flat never gets here with the watch on): at the first reveal composite of a frame, re-run the frame's first downsample of the FSS ring layer. Before the
+    // instrument sees this draw, and through the game's own un-hooked entry points, so nothing tracking state sees the replay.
+    if (fssRevealWatching() && !foreignContext(self) && !runtimeFlatProfile()) {
+        FssRealCalls rc;
+        rc.vsSetCb = reinterpret_cast<void*>(g_state->realVSSetConstantBuffers);
+        rc.psSetCb = reinterpret_cast<void*>(g_state->realPSSetConstantBuffers);
+        rc.psSetSrv = reinterpret_cast<void*>(g_state->realPSSetShaderResources);
+        rc.vsSetSrv = reinterpret_cast<void*>(g_state->realVSSetShaderResources);
+        rc.vsSetShader = reinterpret_cast<void*>(g_state->realVSSetShader);
+        rc.psSetShader = reinterpret_cast<void*>(g_state->realPSSetShader);
+        rc.omSetRts = reinterpret_cast<void*>(g_state->realOMSetRenderTargets);
+        rc.omSetBlend = reinterpret_cast<void*>(g_state->realOMSetBlendState);
+        rc.rsSetViewports = reinterpret_cast<void*>(g_state->realRSSetViewports);
+        rc.drawInstanced = reinterpret_cast<void*>(g_state->realDrawInstanced);
+        fssRevealOnDrawSlow(self, rc, perInstance, instances, startVertex, startInstance);
+    }
     if (!foreignContext(self)) fssTilesNoteDraw(self, 'N', perInstance, instances);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'N', perInstance, instances);
     if (runtimeFlatProfile()) {

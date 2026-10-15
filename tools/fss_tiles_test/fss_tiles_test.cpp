@@ -30,6 +30,7 @@
 #include "../../src/d3d11/fss_ring_core.h"
 #include "../../src/d3d11/fss_tiles_core.h"
 #include "../../src/d3d11/fss_tiles_d3d.h"
+#include "../../src/d3d11/fss_tiles_replay.h"
 
 using Microsoft::WRL::ComPtr;
 namespace ft = edvr::fsstiles;
@@ -1126,6 +1127,174 @@ void testV11Gpu(Gpu& g) {
     g.ctx->PSSetSamplers(0, 1, ns);
 }
 
+void testV12Gpu(Gpu& g) {
+    ID3D11Device* d = g.dev.Get();
+    ComPtr<ID3D11DeviceContext1> c1;
+    g.ctx.As(&c1);
+    const char* vsSrc = "float4 main(uint id : SV_VertexID) : SV_Position { float2 p = float2((id << 1) & 2, id & 2); return float4(p * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0); }";
+    const char* psSrc = "cbuffer C2 : register(b2) { float4 col; } Texture2D t0 : register(t0); float4 main(float4 p : SV_Position) : SV_Target { return col + t0.Load(int3(0, 0, 0)) * 0.0; }";
+    ComPtr<ID3DBlob> vsb, psb, err;
+    check(SUCCEEDED(D3DCompile(vsSrc, std::strlen(vsSrc), "v", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &err)), "the test vertex shader compiles");
+    check(SUCCEEDED(D3DCompile(psSrc, std::strlen(psSrc), "p", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &err)), "the test pixel shader compiles");
+    if (!vsb || !psb) return;
+    ComPtr<ID3D11VertexShader> vs;
+    ComPtr<ID3D11PixelShader> ps;
+    d->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &vs);
+    d->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &ps);
+    auto makeTex = [&](uint32_t w, UINT bind, ComPtr<ID3D11Texture2D>& t) {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = w; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.BindFlags = bind;
+        return SUCCEEDED(d->CreateTexture2D(&td, nullptr, &t));
+    };
+    ComPtr<ID3D11Texture2D> texT, texC, texL;
+    check(makeTex(8, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, texT) && makeTex(8, D3D11_BIND_RENDER_TARGET, texC) && makeTex(4, D3D11_BIND_SHADER_RESOURCE, texL), "the replay test textures");
+    ComPtr<ID3D11RenderTargetView> rtvT, rtvC;
+    ComPtr<ID3D11ShaderResourceView> srvT, srvL;
+    d->CreateRenderTargetView(texT.Get(), nullptr, &rtvT);
+    d->CreateRenderTargetView(texC.Get(), nullptr, &rtvC);
+    d->CreateShaderResourceView(texT.Get(), nullptr, &srvT);
+    d->CreateShaderResourceView(texL.Get(), nullptr, &srvL);
+    // two constant buffers: B (the downsample's, red) and A (the composite's, blue)
+    const float red[4] = {1, 0, 0, 1}, green[4] = {0, 1, 0, 1}, blue[4] = {0, 0, 1, 1};
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA sr{red, 0, 0}, sb{blue, 0, 0};
+    ComPtr<ID3D11Buffer> bufB, bufA;
+    d->CreateBuffer(&bd, &sr, &bufB);
+    d->CreateBuffer(&bd, &sb, &bufA);
+    // two of every state object that differs between the two draws
+    D3D11_RASTERIZER_DESC rd{};
+    rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> rsB, rsA;
+    d->CreateRasterizerState(&rd, &rsB);
+    rd.ScissorEnable = TRUE;
+    d->CreateRasterizerState(&rd, &rsA);
+    D3D11_BLEND_DESC bld{};
+    bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    bld.RenderTarget[0].SrcBlend = bld.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    bld.RenderTarget[0].DestBlend = bld.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    bld.RenderTarget[0].BlendOp = bld.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    ComPtr<ID3D11BlendState> bsB, bsA;
+    d->CreateBlendState(&bld, &bsB);
+    bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+    d->CreateBlendState(&bld, &bsA);
+    D3D11_DEPTH_STENCIL_DESC dsd{};
+    dsd.DepthEnable = FALSE; dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO; dsd.DepthFunc = D3D11_COMPARISON_LESS; dsd.StencilEnable = FALSE;
+    dsd.StencilReadMask = 0xFF; dsd.StencilWriteMask = 0xFF;
+    dsd.FrontFace.StencilFailOp = dsd.FrontFace.StencilDepthFailOp = dsd.FrontFace.StencilPassOp = D3D11_STENCIL_OP_KEEP; dsd.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS;
+    dsd.BackFace = dsd.FrontFace;
+    ComPtr<ID3D11DepthStencilState> dssB, dssA;
+    d->CreateDepthStencilState(&dsd, &dssB);
+    dsd.DepthFunc = D3D11_COMPARISON_GREATER_EQUAL; dsd.StencilReadMask = 1;
+    d->CreateDepthStencilState(&dsd, &dssA);
+    D3D11_SAMPLER_DESC smd{};
+    smd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT; smd.AddressU = smd.AddressV = smd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; smd.ComparisonFunc = D3D11_COMPARISON_NEVER; smd.MaxLOD = D3D11_FLOAT32_MAX;
+    ComPtr<ID3D11SamplerState> smpB, smpA;
+    d->CreateSamplerState(&smd, &smpB);
+    smd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    d->CreateSamplerState(&smd, &smpA);
+    const float zero[4] = {0, 0, 0, 0};
+    const D3D11_VIEWPORT vp8{0, 0, 8, 8, 0, 1}, vpA{1, 1, 6, 6, 0, 1};
+    const D3D11_RECT scA{1, 1, 7, 7};
+
+    // the downsample's state (B): it draws into T from L with the red constant
+    g.ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g.ctx->VSSetShader(vs.Get(), nullptr, 0);
+    g.ctx->PSSetShader(ps.Get(), nullptr, 0);
+    ID3D11Buffer* cb = bufB.Get();
+    g.ctx->PSSetConstantBuffers(2, 1, &cb);
+    ID3D11ShaderResourceView* sv = srvL.Get();
+    g.ctx->PSSetShaderResources(0, 1, &sv);
+    ID3D11RenderTargetView* rt = rtvT.Get();
+    g.ctx->OMSetRenderTargets(1, &rt, nullptr);
+    g.ctx->RSSetViewports(1, &vp8);
+    g.ctx->RSSetState(rsB.Get());
+    g.ctx->OMSetBlendState(bsB.Get(), nullptr, 0xFFFFFFFFu);
+    g.ctx->OMSetDepthStencilState(dssB.Get(), 5);
+    ID3D11SamplerState* ss = smpB.Get();
+    g.ctx->PSSetSamplers(0, 1, &ss);
+    ft::DrawState rec;
+    ft::CbPool pool;
+    check(ft::captureState(d, g.ctx.Get(), c1.Get(), &pool, rec) && rec.valid && rec.psCb[2] != nullptr && rec.psCb[2] != bufB.Get() && rec.rtv[0] == rtvT.Get() && rec.ps == ps.Get(),
+          "the downsample's state is captured with its constant buffer replaced by a private copy");
+    rec.perInstance = 3;
+    rec.instances = 1;
+    // the game moves on: T is cleared, the downsample's constant buffer is rewritten (green), and the composite's state (A) is bound, with T as its input t1
+    g.ctx->ClearRenderTargetView(rtvT.Get(), zero);
+    g.ctx->UpdateSubresource(bufB.Get(), 0, nullptr, green, 0, 0);
+    cb = bufA.Get();
+    g.ctx->PSSetConstantBuffers(2, 1, &cb);
+    rt = rtvC.Get();
+    g.ctx->OMSetRenderTargets(1, &rt, nullptr);   // T stops being an output first: binding it as an input while it is still a render target would unbind it
+    ID3D11ShaderResourceView* svs[2] = {srvL.Get(), srvT.Get()};
+    g.ctx->PSSetShaderResources(0, 2, svs);
+    g.ctx->ClearRenderTargetView(rtvC.Get(), zero);
+    g.ctx->RSSetViewports(1, &vpA);
+    g.ctx->RSSetScissorRects(1, &scA);
+    g.ctx->RSSetState(rsA.Get());
+    const float bfA[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+    g.ctx->OMSetBlendState(bsA.Get(), bfA, 0xFFFFFFF0u);
+    g.ctx->OMSetDepthStencilState(dssA.Get(), 3);
+    ss = smpA.Get();
+    g.ctx->PSSetSamplers(0, 1, &ss);
+    ft::DrawState a1;
+    ft::captureState(d, g.ctx.Get(), c1.Get(), nullptr, a1);
+    bool verified = false;
+    ft::ReplayCalls noCalls;
+    const bool done = ft::replayDraw(d, g.ctx.Get(), c1.Get(), noCalls, rec, &verified);
+    ft::DrawState a2;
+    ft::captureState(d, g.ctx.Get(), c1.Get(), nullptr, a2);
+    check(done && verified && ft::sameState(a1, a2), "the state after the replay equals the state before it (read back through the API, every stage the draw touches)");
+    check(a2.rtv[0] == rtvC.Get() && a2.psSrv[1] == srvT.Get() && a2.psSrv[0] == srvL.Get(), "the composite's own target and its inputs (t1 is the texture the replay drew into) are back");
+    check(a2.psCb[2] == bufA.Get() && a2.rs == rsA.Get() && a2.bs == bsA.Get() && a2.dss == dssA.Get() && a2.psSmp[0] == smpA.Get() && a2.ps == ps.Get(), "its constants, rasterizer, blend, depth-stencil, sampler and shader are back");
+    check(a2.stencilRef == 3 && a2.sampleMask == 0xFFFFFFF0u && a2.bf[1] == 0.5f, "its stencil reference, sample mask and blend factor are back");
+    check(a2.nvp >= 1 && a2.vp[0].TopLeftX == 1.0f && a2.vp[0].Width == 6.0f && a2.nsc >= 1 && a2.sc[0].right == 7, "its viewport and scissor are back");
+    // what the replay drew: T holds the downsample's red (the copied constant, not the rewritten green); the composite's target is untouched
+    auto readPixel = [&](ID3D11Texture2D* tex, uint8_t* out) {
+        D3D11_TEXTURE2D_DESC td{};
+        tex->GetDesc(&td);
+        td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> st;
+        if (FAILED(d->CreateTexture2D(&td, nullptr, &st))) return false;
+        g.ctx->CopyResource(st.Get(), tex);
+        g.ctx->Flush();
+        D3D11_MAPPED_SUBRESOURCE m{};
+        for (int tries = 0; tries < 200; ++tries) {
+            if (SUCCEEDED(g.ctx->Map(st.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m))) {
+                std::memcpy(out, m.pData, 4);
+                g.ctx->Unmap(st.Get(), 0);
+                return true;
+            }
+            Sleep(5);
+        }
+        return false;
+    };
+    uint8_t pt[4] = {}, pc[4] = {};
+    const bool rt1 = readPixel(texT.Get(), pt), rt2 = readPixel(texC.Get(), pc);
+    check(rt1 && pt[0] > 250 && pt[1] == 0 && pt[2] == 0, "the replay drew the downsample's red from its private copy of the constant buffer, not the green it was rewritten to");
+    check(rt2 && pc[0] == 0 && pc[1] == 0 && pc[2] == 0 && pc[3] == 0, "the composite's render target was not drawn into");
+    // a second replay from the same record is as clean
+    verified = false;
+    check(ft::replayDraw(d, g.ctx.Get(), c1.Get(), noCalls, rec, &verified) && verified, "a second replay from the same record also restores the state exactly");
+    // an invalid record draws nothing
+    ft::DrawState empty;
+    check(!ft::replayDraw(d, g.ctx.Get(), c1.Get(), noCalls, empty, nullptr), "a record with no state is not replayed");
+    a1.release(); a2.release(); rec.release(); pool.release();
+    // leave the pipeline clean
+    ID3D11ShaderResourceView* none[8] = {};
+    g.ctx->PSSetShaderResources(0, 8, none);
+    g.ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    ID3D11Buffer* nb[1] = {};
+    g.ctx->PSSetConstantBuffers(2, 1, nb);
+    g.ctx->VSSetShader(nullptr, nullptr, 0);
+    g.ctx->PSSetShader(nullptr, nullptr, 0);
+    g.ctx->RSSetState(nullptr);
+    g.ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+    g.ctx->OMSetDepthStencilState(nullptr, 0);
+    ID3D11SamplerState* nsmp[1] = {};
+    g.ctx->PSSetSamplers(0, 1, nsmp);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // 4. Source pins
 
@@ -1288,6 +1457,77 @@ void testV10Pure() {
     for (uint32_t h : {1u, 2u, 1u, 3u, 1u, 4u, 5u, 6u, 7u, 8u}) dt.add(h);
     check(dt.distinct == 8 && dt.used == ft::DriverTally::kCap && dt.hash[0] == 1 && dt.n[0] == 3, "the binding-hash tally counts every distinct hash and keeps the first few");
     check(ft::fnvStep(ft::kFnvBasis, 1) != ft::fnvStep(ft::kFnvBasis, 2), "the binding hash tells draws apart");
+}
+
+// ---- v12: the reveal fix's decisions -----------------------------------------------------------------------------------------------------------------------------------------
+void testV12Pure() {
+    check(ft::kRevealCompVs == 0x953C8123AD8DC13Bull && ft::kRevealCompPs == 0xA473A867BDDBC342ull && ft::kRevealDownVs == 0xDEF19B035D5EDEDCull && ft::kRevealDownPs == 0x831DF02EBA8AE814ull,
+          "the reveal composite and the downsample are named by the whole 64-bit hashes of both shaders");
+    int T121 = 0, other = 0, layer = 0;
+    int idx = -1;
+    // the stock order of flight d7769063: the first downsample (#216) is drawn before the left composite (#219), the second (#252) before the right one (#253)
+    {
+        ft::RevealReplay r;
+        const int rec = r.record(&T121);
+        check(rec == 0, "the first downsample of the frame is recorded");
+        check(r.composite(false, &T121, &idx) == ft::RevealReplay::Replay && idx == 0, "the first composite replays the downsample recorded into its own t1");
+        r.record(&T121);   // the second downsample, drawn by the game as it always did
+        check(r.composite(false, &T121, &idx) == ft::RevealReplay::DeclDone, "the second composite of the frame decides nothing");
+        r.endFrame();
+        check(r.frames == 1 && r.framesWithComposite == 1 && r.framesReplayed == 1 && r.framesDeclined[ft::RevealReplay::DeclNoRecord] == 0 && r.records == 2, "the frame is tallied as replayed");
+    }
+    // a hash-only match on another target is declined: the downsample shaders also make generic copies
+    {
+        ft::RevealReplay r;
+        r.record(&other);
+        const ft::RevealReplay::Decision d = r.composite(false, &T121, &idx);
+        r.endFrame();
+        check(d == ft::RevealReplay::DeclOtherTarget && r.framesReplayed == 0 && r.framesDeclined[ft::RevealReplay::DeclOtherTarget] == 1, "a downsample into another texture than the composite's t1 is declined");
+    }
+    // there is no replay without a recorded downsample that frame
+    {
+        ft::RevealReplay r;
+        check(r.composite(false, &T121, &idx) == ft::RevealReplay::DeclNoRecord, "no replay without a recorded downsample");
+        r.record(&T121);   // recorded AFTER the composite: too late for this frame
+        check(r.composite(false, &T121, &idx) == ft::RevealReplay::DeclDone, "a downsample after the composite is not replayed for it");
+        r.endFrame();
+        check(r.framesReplayed == 0 && r.framesDeclined[ft::RevealReplay::DeclNoRecord] == 1 && r.replays == 0, "the frame counts as declined, not replayed");
+        // the next frame starts clean: last frame's record is gone
+        check(r.composite(false, &T121, &idx) == ft::RevealReplay::DeclNoRecord, "a record does not carry into the next frame");
+    }
+    // a composite whose t1 did not resolve
+    {
+        ft::RevealReplay r;
+        r.record(&T121);
+        check(r.composite(false, nullptr, &idx) == ft::RevealReplay::DeclT1 && r.t1Unresolved == 1, "an unresolved t1 matches nothing");
+    }
+    // flat never replays
+    {
+        ft::RevealReplay r;
+        r.record(&T121);
+        check(r.composite(true, &T121, &idx) == ft::RevealReplay::DeclFlat, "flat never replays, even with a matching record");
+        r.endFrame();
+        check(r.framesReplayed == 0 && r.framesDeclined[ft::RevealReplay::DeclFlat] == 1, "and it is tallied");
+    }
+    // a record whose state could not be kept is never replayed; the table is bounded
+    {
+        ft::RevealReplay r;
+        const int a = r.record(&T121);
+        r.recordFailed(a);
+        check(r.composite(false, &T121, &idx) == ft::RevealReplay::DeclOtherTarget && r.recordFailures == 1, "a record that failed is not replayed");
+        r.endFrame();
+        for (int i = 0; i < 4; ++i) r.record(&layer);
+        check(r.record(&layer) == -1 && r.recordDrops == 1, "the frame's table is bounded");
+        r.resetTotals();
+        check(r.records == 0 && r.recordDrops == 0 && r.frames == 0, "the totals reset per capture");
+    }
+    // the first composite wins: a later composite of the frame with another t1 changes nothing
+    {
+        ft::RevealReplay r;
+        r.record(&T121);
+        r.composite(false, &T121, &idx);
+        check(r.composite(false, &other, &idx) == ft::RevealReplay::DeclDone, "only the first composite decides");
+    }
 }
 
 // ---- v11: every input of the composite draw, compared between the eyes -----------------------------------------------------------------------------------------------------------
@@ -1578,7 +1818,7 @@ void testSourcePins(const std::string& root) {
             const size_t next = vs.find("if (runtimeFlatProfile())", f);
             char what[160];
             std::snprintf(what, sizeof(what), "%s counts its draw for fss_tiles (owner context) before anything else", pin.fn);
-            check(f != std::string::npos && c != std::string::npos && c > f && c - f < 600 && next > c, what);
+            check(f != std::string::npos && c != std::string::npos && c > f && c - f < (std::strcmp(pin.fn, "hookedDrawInstanced") == 0 ? 2400u : 600u) && next > c, what);   // DrawInstanced has the reveal fix's block first: it must run before the instrument reads the composite's inputs
         }
     }
     const std::string tp = slurp(root + "/src/d3d11/temporal_pass.cpp");
@@ -1670,6 +1910,31 @@ void testSourcePins(const std::string& root) {
     check(has(cpp, "fss tiles: window %u gate closed at f=%u: %s.") && has(cpp, "The reveal capture ends with it, and any pending eye run is cancelled.") &&
               has(slurp(root + "/src/d3d11/fss_tiles_core.h"), "gate.step(in.frame, in.chromeAgo, in.focusKnown, in.focus)") && has(cpp, "o.refused & (1u << k)"),
           "leaving the scanner or losing FSS focus closes the window and ends the capture, and an eye run waits for the chrome");
+    // v12 source pins
+    {
+        const std::string c12 = slurp(root + "/src/d3d11/fss_tiles.cpp");
+        const std::string vs12 = slurp(root + "/src/d3d11/vscreen.cpp");
+        const std::string rp12 = slurp(root + "/src/d3d11/fss_tiles_replay.h");
+        const size_t fn = vs12.find("void STDMETHODCALLTYPE hookedDrawInstanced(");
+        const size_t call = vs12.find("fssRevealOnDrawSlow(self, rc, perInstance, instances, startVertex, startInstance);", fn);
+        const size_t flat = vs12.find("if (runtimeFlatProfile()) {", fn);
+        check(fn != std::string::npos && call != std::string::npos && flat != std::string::npos && call < flat && vs12.find("if (fssRevealWatching() && !foreignContext(self) && !runtimeFlatProfile()) {", fn) < call &&
+                  vs12.find("fssTilesNoteDraw(self, 'N', perInstance, instances);", fn) > call,
+              "the reveal fix is asked in DrawInstanced on the owner context, VR profile only, before the instrument sees the draw and before the flat branch could be taken");
+        check(has(vs12, "rc.drawInstanced = reinterpret_cast<void*>(g_state->realDrawInstanced);") && has(vs12, "rc.omSetRts = reinterpret_cast<void*>(g_state->realOMSetRenderTargets);") &&
+                  has(vs12, "rc.psSetSrv = reinterpret_cast<void*>(g_state->realPSSetShaderResources);"),
+              "the game's own un-hooked entry points are passed, so no hook sees the replay");
+        check(has(c12, "const RevealReplay::Decision d = g.rep.composite(false, t1, &idx);") && has(c12, "if (vs == kRevealDownVs && ps == kRevealDownPs) {") && has(c12, "vs == kRevealCompVs && ps == kRevealCompPs") &&
+                  has(c12, "replayDraw(dev, ctx, g.ctx1, calls, g.recSt[idx], check ? &verified : nullptr)") && has(c12, "captureState(dev, ctx, g.ctx1, &g.recPool[idx], g.recSt[idx])"),
+              "a downsample is recorded with its constant buffers copied, and replayed only for the composite whose t1 is its render target");
+        check(has(c12, "detail::g_fssRevealWatch = !runtimeFlatProfile() && (chromeHeld(chromeAgo) || latchOpen);") && has(c12, "g.rep.endFrame();"),
+              "the watch is VR only, on while the scanner is up, and every frame is tallied");
+        check(has(c12, "window %u reveal replay -- frames with draws of the reveal shaders %u") && has(c12, "THE REPLAY NEVER FIRED although reveal composites drew") &&
+                  has(c12, "no reveal composite drew in this capture, so the replay had nothing to do") && has(c12, "THE CONTEXT STATE READ BACK AFTERWARDS DIFFERS FROM THE STATE BEFORE"),
+              "every capture says how often the replay fired and why not, and a run where it never fired reads differently from success");
+        check(has(rp12, "applyState(ctx, c1, rc, rec, true);") && has(rp12, "applyState(ctx, c1, rc, before, false);") && has(rp12, "CopySubresourceRegion(pool.buf[stage][i]"),
+              "the replay unbinds the target's inputs before it is bound, restores the targets before the inputs, and copies the constant buffers");
+    }
     // v11 source pins
     {
         const std::string c11 = slurp(root + "/src/d3d11/fss_tiles.cpp");
@@ -1741,6 +2006,7 @@ int main(int argc, char** argv) {
     testV9Replay(root);
     testV10Pure();
     testV11Pure();
+    testV12Pure();
     testFakeRestore();
 
     const auto createDevice = edvr::systemD3D11CreateDevice();
@@ -1762,6 +2028,7 @@ int main(int argc, char** argv) {
             testReducedCapture(g);
             testV10Gpu(g);
             testV11Gpu(g);
+            testV12Gpu(g);
             ComPtr<ID3D11InfoQueue> q;
             if (SUCCEEDED(g.dev.As(&q))) {
                 const UINT64 cnt = q->GetNumStoredMessagesAllowedByRetrievalFilter();

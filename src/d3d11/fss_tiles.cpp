@@ -17,6 +17,7 @@
 #include "../common/timing.h"
 #include "fss_tiles_core.h"
 #include "fss_tiles_d3d.h"
+#include "fss_tiles_replay.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the automatic eye run
 #include "eye_final_capture.h"   // g_reduceLevel: the automatic eye run covers the whole eye at reduced size
 #include "device_hook.h"         // deviceHookFssModeLatch: the FSS latch, for the exit guard and the arrival
@@ -38,6 +39,7 @@ namespace detail {
 bool g_fssTilesActive = false;
 bool g_fssTilesWatch = false;
 bool g_fssTilesDraws = false;
+bool g_fssRevealWatch = false;
 }  // namespace detail
 
 namespace {
@@ -320,6 +322,12 @@ struct State {
     PrevIn   prevIn[2];
     InputDiffTotals inTot;
     uint32_t inLines = 0, inCaptured = 0, inDone = 0, inSkipped = 0, inIncomplete = 0, inFiles = 0, inDiffLines = 0;
+    // v12: the reveal fix
+    RevealReplay rep;
+    DrawState recSt[RevealReplay::kRec];
+    CbPool    recPool[RevealReplay::kRec];
+    FaultBudget revBudget{"fssReveal", 5};
+    uint32_t revLogs = 0;
     // v11: who renders into the composite's inputs
     struct ProdEnt { const void* rt = nullptr; const void* dsv = nullptr; uint64_t vs = 0, ps = 0; int cam = -1; unsigned role = 255; bool inRing = false; uint32_t draws = 0, firstSeq = 0, lastSeq = 0; };
     ProdEnt  prod[512];
@@ -395,6 +403,8 @@ void resetWindowTallies() {
     g.inLines = g.inCaptured = g.inDone = g.inSkipped = g.inIncomplete = g.inFiles = g.inDiffLines = 0;
     g.prevIn[0].have = g.prevIn[1].have = false;
     g.prodN = g.prodOverflow = g.prodLines = 0;
+    g.rep.resetTotals();
+    g.revLogs = 0;
     g.sched.newFrame();
     g.compRt[0] = g.compRt[1] = g.eyeDepth[0] = g.eyeDepth[1] = nullptr;
     g.capNotes = g.capsQueued = g.capSkipped = g.capsDone = g.capIncomplete = g.dumpFiles = g.asymFrames = 0;
@@ -1502,6 +1512,8 @@ void capReleaseAll() {
     if (g.ctx1) { g.ctx1->Release(); g.ctx1 = nullptr; }
     g.ctx1Tried = false;
     inputsRelease();
+    for (auto& r : g.recSt) r.release();
+    for (auto& p : g.recPool) p.release();
     for (auto& j : g.cbJob) {
         if (j.st) { j.st->Release(); j.st = nullptr; }
         j = State::CbJob();
@@ -2678,6 +2690,16 @@ void emitSummary() {
                                 g.asymTotal[0][kWroteBlack], g.asymTotal[0][kNoDepth], g.asymTotal[1][kRejected], g.asymTotal[1][kOverwritten], g.asymTotal[1][kNeverCovered], g.asymTotal[1][kWroteBlack], g.asymTotal[1][kNoDepth]);
             }
             summarizeInputs();
+            {
+                const RevealReplay& rp = g.rep;
+                const char* verdict = !rp.framesWithComposite ? "no reveal composite drew in this capture, so the replay had nothing to do"
+                                      : (rp.framesReplayed ? "the replay fired" : "THE REPLAY NEVER FIRED although reveal composites drew: this run did not test the fix");
+                Log::get().note("fss tiles: window %u reveal replay -- frames with draws of the reveal shaders %u, with a reveal composite %u; downsample REPLAYED before the first composite in %u frame(s) (%u replay(s), %u failed); "
+                                "state read back after the first replays: %u equal, %u DIFFERENT; downsamples recorded %u (%u dropped, %u failed); composites declined, in frames: no downsample recorded %u, recorded for another "
+                                "texture than t1 (hash-only match) %u, t1 unresolved %u, flat %u. %s.",
+                                g.windowNo, rp.frames, rp.framesWithComposite, rp.framesReplayed, rp.replays, rp.replayFailures, rp.verifiedOk, rp.verifiedBad, rp.records, rp.recordDrops, rp.recordFailures,
+                                rp.framesDeclined[RevealReplay::DeclNoRecord], rp.framesDeclined[RevealReplay::DeclOtherTarget], rp.framesDeclined[RevealReplay::DeclT1], rp.framesDeclined[RevealReplay::DeclFlat], verdict);
+            }
             // the fill series, kFillEvery frames apart, in lines of 24
             if (!g.ringFillN) {
                 Log::get().note("fss tiles: window %u ring offscreen target fill -- no samples (no target, or none sampleable); %u skipped for a read-back still pending.", g.windowNo, g.snapSkipped);
@@ -2930,6 +2952,84 @@ void fssTilesNoteWriteSlow(const void* p, bool isView, uint32_t call) {
     });
 }
 
+// The reveal fix. Called for every DrawInstanced on the owner context while the scanner is on show (VR profile). A fault budget runs out into "do nothing", never into a half-restored state:
+// the replay saves and restores everything it touches, and a fault inside it can only lose the budget's remaining calls.
+void fssRevealOnDrawSlow(ID3D11DeviceContext* ctx, const FssRealCalls& rc, uint32_t perInstance, uint32_t instances, uint32_t startVertex, uint32_t startInstance) {
+    guardedBudget(g.revBudget, [&] {
+        const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+        if (vs != kRevealCompVs && vs != kRevealDownVs) return;
+        const uint64_t ps = bindingShaderHash(BindSlot::Ps);
+        if (vs == kRevealDownVs && ps == kRevealDownPs) {
+            // a downsample: keep the state it is issued with (constant buffers by copy), keyed by its render target
+            ResourceInfo ri;
+            void* rtv = bindingGet(BindSlot::Rtv0);
+            const void* rt = (rtv && bindingResolveProbe(rtv, &ri)) ? ri.resource : nullptr;
+            const int idx = g.rep.record(rt);
+            if (idx < 0) return;
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            ensureCtx1(ctx);
+            bool ok = false;
+            if (dev) {
+                ok = captureState(dev, ctx, g.ctx1, &g.recPool[idx], g.recSt[idx]);
+                dev->Release();
+            }
+            if (ok) {
+                g.recSt[idx].perInstance = perInstance;
+                g.recSt[idx].instances = instances;
+                g.recSt[idx].startVertex = startVertex;
+                g.recSt[idx].startInstance = startInstance;
+            } else {
+                g.rep.recordFailed(idx);
+                if (g.revLogs < 8) { ++g.revLogs; Log::get().note("fss tiles: reveal replay f=%u: the state of a downsample draw could not be kept; it will not be replayed.", g.frame); }
+            }
+            return;
+        }
+        if (vs == kRevealCompVs && ps == kRevealCompPs) {
+            if (g.rep.compSeen) return;   // only the first composite of the frame decides
+            ResourceInfo ri;
+            void* v = bindingGet(BindSlot::PsSrv1);
+            const void* t1 = (v && bindingResolveProbe(v, &ri)) ? ri.resource : nullptr;
+            int idx = -1;
+            const RevealReplay::Decision d = g.rep.composite(false, t1, &idx);
+            if (d != RevealReplay::Replay) {
+                if (g.revLogs < 8) { ++g.revLogs; Log::get().note("fss tiles: reveal replay f=%u: the first reveal composite of the frame was %s.", g.frame, revealDecisionText(d)); }
+                return;
+            }
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            ensureCtx1(ctx);
+            ReplayCalls calls;
+            calls.vsSetCb = reinterpret_cast<decltype(calls.vsSetCb)>(rc.vsSetCb);
+            calls.psSetCb = reinterpret_cast<decltype(calls.psSetCb)>(rc.psSetCb);
+            calls.psSetSrv = reinterpret_cast<decltype(calls.psSetSrv)>(rc.psSetSrv);
+            calls.vsSetSrv = reinterpret_cast<decltype(calls.vsSetSrv)>(rc.vsSetSrv);
+            calls.vsSetShader = reinterpret_cast<decltype(calls.vsSetShader)>(rc.vsSetShader);
+            calls.psSetShader = reinterpret_cast<decltype(calls.psSetShader)>(rc.psSetShader);
+            calls.omSetRts = reinterpret_cast<decltype(calls.omSetRts)>(rc.omSetRts);
+            calls.omSetBlend = reinterpret_cast<decltype(calls.omSetBlend)>(rc.omSetBlend);
+            calls.rsSetViewports = reinterpret_cast<decltype(calls.rsSetViewports)>(rc.rsSetViewports);
+            calls.drawInstanced = reinterpret_cast<decltype(calls.drawInstanced)>(rc.drawInstanced);
+            bool verified = false;
+            const bool check = g.rep.replays < 8;   // the first replays of a capture read the whole state back and compare it with what was bound before
+            const bool done = dev && replayDraw(dev, ctx, g.ctx1, calls, g.recSt[idx], check ? &verified : nullptr);
+            if (dev) dev->Release();
+            if (done) {
+                ++g.rep.replays;
+                if (check) { if (verified) ++g.rep.verifiedOk; else ++g.rep.verifiedBad; }
+                if (g.revLogs < 8) {
+                    ++g.revLogs;
+                    Log::get().note("fss tiles: reveal replay f=%u: the frame's first downsample into the composite's t1 (T%u) was re-run just before the first reveal composite, from the finished layer; %s.", g.frame,
+                                    g.ids.id(t1), check ? (verified ? "the context state read back afterwards equals the state before" : "THE CONTEXT STATE READ BACK AFTERWARDS DIFFERS FROM THE STATE BEFORE") : "state check not repeated");
+                }
+            } else {
+                ++g.rep.replayFailures;
+                if (g.revLogs < 8) { ++g.revLogs; Log::get().note("fss tiles: reveal replay f=%u: the replay could not be done (no device or no state); nothing was drawn.", g.frame); }
+            }
+        }
+    });
+}
+
 void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances) {
     if (!g.rv.win.capturing) return;
     guardedBudget(g.budget, [&] {
@@ -3082,6 +3182,9 @@ void fssTilesFrameBoundary(uint32_t frameNo, uint32_t chromeAgo, bool focusKnown
     g.occ = 0;
     const bool latchOpen = deviceHookFssModeLatch();
     g.latch.update(latchOpen, nowMs());
+    g.rep.endFrame();   // v12: what the reveal fix did in the frame that just ended
+    for (auto& r : g.recSt) r.release();
+    detail::g_fssRevealWatch = !runtimeFlatProfile() && (chromeHeld(chromeAgo) || latchOpen);
     // While the scanner chrome is held the ring pass hook looks for the arrival itself (the first call with ring+0x6b0 set), capture or not.
     fssRingHookScan(chromeHeld(chromeAgo));
     RevealMachine::In in;
