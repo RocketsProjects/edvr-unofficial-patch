@@ -914,6 +914,66 @@ std::string slurp(const std::string& path) {
 
 bool has(const std::string& s, const char* needle) { return s.find(needle) != std::string::npos; }
 
+void testV8(const std::string& root) {
+    namespace rh = edvr::ringhook;
+    // The arrival signature: body mode 2 with the scan alpha ramping up (below 1, direction 0).
+    rh::Call c;
+    c.mode = 2; c.alpha = 0.25f; c.direction = 0;
+    check(rh::isArrival(c) && !rh::rampDone(c), "mode 2 with alpha 0.25 ramping up is the arrival");
+    c.alpha = 1.0f;
+    check(!rh::isArrival(c) && rh::rampDone(c), "mode 2 with alpha 1.0 is the ramp done, not the arrival (flight 0dbd3964 window 2)");
+    c.alpha = 0.25f; c.mode = 1;
+    check(!rh::isArrival(c) && !rh::rampDone(c), "another body mode is neither");
+    c.mode = 2; c.direction = 1;
+    check(!rh::isArrival(c), "a ramp going down is not the arrival");
+
+    // A press 0.5 s after the capture closed finds the gate open and restarts the capture; the old one is over.
+    ft::WindowMachine w;
+    check(w.step(true, 100, 1000) == ft::WindowMachine::Opened && w.windows == 1, "a press-started capture opens");
+    check(w.restart(900, 9000) == ft::WindowMachine::Opened && w.windows == 2 && w.capturing && w.open && w.startFrame == 900 && w.startMs == 9000,
+          "a restart opens a new capture whatever state the old one is in");
+    w.capturing = false;
+    check(w.restart(1500, 12000) == ft::WindowMachine::Opened && w.capturing && w.windows == 3, "a restart after the capture closed (the gate still open) starts one");
+    for (uint32_t i = 0; i < 20; ++i) w.restart(2000 + i, 20000 + i);
+    check(w.windows == ft::kMaxWindows && w.restart(3000, 30000) == ft::WindowMachine::None, "restarts are capped with the session's windows");
+
+    // The exit guard: the FSS latch closed at t=10000 ms; a jump 180 ms later is the exit, one 1100 ms later is not.
+    ft::LatchGuard lg;
+    lg.update(true, 5000);
+    check(!lg.jumpRefused(5100), "an open latch refuses nothing");
+    lg.update(false, 10000);
+    check(lg.jumpRefused(10180) && lg.jumpRefused(10999) && !lg.jumpRefused(11000) && !lg.jumpRefused(12000), "a jump within 1 s of the latch closing is refused");
+
+    // The validity line.
+    ft::Validity v;
+    v.chromeAtStart = true; v.arrivalFrame = 13273; v.runsRan = 2; v.runsPlanned = 2;
+    char line[800];
+    ft::formatValidity(line, sizeof(line), 1, "ring arrival (mode 2, scan alpha 0.083 ramping up, camera 1, seen at f=13273)", v);
+    check(std::strcmp(line, "fss tiles: capture 1 valid=yes (started by ring arrival (mode 2, scan alpha 0.083 ramping up, camera 1, seen at f=13273), mode 2 alpha<1 seen at f=13273, eye runs ran: 2 of 2 planned)") == 0,
+          "a capture with the arrival, the chrome and its eye runs is valid");
+    ft::Validity bad;
+    bad.chromeAtStart = true; bad.runsPlanned = 2; bad.endedBy = "the scanner chrome dropped (the scanner was left)";
+    ft::formatValidity(line, sizeof(line), 2, "zoom press at f=100", bad);
+    check(std::strstr(line, "capture 2 valid=no (started by zoom press at f=100, mode 2 alpha<1 seen at never, eye runs ran: 0 of 2 planned, ended by: the scanner chrome dropped") &&
+              std::strstr(line, "never showed mode 2 with alpha below 1") && std::strstr(line, "no eye run ran") && std::strstr(line, "cut short"),
+          "an invalid capture says it is invalid and every reason");
+
+    // Source pins.
+    const std::string cpp = slurp(root + "/src/d3d11/fss_tiles.cpp");
+    const std::string rhs = slurp(root + "/src/d3d11/fss_ring_hook.cpp");
+    check(!cpp.empty() && has(cpp, "fssRingHookTakeArrival(&aFrame, &aAlpha, &aCam)") && has(cpp, "g.win.restart(frameNo, nowMs())") && has(cpp, "g.restartRequested = true;") &&
+              has(cpp, "g.latch.jumpRefused(nowMs())"),
+          "the arrival starts a capture, a later accepted press or jump restarts it, and a jump after the latch closed is refused");
+    check(has(cpp, "formatValidity(vl, sizeof(vl), g.windowNo,") && has(cpp, "ring offscreen target identified: T%u") && has(cpp, "fss tiles: ring path f=%u cam=%d role=%u 6b0=%s") &&
+              has(cpp, "ring path -- offscreen ring target (ring+0x6b0)") && has(cpp, "ring offscreen target fill") && has(cpp, "fss tiles: input f=%u ring offscreen target T%u"),
+          "the validity line, the ring path lines and the offscreen target lines are written");
+    check(has(cpp, "if (fssRingHookCurrent(&rc)) ringPathRecord(ctx, rtv, res, rc, instances);") && has(cpp, "detail::g_fssTilesDraws = g.win.capturing;"),
+          "the draws made inside a ring-pass call are recorded for the whole capture");
+    check(!rhs.empty() && has(rhs, "if (active || g_scan.load(std::memory_order_relaxed)) observe(ring, pass, camera, data, active);") &&
+              has(rhs, "forward(ring, pass, camera, a4, a5, a6, a7, data);") && has(rhs, "t_cur.inCall = false;"),
+          "every argument is forwarded unchanged, and the observation runs inside a capture or while the scanner is on show");
+}
+
 void testSourcePins(const std::string& root) {
     const std::string ef = slurp(root + "/src/d3d11/exposure_fix.cpp");
     check(!ef.empty(), "exposure_fix.cpp is readable");
@@ -993,8 +1053,8 @@ void testSourcePins(const std::string& root) {
     check(has(rhs, "vertex_resync_core.h") && has(rhs, "vresync::identityMatches") && has(rhs, "sehCheckBytes(target, kPrologue, kPrologueBytes)") &&
               has(rhs, "g_hook.install(reinterpret_cast<void*>(target), g_relay, nullptr, \"fss-ring-pass\""),
           "the build identity and the prologue are checked before the CodeHook is placed, through the vertex resync's relay");
-    check(has(rhs, "forward(ring, pass, camera, a4, a5, a6, a7, data);") && has(rhs, "if (g_active.load(std::memory_order_relaxed)) observe(ring, pass, camera, data);"),
-          "every argument is forwarded unchanged and the observation runs only inside a capture");
+    check(has(rhs, "forward(ring, pass, camera, a4, a5, a6, a7, data);"),
+          "every argument is forwarded unchanged (the observation is pinned in testV8)");
     check(has(rhs, "__try") && has(rhs, "readCall(") && has(rhs, "readMainId(") && has(rhs, "runtimeFlatProfile()"), "the reads are SEH-guarded and the flat profile is left alone");
     check(!has(rhs, "WriteProcessMemory"), "the observer does not write the game's memory itself (CodeHook places the one patch)");
     const std::string dhk = slurp(root + "/src/d3d11/device_hook.cpp");
@@ -1084,6 +1144,7 @@ int main(int argc, char** argv) {
     testRingCore(root);
     testLedger();
     testGate();
+    testV8(root);
     testFakeRestore();
 
     const auto createDevice = edvr::systemD3D11CreateDevice();

@@ -92,6 +92,13 @@ std::atomic<bool> g_active{false};            // a zoom/reveal capture is runnin
 std::atomic<uint32_t> g_windowNo{0};
 std::atomic<uint32_t> g_frame{0};
 std::atomic<uint32_t> g_windowStartFrame{0};
+std::atomic<bool> g_scan{false};                  // the scanner is on show: look for the arrival even outside a capture
+std::atomic<bool> g_arrivalLatched{false};        // one trigger per zoom: cleared when the ramp finishes or the scanner is left
+std::atomic<bool> g_trigPending{false};
+std::atomic<uint32_t> g_trigFrame{0}, g_trigAlphaBits{0};
+std::atomic<int> g_trigCamera{0};
+std::atomic<uint32_t> g_arrivalInWindow{0};
+thread_local Current t_cur;                       // the ring-pass call this thread is inside, while the capture runs
 char g_inertReason[200] = "not attempted (the flat profile, or the install was never reached)";
 
 // The window's tallies; touched by the calling thread only (the render thread), the summary reads them from the boundary tick on the same thread.
@@ -174,9 +181,29 @@ void noteFault() noexcept {
     }
 }
 
-void observe(uintptr_t ring, int pass, uintptr_t camera, uintptr_t data) noexcept {
+void observe(uintptr_t ring, int pass, uintptr_t camera, uintptr_t data, bool active) noexcept {
     const uint32_t window = g_windowNo.load(std::memory_order_relaxed);
     const uint32_t frame = g_frame.load(std::memory_order_relaxed);
+    Call c;
+    if (!ring || !camera || !readCall(ring, pass, camera, data, &c)) {
+        noteFault();
+        return;
+    }
+    // The arrival: body mode 2 with the scan alpha ramping up. One trigger per zoom (the latch); inside a capture the first sighting is also recorded for the validity line.
+    if (isArrival(c)) {
+        if (active && g_arrivalInWindow.load(std::memory_order_relaxed) == 0) g_arrivalInWindow.store(frame ? frame : 1u, std::memory_order_relaxed);
+        if (!g_arrivalLatched.exchange(true, std::memory_order_acq_rel)) {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &c.alpha, sizeof(bits));
+            g_trigAlphaBits.store(bits, std::memory_order_relaxed);
+            g_trigCamera.store(c.camera, std::memory_order_relaxed);
+            g_trigFrame.store(frame, std::memory_order_relaxed);
+            g_trigPending.store(true, std::memory_order_release);
+        }
+    } else if (rampDone(c)) {
+        g_arrivalLatched.store(false, std::memory_order_relaxed);
+    }
+    if (!active) return;
     if (g_tallyWindow != window) {      // a new window: its own tallies
         g_tallyWindow = window;
         g_callsInWindow = 0;
@@ -184,11 +211,12 @@ void observe(uintptr_t ring, int pass, uintptr_t camera, uintptr_t data) noexcep
         g_tuples.clear();
     }
     ++g_callsInWindow;
-    Call c;
-    if (!ring || !camera || !readCall(ring, pass, camera, data, &c)) {
-        noteFault();
-        return;
-    }
+    t_cur.inCall = true;
+    t_cur.camera = c.camera;
+    t_cur.role = c.role;
+    t_cur.pass = c.pass;
+    t_cur.mode = c.mode;
+    t_cur.scratch = c.scratch;
     const bool isNew = g_tuples.add(c);
     if (g_mainIdWindow != window) {
         g_mainIdWindow = window;
@@ -226,8 +254,10 @@ __declspec(noinline) void __fastcall ringPassObserved(uintptr_t ring, int pass, 
     const auto forward = reinterpret_cast<RingFn>(g_forward.load(std::memory_order_acquire));
     if (!forward) return;   // stood down at install; the relay is unreachable then
     g_callsTotal.fetch_add(1, std::memory_order_relaxed);
-    if (g_active.load(std::memory_order_relaxed)) observe(ring, pass, camera, data);
+    const bool active = g_active.load(std::memory_order_relaxed);
+    if (active || g_scan.load(std::memory_order_relaxed)) observe(ring, pass, camera, data, active);
     forward(ring, pass, camera, a4, a5, a6, a7, data);
+    t_cur.inCall = false;
 }
 
 }  // namespace
@@ -280,8 +310,41 @@ void fssRingHookInstall() {
          static_cast<unsigned long long>(kRingPassRva), g_hook.stolenBytes(), kPrologueBytes, kPrologueBytes, kFirstFrames, kEvery, kMaxCallLines);
 }
 
+void fssRingHookScan(bool wanted) {
+    g_scan.store(wanted && g_installed.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    if (!wanted) g_arrivalLatched.store(false, std::memory_order_relaxed);
+}
+
+bool fssRingHookTakeArrival(uint32_t* frame, float* alpha, int* camera) {
+    if (!g_trigPending.exchange(false, std::memory_order_acq_rel)) return false;
+    if (frame) *frame = g_trigFrame.load(std::memory_order_relaxed);
+    if (alpha) {
+        const uint32_t bits = g_trigAlphaBits.load(std::memory_order_relaxed);
+        std::memcpy(alpha, &bits, sizeof(bits));
+    }
+    if (camera) *camera = g_trigCamera.load(std::memory_order_relaxed);
+    return true;
+}
+
+uint32_t fssRingHookArrivalInWindow() { return g_arrivalInWindow.load(std::memory_order_relaxed); }
+
+bool fssRingHookCurrent(ringhook::Current* out) {
+    if (!t_cur.inCall) return false;
+    *out = t_cur;
+    return true;
+}
+
+bool fssRingHookMainCamera(int* id) {
+    if (!g_mainIdKnown) return false;
+    *id = g_mainId;
+    return true;
+}
+
 void fssRingHookWindow(bool active, uint32_t windowNo, uint32_t frame) {
-    if (windowNo != g_windowNo.load(std::memory_order_relaxed) && active) g_windowStartFrame.store(frame, std::memory_order_relaxed);
+    if (windowNo != g_windowNo.load(std::memory_order_relaxed) && active) {
+        g_windowStartFrame.store(frame, std::memory_order_relaxed);
+        g_arrivalInWindow.store(0, std::memory_order_relaxed);
+    }
     g_windowNo.store(windowNo, std::memory_order_relaxed);
     g_frame.store(frame, std::memory_order_relaxed);
     g_active.store(active && g_installed.load(std::memory_order_relaxed), std::memory_order_relaxed);
