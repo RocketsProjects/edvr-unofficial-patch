@@ -17,6 +17,7 @@ class Config;
 namespace detail {
 extern bool g_fssTilesActive;
 extern bool g_fssTilesWatch;   // a window is capturing and has buffers to watch
+extern bool g_fssTilesDraws;   // ... and has the per-eye textures of the tile dispatch to count draws into
 }  // namespace detail
 
 typedef void(__stdcall* FssTilesRealDispatchIndirect)(ID3D11DeviceContext*, ID3D11Buffer*, unsigned int);
@@ -36,6 +37,13 @@ inline void fssTilesNoteWrite(const void* resource, uint32_t call) {
 }
 inline void fssTilesNoteWriteView(const void* view, uint32_t call) {
     if (detail::g_fssTilesWatch) fssTilesNoteWriteSlow(view, true, call);
+}
+
+// Record-only: a draw call on the owner context. Counts it when the bound render target is one of the window's per-eye input
+// textures (SRV slots 3 and 4 of the tile dispatch), with the viewport and scissor of the first and last sampled draw.
+void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, uint32_t weight);
+inline void fssTilesNoteDraw(ID3D11DeviceContext* ctx, uint32_t weight) {
+    if (detail::g_fssTilesDraws) fssTilesNoteDrawSlow(ctx, weight);
 }
 
 // The eye-dump key was pressed (temporal_pass.cpp, temporalPassArmEyeDump): inside a window, write the raw lists and tile-info

@@ -43,12 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight (2026-10-15 night, v3 built, not flown):** two zooms, no
-  keys, `fix.fss_eye_sync` = `off` then `tiles`, set in the ini before launch.
-  The band watch fires the eye run itself on a whole-row move of a large list
-  ("2026-10-15 (night)"). Flight e2e182a6: both eyes cover all 289 cells,
-  writes symmetric, the large/small row differs at the zoom. Known, not
-  fixed: the ~220 m remap; the loading-screen panel bit; the sky's drift.
+- **Next flight (2026-10-15 late night, v4 built, not flown):** `off`, one
+  zoom of a ringed planet, no keys; read the `input`, `gbuf` and `window N`
+  lines of the 600-frame reveal capture. Flight bca9d6b8: `tiles` does not fix
+  it (list row ruled out); Sean: only the LEFT eye shows the squares. Fallback
+  `fix.fss_eye_sync` = `mirror`. Known, not fixed: the ~220 m remap; the
+  loading-screen panel bit; the sky's drift.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -1957,6 +1957,160 @@ Reading rules:
 - Either run: compare the two events' frame counts from the zoom press to the
   event (about 3 s at 90 Hz is the arrival) and the large-list sizes before
   the event; a row event early in the transit is not the arrival.
+
+## 2026-10-15 (late): flight bca9d6b8, `tiles` does not fix it
+
+Flight on test build K (`v0.20.0-rc.1-85-gbca9d6b8`, Frontier, VR), two
+launches, no keys. `edvr_gfx_20261015_075527.log` is `off` (the instrument
+line says the candidate is off, `lockstep=off`); `edvr_gfx_20261015_075814.log`
+is `tiles` (`lockstep=on`). Sean: "tiles doesn't fix it still". Read-only
+analysis.
+
+Sean, on both runs: only the LEFT eye shows the black squares; the right eye
+shows the ring already filled (confirmed after the flight).
+
+Did it run:
+
+- `off`: window 1 opened at f12037; the band event fired at f12039 (a large
+  list went to zero), the eye run started at f12042 (frames 12043-12058 in the
+  dump). The zoom window then closed after 21 frames (f12058).
+- `tiles`: window 1 (f11431, 901 frames) never left the static 136 / 136 state,
+  no zoom arrival, no event. Window 2 (f12837): `lockstep engaged` at f12838,
+  `substituted=634`, `declined(shape=44)` (frames after one with a third
+  argument-buffer pass), band event at f13152 (a large list moved by a whole
+  row: eye 0 136 -> 225, eye 1 181), large lists to zero at f13155, eye run from
+  f13156. All 34 band lines carry `ran: eye1 drew eye0's lists`.
+
+What the rows say:
+
+- READ: the row mismatch is short. `off`: f12037-12038 eye 0 L=226 (row 3.71),
+  eye 1 L=187 (row 6.00), gap 2.29 rows; f12039 on both eyes L=0, S=289 (all
+  cells small) and the own row gap is 0.00 for every later frame. `tiles`:
+  f13152-13154 eye 0 225 / 226 against eye 1's own 181 (gap 2.59-2.65), eye 1
+  drew eye 0's (`ran` row 3.76); from f13155 both L=0 and the gap 0.00. From
+  the all-small state on, the two eyes' lists are the same size and the engine
+  itself puts them on one row, so the substitution has nothing to change.
+- READ, the eye runs: both runs captured the transit void. `off`: frames
+  12043-12054 are black in both eyes (maximum luma 0-1), and the reveal starts in
+  the last four frames (16 x 16 blocks lit, left 310, 448, 563, 678; right 369,
+  490, 572, 635). `tiles`: all 16 frames (13156-13171) black in both eyes. The
+  windows closed (f12058, f13176) as the reveal began, so neither the instrument
+  nor the dump saw it. No left-only squares were measured in these runs.
+
+Classification: the large/small row mismatch is NOT the lever. ruled out: the
+large/small list row (the `tiles` substitution) as the source of the left-only
+reveal, because the mismatch lasts two or three frames before the all-small
+state, the lists are identical in size from then on in both eyes, `tiles` ran
+with `ran` present on every frame and Sean still sees the reveal in one eye.
+ruled out: the tile pass's schedule (group counts, lists, arguments) as the
+source, for the same reason and flight e2e182a6's symmetric clears. UNKNOWN
+but supported: the blacks come from the per-eye INPUTS of the tile dispatch,
+not its schedule: SRV slots 0 (21,936,256 bytes), 1 (light records), 3 and 4
+(per-eye textures, T5 / T6 in the lines) differ per eye, while 5-7 are shared.
+INFERRED: slots 3 and 4 are the ring's offscreen G-buffer, which round 27
+measured as a budgeted subset of 16 x 16 tiles per frame over a cleared target
+(unbudgeted tiles sample zero normals and shade black); the producer is then
+the per-eye ring scene draws, upstream of this pass.
+
+Next, ranked by evidence:
+
+1. `mirror` now, no build: `fix.fss_eye_sync = mirror` (set in the ini before
+   launch). It stamps the left eye's hard-black pixels into the right at the
+   infinity shift, so the reveal plays in both eyes, as the flat screen shows
+   it. It exists, is supported on the native path (`healMode 2`: target the right
+   eye, donor the left; `native_fss.cpp`) and was the old round-39 answer; it is
+   gated by the zoom window and the scanner chrome, so it acts while the
+   scanner is up. Not flown on this build. It is the practical answer to "the
+   animation in both eyes" while the engine cause stays open. Cost: a misread
+   pixel stamps black on a dark surface (near invisible).
+2. The ring draws, no build: `advanced.census_fss_jump = 1` arms a census at
+   the zoom's first frame; read it for the per-eye ring draws (the 13,248-vertex
+   ring mesh, the ring quad and mesh draws of rounds 16-18) and their instance
+   counts and targets, and compare the eyes at the arrival and during the reveal.
+   The census covers a fixed number of frames from the press, so check that it
+   spans the 13 frames after the all-small event.
+3. A longer window (small build): keep the band watch and the lists capturing
+   for 600 frames after the all-small event, log the per-eye identity and a
+   sampled hash of slots 3 and 4 and of slot 0 in that stretch, and start the
+   eye run 20 frames after the event so it brackets the reveal's start.
+
+## 2026-10-15 (late night): the reveal window, the inputs and the ring's draws, v4 (built, not flown)
+
+Sean confirmed on both flight bca9d6b8 runs (`off` and `tiles`): only the LEFT
+eye shows the black squares, and the right eye shows the ring already filled.
+So the squares are drawn into eye 0's image only, with the tile schedule (group
+counts, lists, arguments) ruled out. The instrument now looks where the
+schedule's inputs come from. Read-only; the Ghidra side is another agent's.
+
+What v4 adds (inside the same zoom window, every cap named):
+
+- THE WINDOW. The all-small band event (a large list going to zero, the f12039
+  / f13155 event of flight bca9d6b8) now also starts a reveal capture: the
+  instrument keeps capturing for 600 frames after it, whatever the zoom window
+  does (the journal window had closed as the reveal began in both runs). Only
+  the all-small event arms it; a row move is no longer an event. Two automatic
+  16-frame eye runs, at 20 and 150 frames after the event, so one brackets the
+  reveal's start and one its middle; both count against the 2-a-session cap, so
+  one zoom per session uses them.
+- THE INPUTS. Every 10th frame, per eye, for the large dispatch: SRV slot 0
+  (the 21,936,256-byte buffer), slot 3 and slot 4 (the per-eye textures) and
+  slot 6 (the cube array). Identity, size and format always; contents sampled
+  coarsely and safely: 16 regions of 256 bytes spread over slot 0, and for a
+  colour texture an 8 x 8 grid of 16 x 16-pixel boxes (the squares' own size)
+  copied into a 128 x 128 staging twin, each box shown as one character (`.` all
+  zero, `#` all non-zero, `1`-`8` the share). Depth-stencil, multisampled and
+  unknown formats are named, not copied; the full 21 MB is never read.
+- THE DRAWS. The draws that render into slot 3 and slot 4's textures (render
+  target 0, found from the binding shadow's render target) are counted per eye
+  and per frame by every draw hook (one bool outside a window): draws,
+  instances, and the viewport and scissor of the first and the last sampled draw
+  (the first two draws of a frame and one in sixteen after). Clears, copies and
+  updates into those textures are counted by the existing write watch under the
+  roles `slot3` and `slot4`.
+
+Lines (new ones only):
+
+    fss tiles: band event at f=N (a large list went to zero ...): ... Capture continues until f=M (600 frames); 2 automatic eye run(s) at f=A and the second later (planned 2 of 2 this session); input and gbuf lines every 10 frames.
+    fss tiles: input f=N eyeE | slot0 B<id> <bytes> bytes nz16=<16 chars> | slot3 T<id> WxH fmtF nz8x8=<rows/of/8> | slot4 T<id> WxH fmtF nz8x8=... | cube T<id> WxHxL fmtF
+    fss tiles: gbuf f=N eyeE slotS T<id> draws=n instances=m viewport first (x,y WxH) last (...) scissor first (l,t,r,b) last (...)
+    fss tiles: window N upstream -- draws into the per-eye textures of slots 3 and 4: eyeE slotS: frames with draws a, draws b (per frame lo..hi), instances c, viewport changes d | ...
+    fss tiles: window N inputs -- fingerprints read=n lines=m; sampled grids that differ between the eyes: slot0 a of b, slot3 c of d, slot4 e of f frames; gbuf lines g
+
+Both closing lines are printed whether or not anything matched (the upstream
+line says when no render target matched slot 3 or 4's resources), so
+"nothing drawn there" reads differently from "never ran".
+
+Flight plan (Sean, VR, a ringed planet, no keys, `off` only):
+
+1. Set `fix.fss_eye_sync = off` in the ini before launching. Check the log head:
+   no `fss eye heal: armed`, no `fss reveal: ON`, and the instrument line says
+   the candidate is off.
+2. Zoom onto a ringed planet once and watch the reveal through to the end
+   (about ten seconds). Press nothing. Say which eye shows the squares (flight
+   bca9d6b8: the left) and roughly when they start and stop.
+3. Read: `band event` (the zoom's frame), then `input`, `gbuf` and the two
+   `window N` lines; the eye runs are `edvr_logs\eyes\eye_<stamp>_FinalCrisp*`.
+
+Reading rules:
+
+- Inputs: take the `input` lines of the reveal (from the event on). A sampled
+  grid whose `.` / digit pattern differs between eye 0 and eye 1 for slot 3 or
+  slot 4, with eye 0's mostly `.` (unwritten) where eye 1's is filled, says the
+  per-eye G-buffer is the lever: eye 0's texture is not fully written when the
+  tile pass reads it. `window N inputs` counts the frames the grids differed.
+  Identical grids and identical identities for slot 0 and slot 6 across the
+  eyes rule the inputs out as the difference.
+- Draws: eye 0's draws into slot 3 / slot 4 per frame against eye 1's
+  (`upstream` line, and the `gbuf` lines frame by frame): fewer draws, or a
+  smaller viewport or scissor, for eye 0 during the reveal is round 27's budgeted
+  subset made visible, and the producer is the ring's offscreen draw, not the
+  tile pass. Equal draws and equal regions with different grids point at what
+  the draws read (their own inputs) instead. No match at all means the
+  textures are not drawn into through render target 0 (a compute or another
+  slot), and the next look is the write watch's `slot3` / `slot4` counts.
+- The eye runs: with the reveal inside the capture, black 16 x 16 blocks in
+  eye 0's `FinalCrisp_L` frames against eye 1's `_R` (the method of the
+  flight e2e182a6 entry), set against the grids at the same frames.
 
 ## Open
 
