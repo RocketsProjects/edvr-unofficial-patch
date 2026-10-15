@@ -5,6 +5,7 @@
 #include <d3d11.h>
 #include <d3d11_1.h>
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
@@ -307,6 +308,22 @@ struct State {
     uint32_t cbN = 0, cbLines = 0;
     const void* cbDsv[2] = {};
     uint32_t cbPerDsv[2] = {};
+    // v11
+    uint32_t dumpFrom = 0;                  // the arrival frame
+    struct InSlot { bool used = false, drained = true; uint32_t frame = 0, eye = 0, seq = 0; InputsCap cap; };
+    InSlot   inSlot[2][3];
+    BlockReducer inRed[2][kInSlots];
+    ID3D11DeviceContext* inCtx = nullptr;
+    struct InSet { uint32_t frame = 0; bool have[2] = {}; InputsFacts f[2]; InputsData d[2]; };
+    InSet    inSet[4];
+    struct PrevIn { bool have = false; const void* res[kInSlots] = {}; uint32_t hash[kInSlots] = {}; SlotInfo slot[kInSlots]; };
+    PrevIn   prevIn[2];
+    InputDiffTotals inTot;
+    uint32_t inLines = 0, inCaptured = 0, inDone = 0, inSkipped = 0, inIncomplete = 0, inFiles = 0, inDiffLines = 0;
+    // v11: who renders into the composite's inputs
+    struct ProdEnt { const void* rt = nullptr; const void* dsv = nullptr; uint64_t vs = 0, ps = 0; int cam = -1; unsigned role = 255; bool inRing = false; uint32_t draws = 0, firstSeq = 0, lastSeq = 0; };
+    ProdEnt  prod[512];
+    uint32_t prodN = 0, prodOverflow = 0, prodLines = 0;
     ID3D11DeviceContext1* ctx1 = nullptr;
     bool     ctx1Tried = false;
     bool     refusedEventNoted = false;
@@ -333,6 +350,8 @@ void releaseEyeZero(EyeZero& z) {
 
 void capReleaseAll();
 bool capsPending();
+void inputsRelease();
+bool inputsPending();
 
 void resetWindowTallies() {
     g.framesSeen = 0;
@@ -371,6 +390,11 @@ void resetWindowTallies() {
     for (auto& t : g.rptot) t = State::RPTot();
     capReleaseAll();
     g.dumpTo = 0;
+    g.dumpFrom = 0;
+    g.inTot = InputDiffTotals();
+    g.inLines = g.inCaptured = g.inDone = g.inSkipped = g.inIncomplete = g.inFiles = g.inDiffLines = 0;
+    g.prevIn[0].have = g.prevIn[1].have = false;
+    g.prodN = g.prodOverflow = g.prodLines = 0;
     g.sched.newFrame();
     g.compRt[0] = g.compRt[1] = g.eyeDepth[0] = g.eyeDepth[1] = nullptr;
     g.capNotes = g.capsQueued = g.capSkipped = g.capsDone = g.capIncomplete = g.dumpFiles = g.asymFrames = 0;
@@ -1477,6 +1501,7 @@ void capReleaseAll() {
     for (auto& r : g.red) r.release();
     if (g.ctx1) { g.ctx1->Release(); g.ctx1 = nullptr; }
     g.ctx1Tried = false;
+    inputsRelease();
     for (auto& j : g.cbJob) {
         if (j.st) { j.st->Release(); j.st = nullptr; }
         j = State::CbJob();
@@ -1486,7 +1511,7 @@ void capReleaseAll() {
 bool capsPending() {
     for (const auto& e : g.eyeCap) for (const auto& c : e) if (c.used && !c.drained) return true;
     for (const auto& j : g.cbJob) if (j.used && !j.drained) return true;
-    return false;
+    return inputsPending();
 }
 
 uint32_t compositeEye(const void* res) {
@@ -1714,6 +1739,391 @@ void drainCaps(uint32_t frame) {
             else if (frame > c.frame + 40) { c.drained = true; ++g.capIncomplete; }
             ctx->Release();
             dev->Release();
+        }
+    }
+}
+
+// ---- v11: every input of the composite draw, per eye, and the diff between the eyes -------------------------------------------------------------------------------------------------
+constexpr uint32_t kMaxInLines = 600;
+constexpr uint32_t kMaxInDiffLines = 360;
+constexpr uint32_t kMaxInFiles = 260;
+constexpr uint32_t kProdFrom = 9, kProdTo = 17;   // the arrival frames the flight's deciding field is read in: t1-t3 at full block resolution
+
+void ensureCtx1(ID3D11DeviceContext* ctx) {
+    if (!g.ctx1 && !g.ctx1Tried) {
+        g.ctx1Tried = true;
+        ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&g.ctx1));
+    }
+}
+
+void inputsRelease() {
+    for (auto& e : g.inSlot) {
+        for (auto& s : e) {
+            s.cap.release();
+            s = State::InSlot();
+        }
+    }
+    for (auto& e : g.inRed) for (auto& r : e) r.release();
+    if (g.inCtx) { g.inCtx->Release(); g.inCtx = nullptr; }
+    for (auto& s : g.inSet) { s.frame = 0; s.have[0] = s.have[1] = false; }
+}
+
+bool inputsPending() {
+    for (const auto& e : g.inSlot) for (const auto& s : e) if (s.used && !s.drained) return true;
+    return false;
+}
+
+// At the composite draw, before it runs.
+void captureCompositeInputs(ID3D11DeviceContext* ctx, uint32_t eye, uint32_t seq, char kind, uint32_t count) {
+    State::InSlot& s = g.inSlot[eye][g.frame % 3];
+    if (s.used && !s.drained) { ++g.inSkipped; return; }
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return;
+    ensureCtx1(ctx);
+    if (!g.inCtx) { g.inCtx = ctx; ctx->AddRef(); }
+    captureInputs(dev, ctx, g.ctx1, static_cast<uint32_t>(static_cast<unsigned char>(kind)), count, g.inRed[eye], s.cap);
+    s.used = true;
+    s.drained = false;
+    s.frame = g.frame;
+    s.eye = eye;
+    s.seq = seq;
+    ++g.inCaptured;
+    dev->Release();
+}
+
+void inLine(const char* fmt, ...) {
+    if (g.inLines >= kMaxInLines) return;
+    ++g.inLines;
+    char buf[1100];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    Log::get().note("%s", buf);
+}
+
+void writeInPgm(uint32_t frame, uint32_t eye, uint32_t slot, uint32_t w, uint32_t h, const uint8_t* cls) {
+    if (g.inFiles >= kMaxInFiles || !w || !h || w > kMaxBlocks || h > kMaxBlocks) return;
+    if (!g.dirMade) {
+        g.dirMade = true;
+        CreateDirectoryW((Log::get().dir() + L"\\fsstiles").c_str(), nullptr);
+    }
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\fsstiles\\v11_f%u_e%u_t%u.pgm", Log::get().dir().c_str(), frame, eye, slot);
+    HANDLE hf = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return;
+    uint8_t img[kMaxBlocks * kMaxBlocks];
+    for (uint32_t i = 0; i < w * h; ++i) img[i] = static_cast<uint8_t>(cls[i] * 28u);
+    char head[48];
+    const int hn = pgmHeader(head, sizeof(head), w, h);
+    DWORD wrote = 0;
+    WriteFile(hf, head, static_cast<DWORD>(hn), &wrote, nullptr);
+    WriteFile(hf, img, w * h, &wrote, nullptr);
+    CloseHandle(hf);
+    ++g.inFiles;
+}
+
+const char* const kCbName[kInCb] = {"vs cb0", "vs cb1", "vs cb2", "ps cb0", "ps cb1", "ps cb2"};
+
+// One eye's inputs as log lines: everything at arrival +0 and +5, then only a slot whose identity, view or fingerprint changed since this eye's last frame.
+void logInputs(uint32_t frame, uint32_t eye, const InputsFacts& f, const InputsData& d) {
+    const uint32_t rel = frame - g.dumpFrom;
+    const bool full = rel == kInFullAt0 || rel == kInFullAt1;
+    State::PrevIn& pv = g.prevIn[eye];
+    for (uint32_t k = 0; k < kInSlots; ++k) {
+        const SlotInfo& s = f.slot[k];
+        if (!s.bound) continue;
+        const uint32_t id = s.res ? g.ids.id(s.res) : 0u;
+        const bool changed = !pv.have || pv.res[k] != s.res || pv.hash[k] != (d.haveFp[k] ? d.hash[k] : 0u) || !sameView(pv.slot[k], s);
+        const bool deciding = rel >= kProdFrom && rel <= kProdTo && k >= 1 && k <= 3;   // the deciding field, every frame
+        if (!full && !changed && !deciding) continue;
+        char text[420];
+        formatSlot(text, sizeof(text), k, s, id, d.haveFp[k], f.bw[k], f.bh[k], d.hash[k], d.nz[k]);
+        char span[80] = "";
+        if (d.haveFp[k]) {
+            if (d.box[k][0] == 0xFFFFu) std::snprintf(span, sizeof(span), ", NO block is lit");
+            else std::snprintf(span, sizeof(span), ", lit blocks span x %u-%u y %u-%u", d.box[k][0], d.box[k][2], d.box[k][1], d.box[k][3]);
+        }
+        inLine("fss tiles: composite inputs f=%u eye%u %s%s%s", frame, eye, text, span, full ? "" : (changed ? " (changed since the last frame)" : " (the deciding frames: every frame)"));
+    }
+    for (uint32_t k = 0; k < kInSlots; ++k) {
+        pv.res[k] = f.slot[k].res;
+        pv.hash[k] = d.haveFp[k] ? d.hash[k] : 0u;
+        pv.slot[k] = f.slot[k];
+    }
+    pv.have = true;
+    if (!full) return;
+    for (uint32_t k = 0; k < kInSamplers; ++k) {
+        const SamplerInfo& s = f.smp[k];
+        if (!s.bound) continue;
+        inLine("fss tiles: composite inputs f=%u eye%u s%u filter %u address %u/%u/%u border (%g,%g,%g,%g) lod bias %g min %g max %g anisotropy %u compare %u", frame, eye, k, s.filter, s.addrU, s.addrV,
+               s.addrW, static_cast<double>(s.border[0]), static_cast<double>(s.border[1]), static_cast<double>(s.border[2]), static_cast<double>(s.border[3]), static_cast<double>(s.lodBias),
+               static_cast<double>(s.minLod), static_cast<double>(s.maxLod), s.maxAniso, s.cmp);
+    }
+    for (uint32_t k = 0; k < kInCb; ++k) {
+        const CbInfo& c = f.cb[k];
+        if (!c.bound) continue;
+        inLine("fss tiles: composite inputs f=%u eye%u %s B%u from constant %u, %u constants bound, buffer %u bytes, %u bytes read", frame, eye, kCbName[k], c.buf ? g.ids.id(c.buf) : 0u, c.first, c.num,
+               c.bufBytes, c.bytes);
+        for (uint32_t w = 0; w < c.bytes / 4; w += 16) {
+            char row[330];
+            size_t at = 0;
+            row[0] = 0;
+            for (uint32_t i = w; i < c.bytes / 4 && i < w + 16 && at + 20 < sizeof(row); ++i) {
+                uint32_t u;
+                std::memcpy(&u, d.cb[k] + 4 * i, 4);
+                at += static_cast<size_t>(std::snprintf(row + at, sizeof(row) - at, "%s%g", i > w ? " " : "", static_cast<double>(wordAsFloat(u))));
+            }
+            inLine("fss tiles: composite inputs f=%u eye%u %s words %u-%u: %s", frame, eye, kCbName[k], w, (w + 15 < c.bytes / 4 ? w + 15 : c.bytes / 4 - 1), row);
+        }
+    }
+    const VertexInfo& v = f.vtx;
+    inLine("fss tiles: composite inputs f=%u eye%u vertices: draw kind %c count %u, topology %u, input layout L%u, vertex buffer %s B%u stride %u offset %u (%u bytes), index buffer %s B%u format %u offset %u, "
+           "viewport (%g,%g %gx%g depth %g-%g) scissor (%d,%d,%d,%d)",
+           frame, eye, v.kind ? static_cast<char>(v.kind) : '?', v.count, v.topology, v.layout ? g.ids.id(v.layout) : 0u, v.vb ? "bound" : "none", v.vb ? g.ids.id(v.vb) : 0u, v.stride, v.vbOffset,
+           v.vbSize, v.ib ? "bound" : "none", v.ib ? g.ids.id(v.ib) : 0u, v.ibFormat, v.ibOffset, static_cast<double>(v.vp[0]), static_cast<double>(v.vp[1]), static_cast<double>(v.vp[2]),
+           static_cast<double>(v.vp[3]), static_cast<double>(v.vp[4]), static_cast<double>(v.vp[5]), v.sc[0], v.sc[1], v.sc[2], v.sc[3]);
+    if (v.vb && v.stride && v.vbBytes) {
+        const bool indexed = v.kind == 'I' || v.kind == 'X' || v.kind == 'Z';
+        const uint32_t fpv = v.stride / 4 < 8 ? v.stride / 4 : 8;
+        for (uint32_t n = 0; n < kInVertices; ++n) {
+            uint32_t vi = n;
+            if (indexed) {
+                if (v.ibFormat == 57 && (n + 1) * 2 <= v.ibBytes) { uint16_t i16; std::memcpy(&i16, d.ib + 2 * n, 2); vi = i16; }
+                else if (v.ibFormat == 42 && (n + 1) * 4 <= v.ibBytes) { std::memcpy(&vi, d.ib + 4 * n, 4); }
+                else break;
+            }
+            if ((vi + 1) * v.stride > v.vbBytes) { inLine("fss tiles: composite inputs f=%u eye%u vertex %u (index %u) is beyond the %u bytes read", frame, eye, n, vi, v.vbBytes); continue; }
+            char row[330];
+            size_t at = 0;
+            row[0] = 0;
+            for (uint32_t i = 0; i < fpv && at + 20 < sizeof(row); ++i) {
+                uint32_t u;
+                std::memcpy(&u, d.vb + vi * v.stride + 4 * i, 4);
+                at += static_cast<size_t>(std::snprintf(row + at, sizeof(row) - at, "%s%g", i ? " " : "", static_cast<double>(wordAsFloat(u))));
+            }
+            inLine("fss tiles: composite inputs f=%u eye%u vertex %u%s: %s (first %u of %u floats; positions then UVs if the layout is the usual)", frame, eye, n, indexed ? " (by index)" : "", row, fpv,
+                   v.stride / 4);
+        }
+    } else if (!v.vb) {
+        inLine("fss tiles: composite inputs f=%u eye%u vertices: no vertex buffer is bound (the vertex shader makes the quad from the vertex id)", frame, eye);
+    }
+}
+
+void processInputPair(State::InSet& set) {
+    const uint32_t frame = set.frame;
+    const uint32_t rel = frame - g.dumpFrom;
+    InputDiffResult r;
+    compareInputs(set.f[0], set.d[0], set.f[1], set.d[1], &r, &g.inTot);
+    // one line per frame: what differs
+    char what[900];
+    size_t at = 0;
+    what[0] = 0;
+    auto add = [&](const char* fmt, auto... a) {
+        if (at + 160 < sizeof(what)) at += static_cast<size_t>(std::snprintf(what + at, sizeof(what) - at, fmt, a...));
+    };
+    for (uint32_t k = 0; k < kInSlots; ++k) {
+        const uint32_t f = r.slot[k];
+        if (!(f & ~kSlotCompared)) continue;
+        const SlotInfo& x = set.f[0].slot[k];
+        const SlotInfo& y = set.f[1].slot[k];
+        add("%st%u:", at ? "; " : "", k);
+        if (f & kSlotBoundDiff) add(" bound in one eye only");
+        if (f & kSlotIdDiff) add(" identity T%u|T%u", x.res ? g.ids.id(x.res) : 0u, y.res ? g.ids.id(y.res) : 0u);
+        if (f & kSlotViewDiff) add(" view (mip %u+%u slice %u+%u | mip %u+%u slice %u+%u)", x.mostMip, x.mipLevels, x.firstSlice, x.arraySize, y.mostMip, y.mipLevels, y.firstSlice, y.arraySize);
+        if (f & kSlotShapeDiff) add(" shape %ux%u fmt%u|%ux%u fmt%u", x.w, x.h, x.fmt, y.w, y.h, y.fmt);
+        if (f & kSlotContentDiff) add(" content fingerprint %08X (%u not black)|%08X (%u not black)%s", set.d[0].hash[k], set.d[0].nz[k], set.d[1].hash[k], set.d[1].nz[k],
+                                       (f & kSlotSameIdContentDiff) ? " [the SAME resource changed between the two draws]" : "");
+        if (f & kSlotFpMismatch) add(" fingerprinted in one eye only");
+    }
+    for (uint32_t k = 0; k < kInCb; ++k) {
+        if (!r.cbFlags[k] && !r.cbWords[k]) continue;
+        add("%s%s:", at ? "; " : "", kCbName[k]);
+        if (r.cbFlags[k] & 1) add(" different buffer B%u|B%u", set.f[0].cb[k].buf ? g.ids.id(set.f[0].cb[k].buf) : 0u, set.f[1].cb[k].buf ? g.ids.id(set.f[1].cb[k].buf) : 0u);
+        if (r.cbFlags[k] & 2) add(" range %u+%u|%u+%u", set.f[0].cb[k].first, set.f[0].cb[k].bytes, set.f[1].cb[k].first, set.f[1].cb[k].bytes);
+        if (r.cbWords[k]) add(" %u word(s) differ", r.cbWords[k]);
+    }
+    for (uint32_t k = 0; k < kInSamplers; ++k) {
+        if (r.smpMask & (1u << k)) add("%ss%u: sampler state differs", at ? "; " : "", k);
+    }
+    if (r.vtx) {
+        add("%svertex stage:", at ? "; " : "");
+        if (r.vtx & kVtxTopo) add(" topology");
+        if (r.vtx & kVtxLayout) add(" input layout");
+        if (r.vtx & kVtxVb) add(" vertex buffer");
+        if (r.vtx & kVtxIb) add(" index buffer");
+        if (r.vtx & kVtxKind) add(" draw kind or count");
+        if (r.vtx & kVtxViewport) add(" viewport");
+        if (r.vtx & kVtxScissor) add(" scissor");
+        if (r.vtx & kVtxStride) add(" stride or offset");
+        if (r.vtx & kVtxBytes) add(" vertex bytes");
+        if (r.vtx & kVtxIndexBytes) add(" index bytes");
+    }
+    if (g.inDiffLines < kMaxInDiffLines) {
+        ++g.inDiffLines;
+        Log::get().note("fss tiles: composite diff f=%u (arrival +%u): %s", frame, rel, r.any ? what : "no input differs between the eyes");
+    }
+    // the words, for each constant buffer that differs
+    for (uint32_t k = 0; k < kInCb; ++k) {
+        if (!r.cbWords[k] || g.inDiffLines >= kMaxInDiffLines) continue;
+        const uint32_t n = (set.f[0].cb[k].bytes < set.f[1].cb[k].bytes ? set.f[0].cb[k].bytes : set.f[1].cb[k].bytes) / 4;
+        uint32_t a[kInCbMax / 4], b[kInCbMax / 4], idx[12];
+        std::memcpy(a, set.d[0].cb[k], n * 4);
+        std::memcpy(b, set.d[1].cb[k], n * 4);
+        const uint32_t total = wordDiffs(a, b, n, idx, 12);
+        char row[760];
+        size_t ra = 0;
+        row[0] = 0;
+        for (uint32_t i = 0; i < total && i < 12 && ra + 90 < sizeof(row); ++i) {
+            ra += static_cast<size_t>(std::snprintf(row + ra, sizeof(row) - ra, "%sw%u 0x%08X (%g) | 0x%08X (%g)", i ? "; " : "", idx[i], a[idx[i]], static_cast<double>(wordAsFloat(a[idx[i]])),
+                                                    b[idx[i]], static_cast<double>(wordAsFloat(b[idx[i]]))));
+        }
+        ++g.inDiffLines;
+        Log::get().note("fss tiles: composite diff f=%u %s words that differ, eye0 | eye1 (%u of %u%s): %s", frame, kCbName[k], total < 12 ? total : 12u, total, total > 12 ? ", first 12 shown" : "", row);
+    }
+    // the images of the inputs whose identity or content differs, and of t1-t3 in every deciding frame
+    for (uint32_t k = 0; k < kInSlots; ++k) {
+        const bool deciding = rel >= kProdFrom && rel <= kProdTo && k >= 1 && k <= 3;
+        if (!deciding && !(r.slot[k] & (kSlotIdDiff | kSlotContentDiff))) continue;
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            if (set.d[eye].haveFp[k]) writeInPgm(frame, eye, k, set.f[eye].bw[k], set.f[eye].bh[k], set.d[eye].cls[k]);
+        }
+    }
+}
+
+void drainInputs(uint32_t frame) {
+    for (auto& e : g.inSlot) {
+        for (auto& s : e) {
+            if (!s.used || s.drained || frame < s.frame + kReadbackDelay + 1) continue;
+            if (!g.inCtx) { s.drained = true; continue; }
+            State::InSet& set = g.inSet[s.frame % 4];
+            if (set.frame != s.frame) { set.frame = s.frame; set.have[0] = set.have[1] = false; }
+            if (!readInputs(g.inCtx, s.cap, set.d[s.eye])) {
+                if (frame > s.frame + 40) { s.drained = true; ++g.inIncomplete; }
+                continue;
+            }
+            set.f[s.eye] = s.cap.f;
+            set.have[s.eye] = true;
+            s.drained = true;
+            ++g.inDone;
+            logInputs(s.frame, s.eye, set.f[s.eye], set.d[s.eye]);
+            if (set.have[0] && set.have[1]) processInputPair(set);
+        }
+    }
+}
+
+// The per-capture summary: every input that differed between the eyes, and every one that never did.
+void summarizeInputs() {
+    const InputDiffTotals& t = g.inTot;
+    char differ[700], same[500];
+    size_t da = 0, sa2 = 0;
+    differ[0] = same[0] = 0;
+    auto mark = [&](bool diff, const char* name) {
+        if (diff) { if (da + 40 < sizeof(differ)) da += static_cast<size_t>(std::snprintf(differ + da, sizeof(differ) - da, "%s%s", da ? ", " : "", name)); }
+        else if (sa2 + 40 < sizeof(same)) sa2 += static_cast<size_t>(std::snprintf(same + sa2, sizeof(same) - sa2, "%s%s", sa2 ? ", " : "", name));
+    };
+    for (uint32_t k = 0; k < kInSlots; ++k) {
+        const InputDiffTotals::Slot& s = t.slot[k];
+        if (!s.frames) continue;
+        char nm[16];
+        std::snprintf(nm, sizeof(nm), "t%u", k);
+        mark(s.idDiff || s.viewDiff || s.shapeDiff || s.contentDiff || s.boundDiff, nm);
+        Log::get().note("fss tiles: window %u composite diff t%u -- compared in %u frame(s), bound in both for %u: identity differs %u, view differs %u, shape differs %u, content differs %u (the same resource changed between the "
+                        "two draws %u), bound in one eye only %u", g.windowNo, k, s.frames, s.bound, s.idDiff, s.viewDiff, s.shapeDiff, s.contentDiff, s.sameIdContentDiff, s.boundDiff);
+    }
+    for (uint32_t k = 0; k < kInCb; ++k) {
+        const InputDiffTotals::Cb& c = t.cb[k];
+        if (!c.frames) continue;
+        mark(c.idDiff || c.rangeDiff || c.words, kCbName[k]);
+        Log::get().note("fss tiles: window %u composite diff %s -- compared in %u frame(s): buffer differs %u, range differs %u, frames with differing words %u, differing words in all %u", g.windowNo, kCbName[k],
+                        c.frames, c.idDiff, c.rangeDiff, c.framesWithWords, c.words);
+    }
+    for (uint32_t k = 0; k < kInSamplers; ++k) {
+        if (!t.smpFrames[k]) continue;
+        char nm[8];
+        std::snprintf(nm, sizeof(nm), "s%u", k);
+        mark(t.smpDiff[k] != 0, nm);
+    }
+    mark(t.vtxDiff || t.topoDiff || t.layoutDiff || t.vbDiff || t.ibDiff || t.kindDiff || t.strideDiff, "vertices");
+    mark(t.vpDiff || t.scDiff, "viewport/scissor");
+    Log::get().note("fss tiles: window %u composite diff -- %u pair(s) of eye-frames compared (%u eye-frames captured, %u read, %u skipped for a pending read-back, %u incomplete; %u line(s), %u image(s) in edvr_logs\\fsstiles "
+                    "as v11_f<frame>_e<eye>_t<slot>.pgm); samplers: differ %u/%u %u/%u %u/%u %u/%u frames (s0-s3); vertex stage: topology %u, layout %u, vertex buffer %u, index buffer %u, draw kind/count %u, "
+                    "stride %u, viewport %u, scissor %u frames, vertex bytes %u",
+                    g.windowNo, t.pairs, g.inCaptured, g.inDone, g.inSkipped, g.inIncomplete, g.inLines, g.inFiles, t.smpDiff[0], t.smpFrames[0], t.smpDiff[1], t.smpFrames[1], t.smpDiff[2], t.smpFrames[2],
+                    t.smpDiff[3], t.smpFrames[3], t.topoDiff, t.layoutDiff, t.vbDiff, t.ibDiff, t.kindDiff, t.strideDiff, t.vpDiff, t.scDiff, t.vtxDiff);
+    Log::get().note("fss tiles: window %u composite diff -- inputs that DIFFERED between the eyes: %s | inputs that never differed: %s", g.windowNo, da ? differ : "none", sa2 ? same : "none");
+}
+
+// ---- v11: who renders into the composite's inputs --------------------------------------------------------------------------------------------------------------------------------
+void producerNote(const void* rt, const void* dsvRes, uint64_t vs, uint64_t ps, uint32_t seq) {
+    ringhook::Current rc;
+    const bool inRing = fssRingHookCurrent(&rc);
+    for (uint32_t i = 0; i < g.prodN; ++i) {
+        State::ProdEnt& e = g.prod[i];
+        if (e.rt == rt && e.vs == vs && e.ps == ps && e.dsv == dsvRes && e.inRing == inRing && (!inRing || (e.cam == rc.camera && e.role == rc.role))) {
+            e.lastSeq = seq;
+            ++e.draws;
+            return;
+        }
+    }
+    if (g.prodN >= 512) { ++g.prodOverflow; return; }
+    State::ProdEnt& e = g.prod[g.prodN++];
+    e = State::ProdEnt();
+    e.rt = rt;
+    e.dsv = dsvRes;
+    e.vs = vs;
+    e.ps = ps;
+    e.inRing = inRing;
+    if (inRing) { e.cam = rc.camera; e.role = rc.role; }
+    e.firstSeq = e.lastSeq = seq;
+    e.draws = 1;
+}
+
+// At the end of a dump frame: for each eye's composite, the draws that rendered into its t1-t3 textures this frame, with who drew them and where they sit against each eye's composite.
+void flushProducers(uint32_t frame) {
+    if (!g.dumpTo || frame > g.dumpTo) return;
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        State::InSlot& s = g.inSlot[eye][frame % 3];
+        if (!s.used || s.frame != frame || !g.sched.seen[eye]) continue;
+        for (uint32_t k = 1; k <= 3; ++k) {
+            const SlotInfo& sl = s.cap.f.slot[k];
+            if (!sl.bound || !sl.res) continue;
+            bool dup = false;
+            for (uint32_t j = 1; j < k; ++j) dup = dup || s.cap.f.slot[j].res == sl.res;
+            if (dup) continue;
+            char slots[24];
+            size_t sa = 0;
+            slots[0] = 0;
+            for (uint32_t j = k; j <= 3; ++j) {
+                if (s.cap.f.slot[j].res == sl.res) sa += static_cast<size_t>(std::snprintf(slots + sa, sizeof(slots) - sa, "%st%u", sa ? "," : "", j));
+            }
+            uint32_t shown = 0, total = 0;
+            for (uint32_t i = 0; i < g.prodN; ++i) {
+                const State::ProdEnt& e = g.prod[i];
+                if (e.rt != sl.res) continue;
+                ++total;
+                if (shown >= 6 || g.prodLines >= 500) continue;
+                ++shown;
+                ++g.prodLines;
+                char who[120];
+                if (e.inRing) std::snprintf(who, sizeof(who), "inside the ring pass, camera %d role %u", e.cam, e.role);
+                else if (e.dsv && g.eyeDepth[0] == e.dsv) std::snprintf(who, sizeof(who), "outside the ring pass, with eye 0's depth T%u", g.ids.id(e.dsv));
+                else if (e.dsv && g.eyeDepth[1] == e.dsv) std::snprintf(who, sizeof(who), "outside the ring pass, with eye 1's depth T%u", g.ids.id(e.dsv));
+                else if (e.dsv) std::snprintf(who, sizeof(who), "outside the ring pass, with depth T%u (neither eye's)", g.ids.id(e.dsv));
+                else std::snprintf(who, sizeof(who), "outside the ring pass, with no depth bound");
+                Log::get().note("fss tiles: composite producer f=%u eye%u's %s T%u %ux%u fmt%u: vs %016llX ps %016llX, %u draw(s) #%u..#%u, %s; %s eye 0's composite (#%u) and %s eye 1's (#%u)",
+                                frame, eye, slots, g.ids.id(sl.res), sl.w, sl.h, sl.fmt, static_cast<unsigned long long>(e.vs), static_cast<unsigned long long>(e.ps), e.draws, e.firstSeq, e.lastSeq, who,
+                                g.sched.seen[0] ? (e.lastSeq < g.sched.compositeSeq[0] ? "BEFORE" : "AFTER") : "(no)", g.sched.compositeSeq[0],
+                                g.sched.seen[1] ? (e.lastSeq < g.sched.compositeSeq[1] ? "BEFORE" : "AFTER") : "(no)", g.sched.compositeSeq[1]);
+            }
+            if (!total && g.prodLines < 500) {
+                ++g.prodLines;
+                Log::get().note("fss tiles: composite producer f=%u eye%u's %s T%u %ux%u fmt%u: NO draw rendered into it this frame (it was filled earlier, by a compute shader, a copy or a clear, or never)",
+                                frame, eye, slots, g.ids.id(sl.res), sl.w, sl.h, sl.fmt);
+            } else if (total > shown) {
+                Log::get().note("fss tiles: composite producer f=%u eye%u's %s T%u: %u producer entries, %u shown", frame, eye, slots, g.ids.id(sl.res), total, shown);
+            }
         }
     }
 }
@@ -2003,6 +2413,8 @@ void flushRingPath(uint32_t frame) {
 
 void flushDraws(uint32_t frame) {
     flushCompositors(frame);
+    flushProducers(frame);
+    g.prodN = 0;
     flushSuspects(frame);
     flushRingPath(frame);
     g.drawSeq = g.ringSeqFirst = g.ringSeqLast = g.ringSeqN = 0;
@@ -2265,6 +2677,7 @@ void emitSummary() {
                                 "rejected %u, overwritten %u, never covered %u, written black %u, no depth %u", g.windowNo, g.asymFrames, g.asymTotal[0][kRejected], g.asymTotal[0][kOverwritten], g.asymTotal[0][kNeverCovered],
                                 g.asymTotal[0][kWroteBlack], g.asymTotal[0][kNoDepth], g.asymTotal[1][kRejected], g.asymTotal[1][kOverwritten], g.asymTotal[1][kNeverCovered], g.asymTotal[1][kWroteBlack], g.asymTotal[1][kNoDepth]);
             }
+            summarizeInputs();
             // the fill series, kFillEvery frames apart, in lines of 24
             if (!g.ringFillN) {
                 Log::get().note("fss tiles: window %u ring offscreen target fill -- no samples (no target, or none sampleable); %u skipped for a read-back still pending.", g.windowNo, g.snapSkipped);
@@ -2532,13 +2945,21 @@ void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
         const void* res = rtvResource(rtv, &shape);
         if (!res) return;
         ringhook::Current rc;
+        if (dumping) {
+            void* dsvView = bindingGet(BindSlot::Dsv0);
+            const State::ViewRec* dvr = dsvView ? viewInfo(dsvView) : nullptr;
+            producerNote(res, dvr ? dvr->res : nullptr, bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), seq);
+        }
         if (fssRingHookCurrent(&rc)) ringPathRecord(ctx, rtv, res, rc, instances, seq);
         else if (g.ringTargetRef) {
             bool isComposite = false;
             compositorCheck(ctx, rtv, res, shape, instances, seq, &isComposite);
             if (isComposite) {   // known all through the capture (the suspects' before / after), snapshotted only inside the dump window
                 const uint32_t eye = compositeEye(res);
-                if (eye < 2 && g.sched.composite(eye, seq) && dumping) snapBefore(ctx, res, eye, seq);
+                if (eye < 2 && g.sched.composite(eye, seq) && dumping) {
+                    snapBefore(ctx, res, eye, seq);
+                    captureCompositeInputs(ctx, eye, seq, kind, count);   // v11: every input of the draw
+                }
             }
         }
         if (!fssRingHookCurrent(&rc)) {
@@ -2734,6 +3155,7 @@ void fssTilesFrameBoundary(uint32_t frameNo, uint32_t chromeAgo, bool focusKnown
         if (o.armed) {
             armGlue(frameNo);
             g.dumpTo = frameNo + kDumpFrames - 1;
+            g.dumpFrom = frameNo;
             Log::get().note("fss tiles: ring dump armed at f=%u until f=%u: per eye, the composite's target just before, just after and at the end of the frame, and the bound depth and stencil, as %u px blocks.", frameNo, g.dumpTo, kBlockPx);
             Log::get().note("fss tiles: arrival at f=%u (the ring pass, camera %d: ring+0x6b0 set, scan alpha %.3f, scanner chrome held): the capture starts here. Capture continues "
                             "until f=%u (%u frames); %u automatic eye run(s), the first at f=%u (offsets %u, %u, %u; planned %u of %u this session); ledger %u frames; fill series every %u frames; "
@@ -2785,6 +3207,7 @@ void fssTilesFrameBoundary(uint32_t frameNo, uint32_t chromeAgo, bool focusKnown
     drainRingSnap(frameNo);
     drainCaps(frameNo);
     drainCb(frameNo);
+    drainInputs(frameNo);
     if (g.dumpTo && frameNo > g.dumpTo + 45 && !capsPending()) { capReleaseAll(); g.dumpTo = 0; }
     if (g.summaryDue && (!pendingReadbacks() || frameNo >= g.summaryAfterFrame)) emitSummary();
     refreshActive();

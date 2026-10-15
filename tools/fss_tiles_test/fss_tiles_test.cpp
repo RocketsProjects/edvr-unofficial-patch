@@ -981,6 +981,151 @@ void testV10Gpu(Gpu& g) {
     }
 }
 
+void testV11Gpu(Gpu& g) {
+    ID3D11Device* d = g.dev.Get();
+    ComPtr<ID3D11DeviceContext1> c1;
+    g.ctx.As(&c1);
+    // t0: 64 x 64, white in x < 16 (block column 0), black beyond; t3: 32 x 32, all black
+    std::vector<uint32_t> px(64 * 64), px2(32 * 32, 0xFF000000u);
+    for (uint32_t y = 0; y < 64; ++y) for (uint32_t x = 0; x < 64; ++x) px[y * 64 + x] = x < 16 ? 0xFFFFFFFFu : 0xFF000000u;
+    D3D11_TEXTURE2D_DESC td{};
+    td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    td.Width = td.Height = 64;
+    D3D11_SUBRESOURCE_DATA s1{px.data(), 64 * 4, 0};
+    ComPtr<ID3D11Texture2D> t0, t3;
+    check(SUCCEEDED(d->CreateTexture2D(&td, &s1, &t0)), "the first input texture");
+    td.Width = td.Height = 32;
+    D3D11_SUBRESOURCE_DATA s2{px2.data(), 32 * 4, 0};
+    check(SUCCEEDED(d->CreateTexture2D(&td, &s2, &t3)), "the second input texture");
+    ComPtr<ID3D11ShaderResourceView> v0, v3;
+    d->CreateShaderResourceView(t0.Get(), nullptr, &v0);
+    d->CreateShaderResourceView(t3.Get(), nullptr, &v3);
+    ID3D11ShaderResourceView* views[1] = {v0.Get()};
+    g.ctx->PSSetShaderResources(0, 1, views);
+    views[0] = v3.Get();
+    g.ctx->PSSetShaderResources(3, 1, views);
+    // constant buffers: vs cb0 (64 bytes, floats 0..15) and ps cb1 bound at constant 16 for 16 constants, in a 1024 byte buffer of floats 0..255
+    std::vector<float> fl(256);
+    for (uint32_t i = 0; i < 256; ++i) fl[i] = static_cast<float>(i);
+    D3D11_BUFFER_DESC bd{};
+    bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.ByteWidth = 64;
+    D3D11_SUBRESOURCE_DATA sb{fl.data(), 0, 0};
+    ComPtr<ID3D11Buffer> cbV, cbP, vbuf;
+    d->CreateBuffer(&bd, &sb, &cbV);
+    bd.ByteWidth = 1024;
+    d->CreateBuffer(&bd, &sb, &cbP);
+    ID3D11Buffer* b0 = cbV.Get();
+    g.ctx->VSSetConstantBuffers(0, 1, &b0);
+    if (c1) {
+        ID3D11Buffer* b1 = cbP.Get();
+        UINT first = 16, num = 16;
+        c1->PSSetConstantBuffers1(1, 1, &b1, &first, &num);
+    }
+    // six vertices, stride 16
+    std::vector<float> vtx(6 * 4);
+    for (uint32_t i = 0; i < 24; ++i) vtx[i] = static_cast<float>(100 + i);
+    D3D11_BUFFER_DESC vd{};
+    vd.ByteWidth = 96; vd.Usage = D3D11_USAGE_DEFAULT; vd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA sv{vtx.data(), 0, 0};
+    d->CreateBuffer(&vd, &sv, &vbuf);
+    ID3D11Buffer* vb = vbuf.Get();
+    UINT stride = 16, off = 0;
+    g.ctx->IASetVertexBuffers(0, 1, &vb, &stride, &off);
+    g.ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    D3D11_SAMPLER_DESC sd{};
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_BORDER; sd.BorderColor[0] = 1.0f; sd.MaxLOD = D3D11_FLOAT32_MAX; sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    ComPtr<ID3D11SamplerState> smp;
+    d->CreateSamplerState(&sd, &smp);
+    ID3D11SamplerState* ss = smp.Get();
+    g.ctx->PSSetSamplers(0, 1, &ss);
+
+    static ft::InputsCap cap;
+    static ft::InputsData data;
+    ft::BlockReducer red[ft::kInSlots];
+    ft::captureInputs(d, g.ctx.Get(), c1.Get(), 'N', 6, red, cap);
+    const ft::InputsFacts& f = cap.f;
+    check(f.slot[0].bound && f.slot[0].isTex2d && f.slot[0].w == 64 && f.slot[0].fpQueued && f.slot[3].bound && f.slot[3].w == 32 && f.slot[3].fpQueued && !f.slot[1].bound && !f.slot[7].bound,
+          "t0 and t3 are found with their shape and a fingerprint queued, the unbound slots are not");
+    check(f.slot[0].viewDim == D3D11_SRV_DIMENSION_TEXTURE2D && f.slot[0].mipLevels == 1 && f.slot[0].res == t0.Get() && f.slot[3].res == t3.Get(), "the view's range and the resource's identity");
+    check(f.cb[0].bound && f.cb[0].bytes == 64 && f.cb[0].bufBytes == 64 && !f.cb[1].bound && !f.cb[3].bound, "vertex cb0 is found with its size");
+    if (c1) check(f.cb[4].bound && f.cb[4].first == 16 && f.cb[4].num == 16 && f.cb[4].bytes == 256 && f.cb[4].bufBytes == 1024, "pixel cb1 is read for its bound range only (constant 16 for 16 constants)");
+    check(f.vtx.kind == 'N' && f.vtx.count == 6 && f.vtx.topology == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST && f.vtx.stride == 16 && f.vtx.vbBytes == 96 && f.vtx.vb == vbuf.Get() && f.vtx.ib == nullptr,
+          "the vertex buffer, stride, topology and the draw's kind and count");
+    check(f.smp[0].bound && f.smp[0].addrU == D3D11_TEXTURE_ADDRESS_BORDER && f.smp[0].border[0] == 1.0f && f.smp[0].filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR && !f.smp[1].bound, "the sampler state with its border colour");
+    bool ready = false;
+    for (int tries = 0; tries < 200 && !ready; ++tries) {
+        g.ctx->Flush();
+        ready = ft::readInputs(g.ctx.Get(), cap, data);
+        if (!ready) Sleep(5);
+    }
+    check(ready, "the inputs read back without waiting");
+    if (ready) {
+        check(data.haveFp[0] && data.cls[0][0] == 7 && data.cls[0][1] == 0 && data.nz[0] == 4 && data.haveFp[3] && data.nz[3] == 0, "t0's first block column is white (class 7) and the rest black; t3 is all black");
+        float w0, w1;
+        std::memcpy(&w0, data.cb[0], 4);
+        std::memcpy(&w1, data.cb[0] + 4 * 15, 4);
+        check(w0 == 0.0f && w1 == 15.0f, "vertex cb0's words");
+        if (c1) {
+            float p0;
+            std::memcpy(&p0, data.cb[4], 4);
+            check(p0 == 64.0f, "pixel cb1 starts at constant 16 of the buffer (float 64)");
+        }
+        float vf0, vf5;
+        std::memcpy(&vf0, data.vb, 4);
+        std::memcpy(&vf5, data.vb + 5 * 16 + 12, 4);
+        check(vf0 == 100.0f && vf5 == 123.0f, "the first and last of the six vertices");
+    }
+    cap.release();
+    for (auto& r : red) r.release();
+    // a mipped texture is reduced at the mip the view reads: mip 0 black (64 px, 4 x 4 blocks), mip 1 white (32 px, 2 x 2 blocks)
+    {
+        std::vector<uint32_t> m0(64 * 64, 0xFF000000u), m1(32 * 32, 0xFFFFFFFFu);
+        D3D11_TEXTURE2D_DESC md{};
+        md.Width = md.Height = 64; md.MipLevels = 2; md.ArraySize = 1; md.Format = DXGI_FORMAT_R8G8B8A8_UNORM; md.SampleDesc.Count = 1; md.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA sdm[2] = {{m0.data(), 64 * 4, 0}, {m1.data(), 32 * 4, 0}};
+        ComPtr<ID3D11Texture2D> mt;
+        check(SUCCEEDED(d->CreateTexture2D(&md, sdm, &mt)), "a two-mip texture");
+        ft::BlockReducer r;
+        ID3D11Texture2D* st = nullptr;
+        uint32_t bw = 0, bh = 0;
+        DXGI_FORMAT typed = DXGI_FORMAT_UNKNOWN;
+        const char* why = "";
+        float peak[16];
+        for (uint32_t mip = 1; mip != 2; mip = (mip == 1 ? 0 : 2)) {
+            const bool ok = mt && r.reduce(d, g.ctx.Get(), mt.Get(), &st, &bw, &bh, &typed, &why, mip, 0);
+            D3D11_MAPPED_SUBRESOURCE mm{};
+            bool read = false;
+            if (ok) {
+                g.ctx->Flush();
+                for (int tries = 0; tries < 200 && !read; ++tries) {
+                    read = SUCCEEDED(g.ctx->Map(st, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mm));
+                    if (!read) Sleep(5);
+                }
+            }
+            if (read) {
+                ft::colorBlocks(static_cast<const uint8_t*>(mm.pData), mm.RowPitch, static_cast<uint32_t>(typed), bw, bh, peak);
+                g.ctx->Unmap(st, 0);
+            }
+            if (mip == 1) check(ok && read && bw == 2 && bh == 2 && peak[0] > 0.99f && peak[3] > 0.99f, "mip 1 of the texture is reduced at its own size and is white");
+            else check(ok && read && bw == 4 && bh == 4 && peak[0] == 0.0f && peak[15] == 0.0f, "mip 0 of the same texture, reduced by the same reducer, is its own size and black");
+        }
+        if (st) st->Release();
+        r.release();
+    }
+    // leave the pipeline clean for the tests after this one
+    ID3D11ShaderResourceView* none[8] = {};
+    g.ctx->PSSetShaderResources(0, 8, none);
+    ID3D11Buffer* nb[3] = {};
+    g.ctx->VSSetConstantBuffers(0, 3, nb);
+    if (c1) { UINT z[3] = {}; c1->PSSetConstantBuffers1(0, 3, nb, z, z); }
+    ID3D11Buffer* nvb[1] = {};
+    UINT z0 = 0;
+    g.ctx->IASetVertexBuffers(0, 1, nvb, &z0, &z0);
+    ID3D11SamplerState* ns[1] = {};
+    g.ctx->PSSetSamplers(0, 1, ns);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // 4. Source pins
 
@@ -1143,6 +1288,76 @@ void testV10Pure() {
     for (uint32_t h : {1u, 2u, 1u, 3u, 1u, 4u, 5u, 6u, 7u, 8u}) dt.add(h);
     check(dt.distinct == 8 && dt.used == ft::DriverTally::kCap && dt.hash[0] == 1 && dt.n[0] == 3, "the binding-hash tally counts every distinct hash and keeps the first few");
     check(ft::fnvStep(ft::kFnvBasis, 1) != ft::fnvStep(ft::kFnvBasis, 2), "the binding hash tells draws apart");
+}
+
+// ---- v11: every input of the composite draw, compared between the eyes -----------------------------------------------------------------------------------------------------------
+void testV11Pure() {
+    check(ft::kInSlots == 8 && ft::kInCb == 6 && ft::kInCbMax == 512 && ft::kInVertices == 6 && ft::kInSamplers == 4 && ft::kInFullAt0 == 0 && ft::kInFullAt1 == 5,
+          "the composite's inputs: t0-t7, vs/ps cb0-cb2 up to 512 bytes, six vertices, s0-s3, in full at arrival +0 and +5");
+    static ft::InputsFacts fa, fb;
+    static ft::InputsData da, db;
+    fa = ft::InputsFacts();
+    fb = ft::InputsFacts();
+    std::memset(&da, 0, sizeof(da));
+    std::memset(&db, 0, sizeof(db));
+    int layerA = 0, otherA = 0, otherB = 0, cbA = 0, vbA = 0;
+    auto bindSlot = [](ft::InputsFacts& f, ft::InputsData& d, uint32_t k, const void* res, uint32_t w, uint32_t hash, uint32_t nz) {
+        ft::SlotInfo& s = f.slot[k];
+        s.bound = true; s.res = res; s.isTex2d = true; s.w = s.h = w; s.fmt = 26; s.resMips = 1; s.resArray = 1; s.viewDim = 4; s.viewFmt = 26; s.mipLevels = 1; s.arraySize = 1;
+        s.fpQueued = true; f.bw[k] = f.bh[k] = w / 16; f.typed[k] = 26;
+        d.haveFp[k] = true; d.hash[k] = hash; d.nz[k] = nz;
+    };
+    // t2 is the layer, the same resource in both eyes; t3 is a different texture in each, with different contents
+    bindSlot(fa, da, 2, &layerA, 1008, 0xAAAA0001u, 40);
+    bindSlot(fb, db, 2, &layerA, 1008, 0xAAAA0001u, 40);
+    bindSlot(fa, da, 3, &otherA, 252, 0x11111111u, 0);
+    bindSlot(fb, db, 3, &otherB, 252, 0x22222222u, 12);
+    for (ft::InputsFacts* f : {&fa, &fb}) {
+        f->cb[4].bound = true; f->cb[4].first = 16; f->cb[4].num = 16; f->cb[4].bytes = 64; f->cb[4].bufBytes = 1024;
+        f->smp[1].bound = true; f->smp[1].addrU = f->smp[1].addrV = 3;
+        f->vtx.kind = 'N'; f->vtx.count = 6; f->vtx.topology = 4; f->vtx.stride = 16; f->vtx.vbBytes = 96; f->vtx.vp[2] = f->vtx.vp[3] = 2016; f->vtx.layout = &vbA;
+    }
+    fa.cb[4].buf = &cbA;
+    fb.cb[4].buf = &cbA;
+    for (uint32_t i = 0; i < 16; ++i) { const float v = static_cast<float>(i); std::memcpy(da.cb[4] + 4 * i, &v, 4); std::memcpy(db.cb[4] + 4 * i, &v, 4); }
+    // identical but for t3
+    ft::InputDiffResult r;
+    ft::InputDiffTotals t;
+    ft::compareInputs(fa, da, fb, db, &r, &t);
+    check(r.any && (r.slot[2] & ~ft::kSlotCompared) == 0 && (r.slot[3] & ft::kSlotIdDiff) && (r.slot[3] & ft::kSlotContentDiff) && !(r.slot[3] & ft::kSlotSameIdContentDiff) && r.cbWords[4] == 0 &&
+              r.smpMask == 0 && r.vtx == 0 && t.pairs == 1 && t.slot[3].idDiff == 1 && t.slot[3].contentDiff == 1 && t.slot[2].idDiff == 0 && t.slot[2].frames == 1 && t.slot[0].frames == 0,
+          "a texture that is a different resource with different contents is the only difference found");
+    // a constant that differs, a sampler that differs, a vertex that differs, the same layer changed between the two draws
+    uint32_t w = 0x3F000000u;                                  // 0.5
+    std::memcpy(db.cb[4] + 4 * 7, &w, 4);
+    std::memcpy(db.cb[4] + 4 * 9, &w, 4);
+    fb.smp[1].addrU = 4;
+    da.vb[20] = 1; db.vb[20] = 2;
+    db.hash[2] = 0xBBBB0002u;
+    ft::compareInputs(fa, da, fb, db, &r, &t);
+    check(r.cbWords[4] == 2 && r.cbFlags[4] == 0 && (r.smpMask == 2u) && (r.vtx & ft::kVtxBytes) && !(r.vtx & ft::kVtxLayout) && (r.slot[2] & ft::kSlotContentDiff) && (r.slot[2] & ft::kSlotSameIdContentDiff) &&
+              !(r.slot[2] & ft::kSlotIdDiff) && t.cb[4].words == 2 && t.cb[4].framesWithWords == 1 && t.smpDiff[1] == 1 && t.vtxDiff == 1 && t.slot[2].sameIdContentDiff == 1,
+          "differing constant words, a sampler address, vertex bytes and the same resource changing between the draws are each named");
+    uint32_t a[4] = {1, 2, 3, 4}, b[4] = {1, 9, 3, 8}, idx[1];
+    check(ft::wordDiffs(a, b, 4, idx, 1) == 2 && idx[0] == 1 && ft::wordDiffs(a, a, 4, idx, 1) == 0, "word diffs count them all and keep the first few");
+    ft::InputsFacts fc = fa;
+    fc.slot[2].bound = false;
+    ft::InputDiffResult r3;
+    ft::InputDiffTotals t3;
+    ft::compareInputs(fa, da, fc, db, &r3, &t3);
+    check((r3.slot[2] & ft::kSlotBoundDiff) && t3.slot[2].boundDiff == 1, "a texture bound in one eye only is named");
+    ft::InputDiffResult r4;
+    ft::InputDiffTotals t4;
+    static ft::InputsData dd;
+    std::memcpy(&dd, &da, sizeof(dd));
+    ft::compareInputs(fa, da, fa, dd, &r4, &t4);
+    check(!r4.any, "identical inputs report no difference");
+    char line[500];
+    ft::SlotInfo si = fa.slot[2];
+    ft::formatSlot(line, sizeof(line), 2, si, 95, true, 63, 63, 0xAAAA0001u, 40);
+    check(std::strstr(line, "t2 T95 1008x1008 fmt26 (resource mips 1 array 1 samples 0) view dim 4 fmt 26 mip 0+1 slice 0+1 | blocks 63x63 fingerprint AAAA0001, 40 not black"), "the slot line");
+    check(ft::hashBytes(reinterpret_cast<const uint8_t*>("ab"), 2) == ft::hashBytes(reinterpret_cast<const uint8_t*>("ab"), 2) && ft::hashBytes(reinterpret_cast<const uint8_t*>("ab"), 2) !=
+              ft::hashBytes(reinterpret_cast<const uint8_t*>("ba"), 2), "the byte hash tells orders apart");
 }
 
 // ---- v9: the replay of flight f5c7ad89 (capture 4) through the decisions that missed three flights -----------------------------------------------------------
@@ -1455,11 +1670,30 @@ void testSourcePins(const std::string& root) {
     check(has(cpp, "fss tiles: window %u gate closed at f=%u: %s.") && has(cpp, "The reveal capture ends with it, and any pending eye run is cancelled.") &&
               has(slurp(root + "/src/d3d11/fss_tiles_core.h"), "gate.step(in.frame, in.chromeAgo, in.focusKnown, in.focus)") && has(cpp, "o.refused & (1u << k)"),
           "leaving the scanner or losing FSS focus closes the window and ends the capture, and an eye run waits for the chrome");
+    // v11 source pins
+    {
+        const std::string c11 = slurp(root + "/src/d3d11/fss_tiles.cpp");
+        const std::string d11 = slurp(root + "/src/d3d11/fss_tiles_d3d.h");
+        check(has(c11, "captureCompositeInputs(ctx, eye, seq, kind, count);") && has(c11, "g.dumpFrom = frameNo;") && has(c11, "drainInputs(frameNo);") && has(c11, "captureInputs(dev, ctx, g.ctx1,") &&
+                  has(c11, "compareInputs(set.f[0], set.d[0], set.f[1], set.d[1], &r, &g.inTot);"),
+              "the composite's inputs are captured at the composite draw, read back later and compared between the eyes");
+        check(has(c11, "fss tiles: composite inputs f=%u eye%u %s%s") && has(c11, "fss tiles: composite diff f=%u (arrival +%u): %s") && has(c11, "words that differ, eye0 | eye1") &&
+                  has(c11, "composite diff -- inputs that DIFFERED between the eyes: %s | inputs that never differed: %s") && has(c11, "v11_f%u_e%u_t%u.pgm"),
+              "the inputs lines, the per-frame diff, the differing words, the capture summary naming what differed and the images are written");
+        check(has(d11, "ctx->PSGetShaderResources(0, kInSlots, sv);") && has(d11, "ctx1->VSGetConstantBuffers1(0, 3, b, first, num);") && has(d11, "ctx1->PSGetConstantBuffers1(0, 3, b, first, num);") &&
+                  has(d11, "ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &voff);") && has(d11, "ctx->PSGetSamplers(0, kInSamplers, sm);") && has(d11, "D3D11_MAP_FLAG_DO_NOT_WAIT"),
+              "every pixel-shader texture, both stages' constant buffers over their bound range, the vertex buffer and the samplers are read, and the read-back never waits");
+        check(has(c11, "fss tiles: composite producer f=%u eye%u's %s T%u %ux%u fmt%u: vs %016llX ps %016llX") && has(c11, "NO draw rendered into it this frame") && has(c11, "flushProducers(frame);") &&
+                  has(c11, "producerNote(res, dvr ? dvr->res : nullptr, bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), seq);") && has(c11, "lit blocks span x %u-%u y %u-%u") &&
+                  has(c11, "const bool deciding = rel >= kProdFrom && rel <= kProdTo && k >= 1 && k <= 3;") && has(c11, "constexpr uint32_t kProdFrom = 9, kProdTo = 17;") &&
+                  has(d11, "s.mostMip, s.firstSlice)) s.fpQueued = true;"),
+              "t1-t3 are logged and imaged at full block resolution in every frame +9..+17, each with the span of its lit blocks, and the draws that render into them are listed with their camera or eye and their order against both composites");
+    }
     // v10 source pins
     {
         const std::string c10 = slurp(root + "/src/d3d11/fss_tiles.cpp");
         check(has(c10, "g.dumpTo = frameNo + kDumpFrames - 1;") && has(c10, "const bool dumping = g.dumpTo != 0 && g.frame <= g.dumpTo;") && has(c10, "const uint32_t due = g.sched.takeAfter();") &&
-                  has(c10, "if (eye < 2 && g.sched.composite(eye, seq) && dumping) snapBefore(ctx, res, eye, seq);") && has(c10, "finishFrameSnaps(g.frame);"),
+                  has(c10, "if (eye < 2 && g.sched.composite(eye, seq) && dumping) {") && has(c10, "snapBefore(ctx, res, eye, seq);") && has(c10, "finishFrameSnaps(g.frame);"),
               "the dump window opens with the arrival, the composite is snapshotted before, the first draw after it takes the after-snapshot, the boundary the end-of-frame one");
         check(has(c10, "compositorCheck(ctx, rtv, res, shape, instances, seq, &isComposite);") && has(c10, "*composite = shape != 0 && e->w >= 512 && e->h >= 512;") &&
                   has(c10, "const int fam = suspectIndex(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));") && has(c10, "suspectRecord(ctx, rtv, res, fam, instances, seq);"),
@@ -1470,8 +1704,8 @@ void testSourcePins(const std::string& root) {
               "the verdict line per eye-frame, the pair line, the suspect lines, the constant-buffer samples, the dump summary and the grey images are written");
         check(has(c10, "drainCaps(frameNo);") && has(c10, "drainCb(frameNo);") && has(c10, "D3D11_MAP_FLAG_DO_NOT_WAIT") && has(c10, "if (capsPending()) return true;"),
               "the dump's read-backs never wait and keep the summary pending");
-        const std::string dh = slurp(root + "/src/d3d11/fss_tiles_d3d.h");
-        check(has(dh, "ctx->GenerateMips(srv);") && has(dh, "ctx->CopyResource(*stage, depth);") && has(dh, "D3D11_FORMAT_SUPPORT_MIP_AUTOGEN"), "the block reduction uses the mip chain and the depth is copied whole into a staging twin");
+        const std::string dh10 = slurp(root + "/src/d3d11/fss_tiles_d3d.h");
+        check(has(dh10, "ctx->GenerateMips(srv);") && has(dh10, "ctx->CopyResource(*stage, depth);") && has(dh10, "D3D11_FORMAT_SUPPORT_MIP_AUTOGEN"), "the block reduction uses the mip chain and the depth is copied whole into a staging twin");
     }
     check(has(cpp, "fss tiles: eye-dump key at f=%u") && has(cpp, "outside a capturing zoom window"), "the eye-dump key's reception is logged either way");
     check(has(cpp, "fss tiles: window %u opened") && has(cpp, "fss tiles: window %u closed") && has(cpp, "fss tiles: instrument armed"),
@@ -1506,6 +1740,7 @@ int main(int argc, char** argv) {
     testV8(root);
     testV9Replay(root);
     testV10Pure();
+    testV11Pure();
     testFakeRestore();
 
     const auto createDevice = edvr::systemD3D11CreateDevice();
@@ -1526,6 +1761,7 @@ int main(int argc, char** argv) {
             testSampling(g);
             testReducedCapture(g);
             testV10Gpu(g);
+            testV11Gpu(g);
             ComPtr<ID3D11InfoQueue> q;
             if (SUCCEEDED(g.dev.As(&q))) {
                 const UINT64 cnt = q->GetNumStoredMessagesAllowedByRetrievalFilter();

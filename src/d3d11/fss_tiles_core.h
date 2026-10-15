@@ -1180,6 +1180,213 @@ struct DriverTally {
     }
 };
 
+// ---- v11: every input of the composite draw, per eye (2026-10-15, after flight 38aef250) ----------------------------------------------------------------------------------------
+// Flight 38aef250 (v10): for about 8 frames at the arrival the left eye's composite (VS 953C8123 / PS A473A867), sampling the same ring layer, leaves the ring's near arc uncovered while the
+// right eye's covers it. Depth, overwrite, ordering and the suspect quads are ruled out, so the difference is in another input of that draw: a pixel-shader texture other than the layer, a
+// constant (a per-eye window into the layer), the vertices, or a sampler state. v11 records all of them at the composite draw, per eye, and diffs the eyes. The POD structs and the
+// comparisons are pure so the rig can check them; the D3D calls are in fss_tiles_d3d.h.
+constexpr uint32_t kInSlots = 8;                  // pixel-shader textures t0-t7
+constexpr uint32_t kInCb = 6;                     // vertex cb0-cb2, pixel cb0-cb2
+constexpr uint32_t kInCbMax = 512;                // bytes read of each constant buffer
+constexpr uint32_t kInVbBytes = 512;
+constexpr uint32_t kInIbBytes = 64;
+constexpr uint32_t kInVertices = 6;               // vertices logged
+constexpr uint32_t kInFullAt0 = 0, kInFullAt1 = 5;   // the full dump of every input, at arrival +0 and +5
+constexpr uint32_t kInSamplers = 4;
+
+struct SlotInfo {
+    bool        bound = false;
+    const void* res = nullptr;                    // the resource's identity (the caller interns it)
+    bool        isTex2d = false, isBuffer = false;
+    uint32_t    viewDim = 0, viewFmt = 0, mostMip = 0, mipLevels = 0, firstSlice = 0, arraySize = 0, firstElement = 0, numElements = 0;
+    uint32_t    w = 0, h = 0, fmt = 0, resMips = 0, resArray = 0, samples = 0, bufBytes = 0;
+    bool        fpQueued = false;                 // a block fingerprint was queued
+    const char* fpWhy = "";                       // why not, when it was not
+};
+inline bool sameView(const SlotInfo& a, const SlotInfo& b) {
+    return a.bound == b.bound && a.viewDim == b.viewDim && a.viewFmt == b.viewFmt && a.mostMip == b.mostMip && a.mipLevels == b.mipLevels && a.firstSlice == b.firstSlice &&
+           a.arraySize == b.arraySize && a.firstElement == b.firstElement && a.numElements == b.numElements;
+}
+inline bool sameShape(const SlotInfo& a, const SlotInfo& b) {
+    return a.w == b.w && a.h == b.h && a.fmt == b.fmt && a.resMips == b.resMips && a.resArray == b.resArray && a.bufBytes == b.bufBytes;
+}
+
+struct SamplerInfo {
+    bool     bound = false;
+    uint32_t filter = 0, addrU = 0, addrV = 0, addrW = 0, maxAniso = 0, cmp = 0;
+    float    border[4] = {0, 0, 0, 0};
+    float    lodBias = 0, minLod = 0, maxLod = 0;
+};
+inline bool sameSampler(const SamplerInfo& a, const SamplerInfo& b) {
+    return a.bound == b.bound && a.filter == b.filter && a.addrU == b.addrU && a.addrV == b.addrV && a.addrW == b.addrW && a.maxAniso == b.maxAniso && a.cmp == b.cmp &&
+           std::memcmp(a.border, b.border, sizeof(a.border)) == 0 && a.lodBias == b.lodBias && a.minLod == b.minLod && a.maxLod == b.maxLod;
+}
+
+struct CbInfo {
+    bool        bound = false;
+    const void* buf = nullptr;
+    uint32_t    first = 0, num = 0, bufBytes = 0, bytes = 0;   // first constant, constants bound, buffer size, bytes read (at most kInCbMax)
+};
+
+struct VertexInfo {
+    uint32_t    kind = 0, count = 0;              // the draw call's kind letter and its vertex or index count
+    uint32_t    topology = 0;
+    const void* layout = nullptr; const void* vb = nullptr; const void* ib = nullptr;
+    uint32_t    stride = 0, vbOffset = 0, ibFormat = 0, ibOffset = 0, vbBytes = 0, ibBytes = 0, vbSize = 0;
+    float       vp[6] = {0, 0, 0, 0, 0, 0};       // x y w h minZ maxZ
+    int         sc[4] = {0, 0, 0, 0};
+    uint32_t    sampleMask = 0;
+};
+
+// The words that differ between two reads, up to `cap` of them; returns how many differ in all.
+inline uint32_t wordDiffs(const uint32_t* a, const uint32_t* b, uint32_t n, uint32_t* idx, uint32_t cap) {
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (a[i] == b[i]) continue;
+        if (total < cap) idx[total] = i;
+        ++total;
+    }
+    return total;
+}
+inline uint32_t hashBytes(const uint8_t* p, size_t n) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+inline float wordAsFloat(uint32_t w) { float f; std::memcpy(&f, &w, 4); return f; }
+
+// One bound slot as text: its identity, its shape, the view's range and the fingerprint.
+inline int formatSlot(char* out, size_t cap, uint32_t k, const SlotInfo& s, uint32_t id, bool haveFp, uint32_t bw, uint32_t bh, uint32_t hash, uint32_t nonzero) {
+    char fp[110];
+    if (haveFp) std::snprintf(fp, sizeof(fp), "blocks %ux%u fingerprint %08X, %u not black", bw, bh, hash, nonzero);
+    else std::snprintf(fp, sizeof(fp), "no fingerprint (%s)", s.fpWhy[0] ? s.fpWhy : "not read");
+    if (s.isBuffer) {
+        return std::snprintf(out, cap, "t%u B%u buffer %u bytes, view dim %u fmt %u elements %u+%u | %s", k, id, s.bufBytes, s.viewDim, s.viewFmt, s.firstElement, s.numElements, fp);
+    }
+    return std::snprintf(out, cap, "t%u T%u %ux%u fmt%u (resource mips %u array %u samples %u) view dim %u fmt %u mip %u+%u slice %u+%u | %s", k, id, s.w, s.h, s.fmt, s.resMips, s.resArray,
+                         s.samples, s.viewDim, s.viewFmt, s.mostMip, s.mipLevels, s.firstSlice, s.arraySize, fp);
+}
+
+// The per-capture totals of what differed between the eyes.
+struct InputDiffTotals {
+    struct Slot { uint32_t frames = 0, bound = 0, idDiff = 0, viewDiff = 0, shapeDiff = 0, contentDiff = 0, sameIdContentDiff = 0, boundDiff = 0; };
+    struct Cb { uint32_t frames = 0, idDiff = 0, rangeDiff = 0, framesWithWords = 0, words = 0; };
+    Slot     slot[kInSlots];
+    Cb       cb[kInCb];
+    uint32_t smpFrames[kInSamplers] = {}, smpDiff[kInSamplers] = {};
+    uint32_t vtxFrames = 0, vtxDiff = 0, topoDiff = 0, layoutDiff = 0, vbDiff = 0, ibDiff = 0, kindDiff = 0, vpDiff = 0, scDiff = 0, strideDiff = 0;
+    uint32_t pairs = 0;
+};
+
+// Everything captured at one eye's composite draw, apart from the pixels and bytes themselves (those are InputsData).
+struct InputsFacts {
+    SlotInfo    slot[kInSlots];
+    CbInfo      cb[kInCb];
+    SamplerInfo smp[kInSamplers];
+    VertexInfo  vtx;
+    uint32_t    bw[kInSlots] = {}, bh[kInSlots] = {}, typed[kInSlots] = {};   // the block fingerprint's grid and its typed format
+};
+// The read-back contents: per slot a block grid (brightness classes) with an exact hash of the block texels, the constant buffer bytes, the vertex and index bytes.
+struct InputsData {
+    uint8_t  cls[kInSlots][kMaxBlocks * kMaxBlocks];
+    uint32_t hash[kInSlots];
+    uint32_t nz[kInSlots];
+    bool     haveFp[kInSlots];
+    uint16_t box[kInSlots][4];                   // the span of the blocks that are not black: min x, min y, max x, max y (min x 0xFFFF: none)
+    uint8_t  cb[kInCb][kInCbMax];
+    uint8_t  vb[kInVbBytes];
+    uint8_t  ib[kInIbBytes];
+};
+
+enum InSlotBit : uint32_t { kSlotCompared = 1, kSlotIdDiff = 2, kSlotViewDiff = 4, kSlotShapeDiff = 8, kSlotContentDiff = 16, kSlotBoundDiff = 32, kSlotSameIdContentDiff = 64, kSlotFpMismatch = 128 };
+enum InVtxBit : uint32_t { kVtxTopo = 1, kVtxLayout = 2, kVtxVb = 4, kVtxIb = 8, kVtxKind = 16, kVtxViewport = 32, kVtxScissor = 64, kVtxStride = 128, kVtxBytes = 256, kVtxIndexBytes = 512 };
+struct InputDiffResult {
+    uint32_t slot[kInSlots] = {};
+    uint32_t cbFlags[kInCb] = {};                 // 1: a different buffer, 2: a different range
+    uint32_t cbWords[kInCb] = {};                 // words that differ
+    uint32_t smpMask = 0;
+    uint32_t vtx = 0;
+    bool     any = false;
+};
+// Eye 0's inputs against eye 1's at the composite draw of one frame. Fills `r` and adds to `t`.
+inline void compareInputs(const InputsFacts& a, const InputsData& da, const InputsFacts& b, const InputsData& db, InputDiffResult* r, InputDiffTotals* t) {
+    *r = InputDiffResult();
+    ++t->pairs;
+    for (uint32_t k = 0; k < kInSlots; ++k) {
+        const SlotInfo& x = a.slot[k];
+        const SlotInfo& y = b.slot[k];
+        if (!x.bound && !y.bound) continue;
+        InputDiffTotals::Slot& s = t->slot[k];
+        uint32_t f = kSlotCompared;
+        ++s.frames;
+        if (x.bound != y.bound) { f |= kSlotBoundDiff; ++s.boundDiff; }
+        else {
+            ++s.bound;
+            if (x.res != y.res) { f |= kSlotIdDiff; ++s.idDiff; }
+            if (!sameView(x, y)) { f |= kSlotViewDiff; ++s.viewDiff; }
+            if (!sameShape(x, y)) { f |= kSlotShapeDiff; ++s.shapeDiff; }
+            if (da.haveFp[k] && db.haveFp[k]) {
+                if (da.hash[k] != db.hash[k] || a.bw[k] != b.bw[k] || a.bh[k] != b.bh[k]) {
+                    f |= kSlotContentDiff;
+                    ++s.contentDiff;
+                    if (x.res == y.res) { f |= kSlotSameIdContentDiff; ++s.sameIdContentDiff; }
+                }
+            } else if (da.haveFp[k] != db.haveFp[k]) {
+                f |= kSlotFpMismatch;
+            }
+        }
+        r->slot[k] = f;
+        if (f & ~kSlotCompared) r->any = true;
+    }
+    for (uint32_t k = 0; k < kInCb; ++k) {
+        const CbInfo& x = a.cb[k];
+        const CbInfo& y = b.cb[k];
+        if (!x.bound && !y.bound) continue;
+        InputDiffTotals::Cb& c = t->cb[k];
+        ++c.frames;
+        uint32_t f = 0;
+        if (x.bound != y.bound || x.buf != y.buf) { f |= 1; ++c.idDiff; }
+        if (x.first != y.first || x.bytes != y.bytes || x.bufBytes != y.bufBytes) { f |= 2; ++c.rangeDiff; }
+        uint32_t words = 0;
+        const uint32_t n = (x.bytes < y.bytes ? x.bytes : y.bytes) / 4;
+        for (uint32_t i = 0; i < n; ++i) {
+            uint32_t u, v;
+            std::memcpy(&u, da.cb[k] + 4 * i, 4);
+            std::memcpy(&v, db.cb[k] + 4 * i, 4);
+            if (u != v) ++words;
+        }
+        if (x.bytes != y.bytes) words += (x.bytes > y.bytes ? x.bytes - y.bytes : y.bytes - x.bytes) / 4;
+        r->cbFlags[k] = f;
+        r->cbWords[k] = words;
+        if (words) { ++c.framesWithWords; c.words += words; }
+        if (f || words) r->any = true;
+    }
+    for (uint32_t k = 0; k < kInSamplers; ++k) {
+        if (!a.smp[k].bound && !b.smp[k].bound) continue;
+        ++t->smpFrames[k];
+        if (!sameSampler(a.smp[k], b.smp[k])) { r->smpMask |= 1u << k; ++t->smpDiff[k]; r->any = true; }
+    }
+    const VertexInfo& x = a.vtx;
+    const VertexInfo& y = b.vtx;
+    ++t->vtxFrames;
+    uint32_t v = 0;
+    if (x.topology != y.topology) { v |= kVtxTopo; ++t->topoDiff; }
+    if (x.layout != y.layout) { v |= kVtxLayout; ++t->layoutDiff; }
+    if (x.vb != y.vb) { v |= kVtxVb; ++t->vbDiff; }
+    if (x.ib != y.ib) { v |= kVtxIb; ++t->ibDiff; }
+    if (x.kind != y.kind || x.count != y.count) { v |= kVtxKind; ++t->kindDiff; }
+    if (std::memcmp(x.vp, y.vp, sizeof(x.vp)) != 0) { v |= kVtxViewport; ++t->vpDiff; }
+    if (std::memcmp(x.sc, y.sc, sizeof(x.sc)) != 0) { v |= kVtxScissor; ++t->scDiff; }
+    if (x.stride != y.stride || x.vbOffset != y.vbOffset) { v |= kVtxStride; ++t->strideDiff; }
+    const uint32_t vn = x.vbBytes < y.vbBytes ? x.vbBytes : y.vbBytes;
+    if (x.vbBytes != y.vbBytes || std::memcmp(da.vb, db.vb, vn) != 0) v |= kVtxBytes;
+    const uint32_t in = x.ibBytes < y.ibBytes ? x.ibBytes : y.ibBytes;
+    if (x.ibBytes != y.ibBytes || std::memcmp(da.ib, db.ib, in) != 0) v |= kVtxIndexBytes;
+    if (v & (kVtxBytes | kVtxIndexBytes)) ++t->vtxDiff;
+    r->vtx = v;
+    if (v) r->any = true;
+}
+
 // ---- the state-restoring substitution ------------------------------------------------------------------------------
 // Ops supplies: void* getSrv(uint32_t slot) (a reference the caller releases), void setSrv(uint32_t slot, void* view),
 // void release(void* view), void dispatchIndirect(void* args, uint32_t off).
