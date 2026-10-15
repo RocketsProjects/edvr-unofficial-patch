@@ -10,6 +10,8 @@
 #include "vscreen.h"           // vScreenClearRenderTargetViewRaw: the black frame's one clear
 #include "vr_camera_census.h"   // nativeTemporalEyeGeometry's declaration, so its definition below is checked against it
 #include "terrain_cull_cover_hook.h"   // the terrain cull cover (docs/terrain-culling.md): begin() tells it the frusta the game is handed
+#include "jitter_probe_core.h"     // advanced.jitter_test: the temporary jitter A/B key
+#include "jitter_reference.h"      // what begin() published about the jitter, for the scene inspector and the pass's census
 #include "light_grid_cache_hook.h"     // the light grid cache's jitter probe: begin() tells it this frame's jitter
 #include "../common/config.h"
 #include "../common/frame_flag.h"
@@ -41,6 +43,7 @@ struct History {
 };
 struct Settings {
   bool on=false,dlaa=false,upscale=false,jitter=true,lag=false; int motion=3,signX=1,signY=1;
+  edvr::jitterprobe::JitterTest jitterTest=edvr::jitterprobe::JitterTest::Normal;   // advanced.jitter_test (TEMPORARY): jitter and the signs below follow it
   float blend=.90f,clamp=1.f;
   // dlaa means "an external, trained engine" (NVIDIA's or AMD's), kept under
   // its original name since flags bit 1 (edvrTemporalAa) still means exactly
@@ -172,7 +175,17 @@ Settings readConfig() {
   // pinned to 1:1 on purpose (menu.cpp's "DLAA, even below HMD Quality 1").
   s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0||_stricmp(mode.c_str(),"xess")==0;
   // The shipped values: jitter on, blend .90, clamp 1.0, depth-derived motion, the jitter sign as is, no lag.
-  s.jitter=true; s.blend=.90f; s.clamp=1.f; s.motion=3; s.signX=s.signY=1; s.lag=false; return s;
+  // The shipped values: jitter on, the sign as is, no lag -- unless the TEMPORARY A/B key advanced.jitter_test (docs/dlss-blur-elements-2026-10-14.md, the jitter check)
+  // says otherwise. Read live (this runs every frame); VR only. A flip changes what DLSS and the pass's consumers are TOLD, not the projection (jitter_probe_core.h).
+  {static std::string told; bool known=true;
+   const std::string asked=c.getString("advanced.jitter_test","normal");
+   s.jitterTest=edvr::jitterprobe::parseJitterTest(asked.c_str(),&known);
+   const auto fx=edvr::jitterprobe::jitterTestEffect(s.jitterTest);
+   s.jitter=fx.jitter; s.signX=fx.signX; s.signY=fx.signY;
+   if(asked!=told){told=asked;if(!known)edvr::Log::get().note("temporal aa: advanced.jitter_test = \"%s\" is not one of normal, off, flip_x, flip_y, flip_both; it reads normal.",asked.c_str());
+     else if(s.jitterTest!=edvr::jitterprobe::JitterTest::Normal)edvr::Log::get().note("temporal aa: advanced.jitter_test (TEMPORARY A/B key) = %s: %s.",edvr::jitterprobe::jitterTestName(s.jitterTest),
+       s.jitterTest==edvr::jitterprobe::JitterTest::Off?"no tangent shift is advertised and DLSS is told a zero jitter (the edge should hold perfectly still, aliased)":"the projection is shifted as always and DLSS is told that jitter component reversed");}}
+  s.blend=.90f; s.clamp=1.f; s.motion=3; s.lag=false; return s;
 }
 void reset(State& s) {
   for(auto& h:s.history) h={}; s.treated[0]=s.treated[1]=false;
@@ -408,6 +421,9 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
     s->shift[e][0]=out->tangentShift[e][0];s->shift[e][1]=out->tangentShift[e][1];
   }
   if(s->shift[0][0]||s->shift[0][1]||s->shift[1][0]||s->shift[1][1])++s->jitterFrames;
+  {edvr::JitterRef ref;ref.known=true;ref.frame=s->frameCounter;ref.jx=jx;ref.jy=jy;ref.test=static_cast<uint32_t>(s->currentSettings.jitterTest);   // the projection's jitter, never the told (flipped) one
+   for(int e=0;e<2;++e){ref.shift[e][0]=s->shift[e][0];ref.shift[e][1]=s->shift[e][1];std::memcpy(ref.frusta[e],s->frusta[e],sizeof(ref.frusta[e]));ref.width[e]=s->width[e];ref.height[e]=s->height[e];}
+   edvr::jitterRefPublish(ref);}
   edvr::lightGridCacheNoteJitter(s->frameCounter,jx,jy,s->shift);   // the grid cache's jitter probe reads this (log only)
   return S_OK;
 }

@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "jitter_probe_core.h"   // the projection a draw used, judged against the published jitter (the jitter check)
 #include "blend_probe_core.h"   // the state names, the decision-flag decoder and the text helpers both instruments share
 
 // windows.h defines near and far as empty macros; this header uses both as names (the far plane, an approximate comparison in the rig).
@@ -669,6 +670,8 @@ struct DrawRow {
     char engine[12] = {};
     char motion[24] = {};       // engine-record | self-marking | camera-row
     char role[16] = {};         // roleName(): the draw's render target as DLSS relates to it
+    char cam[12] = {};          // the scene block the draw's VS slot 1 held: "#1", "#2" ... or "-" (none of scene size); the capture's camera-block lines name them
+    char jitter[40] = {};       // what that block's projection carried: published | none | other(+0.31,-0.12 px) | published(x flipped) | n/a
 };
 inline void countText(char* out, size_t cap, int64_t v) noexcept {
     if (v < 0) std::snprintf(out, cap, "?");
@@ -681,10 +684,10 @@ inline int formatDrawLine(char* out, size_t cap, const DrawRow& r) noexcept {
     countText(ctr, sizeof(ctr), r.ctr);
     const int n = std::snprintf(out, cap,
         "scene inspect draw: #%u rt=#%u eye=%d order=%u gf=%u vs=%016llX ps=%016llX %c n=%u inst=%u topo=%s cls=%s status=%s box=%s ctr=%s "
-        "blend=[%s] depth=[%s] stencil=[%s] cull=%s rts=%u rt0=%s %ux%u ds=%s %ux%u role=%s srv=[%s]",
+        "blend=[%s] depth=[%s] stencil=[%s] cull=%s rts=%u rt0=%s %ux%u ds=%s %ux%u role=%s cam=%s jitter=%s srv=[%s]",
         r.idx, r.rt, r.eye, r.order, r.gameFrame, static_cast<unsigned long long>(r.vs), static_cast<unsigned long long>(r.ps), r.kind,
         r.count, r.instances, topologyName(r.topology), r.cls, r.status, box, ctr, r.blend, r.depth, r.stencil, r.cull, r.rtCount, r.rt0,
-        r.rt0W, r.rt0H, r.ds, r.dsW, r.dsH, r.role, r.srv);
+        r.rt0W, r.rt0H, r.ds, r.dsW, r.dsH, r.role, r.cam[0] ? r.cam : "-", r.jitter[0] ? r.jitter : "n/a", r.srv);
     if (n < 0 || static_cast<size_t>(n) >= cap) return -1;
     return n;
 }
@@ -1011,7 +1014,7 @@ inline void csvHex(std::string* line, uint64_t v) {
 
 inline const char* drawsCsvHeader() noexcept {
     return "cap,idx,rt,eye,order,game_frame,vs,ps,kind,count,instances,topology,class,status,box,centre,blend,depth,stencil,cull,rt0_format,rt0_w,rt0_h,"
-           "ds_format,ds_w,ds_h,target_role,srv,edvr_verdict,ui_family,ui_decision,holo,mask,keyed,engine,motion_source,occluded_by,verdict_code,verdict_text\n";
+           "ds_format,ds_w,ds_h,target_role,cam,jitter,srv,edvr_verdict,ui_family,ui_decision,holo,mask,keyed,engine,motion_source,occluded_by,verdict_code,verdict_text\n";
 }
 inline std::string drawsCsvRow(uint32_t capId, const DrawRow& r, int32_t by, const VerdictOut& v) {
     std::string l;
@@ -1043,6 +1046,8 @@ inline std::string drawsCsvRow(uint32_t capId, const DrawRow& r, int32_t by, con
     csvNumber(&l, r.dsW);
     csvNumber(&l, r.dsH);
     csvField(&l, r.role);
+    csvField(&l, r.cam);
+    csvField(&l, r.jitter);
     csvField(&l, r.srv);
     csvField(&l, r.verdict);
     csvField(&l, r.uiFamily);
@@ -1058,6 +1063,46 @@ inline std::string drawsCsvRow(uint32_t capId, const DrawRow& r, int32_t by, con
     l += '\n';
     return l;
 }
+// ---- the camera blocks (the jitter check) ---------------------------------------------------------------------------------------------------------
+// The scene block each tested draw had at VS slot 1 (a constant buffer of scene size), grouped by buffer: which draws read which, what jitter the block's
+// projection carried against the published one, and its depth encoding (cb1[198] = (0, 0, A, B): depth = A + B / z). A block whose depth encoding differs from the
+// busiest block's is a separate near/far camera (the cockpit's, if the shell reads it).
+struct CamBlockInfo {
+    uint32_t id = 0;                    // 1 = the block most draws read
+    uint64_t addr = 0;                  // the buffer's address (a name for the capture, nothing more)
+    uint32_t bytes = 0, draws = 0;
+    uint32_t kinds[7] = {};             // draws by jitterprobe::JitterKind
+    float a = 0, b = 0;                 // the first draw's depth encoding
+    bool abVaries = false;              // another draw of the same buffer read a different one
+};
+inline int formatJitterReferenceLine(char* out, size_t cap, const JitterRef& r, uint32_t judged, uint32_t scene, const char* test) noexcept {
+    return std::snprintf(out, cap,
+        "scene inspect jitter reference: pass frame %llu, published jitter (%+.4f, %+.4f) px, tangent shift eye 0 (%.6g, %.6g) eye 1 (%.6g, %.6g), eye render %ux%u; "
+        "%u of %u scene-block draws judged; advanced.jitter_test=%s",
+        static_cast<unsigned long long>(r.frame), static_cast<double>(r.jx), static_cast<double>(r.jy), static_cast<double>(r.shift[0][0]), static_cast<double>(r.shift[0][1]),
+        static_cast<double>(r.shift[1][0]), static_cast<double>(r.shift[1][1]), r.width[0], r.height[0], judged, scene, test ? test : "normal");
+}
+inline int formatCamBlockLine(char* out, size_t cap, const CamBlockInfo& b, const CamBlockInfo* mainBlock) noexcept {
+    static const char* const kindName[7] = {"n/a", "published", "published(x flipped)", "published(y flipped)", "published(both flipped)", "none", "other"};
+    char kinds[200];
+    size_t k = 0;
+    kinds[0] = 0;
+    for (int i = 0; i < 7; ++i) {
+        if (!b.kinds[i]) continue;
+        const int n = std::snprintf(kinds + k, sizeof(kinds) - k, "%s%s %u", k ? ", " : "", kindName[i], b.kinds[i]);
+        if (n < 0 || static_cast<size_t>(n) >= sizeof(kinds) - k) break;
+        k += static_cast<size_t>(n);
+    }
+    char sep[160] = "";
+    if (mainBlock && b.id != mainBlock->id) {
+        const bool same = std::fabs(b.a - mainBlock->a) <= 1e-9f && std::fabs(b.b - mainBlock->b) <= 1e-6f * std::fabs(mainBlock->b);
+        std::snprintf(sep, sizeof(sep), same ? " -- a separate buffer with the same depth encoding as #%u's" : " -- a SEPARATE CAMERA (near/far): its depth encoding differs from #%u's (A=%.6g B=%.6g)",
+                      mainBlock->id, static_cast<double>(mainBlock->a), static_cast<double>(mainBlock->b));
+    }
+    return std::snprintf(out, cap, "scene inspect camera block: #%u buffer=0x%llX %u bytes, %u draws; jitter %s; depth encoding A=%.6g B=%.6g%s%s", b.id,
+                         static_cast<unsigned long long>(b.addr), b.bytes, b.draws, kinds, static_cast<double>(b.a), static_cast<double>(b.b), b.abVaries ? " (varies between draws)" : "", sep);
+}
+
 inline const char* boxCsvHeader() noexcept {
     return "cap,x,y,depth,metres,mv_pass_x,mv_pass_y,mv_dlss_x,mv_dlss_y,expect_world_x,expect_world_y,expect_ship_x,expect_ship_y,path,hidden,ui,"
            "engine_kind,coverage_mask,bias_mask,engine_slot,effect_hidden,kind4_hidden\n";
