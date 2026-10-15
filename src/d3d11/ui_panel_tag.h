@@ -59,6 +59,9 @@ struct PanelTag {
 };
 
 inline PanelTag g_panelTag;
+// Set by the layer's frame boundary: the UI layer is live (fix.ui_quality on and the layer armed). The bind hook tags only while it is, so a session with the
+// key off or the layer stood down pays one load per bind.
+inline bool g_panelTagLive = false;
 inline uint32_t g_panelLearnGen = 1;   // bumped by every change to the learned set (add, evict, clear)
 
 // The draw path's ONLY read of the tag: one load. tools/ui_panel_tag_test pins that nothing else of the tagger is reached from it.
@@ -83,7 +86,7 @@ inline bool panelTagBind(PanelTag& tag, uint32_t learnGen, uint32_t start, uint3
 // ---- the per-run census ---------------------------------------------------------------------------------------------------------
 constexpr size_t kBoundaryPairs = 8;     // unlisted pairs a window names; more are counted, unnamed
 constexpr size_t kBoundaryNamed = 3;     // ...and the line shows the busiest of them
-constexpr size_t kBoundaryRuns = 4;      // eye targets tracked at once (two eyes, and slack for a re-created pair)
+constexpr size_t kBoundaryRuns = 8;      // targets that have had a tagged draw (or a composite) this frame: two eyes, and slack for a re-created pair
 
 // Timing is sampled: one bind in kBindTimedEvery and one draw note in kNoteTimedEvery pay two QueryPerformanceCounter reads; the
 // totals are scaled by calls / samples. The verification sample is separate (it is the census's own cost, not the tagging's).
@@ -94,6 +97,19 @@ constexpr uint32_t kVerifyPerFrame = 4;      // ... and at most this many a fram
 
 struct UiBoundaryPair {
     uint64_t vs = 0, ps = 0, draws = 0;
+    bool caught = false;   // the lit-target rule (uiLayerFamilyFor, kPanelTag) took at least one of these draws as a cockpit panel
+};
+
+// The unlisted vertex shaders the rule has caught and the log has announced this session: "new panel VS seen", once each.
+constexpr size_t kBoundaryAnnouncedMax = 16;
+struct UiBoundaryAnnounced {
+    uint64_t vs[kBoundaryAnnouncedMax] = {};
+    uint32_t n = 0;
+    bool knows(uint64_t v) const {
+        for (uint32_t i = 0; i < n; ++i)
+            if (vs[i] == v) return true;
+        return false;
+    }
 };
 
 // One eye target's run in the current frame: the draws into it, in order.
@@ -117,7 +133,7 @@ struct UiBoundaryWindow {
     uint64_t litRuns = 0;       // eye-frames in which at least one draw sampled a learned surface
     uint64_t sceneBetween = 0;  // X summed: the other lit-target draws between a run's first and last such draw
     uint32_t maxBetween = 0;
-    uint64_t runOverflow = 0;   // draws whose target found no free run slot
+    uint64_t runOverflow = 0;   // tagged draws (or composites) whose target found no free run slot: nonzero means "between" is incomplete
     // the 8-bit post-tonemap eye target, after its first composite
     uint64_t ldrComposites = 0; // runs that had a composite (the first one is the anchor, not counted below)
     uint64_t ldrLearned = 0, ldrReadsEye = 0, ldrOther = 0;
@@ -128,47 +144,55 @@ struct UiBoundaryWindow {
     uint64_t noteCalls = 0, noteSamples = 0, noteTicks = 0;
     // the tagger
     uint64_t memoHits = 0, resolved = 0, unresolved = 0, retags = 0, learnChanges = 0;
+    uint64_t rechecked = 0;       // views re-judged after a learned-set change from what was kept of them, with no resolve
+    uint64_t otherDim = 0;        // views resolved once and found to be no 2D texture (a 3D or 1D texture, a buffer): never a panel, never asked again
+    uint64_t unknownHits = 0;     // binds of a view that could not be resolved, answered from the short memo of that
+    uint64_t verifyUnknown = 0;   // slots the verification could not resolve: what its "0 missed" does not cover
+    uint64_t slotTagged[kPanelTagSlots] = {};   // tagged lit-target draws by the slot that held the panel surface (the lowest set bit)
     // the verification sample
     uint64_t checks = 0, missed = 0, falseHits = 0, missedFrames = 0;
     bool noted = false, missedThisFrame = false;
     UiBoundaryRun runs[kBoundaryRuns];
 
-    UiBoundaryRun* runFor(const void* target) {
-        UiBoundaryRun* freeRun = nullptr;
-        for (UiBoundaryRun& r : runs) {
+    // A target's run exists from its first tagged draw (lit) or first composite (8-bit) until the frame ends. Draws before that are of no interest
+    // to either measure ("between the first and last" and "after the first composite"), so they only LOOK a run up; the table is never spent on the
+    // frame's many other eye-sized targets (the first flight filled it with the G-buffer's and the lit target never found a slot).
+    UiBoundaryRun* findRun(const void* target) {
+        for (UiBoundaryRun& r : runs)
             if (r.target == target) return &r;
-            if (!r.target && !freeRun) freeRun = &r;
-        }
-        if (freeRun) freeRun->target = target;
-        return freeRun;
+        return nullptr;
+    }
+    UiBoundaryRun* openRun(const void* target) {
+        for (UiBoundaryRun& r : runs)
+            if (!r.target) { r.target = target; return &r; }
+        return nullptr;
     }
 
     // A draw into the lit HDR eye target. tagged: its bit; listed: the hash rule named it.
     void noteLit(const void* target, bool tagged, bool listed) {
         noted = true;
         ++litDraws;
-        UiBoundaryRun* r = runFor(target);
-        if (!r) ++runOverflow;
+        UiBoundaryRun* r = findRun(target);
         if (!tagged) {
             if (r) ++r->since;
             return;
         }
         ++litTagged;
         if (listed) ++litListed; else ++litUnlisted;
-        if (r) {
-            if (r->tagged) r->between += r->since;   // the draws before the run's FIRST such draw are not between anything
-            r->since = 0;
-            ++r->tagged;
-        }
+        if (!r) r = openRun(target);
+        if (!r) { ++runOverflow; return; }
+        if (r->tagged) r->between += r->since;   // the draws before the run's FIRST such draw are not between anything
+        r->since = 0;
+        ++r->tagged;
     }
 
     // The shaders of a tagged draw the hash rule did not name (the caller reads them for those alone).
-    void nameUnlisted(uint64_t vs, uint64_t ps) {
+    void nameUnlisted(uint64_t vs, uint64_t ps, bool caught = false) {
         for (uint32_t i = 0; i < used; ++i) {
-            if (pairs[i].vs == vs && pairs[i].ps == ps) { ++pairs[i].draws; return; }
+            if (pairs[i].vs == vs && pairs[i].ps == ps) { ++pairs[i].draws; pairs[i].caught = pairs[i].caught || caught; return; }
         }
         if (used < kBoundaryPairs) {
-            pairs[used].vs = vs; pairs[used].ps = ps; pairs[used].draws = 1;
+            pairs[used].vs = vs; pairs[used].ps = ps; pairs[used].draws = 1; pairs[used].caught = caught;
             ++used;
             return;
         }
@@ -180,10 +204,13 @@ struct UiBoundaryWindow {
     // texture, else other.
     void noteLdr(const void* target, bool composite, bool tagged, bool readsEye) {
         noted = true;
-        UiBoundaryRun* r = runFor(target);
-        if (!r) { ++runOverflow; return; }
-        if (!r->ldrStarted) {
-            if (composite) { r->ldrStarted = true; ++ldrComposites; }
+        UiBoundaryRun* r = findRun(target);
+        if (!r || !r->ldrStarted) {
+            if (!composite) return;
+            if (!r) r = openRun(target);
+            if (!r) { ++runOverflow; return; }
+            r->ldrStarted = true;
+            ++ldrComposites;
             return;
         }
         if (tagged) ++ldrLearned;
@@ -290,7 +317,7 @@ inline UiBoundaryText uiBoundaryText(const UiBoundaryWindow& w, const UiBoundary
                   static_cast<unsigned long long>(layerFrames), static_cast<unsigned long long>(f), c.profile);
     line += buf;
     if (w.runOverflow) {
-        std::snprintf(buf, sizeof(buf), " %llu draws found no run slot.", static_cast<unsigned long long>(w.runOverflow));
+        std::snprintf(buf, sizeof(buf), " %llu tagged draws found no run slot, so the between-draws figure is incomplete.", static_cast<unsigned long long>(w.runOverflow));
         line += buf;
     }
     out.census = line;
@@ -314,18 +341,36 @@ inline UiBoundaryText uiBoundaryText(const UiBoundaryWindow& w, const UiBoundary
     }
     cost += buf;
     std::snprintf(buf, sizeof(buf),
-                  "; tags: %llu memo hits, %llu views resolved, %llu unresolvable, %llu retags on %llu learned-set changes; "
+                  "; tags: %llu memo hits, %llu rejudged after a learned-set change without a resolve, %llu views resolved (%llu of them no 2D texture, "
+                  "kept as such), %llu unresolvable (%llu binds answered from that short memo), %llu retags on %llu learned-set changes; tagged lit "
+                  "draws by slot s0 %llu s1 %llu s2 %llu s3 %llu; "
                   "verify (1 in %u draws, at most %u a frame; the census's own cost, not in the figures above): %llu checks, %llu missed a "
-                  "learned panel, %llu false, %llu frames with a miss.",
-                  static_cast<unsigned long long>(w.memoHits), static_cast<unsigned long long>(w.resolved),
-                  static_cast<unsigned long long>(w.unresolved), static_cast<unsigned long long>(w.retags),
-                  static_cast<unsigned long long>(w.learnChanges), kVerifyEvery,
+                  "learned panel, %llu false, %llu frames with a miss, %llu slots it could not resolve (a view of that kind is outside its 0 missed).",
+                  static_cast<unsigned long long>(w.memoHits), static_cast<unsigned long long>(w.rechecked), static_cast<unsigned long long>(w.resolved),
+                  static_cast<unsigned long long>(w.otherDim), static_cast<unsigned long long>(w.unresolved), static_cast<unsigned long long>(w.unknownHits),
+                  static_cast<unsigned long long>(w.retags), static_cast<unsigned long long>(w.learnChanges),
+                  static_cast<unsigned long long>(w.slotTagged[0]), static_cast<unsigned long long>(w.slotTagged[1]),
+                  static_cast<unsigned long long>(w.slotTagged[2]), static_cast<unsigned long long>(w.slotTagged[3]), kVerifyEvery,
                   kVerifyPerFrame, static_cast<unsigned long long>(w.checks), static_cast<unsigned long long>(w.missed),
-                  static_cast<unsigned long long>(w.falseHits), static_cast<unsigned long long>(w.missedFrames));
+                  static_cast<unsigned long long>(w.falseHits), static_cast<unsigned long long>(w.missedFrames),
+                  static_cast<unsigned long long>(w.verifyUnknown));
     cost += buf;
     if (!c.probe.empty()) cost += " " + c.probe;
     out.cost = cost;
     return out;
+}
+
+// The once-per-session line for a vertex shader the hash list does not name that the lit-target rule took as a cockpit panel. Called with a window's pair; returns
+// the line, and remembers the vertex shader, or returns empty for one already announced (or past the table, which is never announced twice by luck).
+inline std::string boundaryAnnounce(const UiBoundaryPair& p, UiBoundaryAnnounced& seen) {
+    if (!p.caught || !p.draws || seen.knows(p.vs) || seen.n >= kBoundaryAnnouncedMax) return std::string();
+    seen.vs[seen.n++] = p.vs;
+    char buf[320];
+    std::snprintf(buf, sizeof(buf),
+                  "ui quality: layer: new panel VS seen: vs %016llX ps %016llX, %llu draws in its first window -- not on the hash list; taken as a cockpit holo panel because "
+                  "it samples a learned panel surface in the lit HDR target.",
+                  static_cast<unsigned long long>(p.vs), static_cast<unsigned long long>(p.ps), static_cast<unsigned long long>(p.draws));
+    return buf;
 }
 
 }  // namespace edvr

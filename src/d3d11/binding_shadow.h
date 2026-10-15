@@ -97,6 +97,10 @@ struct ResourceInfo {
     // body was DRAWN into with the texture the eye composites SAMPLED, which
     // is the exact question "do the eyes read what was just written" turns on.
     void*    resource = nullptr;
+    // D3D11_RESOURCE_DIMENSION of the resource behind the view (0 UNKNOWN, 1 buffer, 2 1D, 3 2D, 4 3D), set whenever GetType ran -- ALSO when the call
+    // returns false because the resource is none of the two kinds this struct describes (a 1D or 3D texture). 0 means GetType never ran: a null resource
+    // or a faulted probe, the only case that is "not knowable" rather than "known, and not a 2D texture".
+    uint32_t dim = 0;
 };
 
 // The shadow itself, in the header for ONE reason: the three readers below are

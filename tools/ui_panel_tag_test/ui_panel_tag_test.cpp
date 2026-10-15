@@ -15,12 +15,16 @@
 //   N1..N3  the node probe on a synthetic module image: pinned by stamp, slot value and prologue; inert on any mismatch (one attempt, ever);
 //           live it forwards to the original, counts, and its clause says where the last call fell.
 //   M1      the measured cost of the tagging half and of the draw note (printed; the bounds are generous guards, not the figure).
-//   P1..P9  source pins from the repo root, each with a control (the same predicate over a copy with one edit must fail): the bind hook, the
+//   R1..R3  the lit-target rule (ui_layer_math.h kPanelTag): a draw no hash names that samples a learned panel surface is a cockpit holo panel, whatever its
+//           vertex shader; the hash list is still the first answer; ui_depth's exclusion wins; nothing else about the rule moved.
+//   A1..A2  the once-a-session "new panel VS seen" line, and the runs table spent only on targets that have a tagged draw (the first flight filled it with the G-buffer's).
+//   P1..P10 source pins from the repo root, each with a control (the same predicate over a copy with one edit must fail): the bind hook, the
 //           draw hook, the draw path only reading the bit, the shadow clearing the bits, the learned set's generation, the 30 s report, the probe's
 //           install, the build list, and that no decision reads the tag.
 //
 // Usage: --self-test [<repo root>] [--only B1,C2,...]   |   --dry-run
 #include "ui_panel_tag.h"
+#include "ui_layer_math.h"
 #include "ui_node_probe.h"
 #include "binding_shadow.h"
 
@@ -259,14 +263,21 @@ void caseC3() {
 
 void caseC4() {
     UiBoundaryWindow w;
-    int t[6];
-    for (int i = 0; i < 6; ++i) w.noteLit(&t[i], false, false);
-    check(w.runOverflow == 2 && w.litDraws == 6, "C4a: a fifth and sixth target find no run slot: counted as overflow, still counted as lit draws");
-    w.noteLit(&t[0], true, true);
-    check(w.litTagged == 1, "C4b: an overflowing target's tagged draw still counts as tagged");
+    int t[12];
+    for (int i = 0; i < 12; ++i) w.noteLit(&t[i], false, false);
+    check(w.runOverflow == 0 && w.litDraws == 12, "C4a: untagged draws into many targets spend no run slot (the G-buffer's targets no longer fill the table)");
+    for (int i = 0; i < 10; ++i) w.noteLit(&t[i], true, true);
+    check(w.runOverflow == 2 && w.litTagged == 10, "C4b: only targets with a tagged draw take a slot: a ninth and tenth find none, counted as overflow, still counted as tagged");
     w.frameEnd();
-    w.noteLit(&t[5], true, true); w.frameEnd();
-    check(w.litRuns == 2, "C4c: the table is cleared by frameEnd (a target that overflowed last frame has a slot now)");
+    w.noteLit(&t[9], true, true); w.frameEnd();
+    check(w.litRuns == 9, "C4c: the table is cleared by frameEnd (a target that overflowed last frame has a slot now)");
+    // The failure the first flight showed: other targets drawn first, THEN the lit target: its tagged draws must still be measured.
+    UiBoundaryWindow v;
+    int g[6], lit = 0;
+    for (int i = 0; i < 6; ++i) for (int k = 0; k < 20; ++k) v.noteLit(&g[i], false, false);
+    for (bool tg : {false, true, false, false, true}) v.noteLit(&lit, tg, true);
+    v.frameEnd();
+    check(v.runOverflow == 0 && v.litRuns == 1 && v.sceneBetween == 2 && v.maxBetween == 2, "C4d: scene draws into six other targets first, then the lit target: its run is found and X = 2");
 }
 
 // ---- T: the lines ---------------------------------------------------------------------------------------------------------------------
@@ -281,7 +292,7 @@ void caseT1() {
     check(has(t.census, "8-bit target after first composite: 0.00 a learned, 0.00 b reads-eye, 0.00 c other a frame") && has(t.census, "[vr].") &&
               has(t.census, "scene draws between first and last such draw: 0.0 an eye-frame (max 0, 0 eye-frames with one)"),
           "T1b: ...with the 8-bit clause, the between-draws clause, the profile");
-    check(has(t.cost, "ui boundary cost: tagging no bind sampled (0.0 binds a frame) + no draw note sampled (0 draws a frame);") && has(t.cost, "0 checks, 0 missed a learned panel, 0 false, 0 frames with a miss."),
+    check(has(t.cost, "ui boundary cost: tagging no bind sampled (0.0 binds a frame) + no draw note sampled (0 draws a frame);") && has(t.cost, "0 checks, 0 missed a learned panel, 0 false, 0 frames with a miss, 0 slots it could not resolve"),
           "T1c: the cost line says when nothing was sampled, and prints the verification counters at zero");
 }
 
@@ -333,11 +344,14 @@ void caseT4() {
 void caseT5() {
     UiBoundaryWindow w;
     w.checks = 12; w.missed = 3; w.falseHits = 1; w.missedFrames = 2; w.retags = 5; w.learnChanges = 7; w.memoHits = 900; w.resolved = 40; w.unresolved = 2;
+    w.rechecked = 30; w.otherDim = 25; w.unknownHits = 6; w.verifyUnknown = 4; w.slotTagged[1] = 11; w.slotTagged[2] = 13;
     w.framesLive = 1;
     UiBoundaryContext c;
     const UiBoundaryText t = uiBoundaryText(w, c, 1);
-    check(has(t.cost, "900 memo hits, 40 views resolved, 2 unresolvable, 5 retags on 7 learned-set changes;") &&
-              has(t.cost, "12 checks, 3 missed a learned panel, 1 false, 2 frames with a miss."),
+    check(has(t.cost, "900 memo hits, 30 rejudged after a learned-set change without a resolve, 40 views resolved (25 of them no 2D texture, kept as such), "
+                        "2 unresolvable (6 binds answered from that short memo), 5 retags on 7 learned-set changes;") &&
+              has(t.cost, "tagged lit draws by slot s0 0 s1 11 s2 13 s3 0;") &&
+              has(t.cost, "12 checks, 3 missed a learned panel, 1 false, 2 frames with a miss, 4 slots it could not resolve"),
           "T5a: the tagger's counters and the verification's (re-creation frames: the frames with a miss) are printed");
     // frameEnd turns missedThisFrame into a counted frame
     UiBoundaryWindow v;
@@ -348,6 +362,81 @@ void caseT5() {
     v.noteLit(&e, false, false);
     v.frameEnd();
     check(v.missedFrames == 1 && !v.missedThisFrame, "T5b: a frame with a missed panel is counted once, and the flag does not carry to the next frame");
+}
+
+// ---- R: the lit-target rule ------------------------------------------------------------------------------------------------------------
+void caseR1() {
+    UiFamilyFacts f;
+    f.targetKind = 1;
+    f.vs = 0x1234567890ABCDEFull;   // a vertex shader no hash names
+    UiFamilyWhy why = UiFamilyWhy::kOther;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap, "R1a: without the tag an unnamed vertex shader on the lit target is no family");
+    f.panelTagged = true;
+    why = UiFamilyWhy::kOther;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kHolo && why == UiFamilyWhy::kPanelTag, "R1b: with the tag, whatever its vertex shader, it is the cockpit holo panels, by the tag");
+    f.excluded = true;
+    why = UiFamilyWhy::kOther;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone, "R1c: ui_depth's exclusion wins (the null-output quad keeps a leftover surface bound)");
+    // A hash-named draw is decided exactly as before, tag or not.
+    for (uint64_t vs : {kUiVsHolo, kUiVsHoloGuiFxOff, kUiVsHoloAlt, kUiVsFlightHud, kUiVsSprite}) {
+        UiFamilyFacts a, b;
+        a.targetKind = b.targetKind = 1;
+        a.vs = b.vs = vs;
+        b.panelTagged = true;
+        UiFamilyWhy wa = UiFamilyWhy::kOther, wb = UiFamilyWhy::kOther;
+        check(uiLayerFamilyFor(a, &wa) == uiLayerFamilyFor(b, &wb) && wa == wb && wa == UiFamilyWhy::kDirect, "R1d: a hash-named draw has the same family and the same reason with the tag set (the list is the first answer)");
+    }
+    // The 8-bit target and non-eye targets ignore the lit-target fact.
+    UiFamilyFacts g;
+    g.targetKind = 2; g.vs = 0x1234567890ABCDEFull; g.panelTagged = true;
+    why = UiFamilyWhy::kOther;
+    check(uiLayerFamilyFor(g, &why) == UiLayerFamily::kNone, "R1e: on the 8-bit target the fact is not read (that tier already names by what it samples)");
+    g.targetKind = 0;
+    check(uiLayerFamilyFor(g) == UiLayerFamily::kNone, "R1f: not an eye target: no family");
+    check(std::strcmp(uiFamilyWhyName(UiFamilyWhy::kPanelTag), "a learned panel surface sampled in the lit target") == 0, "R1g: the reason has its name");
+}
+
+void caseR2() {
+    // Every combination of the old facts with panelTagged false is the rule as it was: the other 3 shaders and families answer the same.
+    for (int kind = 0; kind <= 2; ++kind) for (int bits = 0; bits < 8; ++bits) {
+        UiFamilyFacts a, b;
+        a.targetKind = b.targetKind = kind;
+        a.vs = b.vs = bits & 1 ? kUiVsHolo : 0x42;
+        a.excluded = b.excluded = (bits & 2) != 0;
+        a.learnedSurface = b.learnedSurface = (bits & 4) != 0;
+        b.panelTagged = false;
+        UiFamilyWhy wa, wb;
+        check(uiLayerFamilyFor(a, &wa) == uiLayerFamilyFor(b, &wb) && wa == wb, "R2a: the new fact defaults to false and changes nothing when false");
+    }
+    UiFamilyFacts h;
+    h.targetKind = 1; h.vs = kUiVsOrbitLines; h.ps = kUiPsOrbitLines; h.panelTagged = true;
+    UiFamilyWhy why = UiFamilyWhy::kOther;
+    check(uiLayerFamilyFor(h, &why) == UiLayerFamily::kOrbitLines && why == UiFamilyWhy::kDirect, "R2b: the supercruise families named by pair keep their family when the tag is set");
+}
+
+void caseA1() {
+    UiBoundaryAnnounced seen;
+    UiBoundaryPair p;
+    p.vs = 0x925ACEDA0153AA5Bull; p.ps = 0x738A98ED038E58B7ull; p.draws = 22; p.caught = true;
+    const std::string first = boundaryAnnounce(p, seen);
+    check(first == "ui quality: layer: new panel VS seen: vs 925ACEDA0153AA5B ps 738A98ED038E58B7, 22 draws in its first window -- not on the hash list; taken as a cockpit holo panel because it samples a learned panel surface in the lit HDR target.",
+          "A1a: the line names the vertex and pixel shader and the draws");
+    p.draws = 30;
+    check(boundaryAnnounce(p, seen).empty(), "A1b: once a session for a vertex shader: the same one in a later window is silent");
+    p.ps = 0x1;
+    check(boundaryAnnounce(p, seen).empty(), "A1c: ...whatever its pixel shader (the key is the vertex shader)");
+    UiBoundaryPair q;
+    q.vs = 0x1111; q.ps = 0x2; q.draws = 5; q.caught = false;
+    check(boundaryAnnounce(q, seen).empty(), "A1d: a pair the rule did not take (excluded) is not announced as a panel");
+    q.caught = true; q.draws = 0;
+    check(boundaryAnnounce(q, seen).empty(), "A1e: a pair with no draws is not announced");
+    q.draws = 1;
+    check(!boundaryAnnounce(q, seen).empty(), "A1f: another vertex shader is");
+    // the window carries 'caught' through nameUnlisted
+    UiBoundaryWindow w; int e = 0;
+    w.noteLit(&e, true, false); w.nameUnlisted(0x77, 0x1, false);
+    w.noteLit(&e, true, false); w.nameUnlisted(0x77, 0x1, true);
+    check(w.used == 1 && w.pairs[0].draws == 2 && w.pairs[0].caught, "A1g: a pair is 'caught' once any of its draws was");
 }
 
 // ---- N: the node probe on a synthetic image -------------------------------------------------------------------------------------------
@@ -566,22 +655,28 @@ void casePins() {
         between(vscreen, "void STDMETHODCALLTYPE hookedPSSetShaderResources", "void STDMETHODCALLTYPE hookedVSSetConstantBuffers"),
         [](const std::string& h) {
             const size_t set = h.find("bindingSet(static_cast<BindSlot>(");
-            const size_t tagAt = h.find("if (uiLayerLive() && uiDepthWantsDraws()) uiDepthTagBind(start, n);");
+            const size_t tagAt = h.find("if (g_panelTagLive) uiDepthTagBind(start, n);");
             const size_t real = h.rfind("g_state->realPSSetShaderResources(self, start, n, srvs);");
             return set != std::string::npos && tagAt != std::string::npos && real != std::string::npos && set < tagAt && tagAt < real;
         },
         [](std::string h) { return eraseAll(h, "uiDepthTagBind(start, n)"); });
+    pin("P1b: the tag is made only while the UI layer is live: the layer's frame boundary publishes the flag the bind hook tests, and the frame boundary stops re-tagging when it is off",
+        layer + "\n" + depth,
+        [](const std::string& t) {
+            return t.find("g_panelTagLive = detail::g_uiLayerLive;") != std::string::npos && t.find("if (!uiDepthWantsDraws() || !g_panelTagLive) g_panelTag.gen = 0;") != std::string::npos;
+        },
+        [](std::string t) { return eraseAll(t, "g_panelTagLive = detail::g_uiLayerLive;"); });
 
     // P2: the draw hook counts after the family rule, from its result, and passes what it needs.
     pin("P2: the draw hook notes the eye draw right after the family rule, from the layer's target kind and the rule's answer",
         vscreen,
         [](const std::string& v) {
             const size_t fam = v.find("const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count);");
-            const size_t note = v.find("uiDepthBoundaryNoteDraw(uiLayerTargetKind(), uiLayerTargetResource(), uiFamily != UiLayerFamily::kNone);");
+            const size_t note = v.find("uiDepthBoundaryNoteDraw(uiLayerTargetKind(), uiLayerTargetResource(), uiFamily != UiLayerFamily::kNone && !t_familyByTag,");
             const size_t decide = v.find("uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily)");
             return fam != std::string::npos && note != std::string::npos && decide != std::string::npos && fam < note && note < decide;
         },
-        [](std::string v) { return eraseAll(v, "uiDepthBoundaryNoteDraw(uiLayerTargetKind(), uiLayerTargetResource(), uiFamily != UiLayerFamily::kNone);"); });
+        [](std::string v) { return eraseAll(v, "uiDepthBoundaryNoteDraw(uiLayerTargetKind(), uiLayerTargetResource(), uiFamily != UiLayerFamily::kNone && !t_familyByTag,"); });
 
     // P3: the draw path only reads the bit.
     const std::string note = between(depth, "void uiDepthBoundaryNoteDraw(", "// --- the verification sample");
@@ -656,27 +751,62 @@ void casePins() {
         },
         [](std::string t) { return eraseAll(t, "uiNodeProbeInstall();"); });
 
-    // P9: observe only -- no decision reads the tag.
+    // P9: who reads the tag. The census (ui_depth.cpp) and the one place that turns it into a fact for the rule (vscreen.cpp's uiLayerFamilyOf); the layer's decision and
+    // the family rule know it only as the fact panelTagged.
     {
-        const char* files[] = {"src\\d3d11\\ui_layer.cpp", "src\\d3d11\\ui_layer_math.h", "src\\d3d11\\vscreen.cpp", "src\\d3d11\\flat_ui_layer.cpp", "src\\d3d11\\ui_layer_seed.h",
-                               "src\\d3d11\\holo_remap_math.h"};
+        const char* files[] = {"src\\d3d11\\ui_layer.cpp", "src\\d3d11\\ui_layer_math.h", "src\\d3d11\\flat_ui_layer.cpp", "src\\d3d11\\ui_layer_seed.h"};
         bool clean = true;
         for (const char* rel : files) {
             std::ifstream in(g_root + "\\" + rel, std::ios::binary);
             if (!in) continue;
             std::stringstream ss;
             ss << in.rdbuf();
-            if (ss.str().find("uiPanelTagMask") != std::string::npos || ss.str().find("g_panelTag") != std::string::npos) clean = false;
+            if (ss.str().find("uiPanelTagMask") != std::string::npos || ss.str().find("g_panelTag.") != std::string::npos) clean = false;
         }
-        check(clean, "P9: no decision reads the tag: uiPanelTagMask and g_panelTag appear in no layer, family-rule or draw-hook file (only the census and the shadow touch them)");
-        check(readFile("src\\d3d11\\ui_layer_math.h").find("panelTag") == std::string::npos, "P9b: the family rule (ui_layer_math.h) knows nothing of the tag");
+        check(clean, "P9: the layer's decision, the family rule and the flat adapter read no tag byte: uiPanelTagMask appears only in the census and the fact-gatherer");
     }
+    pin("P10: uiLayerFamilyOf sets the lit-target fact from the one byte, for the lit target and the VR profile only, with ui_depth's exclusion carried; the family is told apart from a hash's",
+        between(vscreen, "thread_local bool t_familyByTag", "// The verdicts that forward the game's own draw"),
+        [](const std::string& f) {
+            return f.find("if (f.targetKind == 1 && uiPanelTagMask() != 0 && !runtimeFlatProfile()) {") != std::string::npos &&
+                   f.find("f.panelTagged = true;") != std::string::npos && f.find("f.excluded = uiDepthIsExcluded(f.vs);") != std::string::npos &&
+                   f.find("t_familyByTag = why == UiFamilyWhy::kPanelTag;") != std::string::npos;
+        },
+        [](std::string f) { return eraseAll(f, "&& !runtimeFlatProfile()"); });
+    {
+        const std::string math = readFile("src\\d3d11\\ui_layer_math.h");
+        const std::string rule = between(math, "inline UiLayerFamily uiLayerFamilyFor(", "// THE ON-FOOT GATE.");
+        pin("P10b: in the rule the tag is the LAST answer on the lit target (after every hash), is skipped when excluded, and takes the family holo",
+            rule,
+            [](const std::string& r) {
+                const size_t direct = r.find("if (out != UiLayerFamily::kNone) w = UiFamilyWhy::kDirect;");
+                const size_t tag = r.find("else if (f.panelTagged && !f.excluded) {");
+                const size_t holo = r.find("out = UiLayerFamily::kHolo;", tag == std::string::npos ? 0 : tag);
+                return direct != std::string::npos && tag != std::string::npos && holo != std::string::npos && direct < tag && tag < holo;
+            },
+            [](std::string r) { return eraseAll(r, "&& !f.excluded"); });
+    }
+    // P11: the tagger spends no resolve on a view it already knows is not a surface.
+    pin("P11: tagClassify keeps a view that is no 2D texture (and one it could not resolve, for a short while) and re-judges a 2D texture after a learned-set change from what it kept",
+        between(depth, "uint8_t tagClassify(void* view) {", "// The shadow's view pointer for PS SRV slot i"),
+        [](const std::string& f) {
+            const size_t other = f.find("if (e->state == 2) { ++w.memoHits; return 0; }");
+            const size_t unk = f.find("if (age < kTagUnknownLife) { ++w.unknownHits; return 0; }");
+            const size_t keep = f.find("surfaceMatches(e->info)");
+            const size_t resolve = f.find("bindingResolve(view, &info)");
+            return other != std::string::npos && unk != std::string::npos && keep != std::string::npos && resolve != std::string::npos &&
+                   other < resolve && unk < resolve && keep < resolve && f.find("info.dim == 0") != std::string::npos;
+        },
+        [](std::string f) { return eraseAll(f, "if (e->state == 2) { ++w.memoHits; return 0; }"); });
+    check(readFile("src\\d3d11\\binding_shadow.cpp").find("out->dim = static_cast<uint32_t>(dim);") != std::string::npos,
+          "P11b: the shadow's resolver reports the dimension even when the call returns false (a 3D or 1D texture), which is what tells 'known, no panel' from 'not knowable'");
 }
 
 // ---- the runner ---------------------------------------------------------------------------------------------------------------------------
 struct Case { const char* name; void (*fn)(); bool needsRoot; };
 const Case kCases[] = {
     {"B1", caseB1, false}, {"B2", caseB2, false}, {"B3", caseB3, false}, {"B4", caseB4, false}, {"B5", caseB5, false}, {"B6", caseB6, false},
+    {"R1", caseR1, false}, {"R2", caseR2, false}, {"A1", caseA1, false},
     {"C1", caseC1, false}, {"C2", caseC2, false}, {"C3", caseC3, false}, {"C4", caseC4, false},
     {"T1", caseT1, false}, {"T2", caseT2, false}, {"T3", caseT3, false}, {"T4", caseT4, false}, {"T5", caseT5, false},
     {"N1", caseN1, false}, {"N2", caseN2, false}, {"N3", caseN3, false},

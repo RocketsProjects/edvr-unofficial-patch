@@ -4908,6 +4908,7 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
                         g_flatBackOffs);
     }
     detail::g_uiLayerWatching = false;
+    g_panelTagLive = detail::g_uiLayerLive;   // the panel tag (ui_panel_tag.h) is made only while the layer is live
     g_watchBudget = kWatchPerFrame;
     // A tonemap admission whose draw never issued (swallowed) does not
     // survive the frame.

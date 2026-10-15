@@ -830,6 +830,10 @@ struct UiFamilyFacts {
     bool excluded = false;        // ui_depth's exclude list
     bool panelSized = false;      // srv0IsPanelSized: the 2D screen's composite
     bool learnedSurface = false;  // a learned interface surface in PS slots 0..3
+    // The lit HDR target only (targetKind 1): a PS SRV slot holds a learned panel surface, read from the bind-time tag (ui_panel_tag.h) -- the
+    // data-flow rule that replaces naming a cockpit panel by its vertex shader alone. Set by vscreen.cpp for the VR profile; ui_depth's exclude list
+    // (excluded) still wins. Default false: a caller that does not set it gets exactly the rule as it was.
+    bool panelTagged = false;
 };
 
 // How the rule reached its answer, for the family census (ui_layer.cpp).
@@ -841,6 +845,7 @@ enum class UiFamilyWhy : uint8_t {
     kLearnedSurface,    // by a learned interface surface
     kShaderPair,        // by its shader pair alone (no learned surface)
     kDirect,            // a GUI or flight-HUD shader straight into the eye
+    kPanelTag,          // the lit HDR target, a draw no vertex-shader hash names, over a learned panel surface: a cockpit holo panel by what it samples
     kNoSurface,         // a composite shader with no learned surface and an unknown pair
     kOther,             // any other draw
     kCount
@@ -855,6 +860,7 @@ inline const char* uiFamilyWhyName(UiFamilyWhy w) {
         case UiFamilyWhy::kLearnedSurface: return "a learned surface";
         case UiFamilyWhy::kShaderPair: return "its shader pair alone";
         case UiFamilyWhy::kDirect: return "a direct shader";
+        case UiFamilyWhy::kPanelTag: return "a learned panel surface sampled in the lit target";
         case UiFamilyWhy::kNoSurface: return "no learned surface, pixel shader not known";
         default: return "other";
     }
@@ -898,6 +904,12 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
                   (f.ps == 0xEA02FAC2BD6C643Cull || f.ps == 0xE95634B0F61D218Full)))
                   ? UiLayerFamily::kHoloGeneric : UiLayerFamily::kNone;
         if (out != UiLayerFamily::kNone) w = UiFamilyWhy::kDirect;
+        // Last, and only for a draw the hashes did not name: what it samples. Any vertex shader, the cockpit holo panels' family. The hash list stays the
+        // first answer (and the naming), so a draw it names is decided exactly as it always was.
+        else if (f.panelTagged && !f.excluded) {
+            out = UiLayerFamily::kHolo;
+            w = UiFamilyWhy::kPanelTag;
+        }
     } else if (f.excluded) {
         w = UiFamilyWhy::kExcluded;
     } else if (f.panelSized) {
