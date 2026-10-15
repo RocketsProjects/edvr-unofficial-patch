@@ -631,6 +631,7 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
     "src\d3d11\fss_heal.cpp" ^
+    "src\d3d11\fss_tiles.cpp" ^
     "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
@@ -2373,6 +2374,21 @@ if not exist "%OBJ%\exposurechain" mkdir "%OBJ%\exposurechain"
 if errorlevel 1 ( echo [edvr] ERROR: exposure chain test build failed & exit /b 1 )
 "%BUILD%\exposure_chain_test.exe" --dry-run || exit /b 1
 "%BUILD%\exposure_chain_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
+:rig_fss_tiles_test
+echo [edvr] === fss_tiles_test.exe ===
+REM The FSS tile renderer instrument and the tiles candidate (src\d3d11\fss_tiles_core.h, fss_tiles_d3d.h, fss_tiles.cpp): the pure half (identities, the zoom window, the substitution rule, the log line, the key value),
+REM the state restore on a fake context and on a WARP device with the debug layer through the production ops (the second view draws the first view's group count over the first view's list, then its own
+REM bindings are back and the next dispatch is stock), and source pins on the glue. No DLL, no game, no window.
+if not exist "%OBJ%\fsstiles" mkdir "%OBJ%\fsstiles"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\fsstiles\\" ^
+    /Fe"%BUILD%\fss_tiles_test.exe" "tools\fss_tiles_test\fss_tiles_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: fss tiles test build failed & exit /b 1 )
+"%BUILD%\fss_tiles_test.exe" --dry-run || exit /b 1
+"%BUILD%\fss_tiles_test.exe" --self-test "%ROOT%" || exit /b 1
 exit /b 0
 
 :rig_light_grid_cache_test

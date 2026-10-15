@@ -49,6 +49,7 @@
 #include "fss_panel.h"
 #include "fss_panel_rect.h"
 #include "fss_reveal.h"
+#include "fss_tiles.h"
 #include "fss_res.h"
 #include "depth_probe.h"      // Phase 0 item 3: which depth target the eye draws use, and how it reads
 #include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
@@ -5780,6 +5781,7 @@ static void vScreenRefreshConfigBody(bool forced) {
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
     fssRevealConfigure(cfg);
+    fssTilesConfigure(cfg);
     // The transition-flash engine fix (transition_flash_eye_base.cpp), always on.
     // The first call in a VR profile installs its consumer hook and reports
     // Armed or Lost to the camera-buffer tap; later calls do nothing.
@@ -6151,6 +6153,7 @@ void vScreenFrameBoundary() {
                 s->fssArrivalRecogs);
         }
         s->fssArrivalOpen = open;
+        if (!runtimeFlatProfile()) fssTilesFrameBoundary(s->frameNo, open);   // the tile renderer's per-view instrument and candidate (fss_tiles.cpp)
     }
 
     // Before this frame's counters are read or reset: a pending census starts
@@ -6945,6 +6948,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
     fssRevealConfigure(cfg);
+    fssTilesConfigure(cfg);
     // The engine fix. See the other call site's comment above.
     transitionFlashEyeBaseInstall();
     {

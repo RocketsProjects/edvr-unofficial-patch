@@ -19,6 +19,10 @@
 //           into the right -- squares in both eyes, deliberately)
 //   sync    the composite input freeze alone (lockstep)
 //   steady  the composite constants snapshot alone
+//   tiles   the engine candidate, temporary for the 2026-10-15 A/B (docs/fss-scanner.md): the second view's tile-renderer
+//           dispatches draw from the first view's argument buffer and buffer bindings, so both eyes reveal the same ring
+//           tiles in the same frame (the flat screen's look). Alone: no heal, no composite freeze. Not "lockstep" -- that
+//           spelling is the legacy name of the composite freeze (sync) and old inis still carry it.
 //
 // Legacy spellings from the two retired keys parse silently -- 1 -> on,
 // 0/stock -> off, 2 -> mirror, lockstep -> sync -- so an old ini, or a
@@ -39,6 +43,7 @@ struct EyeSync {
     int  healMode = 0;   // 0 off | 1 fill | 2 mirror
     bool lockstep = false;
     bool steady = false;
+    bool tiles = false;       // the tile-renderer candidate (src/d3d11/fss_tiles.cpp); not part of any(), it adds no recognition
     bool recognised = true;   // false: caller notes once, runs the default
 
     bool any() const { return healMode != 0 || lockstep || steady; }
@@ -69,6 +74,10 @@ inline EyeSync eyeSyncParse(std::string v) {
     }
     if (v == "steady") {
         s.steady = true;
+        return s;
+    }
+    if (v == "tiles") {
+        s.tiles = true;
         return s;
     }
     if (!(v == "on" || v == "true" || v == "yes" || v.empty())) {
