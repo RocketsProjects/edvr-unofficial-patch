@@ -169,6 +169,8 @@ void testKeyParsing() {
     check(on.healMode == 1 && on.lockstep && !on.tiles, "on is the shipped pair and nothing more");
     edvr::EyeSync off = edvr::eyeSyncParse("off");
     check(!off.tiles && !off.any(), "off is stock");
+    check(t.needsFssSignals() && on.needsFssSignals() && !off.needsFssSignals(),
+          "the FSS key watcher and Status poll run for tiles as for on, and not for off (flight f9f62bbc: tiles left them off and its zoom window never opened)");
     edvr::EyeSync mir = edvr::eyeSyncParse("mirror");
     check(mir.healMode == 2 && !mir.tiles, "mirror is unchanged");
 }
@@ -440,6 +442,14 @@ void testSourcePins(const std::string& root) {
     while ((at = vs.find("fssTilesConfigure(cfg);", at)) != std::string::npos) { ++n; ++at; }
     check(n == 2, "both config sites (install and reload) configure fss_tiles");
     check(has(vs, "fssTilesFrameBoundary(s->frameNo, open)"), "the frame boundary feeds fss_tiles the arrival window");
+
+    const std::string dh = slurp(root + "/src/d3d11/device_hook.cpp");
+    size_t nd = 0, ad = 0;
+    while ((ad = dh.find("eyeSyncFromConfig(Config::get()).needsFssSignals()", ad)) != std::string::npos) { ++nd; ++ad; }
+    check(nd == 2 && !has(dh, "eyeSyncFromConfig(Config::get()).any()"),
+          "the mode latch and the eager Status poll are wanted by needsFssSignals() at both sites, never by any()");
+    check(has(vs, "fssTilesNoteZoomSignal(s->frameNo, true)") && has(vs, "fssTilesNoteZoomSignal(s->frameNo, false)"),
+          "both zoom signals reach fss_tiles, which says why a zoom opened no window");
 
     const std::string bat = slurp(root + "/build.bat");
     check(has(bat, "src\\d3d11\\fss_tiles.cpp"), "build.bat compiles fss_tiles.cpp into the graphics DLL");

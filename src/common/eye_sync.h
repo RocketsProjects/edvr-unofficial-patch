@@ -47,6 +47,10 @@ struct EyeSync {
     bool recognised = true;   // false: caller notes once, runs the default
 
     bool any() const { return healMode != 0 || lockstep || steady; }
+    // The FSS key and pad watchers, the mode latch and the eager Status.json poll that tell the graphics half a zoom was pressed
+    // (device_hook.cpp fssModeLatchWanted). The tiles candidate needs them too: without them its zoom window never opens
+    // (flight f9f62bbc, 2026-10-15: `tiles` left any() false, so no zoom press was ever seen).
+    bool needsFssSignals() const { return any() || tiles; }
 };
 
 inline EyeSync eyeSyncParse(std::string v) {

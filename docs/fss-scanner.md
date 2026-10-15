@@ -46,7 +46,7 @@ before 2026-09-29 is kept in "Status detail".*
 - **Next flight (2026-10-15, built, not flown):** zoom a ringed planet at
   `fix.fss_eye_sync` = `off`, `tiles`, `mirror`; read the `fss tiles:` lines
   ("2026-10-15: the tile renderer, per view"). `tiles` is TEMPORARY (the
-  engine candidate: eye 1's tile dispatches draw from eye 0's buffers).
+  engine candidate; budget hypothesis refuted by flight f9f62bbc, "later").
   Known, not fixed: the ~220 m remap under head sway; the "scanner is up"
   bit firing on the loading screen's panel; the sky's ~+0.4 px/frame.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
@@ -1693,6 +1693,88 @@ Key retirement, if `tiles` works (proposed; nothing removed here):
   `experimental.fss_panel_distance` (`#fss_panel_distance = 1.0`) are
   separate decisions: neither touches the reveal; one is a sharpness cost,
   the other a user preference.
+
+## 2026-10-15 (later): flight f9f62bbc, the budget refuted, the window bug
+
+Flight on test build I (`v0.20.0-rc.1-65-gf9f62bbc`, Frontier, VR, SteamVR;
+`edvr_gfx_20261015_061452.log`). Two findings.
+
+**The per-view tile budget is refuted.** ruled out: a primary-view-only
+tile budget -- flight f9f62bbc windows 1-2 show equal group counts per eye.
+Window 1 (06:17, `on`): eye 0 large mean 437.3 (x 0..509), eye 1 large 452.0;
+eye 0 small 71.7, eye 1 small 57.0. Window 2: both eyes a constant 509 large,
+0 small. Every frame's large + small is 509 in BOTH eyes (e.g. f11759: eye 0
+382 + 127, eye 1 509 + 0): the same amount of tile work, split between the
+two shaders differently. Sharing: `sameArgsBuffer=0`, `sameUav0=0`; SRV
+slots 0-4 differ per eye, slots 5-7 are shared. A third pair (`eye=2`, small
+buffers, args A22) appears in some frames: another consumer of the same two
+shaders. So the left eye's black tiles are not a smaller budget. Open
+candidates: which tiles each eye's LISTS hold (the split between the two
+shaders differs), or the state of the eye's own output (cleared or not at
+the zoom). Copying eye 0's args and lists into eye 1 (`tiles`) is therefore
+probably the wrong lever and could spread the blacks to the right eye.
+
+READ: the shader declares t2 as a structured buffer of 8-byte entries, t0
+and t1 as raw buffers (the 21,936,256-byte and 149,248-byte ones), a cube
+array and typed UAV textures u0/u1 (`docs/shaders/tile-renderer-cs.asm`),
+and the engine's strings name a tiled deferred shading output (RVA
+0x140593850 references `TiledDeferredShadingOutput_Luminance`). INFERRED:
+this is the tiled lighting pass, whose output stays black where no tile
+writes it.
+
+**The window bug.** With `tiles` the zoom window did not open at the first
+attempts (06:19:38-06:21:36) and, when it did (windows 3 and 4, 06:22), it
+closed after about 0.9 s. CONFIRMED from `device_hook.cpp`: the zoom-press
+watchers, the mode latch and the eager 100 ms Status.json poll run only
+while `fssModeLatchWanted`, which was `eyeSyncFromConfig(...).any()`, and
+`tiles` leaves `any()` false by design. Without them nothing sets the zoom
+press, and the journal's GuiFocus is read slowly, so `journalFssFocus()`
+the window needs is stale. Fixed: `EyeSync::needsFssSignals()` (`any() ||
+tiles`) feeds both sites. If a zoom is ever signalled and no window opens,
+`fss tiles: a zoom was signalled (...) but no window opened: <why>` says
+which of: the journal unreadable, the journal not in the FSS, the window
+cap, or the key watcher not running. Windows 3 and 4 also show the
+candidate engaging (`substituted=162`, SRV slots 0x07) with the previous
+frame's shape check declining the first frame only.
+
+Ghidra, the pass itself (build 332841): `FUN_140593850` (RVA 0x593850, 4.9 KB)
+allocates the `TiledDeferredShadingOutput_Luminance` and `_Illuminance`
+textures from the frame's transient allocator on every call and stores the pair
+in the pass object at +0x90/+0x98; its flag byte (bits 1, 2, 4) is gated by
+settings bytes at +0xe8..+0xeb. READ: no per-view tile cache and no
+invalidation in it. UNKNOWN: whether the allocator clears a recycled texture
+and whether the pass object is per view. INFERRED: a tile that no dispatch
+writes shows whatever the pooled texture held, which can differ per call.
+
+Next instrument (designed, NOT built; read-only): `fss tiles` v2, same zoom
+window, adds per eye per frame at the first 6 frames after arrival and then
+one frame in 45:
+
+- the two list buffers (the slot-2 structured buffers, 2312 bytes each, 8-byte
+  entries): count, a 64-bit hash, the first 8 and last 8 entries in hex, the
+  entry-index range and the tile-coordinate bounding box once the entry layout
+  is read off the first dump. Read back through the same staging ring.
+- the small shader's share of the 509: `small/(large+small)` per eye and
+  frame, to see whether the left eye's split correlates with the reveal.
+- the tile-info raw buffer (slot 1, 149,248 bytes): a hash of each eye's
+  copy at dispatch, to say whether it differs between eyes by content.
+- the output UAVs u0/u1: whether anything clears or copies into them in the
+  window. Record-only hooks on ClearUnorderedAccessViewUint/Float,
+  ClearRenderTargetView, CopyResource/CopySubresourceRegion and
+  UpdateSubresource whose destination resource id is one of the window's
+  UAV/list/args ids: `fss tiles: write f=N <call> -> <id> (eye E)`. The
+  census still does not record the Clear* calls, so this is new.
+- a dump of each eye's u0 at the end of the first window frame as a
+  tile-validity mask (16x16 tile mean luma == 0), through the existing eye
+  dump path, to set against the lists: do the black tiles equal the small
+  shader's list entries in the left eye?
+
+Reading it: black tiles == the small list's entries in the left eye and the
+right eye's small list is empty: the classification (a producer upstream of
+the dispatch) differs per eye, and the fix lies in what feeds the lists, not in
+the dispatch. A clear of eye 0's u0 at the zoom with none for eye 1: that call
+is the lever (suppress or mirror it). Neither: the blacks are in the shader's
+inputs (t0/t1), and the next step is their producers.
 
 ## Open
 

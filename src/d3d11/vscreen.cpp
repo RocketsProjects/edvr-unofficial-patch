@@ -6022,6 +6022,9 @@ void vScreenFrameBoundary() {
         // the window in the COCKPIT, where hard-black is everywhere --
         // the field's flicker.
         if (journalFssFocus()) s->fssJumpFrame = s->frameNo;
+        if (!runtimeFlatProfile() && s->fssChromeFrame != 0 && s->frameNo - s->fssChromeFrame <= 5) {
+            fssTilesNoteZoomSignal(s->frameNo, false);   // a jump with the scanner up: if no window opens, fss_tiles says why
+        }
         if (s->censusFssJump && s->fssChromeFrame != 0 &&
             s->frameNo - s->fssChromeFrame <= 5) {
             drawCensusAutoRequest();
@@ -6030,6 +6033,7 @@ void vScreenFrameBoundary() {
     if (deviceHookTakeFssZoomPress()) {
         // Earlier than the jump: the player's own zoom button.
         s->fssJumpFrame = s->frameNo;
+        if (!runtimeFlatProfile()) fssTilesNoteZoomSignal(s->frameNo, true);
         if (s->fssArrivalNotes < 4) {
             ++s->fssArrivalNotes;
             Log::get().note(

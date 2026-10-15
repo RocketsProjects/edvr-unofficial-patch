@@ -15,6 +15,7 @@
 #include "../common/timing.h"
 #include "fss_tiles_core.h"
 #include "fss_tiles_d3d.h"
+#include "journal_watch.h"   // journalFssFocus: the zoom window's authority
 
 // See fss_tiles_core.h for the story. Two jobs, both inside an FSS zoom window only:
 //   1. the INSTRUMENT: read the 12-byte argument block of every tile-renderer dispatch back (copy to a staging ring, Map
@@ -102,6 +103,11 @@ struct State {
     bool     summaryDue = false;
     uint32_t summaryAfterFrame = 0;
     bool     noTargetNoted = false;
+    // A zoom signalled but no window opened: say why, a few times.
+    bool     signalPending = false;
+    bool     signalPress = false;
+    uint32_t signalFrame = 0;
+    uint32_t noWindowNotes = 0;
 };
 
 State g;
@@ -466,6 +472,12 @@ void fssTilesConfigure(Config& cfg) {
     refreshActive();
 }
 
+void fssTilesNoteZoomSignal(uint32_t frameNo, bool press) {
+    g.signalPending = true;
+    g.signalPress = press;
+    g.signalFrame = frameNo;
+}
+
 void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
     g.frame = frameNo;
     g.prevViews = g.views.n;
@@ -483,6 +495,21 @@ void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
     } else if (ev == WindowMachine::Closed) {
         g.summaryDue = true;
         g.summaryAfterFrame = frameNo + kReadbackDelay + 6;
+    }
+    if (g.signalPending) {
+        g.signalPending = false;
+        if (!g.win.open && g.noWindowNotes < 6) {
+            ++g.noWindowNotes;
+            const char* why;
+            if (!journalFssFocusKnown()) why = "the journal's GuiFocus has not been read (Status.json unknown)";
+            else if (!journalFssFocus()) why = "the journal says the game is not in the FSS (GuiFocus is not 9)";
+            else if (g.win.windows >= kMaxWindows) why = "the session's window cap was reached";
+            else why = "the arrival window did not open for a reason this module cannot see";
+            Log::get().note("fss tiles: a zoom was signalled (%s at frame %u) but no window opened: %s; the FSS key watcher is %s. "
+                            "Said at most 6 times.",
+                            g.signalPress ? "your zoom press" : "a camera jump with the scanner up", g.signalFrame, why,
+                            eyeSyncFromConfig(Config::get()).needsFssSignals() ? "running" : "NOT running (fix.fss_eye_sync is off)");
+        }
     }
     if (!g.win.open) {
         for (EyeZero& z : g.e0) if (z.valid) releaseEyeZero(z);

@@ -1687,7 +1687,7 @@ void presentFrameBoundary() {
             // The three diagnostic keys follow the file too (the menu's Hotkeys page).
             configureDiagnosticHotkeys();
             g_state->fssModeLatchWanted =
-                eyeSyncFromConfig(Config::get()).any();
+                eyeSyncFromConfig(Config::get()).needsFssSignals();
             journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
         });
         tkFrameFlagPeer.run(tickFrameFlagPeer);
@@ -2198,7 +2198,7 @@ State& ensureState() {
         menuAdoptGameBindings(Config::get().getBool("hotkey.read_game_bindings", true), nullptr);
         journalWatchConfigure();
         g_state->fssModeLatchWanted =
-            eyeSyncFromConfig(Config::get()).any();
+            eyeSyncFromConfig(Config::get()).needsFssSignals();
         // Flat reads the GuiFocus of the open map (temporal AA off on the Galaxy Map, the System Map and the Orrery) from Status.json, at the same 100 ms the FSS latch wants.
         journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
     }

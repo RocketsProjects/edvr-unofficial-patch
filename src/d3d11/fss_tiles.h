@@ -26,6 +26,10 @@ void fssTilesConfigure(Config& cfg);
 // Once per frame at the boundary. `zoomOpen` is vscreen's arrival window (journal-gated, 600 frames from the zoom).
 void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen);
 
+// A zoom was signalled (the player's zoom press, or a camera jump while the scanner's chrome is up) on this frame. If no
+// window is open by the frame boundary, the module says why, at most 6 times a session.
+void fssTilesNoteZoomSignal(uint32_t frameNo, bool press);
+
 // A zoom window is open, a read-back is outstanding, or a summary is owed: the DispatchIndirect hook must call in.
 inline bool fssTilesActive() { return detail::g_fssTilesActive; }
 
