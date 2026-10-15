@@ -96,6 +96,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
 #include "gpu_busy_sampler.h" // gpuBusyFrame: the OS GPU busy sampler, counted once per owned Present
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
+#include "fss_ring_hook.h"   // fssRingHookInstall: the read-only ring pass observer (VR profile)
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "light_grid_cache_hook.h"   // lightGridCacheInstall at startup, lightGridCachePoll once a second, lightGridCacheNoteFrame per Present: the fragment-culling grid cache (both profiles)
 #include "ui_node_probe.h"   // uiNodeProbeInstall: the OBSERVE-ONLY probe on the engine's UI node (the panel data-flow census)
@@ -3032,6 +3033,9 @@ void hookDevice(ID3D11Device* device) {
             // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): a CodeHook on Frontier's input-assembler flush, once, in BOTH profiles -- the stale
             // cache is the game's, not VR's. A build that is not 332841 is one log line and nothing patched.
             vertexResyncInstall();
+            // The FSS ring pass observer (fss_ring_hook.cpp): a READ-ONLY CodeHook on the game's ring pass entry, VR profile only, logging inside zoom windows. A build that is
+            // not 332841 or a prologue that differs is one `ring hook inert` line and nothing patched.
+            fssRingHookInstall();
             // The light grid cache (light_grid_cache_hook.cpp; docs/light-grid-cache-2026-10-13.md): a CodeHook on the game's fragment-culling cluster builder, once, in BOTH
             // profiles -- the builder is the game's. No key: exact, and verified against the game's own rebuild while it runs. A build that is not 332841 is one log line.
             lightGridCacheInstall();

@@ -26,6 +26,7 @@
 
 #include "../../src/common/eye_sync.h"
 #include "../../src/common/system_d3d11.h"
+#include "../../src/d3d11/fss_ring_core.h"
 #include "../../src/d3d11/fss_tiles_core.h"
 #include "../../src/d3d11/fss_tiles_d3d.h"
 
@@ -264,8 +265,55 @@ void testV4Pure() {
     check(ft::kRevealFrames == 600 && ft::kRunOffsets[0] == 20 && ft::kRunOffsets[1] == 150 && ft::kFingerEvery == 10 && ft::kTileGrid == 8 &&
               ft::kTilePx == 16 && ft::kBufRegions * ft::kBufRegionBytes == 4096,
           "the numbers the task named");
-    check(std::strcmp(ft::roleName(ft::Role::GbufA), "slot3") == 0 && std::strcmp(ft::roleName(ft::Role::GbufB), "slot4") == 0,
-          "the write watch names the per-eye textures");
+    check(std::strcmp(ft::roleName(ft::Role::Gbuf8), "t8") == 0 && std::strcmp(ft::roleName(ft::Role::Gbuf11), "t11") == 0 && ft::kRoles == 10 &&
+              static_cast<int>(ft::Role::Gbuf11) == 9,
+          "the write watch names the G-buffer textures t8-t11");
+    check(ft::kCaptureSlots == 12 && ft::kSrvSlots == 8 && ft::kFpItems == 7 && ft::kFpSlots[0] == 0 && ft::kFpSlots[1] == 3 && ft::kFpSlots[2] == 4 &&
+              ft::kFpSlots[3] == 8 && ft::kFpSlots[6] == 11,
+          "the dispatch's slots 0-11 are read, and the fingerprint covers 0, depth 3, stencil 4 and the G-buffer 8-11");
+}
+
+std::string slurp(const std::string& path);
+
+void testRingCore(const std::string& root) {
+    namespace rh = edvr::ringhook;
+    check(rh::kRingPassRva == 0x36558A0u && rh::kPrologueBytes == 16, "the ring pass entry and the prologue length are the RE's");
+    const uint8_t good[16] = {0x40, 0x55, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x48, 0x81, 0xEC, 0x90, 0x00, 0x00, 0x00};
+    uint8_t bad[16];
+    std::memcpy(bad, good, 16);
+    bad[15] = 0x01;
+    check(rh::prologueMatches(good, 16) && !rh::prologueMatches(bad, 16) && !rh::prologueMatches(good, 15) && !rh::prologueMatches(nullptr, 16),
+          "the prologue check accepts the bytes read from the exe and nothing else");
+    const std::string doc = slurp(root + "/docs/fss-scanner.md");
+    check(doc.find("0x36558a0, `40 55 57 41 54 41 55 41 56 48 81 EC 90 00 00 00`") != std::string::npos ||
+              doc.find("`FUN_1436558a0` 0x36558a0, `40 55 57 41 54 41 55 41 56 48 81 EC 90 00 00 00`") != std::string::npos,
+          "the prologue is the one in the RE's hook-point table (docs/fss-scanner.md)");
+    check(rh::kCameraId == 0x8e8 && rh::kCameraSettings == 0x8f8 && rh::kSettingsRole == 0x10 && rh::kDataBodyMode == 0x104 && rh::kRingScratch == 0x6b0 &&
+              rh::kRingAlpha == 0x718 && rh::kRingActive == 0x720 && rh::kRingRenderer == 0x48 && rh::kVtableGetCamera == 0xa8 && rh::kVtableGetId == 0x70,
+          "the offsets are the RE's table");
+
+    rh::TupleTable t;
+    rh::Call a;
+    a.camera = 3; a.role = 1; a.pass = 7; a.mode = 2; a.scratch = true;
+    rh::Call b = a;
+    b.role = 2;
+    b.alpha = 0.5f;
+    check(t.add(a) && !t.add(a) && t.add(b) && !t.add(b) && t.used == 2 && t.e[0].n == 2 && t.e[1].n == 2, "the tuple table counts combinations, new ones said once");
+    rh::Call c2 = a;
+    c2.alpha = 0.9f;
+    check(!t.add(c2) && t.used == 2, "the alpha is not part of the combination");
+    rh::TupleTable full;
+    for (int i = 0; i < 40; ++i) { rh::Call x; x.camera = i; full.add(x); }
+    check(full.used == rh::TupleTable::kCap && full.overflow == 8, "a full table counts what it cannot hold");
+    char line[300];
+    rh::formatCall(line, sizeof(line), 13152, 4, a, "new combination");
+    check(std::strcmp(line, "fss tiles: ring f=13152 call=4 cam=3 role=1 pass=7 mode=2 ring+0x6b0=set alpha=0.000 dir=0 active=0 (new combination)") == 0,
+          "the call line has the documented shape");
+    char tup[300];
+    rh::formatTuples(tup, sizeof(tup), t);
+    check(std::strcmp(tup, "cam=3 role=1 pass=7 mode=2 6b0=set x3; cam=3 role=2 pass=7 mode=2 6b0=set x2") == 0, "the combinations line");
+    rh::formatTuples(tup, 20, t);
+    check(std::strlen(tup) < 20, "a short buffer is cut, never overrun");
 }
 
 void testKeyParsing() {
@@ -728,12 +776,30 @@ void testSourcePins(const std::string& root) {
     check(has(vs, "fssTilesNoteZoomSignal(s->frameNo, true)") && has(vs, "fssTilesNoteZoomSignal(s->frameNo, false)"),
           "both zoom signals reach fss_tiles, which says why a zoom opened no window");
 
+    const std::string rhs = slurp(root + "/src/d3d11/fss_ring_hook.cpp");
+    check(!rhs.empty() && has(rhs, "fss tiles: ring hook inert --") && has(rhs, "fss tiles: ring hook armed at EliteDangerous64.exe+0x") &&
+              has(rhs, "fss tiles: window %u ring hook -- armed,") && has(rhs, "the entry has NOT been reached this session") &&
+              has(rhs, "it saw nothing because it was never armed"),
+          "the ring hook says when it is inert and why, when it armed, and every window counts the calls it saw, zero included");
+    check(has(rhs, "vertex_resync_core.h") && has(rhs, "vresync::identityMatches") && has(rhs, "sehCheckBytes(target, kPrologue, kPrologueBytes)") &&
+              has(rhs, "g_hook.install(reinterpret_cast<void*>(target), g_relay, nullptr, \"fss-ring-pass\""),
+          "the build identity and the prologue are checked before the CodeHook is placed, through the vertex resync's relay");
+    check(has(rhs, "forward(ring, pass, camera, a4, a5, a6, a7, data);") && has(rhs, "if (g_active.load(std::memory_order_relaxed)) observe(ring, pass, camera, data);"),
+          "every argument is forwarded unchanged and the observation runs only inside a capture");
+    check(has(rhs, "__try") && has(rhs, "readCall(") && has(rhs, "readMainId(") && has(rhs, "runtimeFlatProfile()"), "the reads are SEH-guarded and the flat profile is left alone");
+    check(!has(rhs, "WriteProcessMemory"), "the observer does not write the game's memory itself (CodeHook places the one patch)");
+    const std::string dhk = slurp(root + "/src/d3d11/device_hook.cpp");
+    const size_t vr = dhk.find("vertexResyncInstall();");
+    const size_t rr = dhk.find("fssRingHookInstall();", vr);
+    check(vr != std::string::npos && rr != std::string::npos && rr > vr && rr - vr < 900, "the ring hook is installed at startup beside the vertex resync");
     const std::string bat = slurp(root + "/build.bat");
-    check(has(bat, "src\\d3d11\\fss_tiles.cpp"), "build.bat compiles fss_tiles.cpp into the graphics DLL");
+    check(has(bat, "src\\d3d11\\fss_tiles.cpp") && has(bat, "src\\d3d11\\fss_ring_hook.cpp"), "build.bat compiles fss_tiles.cpp and fss_ring_hook.cpp into the graphics DLL");
 
     const std::string cpp = slurp(root + "/src/d3d11/fss_tiles.cpp");
     check(has(cpp, "swapBack(ops, g.sw)") && has(cpp, "if (!ok || g.sw.swapped)"), "the fault path restores the bindings from outside the guarded dispatch");
     check(has(cpp, "D3D11_MAP_FLAG_DO_NOT_WAIT"), "the read-back never waits");
+    check(has(cpp, "fssRingHookWindow(g.win.capturing, g.windowNo, frameNo);") && has(cpp, "fssRingHookWindowSummary(g.windowNo);"),
+          "the capture window is handed to the ring hook each frame and its summary is said with every window's");
     check(has(cpp, "fss tiles: window %u lists --") && has(cpp, "fss tiles: window %u writes --") &&
               has(cpp, "no clear, copy or update touched any of them") && has(cpp, "samples read=%u"),
           "every window closes with a lists line and a writes line, zero counts included, so nothing-happened reads differently from never-ran");
@@ -788,6 +854,7 @@ int main(int argc, char** argv) {
     testV2Pure();
     testBand();
     testV4Pure();
+    testRingCore(root);
     testFakeRestore();
 
     const auto createDevice = edvr::systemD3D11CreateDevice();

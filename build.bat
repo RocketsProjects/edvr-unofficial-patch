@@ -632,6 +632,7 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\fss_reveal.cpp" ^
     "src\d3d11\fss_heal.cpp" ^
     "src\d3d11\fss_tiles.cpp" ^
+    "src\d3d11\fss_ring_hook.cpp" ^
     "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
