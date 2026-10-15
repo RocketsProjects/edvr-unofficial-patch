@@ -286,6 +286,18 @@ static void flatNoticeCells() {
         const std::string* got = q.take(false);
         check(got && *got == "AA restored: DLSS" && q.take(false) == nullptr, "only the newest starts when the menu closes");
     }
+    // A profile switch with a notice pending (review follow-up of main 4bd06f12, F3): F7 with the menu open queues "AA off", the mode watcher then commits a
+    // switch to VR, which closes the menu and clears the AA override. Back in flat the old notice must not appear.
+    {
+        FlatNoticeQueue q;
+        q.show(noticeText(Press::WentOff, "dlss", "F7").c_str());
+        check(q.take(true) == nullptr && q.due(), "profile switch: the AA-off notice is waiting behind the open menu");
+        q.clear();   // menuProfileSwitch
+        check(!q.due() && q.take(false) == nullptr && q.take(true) == nullptr, "profile switch: the cleared queue starts nothing when the menu is closed, and keeps nothing");
+        q.show(noticeText(Press::Restored, "dlss", "F7").c_str());
+        const std::string* got = q.take(false);
+        check(got && *got == "AA restored: DLSS", "profile switch: a notice raised after the switch is shown, and is not mixed with the old text");
+    }
     // Menu closed when the notice is raised: it starts on the next tick, as before.
     {
         FlatNoticeQueue q;
@@ -318,6 +330,13 @@ static void sourcePins(const std::string& root) {
     check(has(menu, "void menuShowNotice(") && has(menu, "void menuNoteOwnChange("), "the menu has the notice and the own-change calls");
     check(has(menu, "s.flatNotice.show(text);") && has(menu, "s.flatNotice.take(s.open)"),
           "the flat menu raises and starts its notice through the queue, which holds it while the menu is open");
+    {
+        const size_t at = menu.find("void menuProfileSwitch() {");
+        const size_t end = at == std::string::npos ? at : menu.find("\n}\n", at);
+        const std::string body = end == std::string::npos ? std::string() : menu.substr(at, end - at);
+        check(!body.empty() && has(body.c_str(), "s.flatNotice.clear();") && has(body.c_str(), "s.flatNoticeUp = false;") && has(body.c_str(), "s.flatNoticeShown = false;"),
+              "a profile switch clears the outgoing profile's queued and displayed flat notice (menuProfileSwitch)");
+    }
     check(has(ini, "compare_aa = F7"), "edvr.ini ships the key bound to F7");
     check(std::string(kDefaultKey) == "F7", "and the code's default is the same F7");
     check(has(ini, "# ui: AA comparison key (empty = off) | hotkey | live"), "the F8 Hotkeys page has the row");
