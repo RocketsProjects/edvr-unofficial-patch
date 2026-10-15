@@ -32,7 +32,7 @@ constexpr uint32_t kMaxViews = 4;            // distinct argument buffers tracke
 constexpr uint32_t kMaxPerFrame = 16;        // dispatches read back per frame
 constexpr uint32_t kStagingRing = 4;         // one staging buffer per frame in flight
 constexpr uint32_t kReadbackDelay = 2;       // frames between the copy and the Map
-constexpr uint32_t kMaxWindows = 6;          // zoom windows instrumented per session
+constexpr uint32_t kMaxWindows = 10;         // zoom windows instrumented per session
 constexpr uint64_t kWindowMs = 10000;        // "about 10 s" from the zoom
 constexpr uint32_t kMaxLinesPerWindow = 160;
 constexpr uint32_t kDetailFrames = 4;        // every dispatch is a line for this many frames after the window opens
@@ -158,6 +158,16 @@ struct WindowMachine {
             e = Closed;
         }
         return e;
+    }
+    // v8: a new capture right now, whatever state the old one is in (the arrival, or a later accepted press or jump): the old one is over, a new window opens.
+    Event restart(uint32_t frame, uint64_t ms) {
+        if (windows >= kMaxWindows) return None;
+        ++windows;
+        open = true;
+        capturing = true;
+        startMs = ms;
+        startFrame = frame;
+        return Opened;
     }
     bool wantsDetail(uint32_t frame) const {
         const uint32_t d = frame - startFrame;
@@ -658,6 +668,49 @@ inline const char* closeText(ZoomGate::Close c) {
         case ZoomGate::FocusEnded:    return "the game says FSS focus ended";
         default:                      return "?";
     }
+}
+
+// ---- v8: the capture starts at the arrival (2026-10-15, after flight 0dbd3964) -----------------------------------------------------------------
+// Flight 0dbd3964: an early zoom press opened window 1, which ran its 875 frames on the sky view; the real press came 0.5 s after that capture closed while the 600-frame gate was
+// still open, so nothing re-armed and the arrival was missed; window 2 was after the reveal (alpha 1.000), window 3 the exit. v8 starts the capture on the arrival itself, as the
+// ring pass reports it (body mode 2, scan alpha ramping up), restarts it on every later accepted press or jump while the gate is open, refuses a jump within 1 s of the FSS latch
+// closing (the exit), and says in one line per capture whether it was valid.
+constexpr uint64_t kExitGraceMs = 1000;       // a jump this soon after the FSS latch closes is the exit, not a zoom
+
+struct LatchGuard {
+    bool     was = false;
+    uint64_t closedMs = 0;
+    void update(bool openNow, uint64_t now) {
+        if (was && !openNow) closedMs = now ? now : 1;
+        was = openNow;
+    }
+    bool jumpRefused(uint64_t now) const { return closedMs != 0 && now - closedMs < kExitGraceMs; }
+};
+
+// What a capture has to show to be the reveal.
+struct Validity {
+    bool     chromeAtStart = false;   // the scanner chrome was held when it started
+    uint32_t arrivalFrame = 0;        // the first frame the ring pass showed mode 2 with alpha below 1 inside the capture (0: never)
+    uint32_t runsRan = 0;
+    uint32_t runsPlanned = 0;
+    const char* endedBy = "";         // "" when it ran its course; otherwise why it was cut short
+    bool valid() const { return chromeAtStart && arrivalFrame != 0 && runsRan >= 1 && endedBy[0] == 0; }
+};
+inline int formatValidity(char* out, size_t cap, uint32_t n, const char* startedBy, const Validity& v) {
+    char seen[40];
+    if (v.arrivalFrame) std::snprintf(seen, sizeof(seen), "f=%u", v.arrivalFrame);
+    else std::snprintf(seen, sizeof(seen), "never");
+    char why[220] = "";
+    if (!v.valid()) {
+        size_t at = 0;
+        at += static_cast<size_t>(std::snprintf(why + at, sizeof(why) - at, "; not valid because:"));
+        if (!v.chromeAtStart) at += static_cast<size_t>(std::snprintf(why + at, sizeof(why) - at, " the scanner chrome was not held at the start;"));
+        if (!v.arrivalFrame) at += static_cast<size_t>(std::snprintf(why + at, sizeof(why) - at, " the ring pass never showed mode 2 with alpha below 1 inside it;"));
+        if (v.runsRan < 1) at += static_cast<size_t>(std::snprintf(why + at, sizeof(why) - at, " no eye run ran;"));
+        if (v.endedBy[0]) at += static_cast<size_t>(std::snprintf(why + at, sizeof(why) - at, " it was cut short (%s);", v.endedBy));
+    }
+    return std::snprintf(out, cap, "fss tiles: capture %u valid=%s (started by %s, mode 2 alpha<1 seen at %s, eye runs ran: %u of %u planned%s%s%s)", n, v.valid() ? "yes" : "no", startedBy,
+                         seen, v.runsRan, v.runsPlanned, v.endedBy[0] ? ", ended by: " : "", v.endedBy, why);
 }
 
 // ---- the state-restoring substitution ------------------------------------------------------------------------------

@@ -9,6 +9,8 @@
 // and every window closes with a line that counts the calls it saw (zero included), so a hook that never ran is told from one that saw nothing.
 #include <cstdint>
 
+#include "fss_ring_core.h"
+
 namespace edvr {
 
 // Install the hook (once; later calls do nothing). VR profile only; the flat profile is left alone.
@@ -19,5 +21,17 @@ void fssRingHookWindow(bool active, uint32_t windowNo, uint32_t frame);
 
 // The closing lines of a window (said whether or not anything was seen).
 void fssRingHookWindowSummary(uint32_t windowNo);
+
+// v8 (flight 0dbd3964): the hook finds the ARRIVAL itself. While the scanner is on show (`wanted`: the chrome is held and the FSS latch is open) every ring-pass call
+// is checked, capture or not, and the first call in body mode 2 with the scan alpha ramping up (below 1, direction 0) is a trigger. `wanted == false` re-arms the trigger.
+void fssRingHookScan(bool wanted);
+// The pending trigger, once: the frame, the alpha and the camera of the call that saw it.
+bool fssRingHookTakeArrival(uint32_t* frame, float* alpha, int* camera);
+// The first frame inside the current capture where the arrival signature was seen (0: not seen).
+uint32_t fssRingHookArrivalInWindow();
+// The ring-pass call the calling thread is inside, if the capture is running (the draws made inside it belong to that camera, pass and mode).
+bool fssRingHookCurrent(ringhook::Current* out);
+// The main camera's id, as read once a window.
+bool fssRingHookMainCamera(int* id);
 
 }  // namespace edvr

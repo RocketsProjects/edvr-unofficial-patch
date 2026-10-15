@@ -43,9 +43,9 @@ constexpr size_t kRingRenderer = 0x48;
 constexpr size_t kVtableGetCamera = 0xa8;
 constexpr size_t kVtableGetId = 0x70;
 
-constexpr uint32_t kFirstFrames = 12;        // every call is a line for this many frames after a window opens
+constexpr uint32_t kFirstFrames = 20;        // every call is a line for this many frames after a window opens (the arrival, call by call)
 constexpr uint32_t kEvery = 10;              // then the calls of one frame in this many
-constexpr uint32_t kMaxCallLines = 200;      // call lines a window
+constexpr uint32_t kMaxCallLines = 4000;     // call lines a window (96 calls a frame in the zoomed view)
 constexpr uint32_t kMaxFaults = 8;           // reads that fault before the hook stands down
 
 struct Call {
@@ -79,6 +79,22 @@ struct TupleTable {
         return false;
     }
     void clear() { used = 0; overflow = 0; for (auto& x : e) x = Entry(); }
+};
+
+// The arrival, as the ring pass shows it (flight 0dbd3964, docs/fss-scanner.md "v7 flown"): body mode 2 with the scan alpha still ramping UP (alpha below 1, direction 0).
+// Seen on the first such call, it starts the capture, whatever the zoom press or jump did or did not say.
+constexpr float kArrivalAlpha = 0.999f;
+inline bool isArrival(const Call& c) { return c.mode == 2 && c.alpha >= 0.0f && c.alpha < kArrivalAlpha && c.direction == 0; }
+inline bool rampDone(const Call& c) { return c.mode == 2 && c.alpha >= kArrivalAlpha; }
+
+// What a ring-pass call looks like to the draws made inside it (fss_ring_hook.cpp sets it around the forward, on the calling thread).
+struct Current {
+    bool     inCall = false;
+    int      camera = 0;
+    unsigned role = 255;
+    int      pass = 0;
+    int      mode = -1;
+    bool     scratch = false;
 };
 
 inline int formatCall(char* out, size_t cap, uint32_t frame, uint32_t callNo, const Call& c, const char* why) {
