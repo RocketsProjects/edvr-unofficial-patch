@@ -228,6 +228,7 @@ int uiDepthEyeOfTarget(const void* res, uint32_t, uint32_t, uint32_t) {
     return res && res == g_stubs.eyeRes[0] ? 0 : res && res == g_stubs.eyeRes[1] ? 1 : -1;
 }
 int uiDepthEyeOfTargetReadOnly(const void* res) { return uiDepthEyeOfTarget(res, 0, 0, 0); }
+void uiDepthBoundaryReport(uint64_t, const char*) {}   // the panel data-flow census's 30 s lines (ui_depth.cpp): this rig does not read them
 void uiPanelScaleSetTarget(float) {}
 void uiPanelScaleSetFlatTemporal(bool) {}
 void uiPanelScaleSetVrTemporal(bool) {}

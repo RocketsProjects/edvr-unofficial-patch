@@ -2,6 +2,7 @@
 #include "fixed_shader_source.h"
 #include "ui_depth.h"
 #include "ui_depth_layer.h"
+#include "ui_node_probe.h"    // uiNodeProbeClause: the engine node probe's clause in the boundary cost line
 #include "stellar_coverage.h"
 #include "orbital_width.h"    // the orbit lines' factor and the twin's private b13 (fix.ui_quality)
 #include "planet_motion.h"
@@ -723,6 +724,7 @@ bool surfaceMatches(const ResourceInfo& info) {
     --g_surfaceCount;
     if (g_surfaceNext >= g_surfaceCount) g_surfaceNext = 0;
     ++g_evictions;
+    uiPanelTagLearnChanged();   // the learned set lost a surface: the panel bits made before this are stale (ui_panel_tag.h)
     return false;
 }
 
@@ -749,6 +751,7 @@ void addSurface(const void* res, uint32_t w, uint32_t h, uint32_t fmt, char fami
         }
     }
     ++g_wLearned;
+    uiPanelTagLearnChanged();   // the learned set gained a surface (or replaced one): the panel bits made before this are stale
 }
 
 bool inList(const uint64_t* list, uint32_t n, uint64_t h) {
@@ -2370,6 +2373,149 @@ int uiDepthSampledSurfaceSlot() {
         if (viewIsSurface(bindingGet(kSlots[i]))) return i;
     }
     return -1;
+}
+
+// ---- the panel tag and the boundary census (ui_panel_tag.h) --------------------------------------------------------------------
+// OBSERVE ONLY. The tag answers "does this PS SRV slot hold a learned panel surface" when the view is bound, so the lit target's draws can
+// ask the data-flow question with one load. Not the draw path's: this runs in the PSSetShaderResources hook, a few hundred binds a frame.
+namespace {
+
+PtrMemo<kMemoSize> g_tagMemo;            // view -> flags | (learned-set generation << 8); an entry from another generation is asked again
+UiBoundaryWindow g_boundary;
+uint32_t g_tagSeenGen = 1;               // the learned-set generation the window last counted a change at
+uint32_t g_tagVerifyThisFrame = 0;
+bool g_tagTouched = false;                // the bind hook has run at least once (the frame boundary re-tags only then)
+uint32_t g_boundaryLit = 0, g_boundaryLdr = 0;   // eye draws counted this frame (the node probe reads them)
+unsigned long g_boundaryThread = 0;      // the thread of the last counted draw
+
+// One view's flags: a probe of the memo, and only for a view not seen lately (or seen before the learned set last changed) a resolve --
+// the view is certainly live now, it is being bound. A view that cannot be resolved is "unknown", not "no": counted, left unmemoised.
+uint8_t tagClassify(void* view) {
+    if (!view) return 0;
+    UiBoundaryWindow& w = g_boundary;
+    uint64_t memo = 0;
+    if (g_tagMemo.get(view, g_frame, kMemoLifeFrames, &memo) && static_cast<uint32_t>(memo >> 8) == g_panelLearnGen) {
+        ++w.memoHits;
+        return static_cast<uint8_t>(memo & 3u);
+    }
+    ResourceInfo info;
+    if (!bindingResolve(view, &info)) {
+        ++w.unresolved;
+        return 0;
+    }
+    uint8_t flags = 0;
+    if (info.isTexture2D) {
+        if (surfaceMatches(info)) flags |= kPanelFlagSurface;
+        if (vScreenIsEyeSized(info.a, info.b)) flags |= kPanelFlagEyeSized;
+    }
+    ++w.resolved;
+    // The generation AFTER surfaceMatches: it evicts a recycled address, which moves the generation, and this answer is about the set as it is now.
+    g_tagMemo.put(view, g_frame, static_cast<uint64_t>(flags) | (static_cast<uint64_t>(g_panelLearnGen) << 8));
+    return flags;
+}
+
+// The shadow's view pointer for PS SRV slot i (0..3).
+void* tagShadowView(uint32_t i) {
+    static const BindSlot kSlots[kPanelTagSlots] = {BindSlot::PsSrv0, BindSlot::PsSrv1, BindSlot::PsSrv2, BindSlot::PsSrv3};
+    return i < kPanelTagSlots ? bindingGet(kSlots[i]) : nullptr;
+}
+
+// All four slots, from the shadow: after the learned set changed, a long-bound view is re-asked once.
+void tagRetagAll() {
+    UiBoundaryWindow& w = g_boundary;
+    w.learnChanges += g_panelLearnGen - g_tagSeenGen;
+    g_tagSeenGen = g_panelLearnGen;
+    g_panelTag.gen = 0;   // stale by construction: panelTagBind recomputes all four
+    panelTagBind(g_panelTag, g_panelLearnGen, 0, 0, tagShadowView, tagClassify);
+    ++w.retags;
+}
+
+// The slow, memo-free answer for the slots bound now, against the bits: the sampled check that says whether the tag was right.
+void tagVerify() {
+    static const BindSlot kSlots[kPanelTagSlots] = {BindSlot::PsSrv0, BindSlot::PsSrv1, BindSlot::PsSrv2, BindSlot::PsSrv3};
+    UiBoundaryWindow& w = g_boundary;
+    ++w.checks;
+    ++g_tagVerifyThisFrame;
+    uint8_t truth = 0;
+    for (uint32_t i = 0; i < kPanelTagSlots; ++i) {
+        void* view = bindingGet(kSlots[i]);
+        ResourceInfo info;
+        if (view && bindingResolve(view, &info) && info.isTexture2D && surfaceMatches(info)) truth = static_cast<uint8_t>(truth | (1u << i));
+    }
+    const uint8_t have = g_panelTag.panel;
+    if (truth & static_cast<uint8_t>(~have)) {
+        ++w.missed;
+        w.missedThisFrame = true;
+    }
+    if (have & static_cast<uint8_t>(~truth)) ++w.falseHits;
+}
+
+}  // namespace
+
+void uiDepthTagBind(unsigned start, unsigned n) {
+    if (!uiDepthWantsDraws()) return;
+    g_tagTouched = true;
+    UiBoundaryWindow& w = g_boundary;
+    ++w.bindCalls;
+    const bool timed = (w.bindCalls % kBindTimedEvery) == 0;
+    const int64_t t0 = timed ? qpcNow() : 0;
+    if (uiPanelTagStale()) {
+        tagRetagAll();
+    } else {
+        panelTagBind(g_panelTag, g_panelLearnGen, start, n, tagShadowView, tagClassify);
+    }
+    if (timed) {
+        ++w.bindSamples;
+        w.bindTicks += static_cast<uint64_t>(qpcNow() - t0);
+    }
+}
+
+void uiDepthBoundaryNoteDraw(int targetKind, const void* target, bool listed) {
+    if (targetKind == 0 || !uiDepthWantsDraws()) return;
+    UiBoundaryWindow& w = g_boundary;
+    ++w.noteCalls;
+    const bool timed = (w.noteCalls % kNoteTimedEvery) == 0;
+    const int64_t t0 = timed ? qpcNow() : 0;
+    // THE READ: one byte. Everything from here to the verification marker is counting; no slot is scanned, no view resolved, no learned-set
+    // lookup made on the draw path (tools/ui_panel_tag_test pins that).
+    const uint8_t mask = uiPanelTagMask();
+    const bool tagged = mask != 0;
+    if (targetKind == 1) {
+        w.noteLit(target, tagged, listed);
+        if (tagged && !listed) w.nameUnlisted(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));
+        ++g_boundaryLit;
+    } else {
+        w.noteLdr(target, tagged || listed, tagged, g_panelTag.eye != 0);
+        ++g_boundaryLdr;
+    }
+    g_boundaryThread = GetCurrentThreadId();
+    if (timed) {
+        ++w.noteSamples;
+        w.noteTicks += static_cast<uint64_t>(qpcNow() - t0);
+    }
+    // --- the verification sample (the census's own cost, outside the figures above) ---
+    if ((w.noteCalls % kVerifyEvery) == 0 && g_tagVerifyThisFrame < kVerifyPerFrame) tagVerify();
+}
+
+void uiDepthBoundaryDrawPosition(uint32_t* lit, uint32_t* ldr, unsigned long* thread) {
+    if (lit) *lit = g_boundaryLit;
+    if (ldr) *ldr = g_boundaryLdr;
+    if (thread) *thread = g_boundaryThread;
+}
+
+void uiDepthBoundaryReport(uint64_t layerFrames, const char* profile) {
+    UiBoundaryContext c;
+    c.detectorOn = uiDepthWantsDraws();
+    c.profile = profile ? profile : "vr";
+    c.qpcFrequency = static_cast<uint64_t>(qpcFrequency());   // log.h
+    char probe[420];
+    uiNodeProbeClause(probe, sizeof(probe));
+    c.probe = probe;
+    const UiBoundaryText text = uiBoundaryText(g_boundary, c, layerFrames);
+    Log::get().note("%s", text.census.c_str());
+    Log::get().note("%s", text.cost.c_str());
+    g_boundary.reset();
+    g_tagSeenGen = g_panelLearnGen;
 }
 
 int uiDepthEyeOfTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt) {
@@ -4010,6 +4156,13 @@ void releaseChromeHeld() {
 
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
+    // The panel tag (ui_panel_tag.h): the frame's census runs closed; the bits made while the pass was off or before the learned set last
+    // changed are recomputed from the shadow so a view bound once and drawn for many frames is not carried stale.
+    g_boundary.frameEnd();
+    g_tagVerifyThisFrame = 0;
+    g_boundaryLit = g_boundaryLdr = 0;
+    if (!uiDepthWantsDraws()) g_panelTag.gen = 0;   // not tagging: the first bind after the pass comes back recomputes all four
+    else if (g_tagTouched && uiPanelTagStale()) tagRetagAll();   // only once the bind hook has run: a rig that never binds has no shadow to read
     releaseChromeHeld();   // the pass, which stages an eye run, has run for the frame
     g_uiContent.retire(g_frame);
     if(ctx)g_uiContent.gpu.poll(ctx);
@@ -4183,6 +4336,8 @@ void uiDepthShutdown() {
     }
     g_surfaceCount = 0;
     g_surfaceNext = 0;
+    uiPanelTagLearnChanged();
+    g_panelTag.forget();
     g_viewMemo.clear();
     g_vsMemo.clear();
     g_psMemo.clear();

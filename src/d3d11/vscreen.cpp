@@ -2993,6 +2993,9 @@ void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UIN
                        srvs[i]);
         }
     }
+    // The panel tag (ui_panel_tag.h, observe only): the shadow's cells were just written, so the slots' panel bits are tagged from them
+    // now, at the bind, and the draws that follow read one byte. One load and a branch while the layer or the interface depth pass is off.
+    if (uiLayerLive() && uiDepthWantsDraws()) uiDepthTagBind(start, n);
     g_state->realPSSetShaderResources(self, start, n, srvs);
 }
 
@@ -4022,6 +4025,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     bool barsFamily = false;
     if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
         const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count);
+        // The boundary census (ui_panel_tag.h, observe only): this eye draw's target class and whether the hash rule named it; the tag's bit
+        // is read inside. Nothing it counts is used here.
+        if (uiDepthWantsDraws()) uiDepthBoundaryNoteDraw(uiLayerTargetKind(), uiLayerTargetResource(), uiFamily != UiLayerFamily::kNone);
         compositeCounted = uiDepthScope.composite;
         compositeFamily = uiFamily;
         barsFamily = uiFamily == UiLayerFamily::kSupercruiseBars;
