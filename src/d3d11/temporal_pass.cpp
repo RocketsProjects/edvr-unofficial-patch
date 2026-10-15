@@ -3,6 +3,7 @@
 #include "temporal_history.h"
 #include "../common/runtime_profile.h"
 #include "draw_census.h"
+#include "fss_tiles.h"   // fssTilesNoteEyeDump: the lists written beside an eye run
 #include "eye_engine_capture.h"
 #include "eye_final_capture.h"
 
@@ -6253,6 +6254,7 @@ void temporalPassArmEyeDump() {
     // The key takes a RUN of the left eye (kEyeRun says why); a run already
     // under way is left alone.
     if (g_eyeRunLeft > 0 || g_eyeRunReady) return;
+    fssTilesNoteEyeDump();   // inside an FSS zoom window it writes the tile renderer's lists for the same frames
     beginEyeRun();
 }
 

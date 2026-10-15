@@ -199,6 +199,130 @@ struct Range {
     }
 };
 
+// ---- v2: what the lists hold (2026-10-15, after flight f9f62bbc refuted the per-view budget) --------------------------
+// Flight f9f62bbc: large + small is 509 in BOTH eyes every frame; only the split between the two shaders differs. So the
+// instrument now reads what each eye's two LIST buffers (SRV slot 2, 8-byte entries, 2312 bytes on build 332841) and its
+// tile-info buffer (SRV slot 1, 149,248 bytes) hold, and who writes to the window's buffers. Nothing here changes a bind.
+constexpr uint32_t kMaxListLines = 120;      // sample lines per window
+constexpr uint32_t kMaxWriteLines = 60;      // write lines per window
+constexpr uint32_t kMaxDumpFrames = 24;      // frames whose raw buffers are written to disk per window
+constexpr uint32_t kEyeDumpFrames = 16;      // consecutive frames written after the eye-dump key (the eye run is sixteen)
+constexpr uint32_t kRegions = 6;             // [eye 0/1] x {large list, small list, tile info}
+inline uint32_t regionOf(uint32_t eye, uint32_t role) { return eye * 3 + role; }
+
+inline uint64_t fnv64(const void* data, size_t n) {
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < n; ++i) {
+        h ^= p[i];
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+
+struct ListSummary {
+    uint32_t bytes = 0;
+    uint32_t entries = 0;                 // bytes / 8
+    uint32_t nonzero = 0;                 // entries with any bit set
+    int32_t  lastNonzero = -1;
+    uint64_t hash = 0;
+    uint32_t firstN = 0, lastN = 0;
+    uint32_t first[4][2] = {};            // the first four non-zero entries, as two u32 words each
+    uint32_t last[4][2] = {};             // the last four non-zero entries, in index order
+};
+
+inline ListSummary summarizeList(const void* data, uint32_t bytes) {
+    ListSummary s;
+    s.bytes = bytes;
+    s.entries = bytes / 8;
+    s.hash = fnv64(data, bytes);
+    const uint32_t* w = static_cast<const uint32_t*>(data);
+    uint32_t lastIdx[4] = {};
+    uint32_t seen = 0;
+    for (uint32_t i = 0; i < s.entries; ++i) {
+        const uint32_t a = w[2 * i], b = w[2 * i + 1];
+        if (!a && !b) continue;
+        ++s.nonzero;
+        s.lastNonzero = static_cast<int32_t>(i);
+        if (s.firstN < 4) { s.first[s.firstN][0] = a; s.first[s.firstN][1] = b; ++s.firstN; }
+        lastIdx[seen % 4] = i;
+        ++seen;
+    }
+    s.lastN = seen < 4 ? seen : 4;
+    for (uint32_t k = 0; k < s.lastN; ++k) {
+        const uint32_t idx = lastIdx[(seen - s.lastN + k) % 4];
+        s.last[k][0] = w[2 * idx];
+        s.last[k][1] = w[2 * idx + 1];
+    }
+    return s;
+}
+
+inline int formatList(char* out, size_t cap, const char* tag, const ListSummary& s) {
+    char f[120], l[120];
+    size_t a = 0, b = 0;
+    f[0] = l[0] = 0;
+    for (uint32_t i = 0; i < s.firstN; ++i)
+        a += static_cast<size_t>(std::snprintf(f + a, sizeof(f) - a, "%s%X:%X", i ? "," : "", s.first[i][0], s.first[i][1]));
+    for (uint32_t i = 0; i < s.lastN; ++i)
+        b += static_cast<size_t>(std::snprintf(l + b, sizeof(l) - b, "%s%X:%X", i ? "," : "", s.last[i][0], s.last[i][1]));
+    return std::snprintf(out, cap, "%s n=%u/%u last@%d hash=%016llX first=[%s] last=[%s]", tag, s.nonzero, s.entries, s.lastNonzero,
+                         static_cast<unsigned long long>(s.hash), f, l);
+}
+
+// The tile-info buffer is large and its layout unread: a hash and how much of it is non-zero.
+inline int formatInfo(char* out, size_t cap, const char* tag, const void* data, uint32_t bytes) {
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    uint32_t nz = 0;
+    for (uint32_t i = 0; i < bytes; ++i) nz += p[i] != 0;
+    return std::snprintf(out, cap, "%s bytes=%u nonzero=%u hash=%016llX", tag, bytes, nz,
+                         static_cast<unsigned long long>(fnv64(data, bytes)));
+}
+
+// The split between the shaders: small / (large + small), in percent. 0 when nothing ran.
+inline double splitPercent(uint32_t large, uint32_t smallCount) {
+    const uint64_t t = static_cast<uint64_t>(large) + smallCount;
+    return t ? 100.0 * smallCount / static_cast<double>(t) : 0.0;
+}
+
+// The roles a window's buffer can have, for the write watch.
+enum class Role : uint8_t { None = 0, Args, Out, List, Info, Big };
+inline const char* roleName(Role r) {
+    switch (r) {
+        case Role::Args: return "args";
+        case Role::Out:  return "output";
+        case Role::List: return "list";
+        case Role::Info: return "info";
+        case Role::Big:  return "t0";
+        default:         return "?";
+    }
+}
+
+struct WatchTable {
+    static constexpr uint32_t kCap = 64;
+    const void* ptr[kCap] = {};
+    Role        role[kCap] = {};
+    uint8_t     eye[kCap] = {};
+    uint32_t    n = 0;
+    void clear() { n = 0; }
+    void add(const void* p, Role r, uint32_t e) {
+        if (!p) return;
+        for (uint32_t i = 0; i < n; ++i) if (ptr[i] == p) return;
+        if (n < kCap) { ptr[n] = p; role[n] = r; eye[n] = static_cast<uint8_t>(e); ++n; }
+    }
+    int find(const void* p) const {
+        for (uint32_t i = 0; i < n; ++i) if (ptr[i] == p) return static_cast<int>(i);
+        return -1;
+    }
+};
+
+// What was written to the watched buffers, by call and role, for the closing summary.
+constexpr uint32_t kWriteCalls = 6;
+inline const char* writeCallName(uint32_t i) {
+    static const char* const n[kWriteCalls] = {"ClearUnorderedAccessViewUint", "ClearUnorderedAccessViewFloat", "ClearRenderTargetView",
+                                               "CopyResource", "CopySubresourceRegion", "UpdateSubresource"};
+    return i < kWriteCalls ? n[i] : "?";
+}
+
 // ---- the state-restoring substitution ------------------------------------------------------------------------------
 // Ops supplies: void* getSrv(uint32_t slot) (a reference the caller releases), void setSrv(uint32_t slot, void* view),
 // void release(void* view), void dispatchIndirect(void* args, uint32_t off).

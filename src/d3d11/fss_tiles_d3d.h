@@ -34,5 +34,27 @@ struct D3dOps {
     }
 };
 
+// A CPU-readable staging twin of a buffer, made to match the source's size and structure so a CopyResource into it is
+// legal for structured and raw buffers alike (the SDK's BasicCompute11 readback does the same). `*st` is reused while the
+// size and structure still match, and replaced when they do not.
+inline bool ensureStagingLike(ID3D11Device* dev, ID3D11Buffer* src, ID3D11Buffer** st) {
+    D3D11_BUFFER_DESC sd{};
+    src->GetDesc(&sd);
+    D3D11_BUFFER_DESC d = sd;
+    d.Usage = D3D11_USAGE_STAGING;
+    d.BindFlags = 0;
+    d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    d.MiscFlags &= D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    if (!(d.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)) d.StructureByteStride = 0;
+    if (*st) {
+        D3D11_BUFFER_DESC have{};
+        (*st)->GetDesc(&have);
+        if (have.ByteWidth == d.ByteWidth && have.MiscFlags == d.MiscFlags && have.StructureByteStride == d.StructureByteStride) return true;
+        (*st)->Release();
+        *st = nullptr;
+    }
+    return SUCCEEDED(dev->CreateBuffer(&d, nullptr, st));
+}
+
 }  // namespace fsstiles
 }  // namespace edvr

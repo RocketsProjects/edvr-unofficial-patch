@@ -43,10 +43,10 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight (2026-10-15, built, not flown):** zoom a ringed planet at
-  `fix.fss_eye_sync` = `off`, `tiles`, `mirror`; read the `fss tiles:` lines
+- **Next flight (2026-10-15, built, not flown):** `fix.fss_eye_sync` = `off`,
+  zoom a ringed planet, press the eye-dump key in the window; read the `fss tiles:` lines
   ("2026-10-15: the tile renderer, per view"). `tiles` is TEMPORARY (the
-  engine candidate: eye 1's tile dispatches draw from eye 0's buffers).
+  engine candidate; budget hypothesis refuted by flight f9f62bbc, "later").
   Known, not fixed: the ~220 m remap under head sway; the "scanner is up"
   bit firing on the loading screen's panel; the sky's ~+0.4 px/frame.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
@@ -1693,6 +1693,106 @@ Key retirement, if `tiles` works (proposed; nothing removed here):
   `experimental.fss_panel_distance` (`#fss_panel_distance = 1.0`) are
   separate decisions: neither touches the reveal; one is a sharpness cost,
   the other a user preference.
+
+## 2026-10-15 (later): flight f9f62bbc, the budget refuted, the window bug
+
+Flight on test build I (`v0.20.0-rc.1-65-gf9f62bbc`, Frontier, VR, SteamVR;
+`edvr_gfx_20261015_061452.log`). Two findings.
+
+**The per-view tile budget is refuted.** ruled out: a primary-view-only
+tile budget -- flight f9f62bbc windows 1-2 show equal group counts per eye.
+Window 1 (06:17, `on`): eye 0 large mean 437.3 (x 0..509), eye 1 large 452.0;
+eye 0 small 71.7, eye 1 small 57.0. Window 2: both eyes a constant 509 large,
+0 small. Every frame's large + small is 509 in BOTH eyes (e.g. f11759: eye 0
+382 + 127, eye 1 509 + 0): the same amount of tile work, split between the
+two shaders differently. Sharing: `sameArgsBuffer=0`, `sameUav0=0`; SRV
+slots 0-4 differ per eye, slots 5-7 are shared. A third pair (`eye=2`, small
+buffers, args A22) appears in some frames: another consumer of the same two
+shaders. So the left eye's black tiles are not a smaller budget. Open
+candidates: which tiles each eye's LISTS hold (the split between the two
+shaders differs), or the state of the eye's own output (cleared or not at
+the zoom). Copying eye 0's args and lists into eye 1 (`tiles`) is therefore
+probably the wrong lever and could spread the blacks to the right eye.
+
+READ: the shader declares t2 as a structured buffer of 8-byte entries, t0
+and t1 as raw buffers (the 21,936,256-byte and 149,248-byte ones), a cube
+array and typed UAV textures u0/u1 (`docs/shaders/tile-renderer-cs.asm`),
+and the engine's strings name a tiled deferred shading output (RVA
+0x140593850 references `TiledDeferredShadingOutput_Luminance`). INFERRED:
+this is the tiled lighting pass, whose output stays black where no tile
+writes it.
+
+**The window bug.** With `tiles` the zoom window did not open at the first
+attempts (06:19:38-06:21:36) and, when it did (windows 3 and 4, 06:22), it
+closed after about 0.9 s. CONFIRMED from `device_hook.cpp`: the zoom-press
+watchers, the mode latch and the eager 100 ms Status.json poll run only
+while `fssModeLatchWanted`, which was `eyeSyncFromConfig(...).any()`, and
+`tiles` leaves `any()` false by design. Without them nothing sets the zoom
+press, and the journal's GuiFocus is read slowly, so `journalFssFocus()`
+the window needs is stale. Fixed: `EyeSync::needsFssSignals()` (`any() ||
+tiles`) feeds both sites. If a zoom is ever signalled and no window opens,
+`fss tiles: a zoom was signalled (...) but no window opened: <why>` says
+which of: the journal unreadable, the journal not in the FSS, the window
+cap, or the key watcher not running. Windows 3 and 4 also show the
+candidate engaging (`substituted=162`, SRV slots 0x07) with the previous
+frame's shape check declining the first frame only.
+
+Ghidra, the pass itself (build 332841): `FUN_140593850` (RVA 0x593850, 4.9 KB)
+allocates the `TiledDeferredShadingOutput_Luminance` and `_Illuminance`
+textures from the frame's transient allocator on every call and stores the pair
+in the pass object at +0x90/+0x98; its flag byte (bits 1, 2, 4) is gated by
+settings bytes at +0xe8..+0xeb. READ: no per-view tile cache and no
+invalidation in it. UNKNOWN: whether the allocator clears a recycled texture
+and whether the pass object is per view. INFERRED: a tile that no dispatch
+writes shows whatever the pooled texture held, which can differ per call.
+
+The instrument, v2 (built, not flown; read-only, inside the same zoom window,
+every cap named): per eye per frame it copies the two list buffers (SRV slot 2
+of each shader, 2312 bytes) and the tile-info buffer (SRV slot 1, 149,248
+bytes) into staging twins and reads them back two frames later with
+`DO_NOT_WAIT`. New lines:
+
+    fss tiles: lists f=N split eye0 small=a/T (p%) eye1 small=b/T (q%) | eye0 L n=<nonzero>/<entries> last@<i> hash=<16 hex> first=[w0:w1,..] last=[..] | eye0 S ...
+    fss tiles: lists f=N eye1 L ... | eye1 S ...
+    fss tiles: info f=N tile-info buffer eye0 bytes= nonzero= hash= | eye1 ... | identical=yes|no|n/a
+    fss tiles: write f=N <call> -> <args|output|list|info|t0> A<id> (eye E)
+    fss tiles: eye-dump key at f=N -- the raw lists ... of the next 16 frames go to edvr_logs\fsstiles ...
+    fss tiles: window N lists -- samples read= lines= raw files written for K frame(s) ...; mean split small/(large+small): eye0 p% eye1 q%
+    fss tiles: window N writes -- watched K buffer(s) ...; <call->role xN, ...> | no clear, copy or update touched any of them
+
+Lines appear for the first four frames of a window, one frame in 45, and any
+frame whose split moved ten points; at most 120 list lines and 60 write lines
+a window. The write watch hooks nothing new: vscreen's existing Clear*,
+CopyResource, CopySubresourceRegion and UpdateSubresource thunks offer their
+destination (owner context, one bool outside a window). Raw files
+`edvr_logs\fsstiles\f<frame>_e<eye>_<listL|listS|info>.bin` are written for
+the first three frames of a window and, after the eye-dump key, the next
+sixteen (at most 24 frames a window). `armed` / `opened` / the two closing
+lines above are printed even when every count is zero, so "nothing happened"
+reads differently from "never ran".
+
+The u0 validity mask is not a GPU reduction: the output textures are about
+150 MB each and a new precompiled shader means the build's shader tables and
+pinned hashes. The eye-dump key (hotkey.dump_eyes, or the menu's "Dump both
+eyes as seen") already writes both treated eyes as `eye_HHMMSS_L.bmp` and
+`_R.bmp`; the black 16x16 tiles there, read with `tools\diff_eye_dump.py`,
+are the mask, set against the raw lists written for the same frames.
+
+Reading it: black tiles equal to the small list's entries in the left eye and
+the right eye's small list empty: the classification (a producer upstream of
+the dispatch) differs per eye, and the fix lies in what feeds the lists. A
+`write` line for eye 0's output at the zoom with none for eye 1: that call is
+the lever. Neither: the blacks are in the shader's inputs (the tile-info
+buffer or the 21 MB raw buffer), and the next step is their producers.
+
+Flight (Sean, VR, a ringed planet): set `fix.fss_eye_sync = off` (stock is what
+is measured; `tiles` is the candidate the budget finding made doubtful). Open
+the FSS, press zoom, and within the next ten seconds, when the left eye shows
+the black tiles, press the eye-dump key once (the run takes sixteen frames,
+one hitch). Do not touch the key again until the log says the window closed.
+Repeat once more on the same planet without the key for the timing baseline.
+Read: the `window N lists` and `writes` lines, the split lines around the
+dump, and the files in `edvr_logs\fsstiles` and `edvr_logs\eyes`.
 
 ## Open
 

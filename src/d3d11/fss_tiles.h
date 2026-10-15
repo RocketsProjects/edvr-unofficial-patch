@@ -16,6 +16,7 @@ class Config;
 
 namespace detail {
 extern bool g_fssTilesActive;
+extern bool g_fssTilesWatch;   // a window is capturing and has buffers to watch
 }  // namespace detail
 
 typedef void(__stdcall* FssTilesRealDispatchIndirect)(ID3D11DeviceContext*, ID3D11Buffer*, unsigned int);
@@ -25,6 +26,25 @@ void fssTilesConfigure(Config& cfg);
 
 // Once per frame at the boundary. `zoomOpen` is vscreen's arrival window (journal-gated, 600 frames from the zoom).
 void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen);
+
+// Record-only: a write to one of the window's buffers (the tile renderer's argument buffer, outputs, lists and tile-info
+// buffer). `call` indexes fsstiles::writeCallName. Owner context only (the caller tests foreignContext). One bool when no
+// window is watching.
+void fssTilesNoteWriteSlow(const void* resourceOrView, bool isView, uint32_t call);
+inline void fssTilesNoteWrite(const void* resource, uint32_t call) {
+    if (detail::g_fssTilesWatch) fssTilesNoteWriteSlow(resource, false, call);
+}
+inline void fssTilesNoteWriteView(const void* view, uint32_t call) {
+    if (detail::g_fssTilesWatch) fssTilesNoteWriteSlow(view, true, call);
+}
+
+// The eye-dump key was pressed (temporal_pass.cpp, temporalPassArmEyeDump): inside a window, write the raw lists and tile-info
+// buffers of the next sixteen frames to edvr_logssstiles, beside the eye run, so the dump's black tiles can be read against them.
+void fssTilesNoteEyeDump();
+
+// A zoom was signalled (the player's zoom press, or a camera jump while the scanner's chrome is up) on this frame. If no
+// window is open by the frame boundary, the module says why, at most 6 times a session.
+void fssTilesNoteZoomSignal(uint32_t frameNo, bool press);
 
 // A zoom window is open, a read-back is outstanding, or a summary is owed: the DispatchIndirect hook must call in.
 inline bool fssTilesActive() { return detail::g_fssTilesActive; }
