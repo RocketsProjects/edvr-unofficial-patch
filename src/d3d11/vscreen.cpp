@@ -1847,7 +1847,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // free. The temporal pass asks too (temporalPassWantsFssChrome): the
     // scanner's interface takes the head's path while the screen is up,
     // and the stamp this tracker bumps is how the pass knows it is.
-    if ((s->fssHealOn || s->censusFssJump ||
+    if ((s->fssHealOn || s->censusFssJump || fssTilesWantsChrome() ||
          temporalPassWantsFssChrome()) &&
         kind == 'X' && count == 6) {
         bool chromeMatched = false;
@@ -6115,6 +6115,8 @@ void vScreenFrameBoundary() {
     }
     State* s = g_state;
     if (!s) return;
+    // Frames since the scanner's chrome last matched (0xFFFFFFFF: never): the fss_tiles gate opens a window only on a jump or a press while it is up.
+    const uint32_t chromeAgo = s->fssChromeFrame != 0 ? s->frameNo - s->fssChromeFrame : 0xFFFFFFFFu;
 
     // The ARRIVAL census (advanced.census_fss_jump): a world-camera jump
     // while the scanner's chrome is up is a zoom's first frame, and the
@@ -6129,9 +6131,7 @@ void vScreenFrameBoundary() {
         // the window in the COCKPIT, where hard-black is everywhere --
         // the field's flicker.
         if (journalFssFocus()) s->fssJumpFrame = s->frameNo;
-        if (!runtimeFlatProfile() && s->fssChromeFrame != 0 && s->frameNo - s->fssChromeFrame <= 5) {
-            fssTilesNoteZoomSignal(s->frameNo, false);   // a jump with the scanner up: if no window opens, fss_tiles says why
-        }
+        if (!runtimeFlatProfile()) fssTilesNoteZoomSignal(s->frameNo, false, chromeAgo);   // every jump: the gate accepts it only while the chrome is held
         if (s->censusFssJump && s->fssChromeFrame != 0 &&
             s->frameNo - s->fssChromeFrame <= 5) {
             drawCensusAutoRequest();
@@ -6140,7 +6140,7 @@ void vScreenFrameBoundary() {
     if (deviceHookTakeFssZoomPress()) {
         // Earlier than the jump: the player's own zoom button.
         s->fssJumpFrame = s->frameNo;
-        if (!runtimeFlatProfile()) fssTilesNoteZoomSignal(s->frameNo, true);
+        if (!runtimeFlatProfile()) fssTilesNoteZoomSignal(s->frameNo, true, chromeAgo);
         if (s->fssArrivalNotes < 4) {
             ++s->fssArrivalNotes;
             Log::get().note(
@@ -6174,7 +6174,7 @@ void vScreenFrameBoundary() {
                 s->fssArrivalRecogs);
         }
         s->fssArrivalOpen = open;
-        if (!runtimeFlatProfile()) fssTilesFrameBoundary(s->frameNo, open);   // the tile renderer's per-view instrument and candidate (fss_tiles.cpp)
+        if (!runtimeFlatProfile()) fssTilesFrameBoundary(s->frameNo, chromeAgo, journalFssFocusKnown(), journalFssFocus());   // the tile renderer's instrument and candidate (fss_tiles.cpp): its own gate decides the window
     }
 
     // Before this frame's counters are read or reset: a pending census starts

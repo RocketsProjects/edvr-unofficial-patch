@@ -615,6 +615,51 @@ struct Ranking {
     }
 };
 
+// ---- v7: the zoom gate (2026-10-15, after flight e05b6be6) --------------------------------------------------------------------------------
+// Flight e05b6be6: under `fix.fss_eye_sync = off` the fast Status.json poll and the zoom watchers did not run, so the arrival's camera jump landed before the
+// FSS focus was known and set nothing; the EXIT jump back to the cockpit landed while the stale focus still read 9 and opened the window. The band event was the
+// black frame of the exit and the eye runs captured the cockpit. The conclusions of v4-v6 drawn from `off` windows are withdrawn.
+//
+// The gate makes the window mean what it says. It opens only on a jump or a zoom press while the scanner's chrome is held (the chrome tracker matched within
+// kChromeHeldFrames frames: the scanner screen is on show), stays open while the chrome stays up and the game still says FSS focus, and closes with a reason
+// when either goes. The band event and the eye runs are refused on any frame the chrome is not held.
+constexpr uint32_t kChromeHeldFrames = 5;       // the chrome matched this recently: the scanner is up
+constexpr uint32_t kChromeDropFrames = 45;      // the chrome has been gone this long: the scanner has been left
+constexpr uint32_t kGateWindowFrames = 600;     // a window lives this long after its last accepted signal
+
+inline bool chromeHeld(uint32_t chromeAgo) { return chromeAgo <= kChromeHeldFrames; }
+
+struct ZoomGate {
+    enum Refusal : uint8_t { Accepted = 0, NoChrome };
+    enum Close : uint8_t { Idle = 0, Open, Expired, ChromeDropped, FocusEnded };
+    bool     open = false;
+    uint32_t startFrame = 0;
+    // A camera jump or the player's zoom press. Accepted only while the chrome is held; an accepted signal inside an open window restarts its clock (the zoom's
+    // departure and its arrival are two jumps).
+    Refusal signal(uint32_t frame, uint32_t chromeAgo) {
+        if (!chromeHeld(chromeAgo)) return NoChrome;
+        open = true;
+        startFrame = frame;
+        return Accepted;
+    }
+    // Once per frame. Idle when no window is open; Open while it stays open; otherwise why it closed this frame.
+    Close step(uint32_t frame, uint32_t chromeAgo, bool focusKnown, bool focus) {
+        if (!open) return Idle;
+        if (focusKnown && !focus) { open = false; return FocusEnded; }
+        if (chromeAgo > kChromeDropFrames) { open = false; return ChromeDropped; }
+        if (frame - startFrame > kGateWindowFrames) { open = false; return Expired; }
+        return Open;
+    }
+};
+inline const char* closeText(ZoomGate::Close c) {
+    switch (c) {
+        case ZoomGate::Expired:       return "the window's 600 frames ran out";
+        case ZoomGate::ChromeDropped: return "the scanner chrome dropped (the scanner was left)";
+        case ZoomGate::FocusEnded:    return "the game says FSS focus ended";
+        default:                      return "?";
+    }
+}
+
 // ---- the state-restoring substitution ------------------------------------------------------------------------------
 // Ops supplies: void* getSrv(uint32_t slot) (a reference the caller releases), void setSrv(uint32_t slot, void* view),
 // void release(void* view), void dispatchIndirect(void* args, uint32_t off).
