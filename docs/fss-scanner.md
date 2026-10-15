@@ -43,12 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next (v11, built, not flown):** the left composite leaves the ring's near
-  arc uncovered at f18888-95, the right covers it; same draw and layer. Depth,
-  overwrite and the suspect quads are ruled out. v11 logs every input of the
-  composite per eye (PS t0-t7 fingerprinted, t1-t3 in every frame +9..+17;
-  cb0-cb2; vertices; samplers), their diff, and the producers of t1-t3. Flight:
-  `off`, one zoom, plus `advanced.glare_shader_dump = 1`. Read `composite diff`.
+- **ROOT CAUSE (flight d7769063, v11):** the reveal shader's coarse input t1
+  (a 63x63 downsample of the layer) is drawn in the left pass BETWEEN the
+  ring's two draw groups, so it lacks the ring's second group (the near arc).
+  It is drawn again before the right composite from the finished layer.
+  Unrevealed cells show t1, so they are black in the left only. Proposed fix
+  (not built): skip the second downsample, so both eyes reveal alike.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -3377,6 +3377,131 @@ How to read it:
    (`words that differ`); then the shader bytecode, from the dump.
 5. If t1-t3 are the same texture as t2 at +0..+8 and three textures later, the
    identity columns show the change frame.
+
+## 2026-10-15 (v11 flown): flight d7769063, the root cause: the coarse reveal input is drawn mid-layer in the left pass
+
+Flight on test build S (`v0.20.0-rc.1-112-gd7769063`, Frontier, VR;
+`edvr_gfx_20261015_125933.log`; `--expect-build d7769063` matches). `off`,
+one zoom, `advanced.glare_shader_dump = 1`. Sean: the squares in the LEFT eye
+only. Read-only analysis.
+
+Validity: `capture 4 valid=yes`, arrival f16113/16114, dump f16114-16144. 25
+paired eye-frames read, 0 skipped. 62 `v11_*.pgm`. The glare dump wrote the
+composite's VS and PS (13:01:54 / 13:02:03); the downsample's shaders were
+already in the dump from 2026-09-06.
+
+**1. What differs at the composite** (`window 4 composite diff`, CONFIRMED):
+
+- **t1** (T121, 63x63 fmt 26) has the same identity and view in both eyes,
+  but its content differs in 22 of 25 frames, `[the SAME resource changed
+  between the two draws]`. Fingerprints 938EDAC4 (left) | 572380F3 (right)
+  through +12, then E318C506 | 413A3AA5 to +27. At +28 (f16142) they
+  converge.
+- **vs cb0 and vs cb2** differ every frame. The VS uses only cb0: the per-eye
+  quad transform and projection (cb0[0..1], cb0[4..7]). Expected per eye
+  (INFERRED).
+- **Never differ:** t0, t2 (the layer T50), t3, t4, ps cb1, ps cb2, s0-s3,
+  vertices, viewport and scissor. But ps cb1 is 333 constants and v11 read
+  only its first 512 bytes, so the reveal's progress words (cb1[90],
+  cb1[119], cb1[332]) were not compared.
+
+**2. The producer of t1** (`composite producer`, CONFIRMED, the same in
+every frame):
+
+- VS `DEF19B035D5EDEDC` / PS `831DF02EBA8AE814` makes 2 draws a frame into
+  T121, outside the ring pass, with neither eye's depth. The ordering at f16120
+  (f16127 and later shift by 55, same pattern):
+
+| Draw | What | Into |
+|---|---|---|
+| #212, #213 | ring group A (B12F7A61/42AC0CAC, 203DF517/EEAAC839), camera 1 role 1, inside the ring pass | the layer T50 |
+| #214, #215 | planet body draws (3530A6FD/13B224F0, 9FFA5D5E/8134D09E), outside the ring pass | T50 |
+| **#216** | **downsample 1**: DEF19B03/831DF02E, layer -> T121 | t1 |
+| #217, #218 | ring group B (the same two materials again), camera 1 | T50 |
+| #219 | LEFT composite (VS 953C8123 / PS A473A867) | T10 |
+| **#252** | **downsample 2**: layer (now complete) -> T121 | t1 |
+| #253 | RIGHT composite | T23 |
+
+- The left eye's t1 is a downsample of a layer that does not yet hold ring
+  group B. The right eye's t1 is taken after it.
+- Cameras 22 and 8 draw no ring (v8-v10), so between #219 and #253 nothing
+  changes the layer. The only per-eye difference is WHEN t1 was taken.
+- INFERRED: group B is the ring's front half, drawn after the planet. The
+  missing region in v10's images is the ring's front arc.
+
+**3. The shaders** (disassembled from the glare dump):
+
+- PS `831DF02E` is a one-texture colour-matrix copy (cb2[1..6]), and VS
+  `DEF19B03` is a pass-through. So t1 is a 1/4 copy of the layer.
+- PS `A473A867` (5 textures, cb1[333], cb2[2]) is the **reveal**.
+  - It splits the screen into square cells. cb1[119].x is the cell count and
+    cb1[332].x/y the aspect.
+  - Per cell it takes the luminance of **t1** at the cell centre, plus a
+    noise texture t4, as that cell's threshold.
+  - The progress is `frac(0.9999 * saturate(cb1[119].z / cb1[119].y))`, and a
+    cell is revealed when `saturate(1 + progress - threshold) >= 0.99`.
+  - An **unrevealed pixel shows t1** (sampled at the pixel); a revealed one
+    shows **t2**, the full-resolution layer.
+  - A grid-line highlight is drawn in the 0.89-0.99 band, then a circular
+    falloff and exposure (cb2, t0).
+- So in the left eye, every unrevealed cell over the front arc shows a black
+  t1: the black squares. They switch to t2, which is complete, as their cells
+  reveal. Dark cells reveal first, so they are gone in about ten frames
+  (round 33).
+- In the right eye the unrevealed cells show a t1 that holds the ring: blurry
+  but filled, the "already filled" look.
+- The animation itself (cells resolving from t1 to t2) runs in both eyes;
+  only the left's coarse image is missing the front arc.
+
+**4. The engine side.**
+
+- CONFIRMED: the order above, and that only camera 1 draws the layer (the
+  main-camera tests at 0x3659a1d / 0x3659f78 in `FUN_1436597f0`, mode 2,
+  ring+0x6b0 set).
+- In camera 1's pass the downsample is issued after ring group A and the
+  planet's draws and before ring group B. In camera 22's pass, which draws no
+  layer content, it runs again on the finished layer.
+- Flat has one camera, so it has the left eye's order. The black squares are
+  the stock flat look, read there as dissolve art.
+- NOT FOUND statically: the function that issues the downsample. It is
+  outside the ring pass, and PS 831DF02E is a generic colour-matrix copy used
+  elsewhere, so no RVA is given for it. The fix below does not need one.
+
+ruled out: the layer t2, t0, t3, t4, the samplers, the vertices and the
+viewport as the per-eye difference, because flight d7769063 shows them
+identical in both eyes in all 25 frames.
+ruled out: a per-eye reveal clock as the cause of the black squares, because
+the squares are explained by t1's content alone. cb1's progress words were not
+read, so a clock difference is untested; it cannot make the squares black.
+
+**The fix** (proposed, not built). Sean wants the stock animation in both
+eyes, so make the right eye's reveal read the same t1 as the left's.
+
+- **What:** skip the second downsample in each frame. Then T121 keeps the
+  left pass's copy, and both composites (and both thresholds) read it.
+- **Where:** EDVR's draw hook. Match VS `DEF19B035D5EDEDC` + PS
+  `831DF02EBA8AE814` whose render target is the texture that the reveal
+  composite (VS `953C8123AD8DC13B` / PS `A473A867BDDBC342`) bound as its t1,
+  learned from that draw. Skip it when the first eye's reveal composite has
+  already drawn this frame. VR profile only, while the reveal composite is
+  drawing.
+- **Risks:**
+  - PS 831DF02E is a generic copy, so key on the render target learned from
+    the composite, never on the hashes alone.
+  - If a future build draws different layer content per eye, the right eye
+    would show the left's coarse image. In this build the layer is drawn
+    only by camera 1.
+  - After the reveal (+28) the two copies are equal, so skipping is
+    harmless then.
+- **Alternative,** if Sean prefers no black squares in either eye: replay the
+  downsample (the same draw state) just before the LEFT composite instead.
+  Both eyes then show the right eye's reveal, which is not the flat look.
+- **Proving flight:**
+  - `off`, one zoom with the fix: both eyes show the same black squares and
+    resolve together.
+  - Log: a `composite diff` with no t1 line in frames +0..+27, and a fix
+    counter of skipped draws equal to the frames of the reveal.
+  - The eye-run images: the same black cells in both eyes.
 
 ## Open
 
