@@ -44,12 +44,11 @@ before 2026-09-29 is kept in "Status detail".*
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
 - **Next flight (2026-10-15 late):** flight bca9d6b8: `tiles` does not fix
-  it and the list row is ruled out (the row gap is 2-3 frames, then the lists
-  are identical per eye); both dumps were of the transit void. Next, no
-  build: `fix.fss_eye_sync = mirror` (the practical answer, "the animation in
-  both eyes"), and a `census_fss_jump` flight for the per-eye ring draws.
-  Then a longer instrument window. Known, not fixed: the ~220 m remap; the
-  loading-screen panel bit; the sky's drift.
+  it; the list row is ruled out (a 2-3 frame gap, then identical lists); both
+  dumps caught the transit void. Next, no build: `fix.fss_eye_sync` =
+  `mirror` (the animation in both eyes), and a `census_fss_jump` flight for
+  the per-eye ring draws; then a longer instrument window. Known, not fixed:
+  the ~220 m remap; the loading-screen panel bit; the sky's drift.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
