@@ -43,8 +43,8 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight (2026-10-15, built, not flown):** zoom a ringed planet at
-  `fix.fss_eye_sync` = `off`, `tiles`, `mirror`; read the `fss tiles:` lines
+- **Next flight (2026-10-15, built, not flown):** `fix.fss_eye_sync` = `off`,
+  zoom a ringed planet, press the eye-dump key in the window; read the `fss tiles:` lines
   ("2026-10-15: the tile renderer, per view"). `tiles` is TEMPORARY (the
   engine candidate; budget hypothesis refuted by flight f9f62bbc, "later").
   Known, not fixed: the ~220 m remap under head sway; the "scanner is up"
@@ -1746,35 +1746,53 @@ invalidation in it. UNKNOWN: whether the allocator clears a recycled texture
 and whether the pass object is per view. INFERRED: a tile that no dispatch
 writes shows whatever the pooled texture held, which can differ per call.
 
-Next instrument (designed, NOT built; read-only): `fss tiles` v2, same zoom
-window, adds per eye per frame at the first 6 frames after arrival and then
-one frame in 45:
+The instrument, v2 (built, not flown; read-only, inside the same zoom window,
+every cap named): per eye per frame it copies the two list buffers (SRV slot 2
+of each shader, 2312 bytes) and the tile-info buffer (SRV slot 1, 149,248
+bytes) into staging twins and reads them back two frames later with
+`DO_NOT_WAIT`. New lines:
 
-- the two list buffers (the slot-2 structured buffers, 2312 bytes each, 8-byte
-  entries): count, a 64-bit hash, the first 8 and last 8 entries in hex, the
-  entry-index range and the tile-coordinate bounding box once the entry layout
-  is read off the first dump. Read back through the same staging ring.
-- the small shader's share of the 509: `small/(large+small)` per eye and
-  frame, to see whether the left eye's split correlates with the reveal.
-- the tile-info raw buffer (slot 1, 149,248 bytes): a hash of each eye's
-  copy at dispatch, to say whether it differs between eyes by content.
-- the output UAVs u0/u1: whether anything clears or copies into them in the
-  window. Record-only hooks on ClearUnorderedAccessViewUint/Float,
-  ClearRenderTargetView, CopyResource/CopySubresourceRegion and
-  UpdateSubresource whose destination resource id is one of the window's
-  UAV/list/args ids: `fss tiles: write f=N <call> -> <id> (eye E)`. The
-  census still does not record the Clear* calls, so this is new.
-- a dump of each eye's u0 at the end of the first window frame as a
-  tile-validity mask (16x16 tile mean luma == 0), through the existing eye
-  dump path, to set against the lists: do the black tiles equal the small
-  shader's list entries in the left eye?
+    fss tiles: lists f=N split eye0 small=a/T (p%) eye1 small=b/T (q%) | eye0 L n=<nonzero>/<entries> last@<i> hash=<16 hex> first=[w0:w1,..] last=[..] | eye0 S ...
+    fss tiles: lists f=N eye1 L ... | eye1 S ...
+    fss tiles: info f=N tile-info buffer eye0 bytes= nonzero= hash= | eye1 ... | identical=yes|no|n/a
+    fss tiles: write f=N <call> -> <args|output|list|info|t0> A<id> (eye E)
+    fss tiles: eye-dump key at f=N -- the raw lists ... of the next 16 frames go to edvr_logs\fsstiles ...
+    fss tiles: window N lists -- samples read= lines= raw files written for K frame(s) ...; mean split small/(large+small): eye0 p% eye1 q%
+    fss tiles: window N writes -- watched K buffer(s) ...; <call->role xN, ...> | no clear, copy or update touched any of them
 
-Reading it: black tiles == the small list's entries in the left eye and the
-right eye's small list is empty: the classification (a producer upstream of
-the dispatch) differs per eye, and the fix lies in what feeds the lists, not in
-the dispatch. A clear of eye 0's u0 at the zoom with none for eye 1: that call
-is the lever (suppress or mirror it). Neither: the blacks are in the shader's
-inputs (t0/t1), and the next step is their producers.
+Lines appear for the first four frames of a window, one frame in 45, and any
+frame whose split moved ten points; at most 120 list lines and 60 write lines
+a window. The write watch hooks nothing new: vscreen's existing Clear*,
+CopyResource, CopySubresourceRegion and UpdateSubresource thunks offer their
+destination (owner context, one bool outside a window). Raw files
+`edvr_logs\fsstiles\f<frame>_e<eye>_<listL|listS|info>.bin` are written for
+the first three frames of a window and, after the eye-dump key, the next
+sixteen (at most 24 frames a window). `armed` / `opened` / the two closing
+lines above are printed even when every count is zero, so "nothing happened"
+reads differently from "never ran".
+
+The u0 validity mask is not a GPU reduction: the output textures are about
+150 MB each and a new precompiled shader means the build's shader tables and
+pinned hashes. The eye-dump key (hotkey.dump_eyes, or the menu's "Dump both
+eyes as seen") already writes both treated eyes as `eye_HHMMSS_L.bmp` and
+`_R.bmp`; the black 16x16 tiles there, read with `tools\diff_eye_dump.py`,
+are the mask, set against the raw lists written for the same frames.
+
+Reading it: black tiles equal to the small list's entries in the left eye and
+the right eye's small list empty: the classification (a producer upstream of
+the dispatch) differs per eye, and the fix lies in what feeds the lists. A
+`write` line for eye 0's output at the zoom with none for eye 1: that call is
+the lever. Neither: the blacks are in the shader's inputs (the tile-info
+buffer or the 21 MB raw buffer), and the next step is their producers.
+
+Flight (Sean, VR, a ringed planet): set `fix.fss_eye_sync = off` (stock is what
+is measured; `tiles` is the candidate the budget finding made doubtful). Open
+the FSS, press zoom, and within the next ten seconds, when the left eye shows
+the black tiles, press the eye-dump key once (the run takes sixteen frames,
+one hitch). Do not touch the key again until the log says the window closed.
+Repeat once more on the same planet without the key for the timing baseline.
+Read: the `window N lists` and `writes` lines, the split lines around the
+dump, and the files in `edvr_logs\fsstiles` and `edvr_logs\eyes`.
 
 ## Open
 

@@ -158,6 +158,47 @@ void testLineAndTallies() {
           "the sharing tally says what the two views have in common");
 }
 
+void testV2Pure() {
+    check(ft::fnv64("a", 1) == 0xaf63dc4c8601ec8cull && ft::fnv64("", 0) == 0xcbf29ce484222325ull, "FNV-1a 64 matches its reference values");
+    uint32_t buf[2 * 12] = {};
+    buf[2 * 3] = 0x10; buf[2 * 3 + 1] = 0x11;      // entry 3
+    buf[2 * 5] = 0x20;                              // entry 5
+    buf[2 * 6 + 1] = 0x30;                          // entry 6 (second word only)
+    buf[2 * 7] = 0x40; buf[2 * 7 + 1] = 0x41;      // 7
+    buf[2 * 8] = 0x50;                              // 8
+    buf[2 * 11] = 0x60; buf[2 * 11 + 1] = 0x61;    // 11
+    ft::ListSummary ls = ft::summarizeList(buf, sizeof(buf));
+    check(ls.entries == 12 && ls.nonzero == 6 && ls.lastNonzero == 11, "the list tally: entries, non-zero entries, last non-zero index");
+    check(ls.firstN == 4 && ls.first[0][0] == 0x10 && ls.first[0][1] == 0x11 && ls.first[3][0] == 0x40, "the first four non-zero entries");
+    check(ls.lastN == 4 && ls.last[0][1] == 0x30 && ls.last[1][0] == 0x40 && ls.last[2][0] == 0x50 && ls.last[3][0] == 0x60 && ls.last[3][1] == 0x61,
+          "the last four non-zero entries, in index order");
+    uint32_t two[4] = {1, 2, 3, 4};
+    ft::ListSummary l2 = ft::summarizeList(two, sizeof(two));
+    check(l2.firstN == 2 && l2.lastN == 2 && l2.last[0][0] == 1 && l2.last[1][0] == 3, "fewer than four entries: first and last agree");
+    ft::ListSummary l0 = ft::summarizeList(two, 0);
+    check(l0.entries == 0 && l0.nonzero == 0 && l0.lastNonzero == -1 && l0.hash == 0xcbf29ce484222325ull, "an empty list is an empty tally");
+    char line[400];
+    ft::formatList(line, sizeof(line), "L", ls);
+    check(std::strstr(line, "L n=6/12 last@11 hash=") != nullptr && std::strstr(line, "first=[10:11,20:0,0:30,40:41]") != nullptr &&
+              std::strstr(line, "last=[0:30,40:41,50:0,60:61]") != nullptr,
+          "the list line shows the tally, the hash and both ends");
+    check(ft::splitPercent(382, 127) > 24.9 && ft::splitPercent(382, 127) < 25.0 && ft::splitPercent(509, 0) == 0.0 && ft::splitPercent(0, 0) == 0.0,
+          "the split is small over large plus small, in percent");
+    uint8_t info[16] = {0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3};
+    ft::formatInfo(line, sizeof(line), "eye0", info, sizeof(info));
+    check(std::strstr(line, "eye0 bytes=16 nonzero=3 hash=") != nullptr, "the tile-info line counts non-zero bytes");
+
+    ft::WatchTable w;
+    int a, b;
+    w.add(&a, ft::Role::Out, 0);
+    w.add(&a, ft::Role::List, 1);
+    w.add(&b, ft::Role::Info, 1);
+    w.add(nullptr, ft::Role::Args, 0);
+    check(w.n == 2 && w.find(&a) == 0 && w.role[0] == ft::Role::Out && w.find(&b) == 1 && w.find(line) == -1,
+          "the watch table keeps the first role of a buffer, ignores null, and finds by identity");
+    check(ft::regionOf(0, 0) == 0 && ft::regionOf(1, 2) == 5 && ft::kRegions == 6, "regions: two eyes by three roles");
+}
+
 void testKeyParsing() {
     edvr::EyeSync t = edvr::eyeSyncParse("tiles");
     check(t.tiles && t.recognised && t.healMode == 0 && !t.lockstep && !t.steady && !t.any(), "tiles is its own value: no heal, no composite freeze");
@@ -413,6 +454,51 @@ void testWarp(Gpu& g) {
     if (back) back->Release();
 }
 
+// The staging twin the v2 samples copy into, on structured and raw buffers, and its reuse and replacement.
+void testStagingLike(Gpu& g) {
+    ID3D11Device* d = g.dev.Get();
+    uint32_t init[8] = {11, 22, 33, 44, 55, 66, 77, 88};
+    D3D11_SUBRESOURCE_DATA sd{init, 0, 0};
+    D3D11_BUFFER_DESC sb{};
+    sb.ByteWidth = 32;
+    sb.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    sb.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    sb.StructureByteStride = 8;
+    ComPtr<ID3D11Buffer> structured;
+    d->CreateBuffer(&sb, &sd, &structured);
+    D3D11_BUFFER_DESC rb{};
+    rb.ByteWidth = 32;
+    rb.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    rb.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+    ComPtr<ID3D11Buffer> raw;
+    d->CreateBuffer(&rb, &sd, &raw);
+    for (int pass = 0; pass < 2; ++pass) {
+        ID3D11Buffer* src = pass ? raw.Get() : structured.Get();
+        ComPtr<ID3D11Buffer> st;
+        check(ft::ensureStagingLike(d, src, st.GetAddressOf()), pass ? "a staging twin of a raw buffer" : "a staging twin of a structured buffer");
+        g.ctx->CopyResource(st.Get(), src);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        const HRESULT hr = g.ctx->Map(st.Get(), 0, D3D11_MAP_READ, 0, &m);
+        check(SUCCEEDED(hr) && std::memcmp(m.pData, init, sizeof(init)) == 0, "the copy reads back byte for byte");
+        if (SUCCEEDED(hr)) g.ctx->Unmap(st.Get(), 0);
+        ID3D11Buffer* before = st.Get();
+        check(ft::ensureStagingLike(d, src, st.GetAddressOf()) && st.Get() == before, "a matching twin is reused");
+    }
+    D3D11_BUFFER_DESC big = sb;
+    big.ByteWidth = 64;
+    ComPtr<ID3D11Buffer> bigSrc;
+    d->CreateBuffer(&big, nullptr, &bigSrc);
+    ComPtr<ID3D11Buffer> st;
+    ft::ensureStagingLike(d, structured.Get(), st.GetAddressOf());
+    ID3D11Buffer* first = st.Get();
+    first->AddRef();
+    check(ft::ensureStagingLike(d, bigSrc.Get(), st.GetAddressOf()), "a differently sized source gets a new twin");
+    D3D11_BUFFER_DESC have{};
+    st->GetDesc(&have);
+    check(have.ByteWidth == 64 && st.Get() != first, "the old twin was replaced by one of the new size");
+    first->Release();
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // 4. Source pins
 
@@ -443,6 +529,29 @@ void testSourcePins(const std::string& root) {
     check(n == 2, "both config sites (install and reload) configure fss_tiles");
     check(has(vs, "fssTilesFrameBoundary(s->frameNo, open)"), "the frame boundary feeds fss_tiles the arrival window");
 
+    {
+        struct Pin { const char* fn; const char* call; };
+        const Pin pins[] = {{"hookedClearRtv", "fssTilesNoteWriteView(rtv, 2)"},
+                            {"hookedClearUavUint", "fssTilesNoteWriteView(uav, 0)"},
+                            {"hookedClearUavFloat", "fssTilesNoteWriteView(uav, 1)"},
+                            {"hookedCopyResource", "fssTilesNoteWrite(dst, 3)"},
+                            {"hookedCopySubresourceRegion", "fssTilesNoteWrite(dst, 4)"},
+                            {"hookedUpdateSubresource", "fssTilesNoteWrite(dst, 5)"}};
+        for (const Pin& pin : pins) {
+            const size_t f = vs.find(std::string("void STDMETHODCALLTYPE ") + pin.fn + "(");
+            const size_t c = vs.find(pin.call, f);
+            const size_t real = vs.find("g_state->real", c);
+            char what[160];
+            std::snprintf(what, sizeof(what), "%s offers its destination to fss_tiles (owner context) before forwarding", pin.fn);
+            check(f != std::string::npos && c != std::string::npos && c > f && c - f < 1200 && real > c, what);
+        }
+    }
+    const std::string tp = slurp(root + "/src/d3d11/temporal_pass.cpp");
+    const size_t arm = tp.find("void temporalPassArmEyeDump()");
+    const size_t note = tp.find("fssTilesNoteEyeDump();", arm);
+    const size_t begin = tp.find("beginEyeRun();", arm);
+    check(arm != std::string::npos && note != std::string::npos && begin != std::string::npos && note < begin,
+          "the eye-dump key tells fss_tiles before it starts the eye run");
     const std::string dh = slurp(root + "/src/d3d11/device_hook.cpp");
     size_t nd = 0, ad = 0;
     while ((ad = dh.find("eyeSyncFromConfig(Config::get()).needsFssSignals()", ad)) != std::string::npos) { ++nd; ++ad; }
@@ -457,6 +566,10 @@ void testSourcePins(const std::string& root) {
     const std::string cpp = slurp(root + "/src/d3d11/fss_tiles.cpp");
     check(has(cpp, "swapBack(ops, g.sw)") && has(cpp, "if (!ok || g.sw.swapped)"), "the fault path restores the bindings from outside the guarded dispatch");
     check(has(cpp, "D3D11_MAP_FLAG_DO_NOT_WAIT"), "the read-back never waits");
+    check(has(cpp, "fss tiles: window %u lists --") && has(cpp, "fss tiles: window %u writes --") &&
+              has(cpp, "no clear, copy or update touched any of them") && has(cpp, "samples read=%u"),
+          "every window closes with a lists line and a writes line, zero counts included, so nothing-happened reads differently from never-ran");
+    check(has(cpp, "fss tiles: eye-dump key at f=%u") && has(cpp, "outside a capturing zoom window"), "the eye-dump key's reception is logged either way");
     check(has(cpp, "fss tiles: window %u opened") && has(cpp, "fss tiles: window %u closed") && has(cpp, "fss tiles: instrument armed"),
           "the instrument says it armed, opened and closed, so never-ran reads differently from zero");
 }
@@ -480,6 +593,7 @@ int main(int argc, char** argv) {
     testSubstitutionRule();
     testLineAndTallies();
     testKeyParsing();
+    testV2Pure();
     testFakeRestore();
 
     const auto createDevice = edvr::systemD3D11CreateDevice();
@@ -496,6 +610,7 @@ int main(int argc, char** argv) {
         check(edvr::reportSystemD3D11Only("fss_tiles_test"), "the rig runs on System32's d3d11.dll and on no other d3d11.dll");
         if (SUCCEEDED(hr)) {
             testWarp(g);
+            testStagingLike(g);
             ComPtr<ID3D11InfoQueue> q;
             if (SUCCEEDED(g.dev.As(&q))) {
                 const UINT64 cnt = q->GetNumStoredMessagesAllowedByRetrievalFilter();

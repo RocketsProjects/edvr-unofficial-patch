@@ -2804,6 +2804,7 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
                                       ID3D11RenderTargetView* rtv, const FLOAT c[4]) {
     if (g_flatComputeInternal) { g_state->realClearRtv(self, rtv, c); return; }
     gpuFrameCommandIfLive(self);
+    if (!foreignContext(self)) fssTilesNoteWriteView(rtv, 2);   // fss_tiles: record-only, one bool outside a zoom window
     noteStaleForward(kSlotClearRenderTargetView, reinterpret_cast<const void*>(g_state->realClearRtv),
                      "ClearRenderTargetView");
     State* s = g_state;
@@ -2860,6 +2861,7 @@ void STDMETHODCALLTYPE hookedClearUavUint(ID3D11DeviceContext* self,
                                           const UINT c[4]) {
     if (g_flatComputeInternal) { g_state->realClearUavUint(self, uav, c); return; }
     gpuFrameCommandIfLive(self);
+    if (!foreignContext(self)) fssTilesNoteWriteView(uav, 0);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
@@ -2874,6 +2876,7 @@ void STDMETHODCALLTYPE hookedClearUavFloat(ID3D11DeviceContext* self,
                                            const FLOAT c[4]) {
     if (g_flatComputeInternal) { g_state->realClearUavFloat(self, uav, c); return; }
     gpuFrameCommandIfLive(self);
+    if (!foreignContext(self)) fssTilesNoteWriteView(uav, 1);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
@@ -4346,6 +4349,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
     if (g_flatComputeInternal) { g_state->realCopyResource(self, dst, src); return; }
     gpuFrameCommandIfLive(self);
+    if (!foreignContext(self)) fssTilesNoteWrite(dst, 3);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
@@ -4518,6 +4522,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
     if (g_flatComputeInternal) { g_state->realCopySubresourceRegion(self,dst,dstSub,dstX,dstY,dstZ,src,srcSub,box); return; }
     gpuFrameCommandIfLive(self);
+    if (!foreignContext(self)) fssTilesNoteWrite(dst, 4);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
                      "CopySubresourceRegion");
@@ -4562,6 +4567,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                UINT rowPitch, UINT depthPitch) {
     if (g_flatComputeInternal) { g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch, depthPitch); return; }
     gpuFrameCommandIfLive(self);
+    if (!foreignContext(self)) fssTilesNoteWrite(dst, 5);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
                      "UpdateSubresource");

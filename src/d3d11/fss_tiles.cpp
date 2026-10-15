@@ -29,6 +29,7 @@ namespace edvr {
 
 namespace detail {
 bool g_fssTilesActive = false;
+bool g_fssTilesWatch = false;
 }  // namespace detail
 
 namespace {
@@ -53,6 +54,18 @@ struct EyeZero {
     void*    args = nullptr;                 // a reference
     void*    views[kSrvSlots] = {};          // references
     Slot     slot[kSrvSlots];
+};
+
+// v2: one frame's copies of the lists and the tile-info buffers, read back two frames later.
+struct Sample {
+    uint32_t frame = 0;
+    bool     used = false;
+    bool     drained = true;
+    bool     files = false;                 // write the raw bytes to disk
+    bool     have[kRegions] = {};
+    uint32_t bytes[kRegions] = {};
+    uint32_t groups[2][2] = {};             // [eye][cs] x group counts, filled from the argument read-back for the split line
+    bool     haveGroups[2][2] = {};
 };
 
 struct OtherCs {
@@ -80,6 +93,24 @@ struct State {
     ID3D11Buffer* staging[kStagingRing] = {};
     bool     stagingFailed = false;
     FrameBuf fb[kStagingRing];
+    Sample   smp[kStagingRing];
+    ID3D11Buffer* pool[kStagingRing][kRegions] = {};
+    bool     poolFailedNoted = false;
+    WatchTable watch;
+    uint32_t listLines = 0;
+    uint32_t writeLines = 0;
+    uint32_t writes[kWriteCalls][6] = {};   // [call][Role]
+    uint32_t samplesRead = 0;
+    uint32_t sampleFiles = 0;
+    uint32_t dumpFramesLeft = 0;            // the eye dump asked for the next frames' raw buffers
+    uint32_t eyeDumpNotes = 0;
+    bool     dirMade = false;
+    ListSummary lastList[2][2];
+    bool     haveLastList[2][2] = {};
+    uint64_t lastInfoHash[2] = {};
+    bool     haveLastInfo[2] = {};
+    uint32_t lastLoggedFrame = 0;
+    double   lastSplit[2] = {-100.0, -100.0};
 
     // eye zero's bindings, per shader
     EyeZero  e0[2];
@@ -140,16 +171,25 @@ void resetWindowTallies() {
     g.share = Share();
     for (auto& o : g.other) o = OtherCs();
     g.noTargetNoted = false;
+    g.watch.clear();
+    g.listLines = g.writeLines = g.samplesRead = g.sampleFiles = 0;
+    for (auto& w : g.writes) for (auto& x : w) x = 0;
+    for (auto& a : g.haveLastList) for (auto& b : a) b = false;
+    g.haveLastInfo[0] = g.haveLastInfo[1] = false;
+    g.lastLoggedFrame = 0;
+    g.lastSplit[0] = g.lastSplit[1] = -100.0;
 }
 
 bool pendingReadbacks() {
     for (const FrameBuf& f : g.fb) if (f.used && !f.drained) return true;
+    for (const Sample& f : g.smp) if (f.used && !f.drained) return true;
     return false;
 }
 
 void refreshActive() {
     detail::g_fssTilesActive =
         g.win.capturing || (g.lockstep && g.win.open) || g.summaryDue || pendingReadbacks();
+    detail::g_fssTilesWatch = g.win.capturing && g.watch.n > 0;
 }
 
 bool ensureStaging(ID3D11DeviceContext* ctx) {
@@ -207,6 +247,17 @@ void processFrame(FrameBuf& f) {
     for (int c = 0; c < 2; ++c) {
         if (first[c][0] && first[c][1]) accumulateShare(g.share, *first[c][0], *first[c][1]);
     }
+    Sample& sm = g.smp[f.frame % kStagingRing];
+    if (sm.used && sm.frame == f.frame) {
+        for (int e = 0; e < 2; ++e) {
+            for (int c = 0; c < 2; ++c) {
+                if (first[c][e] && first[c][e]->haveGroups) {
+                    sm.groups[e][c] = first[c][e]->groups[0];
+                    sm.haveGroups[e][c] = true;
+                }
+            }
+        }
+    }
     ++g.readbacks;
 }
 
@@ -248,6 +299,176 @@ void drain(ID3D11DeviceContext* ctx) {
     }
 }
 
+void drainAll(ID3D11DeviceContext* ctx);
+
+// ---- v2: the lists and the tile-info buffer ---------------------------------------------------------------------------
+const char* const kRegionFile[3] = {"listL", "listS", "info"};
+
+void writeSampleFiles(const Sample& sm, const D3D11_MAPPED_SUBRESOURCE* m) {
+    if (!g.dirMade) {
+        g.dirMade = true;
+        CreateDirectoryW((Log::get().dir() + L"\\fsstiles").c_str(), nullptr);
+    }
+    for (uint32_t r = 0; r < kRegions; ++r) {
+        if (!sm.have[r]) continue;
+        wchar_t path[MAX_PATH];
+        _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\fsstiles\\f%u_e%u_%S.bin", Log::get().dir().c_str(), sm.frame, r / 3,
+                     kRegionFile[r % 3]);
+        HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        DWORD wrote = 0;
+        WriteFile(h, m[r].pData, sm.bytes[r], &wrote, nullptr);
+        CloseHandle(h);
+    }
+}
+
+void processSample(Sample& sm, const D3D11_MAPPED_SUBRESOURCE* m) {
+    ListSummary ls[2][2];
+    bool hl[2][2] = {};
+    for (uint32_t e = 0; e < 2; ++e) {
+        for (uint32_t role = 0; role < 2; ++role) {
+            const uint32_t r = regionOf(e, role);
+            if (!sm.have[r]) continue;
+            ls[e][role] = summarizeList(m[r].pData, sm.bytes[r]);
+            hl[e][role] = true;
+        }
+    }
+    ++g.samplesRead;
+    // Which frames get lines: the first few after the window opens, one in kDetailEvery, and any whose split moved by ten
+    // points since the last line.
+    double sp[2] = {};
+    bool haveSp = true;
+    for (uint32_t e = 0; e < 2; ++e) {
+        if (sm.haveGroups[e][0] && sm.haveGroups[e][1]) sp[e] = splitPercent(sm.groups[e][0], sm.groups[e][1]);
+        else haveSp = false;
+    }
+    const bool moved = haveSp && (sp[0] - g.lastSplit[0] > 10.0 || g.lastSplit[0] - sp[0] > 10.0 || sp[1] - g.lastSplit[1] > 10.0 ||
+                                  g.lastSplit[1] - sp[1] > 10.0);
+    const uint32_t d = sm.frame - g.win.startFrame;
+    const bool wanted = d < kDetailFrames || d % kDetailEvery == 0 || moved;
+    if (wanted && g.listLines + 3 <= kMaxListLines) {
+        if (haveSp) { g.lastSplit[0] = sp[0]; g.lastSplit[1] = sp[1]; }
+        char a[900], b[900], c[700], t0[260], t1[260], t2[260], t3[260];
+        t0[0] = t1[0] = t2[0] = t3[0] = 0;
+        if (hl[0][0]) formatList(t0, sizeof(t0), "L", ls[0][0]);
+        if (hl[0][1]) formatList(t1, sizeof(t1), "S", ls[0][1]);
+        if (hl[1][0]) formatList(t2, sizeof(t2), "L", ls[1][0]);
+        if (hl[1][1]) formatList(t3, sizeof(t3), "S", ls[1][1]);
+        char split[200];
+        if (haveSp) {
+            std::snprintf(split, sizeof(split), "split eye0 small=%u/%u (%.1f%%) eye1 small=%u/%u (%.1f%%)", sm.groups[0][1],
+                          sm.groups[0][0] + sm.groups[0][1], sp[0], sm.groups[1][1], sm.groups[1][0] + sm.groups[1][1], sp[1]);
+        } else {
+            std::snprintf(split, sizeof(split), "split (groups not read back for this frame)");
+        }
+        std::snprintf(a, sizeof(a), "fss tiles: lists f=%u %s | eye0 %s | eye0 %s", sm.frame, split, t0[0] ? t0 : "L -",
+                      t1[0] ? t1 : "S -");
+        std::snprintf(b, sizeof(b), "fss tiles: lists f=%u eye1 %s | eye1 %s", sm.frame, t2[0] ? t2 : "L -", t3[0] ? t3 : "S -");
+        char i0[160] = "-", i1[160] = "-";
+        uint64_t h0 = 0, h1 = 0;
+        const uint32_t r0 = regionOf(0, 2), r1 = regionOf(1, 2);
+        if (sm.have[r0]) {
+            formatInfo(i0, sizeof(i0), "eye0", m[r0].pData, sm.bytes[r0]);
+            h0 = fnv64(m[r0].pData, sm.bytes[r0]);
+        }
+        if (sm.have[r1]) {
+            formatInfo(i1, sizeof(i1), "eye1", m[r1].pData, sm.bytes[r1]);
+            h1 = fnv64(m[r1].pData, sm.bytes[r1]);
+        }
+        std::snprintf(c, sizeof(c), "fss tiles: info f=%u tile-info buffer %s | %s | identical=%s", sm.frame, i0, i1,
+                      (sm.have[r0] && sm.have[r1]) ? (h0 == h1 ? "yes" : "no") : "n/a");
+        Log::get().note("%s", a);
+        Log::get().note("%s", b);
+        Log::get().note("%s", c);
+        g.listLines += 3;
+    }
+    if (sm.files && g.sampleFiles < kMaxDumpFrames) {
+        writeSampleFiles(sm, m);
+        ++g.sampleFiles;
+    }
+}
+
+void drainSamples(ID3D11DeviceContext* ctx) {
+    for (;;) {
+        Sample* pick = nullptr;
+        for (Sample& f : g.smp) {
+            if (!f.used || f.drained || g.frame < f.frame + kReadbackDelay) continue;
+            if (!pick || f.frame < pick->frame) pick = &f;
+        }
+        if (!pick) return;
+        const uint32_t k = static_cast<uint32_t>(pick - g.smp);
+        D3D11_MAPPED_SUBRESOURCE m[kRegions] = {};
+        bool mapped[kRegions] = {};
+        bool ok = true;
+        for (uint32_t r = 0; r < kRegions && ok; ++r) {
+            if (!pick->have[r]) continue;
+            ok = SUCCEEDED(ctx->Map(g.pool[k][r], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m[r]));
+            mapped[r] = ok;
+        }
+        if (ok) processSample(*pick, m);
+        for (uint32_t r = 0; r < kRegions; ++r) {
+            if (mapped[r]) ctx->Unmap(g.pool[k][r], 0);
+        }
+        if (ok) { pick->drained = true; continue; }
+        if (g.frame > pick->frame + 40) { pick->drained = true; ++g.dropped; continue; }
+        return;
+    }
+}
+
+// The copies, queued before the dispatch the way the argument copy is. Eye 0 and 1 only.
+void queueSample(ID3D11DeviceContext* ctx, const Rec& r, const Slot* slot) {
+    if (r.eye > 1) return;
+    const int ci = csIndex(r.cs);
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return;
+    const uint32_t ring = g.frame % kStagingRing;
+    Sample& sm = g.smp[ring];
+    if (!sm.used || sm.frame != g.frame) {
+        if (sm.used && !sm.drained) ++g.dropped;
+        sm = Sample();
+        sm.frame = g.frame;
+        sm.used = true;
+        sm.drained = false;
+        sm.files = g.dumpFramesLeft > 0 || g.frame - g.win.startFrame < 3;
+        if (g.dumpFramesLeft > 0) --g.dumpFramesLeft;
+    }
+    auto take = [&](uint32_t region, uint32_t slotIdx) {
+        if (sm.have[region] || !slot[slotIdx].isBuffer || slot[slotIdx].bytes == 0 || slot[slotIdx].bytes > (1u << 20)) return;
+        ID3D11Buffer* src = static_cast<ID3D11Buffer*>(const_cast<void*>(slot[slotIdx].res));
+        if (!ensureStagingLike(dev, src, &g.pool[ring][region])) {
+            if (!g.poolFailedNoted) {
+                g.poolFailedNoted = true;
+                Log::get().note("fss tiles: a staging twin for a list or tile-info buffer could not be created; those samples are skipped.");
+            }
+            return;
+        }
+        ctx->CopyResource(g.pool[ring][region], src);
+        sm.have[region] = true;
+        sm.bytes[region] = slot[slotIdx].bytes;
+    };
+    if (ci == 0) {
+        take(regionOf(r.eye, 0), 2);
+        take(regionOf(r.eye, 2), 1);
+    } else if (ci == 1) {
+        take(regionOf(r.eye, 1), 2);
+    }
+    dev->Release();
+}
+
+void registerWatch(const Rec& r, ID3D11Buffer* args, const Slot* slot, const void* const* uavRes) {
+    g.watch.add(args, Role::Args, r.eye);
+    for (int i = 0; i < 2; ++i) g.watch.add(uavRes[i], Role::Out, r.eye);
+    if (slot[0].isBuffer) g.watch.add(slot[0].res, Role::Big, r.eye);
+    if (slot[1].isBuffer) g.watch.add(slot[1].res, Role::Info, r.eye);
+    if (slot[2].isBuffer) g.watch.add(slot[2].res, Role::List, r.eye);
+}
+
+void drainAll(ID3D11DeviceContext* ctx) {
+    drain(ctx);
+    drainSamples(ctx);
+}
+
 void emitSummary() {
     g.summaryDue = false;
     char lock[200];
@@ -269,6 +490,28 @@ void emitSummary() {
         }
     }
     Log::get().note("fss tiles: window %u groups -- %s", g.windowNo, at ? body : "none read back");
+    {
+        double mean[2] = {};
+        for (int e = 0; e < 2; ++e) {
+            const uint64_t large = g.range[e][0].sum, smallSum = g.range[e][1].sum;
+            mean[e] = large + smallSum ? 100.0 * static_cast<double>(smallSum) / static_cast<double>(large + smallSum) : 0.0;
+        }
+        Log::get().note("fss tiles: window %u lists -- samples read=%u lines=%u raw files written for %u frame(s) in edvr_logs\\fsstiles; "
+                        "mean split small/(large+small): eye0 %.1f%% eye1 %.1f%%",
+                        g.windowNo, g.samplesRead, g.listLines, g.sampleFiles, mean[0], mean[1]);
+        char wb[500];
+        size_t wa = 0;
+        wb[0] = 0;
+        for (uint32_t c = 0; c < kWriteCalls; ++c) {
+            for (uint32_t r = 1; r < 6; ++r) {
+                if (!g.writes[c][r]) continue;
+                wa += static_cast<size_t>(std::snprintf(wb + wa, sizeof(wb) - wa, "%s%s->%s x%u", wa ? ", " : "",
+                                                        writeCallName(c), roleName(static_cast<Role>(r)), g.writes[c][r]));
+            }
+        }
+        Log::get().note("fss tiles: window %u writes -- watched %u buffer(s) (args, outputs, lists, tile info); %s", g.windowNo,
+                        g.watch.n, wa ? wb : "no clear, copy or update touched any of them");
+    }
     char sl[200];
     size_t sa = 0;
     sl[0] = 0;
@@ -296,7 +539,7 @@ void emitSummary() {
 }
 
 // ---- one tile-renderer dispatch ---------------------------------------------------------------------------------------
-void describeBindings(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView** sr, Slot* slot, Rec& r) {
+void describeBindings(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView** sr, Slot* slot, Rec& r, const void** uavRes) {
     ctx->CSGetShaderResources(0, kSrvSlots, sr);
     for (uint32_t i = 0; i < kSrvSlots; ++i) {
         if (!sr[i]) continue;
@@ -326,6 +569,7 @@ void describeBindings(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView** sr, S
         uv[i]->GetResource(&res);
         if (res) {
             r.uavId[i] = g.ids.id(res);
+            uavRes[i] = res;   // an identity only; the game holds the view
             res->Release();
         }
         uv[i]->Release();
@@ -351,7 +595,12 @@ bool onTarget(ID3D11DeviceContext* ctx, ID3D11Buffer* args, UINT off, uint64_t h
 
     ID3D11ShaderResourceView* sr[kSrvSlots] = {};
     Slot slot[kSrvSlots];
-    describeBindings(ctx, sr, slot, r);
+    const void* uavRes[2] = {};
+    describeBindings(ctx, sr, slot, r, uavRes);
+    if (g.win.capturing) {
+        registerWatch(r, args, slot, uavRes);
+        queueSample(ctx, r, slot);
+    }
 
     // ---- the candidate ----
     bool sub = false;
@@ -472,6 +721,43 @@ void fssTilesConfigure(Config& cfg) {
     refreshActive();
 }
 
+void fssTilesNoteWriteSlow(const void* p, bool isView, uint32_t call) {
+    if (!g.win.capturing || call >= kWriteCalls || !p) return;
+    guardedBudget(g.budget, [&] {
+        const void* res = p;
+        ID3D11Resource* got = nullptr;
+        if (isView) {
+            static_cast<ID3D11View*>(const_cast<void*>(p))->GetResource(&got);
+            res = got;
+        }
+        const int i = g.watch.find(res);
+        if (got) got->Release();
+        if (i < 0) return;
+        const Role role = g.watch.role[i];
+        ++g.writes[call][static_cast<uint32_t>(role)];
+        if (g.writeLines < kMaxWriteLines) {
+            ++g.writeLines;
+            Log::get().note("fss tiles: write f=%u %s -> %s A%u (eye %u)%s", g.frame, writeCallName(call), roleName(role),
+                            g.ids.id(res), static_cast<unsigned>(g.watch.eye[i]),
+                            g.writeLines == kMaxWriteLines ? "; write-line cap reached, the closing summary still counts them" : "");
+        }
+    });
+}
+
+void fssTilesNoteEyeDump() {
+    if (!g.win.capturing) {
+        if (g.eyeDumpNotes < 3) {
+            ++g.eyeDumpNotes;
+            Log::get().note("fss tiles: the eye-dump key was pressed outside a capturing zoom window (f=%u): no raw buffers are "
+                            "written for it. Press it inside the 10 s after a zoom. Said at most 3 times.", g.frame);
+        }
+        return;
+    }
+    g.dumpFramesLeft = kEyeDumpFrames;
+    Log::get().note("fss tiles: eye-dump key at f=%u -- the raw lists and tile-info buffers of the next %u frames go to "
+                    "edvr_logs\\fsstiles as f<frame>_e<eye>_<listL|listS|info>.bin, beside the eye run.", g.frame, kEyeDumpFrames);
+}
+
 void fssTilesNoteZoomSignal(uint32_t frameNo, bool press) {
     g.signalPending = true;
     g.signalPress = press;
@@ -527,7 +813,7 @@ void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
 bool fssTilesDispatchIndirect(ID3D11DeviceContext* ctx, ID3D11Buffer* args, unsigned int off, uint64_t csHash,
                               FssTilesRealDispatchIndirect real) {
     if (!g.budget.shouldRun() || !args) return false;
-    guardedBudget(g.budget, [&] { drain(ctx); });
+    guardedBudget(g.budget, [&] { drainAll(ctx); });
     if (!isTileCs(csHash)) {
         if (g.win.capturing) noteOther(csHash);
         return false;
