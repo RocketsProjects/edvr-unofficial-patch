@@ -43,12 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight (2026-10-15 v7, built, not flown):** v6 unchanged, plus the
-  root-cause fix for flight e05b6be6: the signals run whatever `fss_eye_sync`
-  is, and a window opens only on a jump while the scanner chrome is held.
-  `off`, one zoom, no keys. Check first: `chrome held=yes`, the zoom's frame,
-  and eye-run images that show the scanner with the ring. v4-v6 conclusions
-  from `off` windows stay withdrawn. Fallback `mirror`. Not fixed: ~220 m remap.
+- **Next (after flight 0dbd3964, v7):** still no capture of the arrival. The
+  10 s capture opened on an early zoom press. The real zoom press came 0.5 s
+  after it closed, while the 600-frame gate was still open, so no window
+  reopened, and no eye run ran. Window 2 (zoomed, after the reveal) shows the
+  ring pass live in mode 2 on both cameras. Fix: restart the capture on every
+  press or jump. Fallback `mirror`.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -2617,6 +2617,84 @@ Flight plan (Sean, VR, a ringed planet, `off`, no keys): the same as v6.
    and nothing else in the log is evidence.
 4. Only then read `eyediff`, `ring quad`, `upstream`, `inputs` and the ring hook
    lines as in the v6 entry.
+
+## 2026-10-15 (v7 flown): flight 0dbd3964, the arrival still not captured
+
+Flight on test build O (`v0.20.0-rc.1-99-g0dbd3964`, Frontier, VR;
+`edvr_gfx_20261015_104130.log`; `--expect-build 0dbd3964` matches). `off`,
+one zoom of a ringed planet, no keys. Sean: the squares in the LEFT eye
+again. Read-only analysis.
+
+**Validity: NO.** The gate did its job against the cockpit: seven camera
+jumps were refused with `the scanner chrome is not held`, and each window
+that opened says `chrome held=yes`. But no capture covered the zoom's
+arrival, and no eye run ran, so there are no images to read. Timeline
+(CONFIRMED from the log):
+
+- f15424 (10:44:15): FSS entered (`fss mode latch: OPEN`; GuiFocus 9 read at
+  10:44:16.5, now promptly).
+- f15841 (10:44:20.39): a zoom press opens window 1 (`chrome held=yes`). More
+  presses follow at f15842, f16426 and f16760 (10:44:30.94). Window 1's
+  capture is the 10 s cap (`frames=875`, closed 10:44:30.435). Its lists hold
+  a static 136 / 136 and the ring hook had seen **0 calls since arming**, so
+  this was the sky view, before any zoom.
+- The press at f16760 came **0.5 s after the capture closed**, while the
+  600-frame gate was still open (it closed at f17361 = 16760 + 601). A
+  capture opens only when the gate goes from shut to open, so the real zoom
+  and its arrival (about f17030 by the ~3 s transit, INFERRED) were never
+  captured. Between window 1's summary and window 2, the ring pass went from
+  0 to 267,840 calls (about 96 a frame): the zoomed body with its ring was on
+  screen, unwatched.
+- f19570 (10:45:02.5): a camera jump with the chrome held (and a transition
+  flash) opens window 2. It is the zoomed view AFTER the reveal: the scan alpha
+  is already 1.000 (dir 0, active 1) on its first call. There was no band
+  event, so no eye run.
+- f23641 (10:45:47.9): window 3 opened on the EXIT jump. `fss mode latch:
+  closed (your FSS key)` came 0.18 s before it, the chrome was still held,
+  and the band event at f23643 is the exit black. The gate then closed on
+  `FSS focus ended` at f23660 and cancelled both eye runs (the v7 guard
+  worked; the opener did not).
+
+What window 2 does show, valid but after the reveal (the zoomed FSS view):
+
+- Ring hook (CONFIRMED): 57,696 calls in 600 frames, 96 a frame. The main
+  camera id is 1. Camera 1 is role 1 and camera 22 is role 2. Each camera
+  runs passes 0, 1, 2, 5, 6, 8, four times a frame, all in **body mode 2**:
+  first with ring+0x6b0 clear (calls 1-48), then with it set (calls 49-96),
+  in the order cam 1, cam 22, cam 1, cam 22. By the RE (0x3659a1d /
+  0x3659f78), the mode-2 + 0x6b0-set calls draw into the offscreen ring target
+  for camera 1 only, and camera 22's return.
+- Tile lists: eye 0 large 99-104 groups / small 405-410 against eye 1 large
+  199 / small 310, steady for 600 frames (small share 80.0 % against 60.9 %).
+  The two eyes classify different tile sets in the steady zoomed view. UNKNOWN
+  whether that is parallax or the asymmetry itself.
+- G-buffer: t9 had 39 draws a frame in both eyes and t11 1 in both. The ring
+  family matched no draw (its 332753 hashes again mean nothing on 332841).
+
+Re-test of the v5 rulings withdrawn in the v6 entry:
+
+- ruled out (stands refuted): "the ring pass is not on the reveal's path".
+  The ring pass runs in the zoomed FSS view, 96 calls a frame in mode 2 on
+  both cameras (window 2). Whether it differs per eye AT the arrival is
+  still UNTESTED.
+- The t9-t11 symmetry ruling: still UNTESTED at the arrival (window 2 is
+  after the reveal).
+- ruled out: a capture opened by the first zoom press as covering the
+  arrival, because presses before the real zoom start the 10 s cap, and a
+  later press inside the still-open gate does not restart it.
+
+Root cause: OPEN. The next step is an instrument fix, then the same flight:
+
+- Restart the capture on every zoom press or chrome-held jump while the gate
+  is open, not only when the gate goes from shut to open.
+- Better, start it at the arrival itself: the first frame the ring pass
+  reports body mode 2 (the hook already reads it), or the transition-flash
+  pair.
+- Refuse a jump within 1 s of `fss mode latch: closed` (the exit).
+- Lengthen the capture to the 600-frame reveal from that start.
+- Validity check for the flight: an `opened` line whose ring-hook calls start
+  in mode 2 with alpha below 1.0, and eye-run images of the scanner with the
+  ring.
 
 ## Open
 
