@@ -33,6 +33,8 @@ inline bool flatProfileReadsKey(const char* key) {
         // route hands NVIDIA, scene | fixed | auto. Developer tier, no flat panel row; removed when the arc closes. Unlisted, getString
         // answers "off" here, which the reader takes for scene (flat_runtime.cpp), and the A/B cannot be run.
         std::strcmp(key, "advanced.flat_dlss_exposure") == 0 ||
+        // TEMPORARY (the same entry): the bloom probe, on | off, default on. Developer tier, no flat panel row; removed with the arc.
+        std::strcmp(key, "advanced.flat_bloom_probe") == 0 ||
         // The journal watcher, for the System Map's GuiFocus (journal_watch.h: journalFlatGuiFocus). Its other accessors answer
         // flat with the no-journal values, so enabling the watcher here changes no other flat behaviour. journal_dir names the
         // Saved Games folder when the default is wrong; unlisted, it reads "off" and the watcher looks in a folder named "off".

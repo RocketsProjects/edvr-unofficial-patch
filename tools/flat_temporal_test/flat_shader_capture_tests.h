@@ -29,7 +29,10 @@ inline int flatShaderCaptureTests() {
         check((attempted.fetch_or(bit) & bit) != 0, "duplicate refusal");
     }
     check(all == (uint32_t(1) << edvr::kFlatShaderCaptureCount) - 1u, "all exact targets");
-    check(edvr::kFlatShaderCaptureCount == 17, "four new on-foot shader stages included");
+    check(edvr::kFlatShaderCaptureCount == 22, "the four on-foot shader stages and the five bloom-entry pixel shaders (section 107) included");
+    check(edvr::flatShaderCaptureBit(true, 'p', 0x143AAE0597E2F7BFull) != 0 && edvr::flatShaderCaptureBit(true, 'p', 0x5ECFE7085464069Bull) != 0 &&
+          edvr::flatShaderCaptureBit(true, 'p', 0x8826CACC6382C78Dull) != 0 && edvr::flatShaderCaptureBit(true, 'p', 0x831DF02EBA8AE814ull) != 0 &&
+          edvr::flatShaderCaptureBit(true, 'p', 0xE8948389387DA083ull) != 0, "the bloom chain, the exposure draw and the bloom tone pixel shaders are capture targets");
     check(edvr::flatShaderCaptureBit(true, 'v', 0x025B4B9FF54622EDull) != 0, "new material VS");
     check(edvr::flatShaderCaptureBit(true, 'p', 0x46F92DC71BF8DFA5ull) != 0, "new material PS");
     check(edvr::flatShaderCaptureBit(true, 'v', 0x9AEC596A2B036EA6ull) != 0, "new effect VS");

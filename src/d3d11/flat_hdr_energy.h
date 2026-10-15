@@ -30,6 +30,7 @@
 
 struct ID3D11DeviceContext;
 struct ID3D11ShaderResourceView;
+struct ID3D11UnorderedAccessView;
 struct ID3D11Texture2D;
 
 namespace edvr {
@@ -192,6 +193,11 @@ void flatHdrEnergyAbandon();
 void flatHdrEnergyPoll(ID3D11DeviceContext* ctx);
 // Says the window's line now, whatever the clock (a rig's; the runtime lets the 5 s clock say it).
 void flatHdrEnergyFlush();
+// The reduction primitive the bloom probe shares (flat_bloom_probe.cpp): the energy pass over `srv` (a 2D shader-resource view) into
+// `uav`, a raw buffer view of kFlatHdrEnergyWords words, with the game's compute slot 0 put back exactly. The caller copies the
+// buffer to staging and decodes it with flatHdrEnergyDecode. False when the view was still bound for output or a resource failed.
+bool flatHdrEnergyReduce(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* srv, ID3D11UnorderedAccessView* uav,
+                         uint32_t width, uint32_t height, float threshold);
 
 // The measured exposure. Update runs the pass over `h` (a frame the flat route resolves with the scene exposure); `reset`
 // restarts the smoothing. True when the 1x1 texture holds this frame's value.

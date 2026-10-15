@@ -9,6 +9,7 @@
 #include "../../src/d3d11/flat_trace.h"
 #include "../../src/d3d11/hdr_backend_flags.h"
 #include "../../src/d3d11/flat_hdr_energy.h"
+#include "../../src/d3d11/flat_bloom_probe.h"
 #include "../../src/d3d11/flat_standdown.h"
 #include "flat_standdown_tests.h"
 #include <cstdio>
@@ -476,6 +477,50 @@ inline int flatHdrRouteTests() {
         flatHdrEnergyFormatLine(line, sizeof(line), quiet);
         expect(std::strstr(line, "samples=0 frames=300 ") != nullptr && std::strstr(line, "R=0.0000 M=0.0000") != nullptr,
                "a window that was offered frames and took no sample still prints, with samples=0, so it reads differently from never ran");
+    }    // ---- the flat bloom probe, pure half (flat_bloom_probe.h, TEMPORARY, section 107) ----------------------------------------------
+    {
+        // The bloom's first level: 1920x1080 R11G11B10F, no depth, reading a 3840x2160 R11G11B10F. Not a scene smaller than 1280, not
+        // the same size, not a depth-bound draw, not another format, one pixel of slack on an odd size.
+        expect(bloomIsFirstLevel(1920, 1080, 26, false, 3840, 2160, 26) && bloomIsFirstLevel(1920, 1081, 26, false, 3840, 2161, 26) &&
+               bloomIsFirstLevel(1920, 1080, 26, false, 3841, 2160, 26) &&
+               !bloomIsFirstLevel(1920, 1080, 26, true, 3840, 2160, 26) && !bloomIsFirstLevel(1920, 1080, 27, false, 3840, 2160, 26) &&
+               !bloomIsFirstLevel(1920, 1080, 26, false, 3840, 2160, 27) && !bloomIsFirstLevel(480, 270, 26, false, 960, 540, 26) &&
+               !bloomIsFirstLevel(3840, 2160, 26, false, 3840, 2160, 26) && !bloomIsFirstLevel(1920, 1080, 26, false, 3840, 1080, 26) &&
+               !bloomIsFirstLevel(0, 0, 26, false, 3840, 2160, 26),
+               "the bloom's first level is a full-screen draw into R11G11B10F at half the size of the R11G11B10F texture it reads, the scene at least 1280 wide");
+        expect(bloomIsTone(3840, 27, false, true) && bloomIsTone(3840, 28, false, true) && !bloomIsTone(3840, 27, true, true) &&
+               !bloomIsTone(3840, 27, false, false) && !bloomIsTone(960, 27, false, true) && !bloomIsTone(3840, 26, false, true),
+               "the tone is a full-screen draw into an R8G8B8A8 target of the render size with a 3D texture (the colour grade) bound");
+        expect(bloomIsStrip(6, 1, 39) && bloomIsStrip(6, 1, 41) && !bloomIsStrip(6, 2, 39) && !bloomIsStrip(5, 1, 39) && !bloomIsStrip(6, 1, 26),
+               "the exposure strip is a 6x1 R32 texture");
+        FlatBloomProbeWindow w;
+        std::snprintf(w.aa, sizeof(w.aa), "dlaa");
+        w.bloomSeen = true; w.hAtBloom = true; w.frames = 10; w.samples = 2; w.toneSamples = 2; w.bloomSamples = 2; w.stripSamples = 2; w.ldrSamples = 2;
+        w.hW = 3840; w.hH = 2160; w.bloomW = 1920; w.bloomH = 1080;
+        w.hMean = 4.0; w.hMax = 2000.0; w.hGm = 0.2; w.bloomMean = 0.5; w.bloomMax = 40.0;
+        w.strip[0] = 100.0; w.strip[1] = 2.0; w.strip[2] = 4.0; w.strip[3] = 6.0; w.strip[4] = 8.0; w.strip[5] = 10.0; w.stripMin0 = 40.0; w.stripMax0 = 60.0;
+        w.ldrMean = 1.2; w.ldrWhite = 0.5; w.ldrMax = 2.0;
+        char line[1100];
+        bloomFormatLine(line, sizeof(line), w);
+        expect(std::strcmp(line, "flat bloom probe: aa=dlaa bloom=yes samples=2 frames=10 tone=2 H@bloom(3840x2160): mean=2 max=1000 gm=0.1 | "
+                                 "bloom(1920x1080): mean=0.25 max=20 gain=0.12500 | strip: E=50 (40..60) t1..t5=1/2/3/4/5 (2) | "
+                                 "ldr: mean=0.60000 white=25.000% max=1.0000 (2) | hazards=0 dropped=0 failures=0") == 0,
+               "the bloom probe's line gives H, the bloom and its gain, the exposure strip, and what the tone puts on the screen");
+        FlatBloomProbeWindow none;
+        std::snprintf(none.aa, sizeof(none.aa), "off"); none.frames = 7;
+        bloomFormatLine(line, sizeof(line), none);
+        expect(std::strstr(line, "aa=off bloom=none samples=0 frames=7 tone=0 H@tone(0x0)") != nullptr && std::strstr(line, "gain=0.00000") != nullptr,
+               "a window that watched frames and completed no sample still prints, with samples=0, so it reads differently from never ran");
+        FlatBloomChainEntry e;
+        e.ps = 0x143AAE0597E2F7BFull; e.targetW = 1920; e.targetH = 1080; e.targetFmt = 26;
+        e.kind[0] = '2'; e.w[0] = 3840; e.h[0] = 2160; e.fmt[0] = 26; e.isH[0] = true;
+        e.kind[1] = '3'; e.w[1] = 16; e.h[1] = 16; e.fmt[1] = 28;
+        bloomFormatChainEntry(line, sizeof(line), 1, e);
+        expect(std::strcmp(line, "#1 PS=143AAE05 1920x1080/f26 <- t0=H:3840x2160/f26 t1=3d:16x16/f28") == 0,
+               "a chain entry names the pixel shader, the target and what it reads, the scene image marked H");
+        FlatBloomChainEntry bare;
+        bloomFormatChainEntry(line, sizeof(line), 2, bare);
+        expect(std::strcmp(line, "#2 PS=00000000 0x0/f0 <- -") == 0, "a draw that reads nothing says so");
     }    expect(flatFsrCreateFlags(false, false, false) == (1u << 3) &&
            flatFsrCreateFlags(true, false, false) == (1u << 3 | 1u << 4) &&
            flatFsrCreateFlags(true, true, false) == (1u << 3 | 1u << 4 | 1u << 8) &&

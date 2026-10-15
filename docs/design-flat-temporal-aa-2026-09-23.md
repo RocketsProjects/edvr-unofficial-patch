@@ -25,8 +25,8 @@
 - **10-10 map arcs (section below):** temporal AA OFF, no jitter, while any map is open (GuiFocus 6, 7, 8; built, not flown). The
   plane-motion and per-pixel star-choice work is REMOVED (the stars' parallax, section below). Kept: the map UI families and their zero cancel.
   Map frames below native run SMAA 1x, then AMD's FSR1 EASU, in place of the bilinear tap (shipped for an A/B flight 2026-10-10; section below).
-- **106 (10-09):** fixed exposure 1.0 SHIPS, flat HDR route (flown: brighter, stars back). **107 (10-14), BUILT, NOT FLOWN:**
-  bloom too bright with DLAA; TEMPORARY `advanced.flat_dlss_exposure` (scene|fixed|auto), `flat hdr energy:` line.
+- **106 (10-09):** fixed exposure 1.0 SHIPS, flat HDR route (flown: brighter, stars back). **107 (10-14), probe BUILT:**
+  bloom too bright with DLAA; DLSS adds no energy (flown). TEMPORARY keys flat_dlss_exposure, flat_bloom_probe; see 107.
 - **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
   corona-smear regression and mod effect ordering. Scene/depth identity, camera
   encoding and handoff have flight evidence; correct motion for every rendered
@@ -14950,3 +14950,69 @@ smoothing and reset, the game's compute state put back, the never-ran and sample
 7. VR on foot (the world route) only for its `route=vr-world` line; the ship in VR resolves after the game's post and cannot change bloom.
 Decision: if scene brings R to about 1.00 and the star looks right, keep the measured exposure as the behaviour, retire the key and
 the energy line (the key is removed, quoted, as Scope control requires); if R is already 1.00 under fixed, A is ruled out and B is next.
+
+### 2026-10-14: flight 8459abf4 refutes hypothesis A; the bloom probe
+
+- ruled out: DLSS adds HDR energy at the star, because flight 8459abf4 measured R<1, M<1, max-out 2157 < max-in 9711 in all three modes.
+  Steam, 3840x2160, DLSS preset K, ``flat hdr energy:`` lines 17:10:33 to 17:14:32: R (bright-pixel luma out/in) 0.38 to 0.99 with two
+  windows at 1.13 and 1.17 (a dim view, T 4.3), M 0.14 to 0.98, total-out/in 0.98 to 0.995 (0.84 in the star window), saturated 0 in and out, fallbacks 0. The
+  scene exposure moved 78 to 1.7 and back, ``auto`` and ``fixed`` read the same, and Sean saw no difference between the modes with
+  bloom on. The resolve conserves the picture's energy and spreads it: fewer pixels over T (15733 to 11531 at the star), lower peaks.
+  Hypotheses B and D stand untested; C (exposure) is a different thing from the exposure handed to NVIDIA (below).
+- Sean, planet view, two screenshots 8 s apart, Steam, 8459abf4: AA off is normal, with detail in the clouds and a thin atmosphere rim;
+  DLAA washes the whole lit disc to near white, cloud detail gone over most of the planet, the rim brighter and wider. max-in was about
+  30 in those windows, so this is a broad brightening of moderate values, not a point highlight. A peak clamp (A or (a) as a clamp
+  of peaks) cannot explain it alone.
+- The chain, read from the trace of that session (``flat_trace_11106.bin``, frame 11106, ``flat_temporal_test --trace-chain`` and a
+  dump of the events after H's last draw): H's last draw is event 437 (VS 94D5C556 / PS 912477AE, 3840x2160 f26 with depth), then
+  the trigger at 440 is VS DFED8E1C / PS 143AAE05 into 1920x1080 f26 with H at t0 (srv known): the bloom's FIRST LEVEL, and the
+  route's Resolve marker follows at 441. After it: bloom down 5ECFE708 at 960x540, 480x270, 240x135, 120x67 (events 443 to 449); bloom
+  up 129F602B / 8826CACC at 240x135 to 1920x1080 (451 to 457); the exposure's three small draws DEF19B03 / 831DF02E at 480x270 f26, f53,
+  f60 (461 to 465, a bilinear one-tap colour-matrix pass from one texture) and seven dispatches writing UAVs (467 to 474); the tone
+  43CA9F1C / E8948389 into 3840x2160 f27 (476); the output copy (479). So the route resolves H before BOTH the bloom's first level and
+  the exposure's small draws (their SRVs are not recorded; if they read H, it is the resolved one); the route writes nothing else and no
+  game pass is replaced.
+- Disassembly of the tone with bloom (E8948389, ``tools\dxbc_disasm.py`` on the Epic dump): t1 = H and t2 = the bloom texture each
+  times cb2[2].x and clamped to [0, 64500 cb2[2].x]; with cb2[1].w negative the output is M(E) * (H + bloom), the same M for both
+  (additive bloom); with it non-negative the pass is the depth-of-field lerp of H toward t2 by cb2[1].w. M is a function of E (the
+  vertex shader's strip texel 0) and constants in cb2[7] and cb2[8] (section 107 above), then a rational curve and the colour grade.
+  So brightness = curve(M(E) * (H + bloom(H))): three things can differ with the route on, and only they: H, bloom(H), and E.
+- Candidates, with what each predicts in the probe's line and what the next flight reads:
+
+| candidate | mechanism | reads as |
+|---|---|---|
+| (a) a luminance handling the route defeats | the game's bloom first level (143AAE05) may weight or clamp bright texels (firefly suppression); an aliased H is damped by it, a smoothed H is not, so the same total energy makes more bloom | ``gain`` (bloom mean over H mean) higher with DLAA than with AA off at the same view; the PS is captured by the flat shader capture this flight (143AAE05, 5ECFE708, 8826CACC, 831DF02E, E8948389 are in its keys) and read offline |
+| (b) the bloom lands twice | a pass in the DLAA chain that is not in the AA-off chain, or bloom added to a texture the game then adds bloom to | the chain line differs between the two modes (a draw present in one); ``gain`` equal in both; ldr still brighter |
+| (c) the exposure E differs | the exposure's small draws and dispatches read the resolved H (event 461 follows the Resolve marker); if the strip's E falls, M rises for everything, bloom included | ``strip: E`` lower with DLAA than with AA off at the same view, by about the brightness ratio of the ldr means |
+| (d) anything else | placement, format, a late write into H the resolve missed | none of the above moves while ``ldr`` (mean, white fraction) still differs; the chain and the energy line then say where |
+
+- Built (branch ``claude/flat-bloom-input``): the bloom probe, ``advanced.flat_bloom_probe`` (TEMPORARY, default on, flat profile, live), in
+  flat_bloom_probe.cpp. Twice a second on one frame, with the anti-aliasing off as well as on (it hooks the flat draw thunks directly,
+  not the route), by structure: the bloom's first level (a full-screen draw into R11G11B10F at half the size of the R11G11B10F
+  texture it reads; that texture is H, measured after the route's resolve for that draw), the tone (a full-screen draw into an R8G8B8A8
+  target of the render size with a 3D texture bound), the bloom texture (the smaller R11G11B10F 2D resource the tone reads), the
+  exposure strip (the 6x1 R32 texture at the tone's vertex-shader slot 0, texels 0 to 5), and the tone's target at the frame's end
+  (mean luma, fraction at or above 0.95, the largest). Every 5 s one line:
+  ``flat bloom probe: aa=<mode> bloom=<yes|none> samples frames tone H@<bloom|tone>(WxH): mean max gm | bloom(WxH): mean max gain | strip: E (min..max) t1..t5 | ldr: mean white% max | hazards dropped failures``.
+  ``armed`` is said once; a window with frames and no complete sample prints samples=0; the full-screen draws of the sampled frame are
+  listed once per mode (``flat bloom probe chain (aa=...)``, ``#n PS=<hash> <target> <- t0=.. t1=..``, ``H:`` marks the scene image,
+  ``3d:`` a 3D texture). The rig is tools\flat_hdr_energy_test (the real module on WARP: a synthetic frame, the CPU reference for H, the
+  bloom, the strip and the ldr numbers, the chain text); the pure half is pinned in flat_temporal_test.
+
+### Next flight (checklist, 2026-10-14 bloom probe)
+1. Build check first: ``python tools\edvr_log.py --target steam --expect-build HEAD --version``. Flat profile, Bloom on in Elite's graphics options, SS 1.0,
+   ``advanced.flat_dlss_exposure`` left at scene (it is not the cause; do not vary it).
+2. Planet view (the washed-out one): park in orbit with the lit disc and its rim in frame and hold the view still (the same pose for all
+   legs; the ship does not move in orbit hold). Legs of 30 s each, switching ``temporal_aa`` live: ``off``, ``dlaa``, ``off``, ``dlaa``.
+   Read the lines: ``python tools\edvr_log.py --target steam --grep "flat bloom probe|flat hdr energy"``. The first line of each mode also lists the chain.
+3. Star view with the strut crossing: the same four legs.
+4. Reading, per leg pair (same view): ``strip: E`` (a ratio dE = E(dlaa) / E(off)), ``bloom ... gain``, ``H@bloom mean`` and ``ldr white%``.
+   - ldr white% higher with DLAA and dE far from 1 (below about 0.8): (c); the fix is in the exposure the game computes from the resolved H
+     (the route resolves after the exposure's small draws read H, or the exposure must see the unresolved image).
+   - ldr white% higher, dE near 1, gain higher with DLAA: (a); read the captured 143AAE05 for its luminance handling, then reproduce the
+     game's treatment in the route (or resolve after the bloom's first level, not before).
+   - ldr white% higher, dE and gain near 1, an extra draw in the DLAA chain: (b); name it from the chain lines.
+   - H mean equal in both modes (it should be, within the view's motion), and none of the above moving while ldr differs: (d).
+5. ``temporal_aa = on`` (EDVR TAA, same placement) for one more pair: if the planet washes out the same way, the placement is the cause,
+   whatever the engine; if not, the DLSS output differs in kind from the game's H in a way the means do not show.
+6. The log bundle (Save logs) carries the shaders folder: 143AAE05, 5ECFE708, 8826CACC, 831DF02E and E8948389 in it are the offline reading for (a).

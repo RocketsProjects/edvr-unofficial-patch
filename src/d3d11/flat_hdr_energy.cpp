@@ -70,8 +70,7 @@ bool sameDevice(ID3D11DeviceContext* ctx, Ptr<ID3D11Device>& dev) {
     return true;
 }
 
-bool readyEnergy(ID3D11DeviceContext* ctx) {
-    Ptr<ID3D11Device> dev;
+bool readyEnergyShader(ID3D11DeviceContext* ctx, Ptr<ID3D11Device>& dev) {
     if (!sameDevice(ctx, dev)) return false;
     if (!g_energyCs) g_energyCs.Attach(shaderSwapCreateCs(ctx, kFlatHdrEnergyBytecode, sizeof(kFlatHdrEnergyBytecode),
                                                            "flat hdr energy", "flat hdr energy"));
@@ -80,6 +79,12 @@ bool readyEnergy(ID3D11DeviceContext* ctx) {
         D3D11_BUFFER_DESC bd{}; bd.ByteWidth = 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         if (FAILED(dev->CreateBuffer(&bd, nullptr, &g_energyParams))) return false;
     }
+    return true;
+}
+
+bool readyEnergy(ID3D11DeviceContext* ctx) {
+    Ptr<ID3D11Device> dev;
+    if (!readyEnergyShader(ctx, dev)) return false;
     for (Slot& s : g_slots) {
         for (int side = 0; side < 2; ++side) {
             if (s.buffer[side]) continue;
@@ -299,6 +304,24 @@ void flatHdrEnergyPoll(ID3D11DeviceContext* ctx) {
 }
 
 void flatHdrEnergyFlush() { flush(GetTickCount64()); }
+
+bool flatHdrEnergyReduce(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* srv, ID3D11UnorderedAccessView* uav,
+                         uint32_t width, uint32_t height, float threshold) {
+    if (!ctx || !srv || !uav || !width || !height) return false;
+    FlatComputeInternalScope internal;
+    Ptr<ID3D11Device> dev;
+    if (!readyEnergyShader(ctx, dev)) { ++g_failures; return false; }
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd{}; srv->GetDesc(&vd);
+    if (vd.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) { ++g_failures; return false; }
+    uint32_t params[4] = {width, height, 0, 0};
+    std::memcpy(&params[2], &threshold, 4);
+    ctx->UpdateSubresource(g_energyParams.Get(), 0, nullptr, params, 0, 0);
+    const UINT zero[4] = {0, 0, 0, 0};
+    ctx->ClearUnorderedAccessViewUint(uav, zero);
+    const bool ok = dispatchOver(ctx, g_energyCs.Get(), g_energyParams.Get(), srv, uav, nullptr, 32, 32);
+    if (!ok) ++g_hazards;
+    return ok;
+}
 
 bool flatHdrExposureUpdate(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* h, uint32_t width, uint32_t height, bool reset) {
     g_exposureFresh = false;
