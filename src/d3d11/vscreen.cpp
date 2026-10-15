@@ -3776,11 +3776,18 @@ __declspec(noinline) void blendProbeOfferDraw(ID3D11DeviceContext* self, DrawVer
 // The effect rule's offer (effect_history.h): an eye draw whose vertex shader is on the list is drawn once more into the module's private target, before the
 // game's own issue, with the game's bindings. The caller has tested that the pass is on NVIDIA's path and that this is an eye draw with no verdict of its own.
 // NOINLINE so an ordinary draw pays only the vertex shader's compare against the list.
-__declspec(noinline) void effectHistoryOffer(ID3D11DeviceContext* self, char kind, UINT count, UINT instances, const DrawArgs& args) {
+__declspec(noinline) void effectHistoryOffer(ID3D11DeviceContext* self, char kind, UINT count, UINT instances, const DrawArgs& args, bool substituted) {
     const uint64_t vs = bindingShaderHash(BindSlot::Vs);
     if (!effectVsListed(vs)) return;
+    const uint64_t ps = bindingShaderHash(BindSlot::Ps);
+    // A draw a fix wrapper substitutes or takes (a verdict: sun glare, particle, holo, ...; the UI layer; an engine-record substitution) is not replicated: the
+    // replica would draw the game's original, not what the fix draws. Counted per pair in the census.
+    if (substituted) {
+        effectHistoryNoteSubstituted(vs, ps);
+        return;
+    }
     BlendReplayArgs a{self, kind, count, instances, &args};
-    effectHistoryDraw(self, vs, bindingShaderHash(BindSlot::Ps), &blendReplay, &a);
+    effectHistoryDraw(self, vs, ps, &blendReplay, &a);
 }
 
 // the crisp-HUD half of fix.ui_quality's tonemap re-issue (ui_layer.h): the game's admitted tonemap
@@ -4171,8 +4178,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // The effect rule (effect_history.h): the listed glows, drawn once more into the module's private target, before the game's own issue. Only the game's
     // own plain issue is replicated: a draw with a verdict, or one the UI layer took, is not the draw the rule means. (Below the composite census's
     // read-only block and the loader panel's branch, which a plain draw never enters.)
-    if (owner && v == DrawVerdict::kNone && !uiLayer && g_state->rtv0Eye && effectHistoryLive())
-        effectHistoryOffer(self, kind, count, instances, args);
+    if (owner && g_state->rtv0Eye && effectHistoryLive())
+        effectHistoryOffer(self, kind, count, instances, args, v != DrawVerdict::kNone || uiLayer || engineVelocityDrawSubstituted());
     if (v == DrawVerdict::kQuadSkip) {
         if (seedOutcome.on) {
             seedOutcome.substituted = true;

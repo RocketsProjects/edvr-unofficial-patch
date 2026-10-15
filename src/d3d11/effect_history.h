@@ -40,11 +40,19 @@ void effectHistoryShutdown();
 
 namespace detail {
 extern std::atomic<bool> g_effectNvidia;   // the temporal pass is on the NVIDIA path (effectHistorySetNvidia): the rule only acts there
+extern std::atomic<bool> g_effectEnabled;  // advanced.effect_history (TEMPORARY A/B key, default on), live
 }
+// advanced.effect_history = on | off: said in the log when it changes; off stops every replica and every hide at once (the pass binds nothing for the rule).
+void effectHistoryConfigure(bool on) noexcept;
 // The temporal pass says each eye-frame whether it runs NVIDIA's upscaler. FSR and XeSS are not handed the sentinel this rule relies on. The flag lapses by
 // itself after a few seconds of the pass not saying (a menu, a loading screen), so no replica runs for a pass that is not there.
 void effectHistorySetNvidia(bool on) noexcept;
-inline bool effectHistoryLive() noexcept { return detail::g_effectNvidia.load(std::memory_order_relaxed); }
+inline bool effectHistoryLive() noexcept {
+    return detail::g_effectNvidia.load(std::memory_order_relaxed) && detail::g_effectEnabled.load(std::memory_order_relaxed);
+}
+// A listed draw the draw path did NOT offer for replication because a fix substitutes or takes it (a verdict, the UI layer, an engine-record substitution):
+// counted per pair in the census. The replica never runs a draw a fix wrapper alters.
+void effectHistoryNoteSubstituted(uint64_t vs, uint64_t ps) noexcept;
 
 using EffectReplayFn = void (*)(void* arg);
 // Offer one eye draw (the draw path asks only when effectHistoryLive() and its vertex shader is listed). Returns at once for a draw whose pair is not

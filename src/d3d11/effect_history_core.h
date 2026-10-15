@@ -62,6 +62,7 @@ struct EffectWindow {
     uint32_t frames = 0;                 // frame boundaries in the window
     uint32_t eyeFrames = 0;              // eye-frames in which a listed draw was replicated
     uint32_t draws[kEffectPairSlots] = {};      // listed draws replicated, per pair
+    uint32_t substituted[kEffectPairSlots] = {};   // listed draws left alone because a fix substitutes or takes them (sun glare, particle, holo, UI layer, engine substitution), per pair
     uint64_t samples[kEffectPairSlots] = {};    // samples the replicas wrote (occlusion queries answered), per pair: the pixels the pair covers, an upper bound on those hidden
     uint32_t sampled[kEffectPairSlots] = {};    // draws whose query answered (the divisor for samples)
     uint64_t hiddenPixels = 0;           // pixels the motion shader hid by this rule (its running total's growth), over hiddenEyeFrames
@@ -98,8 +99,8 @@ inline int formatEffectCensus(char* out, size_t cap, const EffectWindow& w, uint
     for (uint32_t i = 0; i < kEffectHistoryPairCount; ++i) {
         char piece[200];
         const double perSample = w.sampled[i] ? static_cast<double>(w.samples[i]) / w.sampled[i] : 0.0;
-        const int m = std::snprintf(piece, sizeof(piece), " %s: %.2f draws/frame, %.0f covered pixels per draw (%u sampled);", kEffectHistoryPairs[i].name,
-                                    w.draws[i] / frames, perSample, w.sampled[i]);
+        const int m = std::snprintf(piece, sizeof(piece), " %s: %.2f draws/frame, %.0f covered pixels per draw (%u sampled), %.2f/frame left alone (a fix substitutes them);",
+                                    kEffectHistoryPairs[i].name, w.draws[i] / frames, perSample, w.sampled[i], w.substituted[i] / frames);
         if (m < 0 || static_cast<size_t>(n + m) >= cap) return -1;
         std::memcpy(out + n, piece, static_cast<size_t>(m) + 1);
         n += m;
