@@ -1174,17 +1174,23 @@ int main(int argc, char** argv) {
         const char* why = "";
         check(se::sunStep(si, &sun, &why) && sun.off, "floor sun: aboard, the pad moving in, the skip goes on");
         si.aboard = false;
-        si.floorHold = true;   // the disembark onto the floor
-        check(!se::sunStep(si, &sun, &why) && sun.off, "floor sun: on foot on the floor the skip STANDS (the hangar leak stays out)");
+        si.onFootInHangar = true;   // the disembark: Status says on foot and in the hangar
+        check(!se::sunStep(si, &sun, &why) && sun.off, "split sun: on foot in the hangar (Status) the skip STANDS (the hangar leak stays out)");
         si.r0 = 0;
         si.inHangar = false;   // the pad's state does not matter on foot
-        check(!se::sunStep(si, &sun, &why) && sun.off, "floor sun: the pad's r1 going away does not release it on foot on the floor");
-        si.floorHold = false;  // the ride starts
-        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "off the hangar floor") != nullptr, "floor sun: the camera rising off the floor releases it, with that reason");
-        si.floorHold = true;   // back on the floor after the ride down
-        check(se::sunStep(si, &sun, &why) && sun.off && std::strstr(why, "on foot on the hangar floor") != nullptr, "floor sun: back on the floor it is restored");
+        check(!se::sunStep(si, &sun, &why) && sun.off, "split sun: the pad's r1 going away does not release it on foot in the hangar");
+        // the lift ride: the camera leaves the floor (the SEAL releases there, below), but Status in-hangar stays 1 through the shaft: the skip stands
+        for (int i = 0; i < 40; ++i) check(!se::sunStep(si, &sun, &why) && sun.off, "split sun: through the lift ride (in-hangar 1) the skip stands");
+        si.onFootInHangar = false;   // the concourse's frame: Status in-hangar drops (0.5 s after the camera jump in the flown trace)
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "out of the hangar") != nullptr && std::strstr(why, "on foot") != nullptr,
+              "split sun: Status in-hangar dropping (the concourse) releases it, with that reason");
+        si.onFootInHangar = true;   // back in the hangar frame (the shaft's top, or the floor)
+        check(se::sunStep(si, &sun, &why) && sun.off && std::strstr(why, "on foot in the hangar") != nullptr, "split sun: in-hangar back to 1 on foot, it is restored");
         si.hangarChanged = true;
-        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "hangar changed") != nullptr, "floor sun: a hangar change still releases it");
+        check(se::sunStep(si, &sun, &why) && !sun.off && std::strstr(why, "hangar changed") != nullptr, "split sun: a hangar change still releases it");
+        si.hangarChanged = false;
+        si.docked = false;
+        check(!se::sunStep(si, &sun, &why) && !sun.off, "split sun: undocked it stays off");
         // the seal
         se::SealState st;
         se::SealInputs in = inHangar(0);
@@ -1196,6 +1202,7 @@ int main(int argc, char** argv) {
         check(se::sealStep(in, &st, &rw) == se::SealAction::kNone && rw == se::ReleaseWhy::kNone, "floor seal: held on the floor stays held");
         in.onFloor = false;   // the ride
         check(se::sealStep(in, &st, &rw) == se::SealAction::kRelease && rw == se::ReleaseWhy::kOnFoot, "floor seal: rising off the floor releases it, reason kOnFoot");
+        // the split: at this same ride the sun skip above stands (in-hangar 1) while the seal is released here; they are logged separately (the sun line and the seal release line)
         in.held = false;
         st = se::SealState{};
         check(firstEngage(&st, in, 2000, 12000) == 0, "floor seal: on foot off the floor never seals");
@@ -1400,7 +1407,7 @@ int main(int argc, char** argv) {
             check(st.find("if (!on) return;") != std::string::npos && st.find("s.traceOn = g_traceOn;") != std::string::npos, "lift trace pins: off, the tick returns at once and the callbacks see traceOn false");
             // the floor hold feeds the sun skip and the seal, runs after the Status words and before the inputs are made, and every reset path drops it
             const size_t fcall = st.find("floorHoldTick();   // after the Status words");
-            const size_t sunIn = st.find("su.floorHold = g_floorHolding;");
+            const size_t sunIn = st.find("su.onFootInHangar = g_onFootInHangarNow;");
             const size_t sealIn = st.find("in.onFloor = g_floorHolding;");
             check(fcall != std::string::npos && words != std::string::npos && fcall > words && sunIn != std::string::npos && sealIn != std::string::npos && fcall < sealIn && fcall < sunIn,
                   "floor pins: the floor hold runs after the Status words and before the sun and seal inputs read it");

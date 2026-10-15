@@ -1159,6 +1159,7 @@ bool g_dockedWasNow = false;               // built v14.20 (review 4): the docke
 std::atomic<bool> g_dockedKnownNow{false};// Status.json has a Flags sample (the waiting line says unknown until then)
 // Built v14.35 (a v0.20.0 blocker): the seat from the same sample (Flags bits 24-26, Flags2 bits 1-2), and the raw words for the release line and the change instrument.
 bool g_aboardNow = false;                 // seated, and known
+bool g_onFootInHangarNow = false;         // docked, Status known, not aboard, Flags2 on foot and in hangar: the sun skip stands (the seal and the floor hold are separate, see FloorHold)
 bool g_statusKnownNow = false;
 uint32_t g_statusFlagsNow = 0, g_statusFlags2Now = 0;
 bool g_flagLogSet = false;                // the change instrument: the last words logged
@@ -2750,6 +2751,8 @@ void optimizedStationFrameBody(uint32_t frame) {
     g_aboardNow = g_statusKnownNow && journalStatusSeated();
     g_statusFlagsNow = journalStatusFlags();
     g_statusFlags2Now = journalStatusFlags2();
+    g_onFootInHangarNow = g_dockedNow.load(std::memory_order_acquire) && g_statusKnownNow && !g_aboardNow && (g_statusFlags2Now & sealed::kFlags2OnFoot) != 0 &&
+                          (g_statusFlags2Now & sealed::kFlags2OnFootInHangar) != 0;
     {   // The flag-change instrument: every change of the two words (known or not) is one line, so one flight shows when each bit moves against the lift's own events.
         const bool changed = !g_flagLogSet || g_flagLogKnown != g_statusKnownNow || g_flagLogFlags != g_statusFlagsNow || g_flagLogFlags2 != g_statusFlags2Now;
         if (changed && g_flagLogN < 400 && (g_dockedNow.load(std::memory_order_acquire) || g_heldValid || g_flagLogSet)) {
@@ -2930,7 +2933,7 @@ void optimizedStationFrameBody(uint32_t frame) {
         su.setting = g_setting.load(std::memory_order_acquire);
         su.docked = g_dockedNow.load(std::memory_order_acquire);
         su.aboard = g_aboardNow;
-        su.floorHold = g_floorHolding;
+        su.onFootInHangar = g_onFootInHangarNow;   // the sun skip follows the Status in-hangar flag; the seal follows the floor hold (in.onFloor)
         su.ownKnown = g_game.ownKnown;
         su.r0Fresh = g_game.r0Fresh;
         su.r0 = static_cast<uint8_t>(g_game.r0 < 0 ? 0 : g_game.r0);

@@ -1978,7 +1978,7 @@ struct SunInputs {
     bool setting = false;
     bool docked = false;
     bool aboard = false;         // the commander is seated in the ship (Status.json); on foot (or unknown) the sun skip is off, as the seal is, unless floorHold
-    bool floorHold = false;      // on foot, in the hangar and on its floor (FloorHold): the skip stands without the seat
+    bool onFootInHangar = false; // on foot with Status Flags2 in-hangar (bit 13) set: the skip stands without the seat until the flag drops (the lift shaft is inside the hangar)
     bool ownKnown = false;       // the game has named the own pad this dock
     bool r0Fresh = false;        // the own pad's r0 was called within kPadStateFreshMs
     uint8_t r0 = 0;              // the own pad's latest r0 code (meaningful with r0Fresh)
@@ -2003,9 +2003,9 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
             *why = "pad moving in or locked in (r0)";
             return true;
         }
-        if (in.setting && in.docked && !in.aboard && in.floorHold) {   // walking the hangar floor: the leak is there too
+        if (in.setting && in.docked && !in.aboard && in.onFootInHangar) {   // on foot in the hangar (the floor, the lift shaft): the leak is there too
             st->off = true;
-            *why = "on foot on the hangar floor";
+            *why = "on foot in the hangar (Status in-hangar flag)";
             return true;
         }
         return false;
@@ -2026,9 +2026,9 @@ inline bool sunStep(const SunInputs& in, SunState* st, const char** why) noexcep
         return true;
     }
     if (!in.aboard) {   // 2026-10-14: the skip persisted for minutes on foot (the pad's r1 stays 1 and Status stays docked), through the lift and the concourse
-        if (in.floorHold) return false;   // on the hangar floor: the pad's state does not matter on foot
+        if (in.onFootInHangar) return false;   // in the hangar by Status: the pad's state does not matter on foot, and the ride (inside the shaft) does not release it
         st->off = false;
-        *why = "on foot, off the hangar floor (the ride, or out of the hangar)";
+        *why = "on foot, out of the hangar (the Status in-hangar flag dropped: the concourse)";
         return true;
     }
     if (moving) return false;                              // still moving in, or the descent
