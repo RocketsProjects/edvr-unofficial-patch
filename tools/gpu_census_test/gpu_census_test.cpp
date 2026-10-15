@@ -163,7 +163,7 @@ void rotationAndRealTimerCase(Device& d) {
     check(gpuTimingBind(d.dev.Get(), d.ctx.Get()), "bind canonical WARP timer owner");
     check(occurrenceCapFor(GpuCensusSection::DoorSharpen) == 4, "K cap: a door section caps at 4 (both eyes, two occurrences each)");
     check(occurrenceCapFor(GpuCensusSection::FrameUiLayerReissues) == 8, "K cap: a per-draw section caps at 8");
-    check(isDoorSection(GpuCensusSection::DoorFssHeal) && isDoorSection(GpuCensusSection::DoorSkyRing),
+    check(isDoorSection(GpuCensusSection::DoorUiLayerComposite) && isDoorSection(GpuCensusSection::DoorSkyRing),
           "section split: the last door section (the sky ring's) is still door");
     check(static_cast<size_t>(GpuCensusSection::DoorSkyRing) + 1 == static_cast<size_t>(GpuCensusSection::FrameHologramPasses),
           "section split: the sky ring is the last door section, nested inside the whole and in no top-level door total");
@@ -788,9 +788,9 @@ void alteredFixCases() {
         ++cycle;
         onlyOwners = onlyOwners && turnOwnerOf(static_cast<GpuCensusSection>(at)) == static_cast<GpuCensusSection>(at);
     } while (at != 0 && cycle < 200);
-    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - static_cast<unsigned>(kSkinSections) && cycle == 25,
-          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route and second-skin ones (25: the 20 there were after the terrain's two sections went, 2026-10-01, plus the three hologram sub-sections and the moved HDR HUD draw, 2026-10-13, and the sky ring's door section, 2026-10-13; the key off changes nothing)");
-    // The same cycle once the VR world route's three sections have been called this window: they take turns, 28.
+    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - static_cast<unsigned>(kSkinSections) && cycle == 24,
+          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route and second-skin ones (24: the 20 there were after the terrain's two sections went, 2026-10-01, plus the three hologram sub-sections and the moved HDR HUD draw, 2026-10-13, and the sky ring's door section, 2026-10-13, less the FSS heal's door section, removed 2026-10-15; the key off changes nothing)");
+    // The same cycle once the VR world route's three sections have been called this window: they take turns, 27.
     for (size_t i = kWorldFirst; i < kWorldFirst + kWorldSections; ++i) g_section[i].occurrences = 1;
     at = 0;
     cycle = 0;
@@ -801,8 +801,8 @@ void alteredFixCases() {
         if (static_cast<size_t>(at) >= kWorldFirst && static_cast<size_t>(at) < kWorldFirst + kWorldSections)
             worldVisited[static_cast<size_t>(at) - kWorldFirst] = true;
     } while (at != 0 && cycle < 200);
-    check(cycle == 28 && worldVisited[0] && worldVisited[1] && worldVisited[2],
-          "turns: a world-route section that has been called this window takes its turn (28: the 20 and the three world ones, then 2026-10-13's five: the hologram sub-sections, the moved HDR HUD draw and the sky ring)");
+    check(cycle == 27 && worldVisited[0] && worldVisited[1] && worldVisited[2],
+          "turns: a world-route section that has been called this window takes its turn (27: the 20 and the three world ones, then 2026-10-13's five: the hologram sub-sections, the moved HDR HUD draw and the sky ring, less the FSS heal's door section)");
     for (size_t i = kWorldFirst; i < kWorldFirst + kWorldSections; ++i) g_section[i].occurrences = 0;
     for (auto& s : g_section) s = SectionState{};
     g_section[kAlteredFixFirst + 2].occurrences = 7;
@@ -890,7 +890,7 @@ void alteredFixCases() {
               "fix line: a fix that never ran prints '-', including the unnamed row");
         check(byFix->find("\"-\" means no draw of that fix ran this window") != std::string::npos,
               "fix line: it says what '-' means");
-        check(byFix->find("sun glare clamp") != std::string::npos && byFix->find("FSS reveal") != std::string::npos &&
+        check(byFix->find("sun glare clamp") != std::string::npos && byFix->find("FSS panel") != std::string::npos &&
                   byFix->find("loading scrim") != std::string::npos && byFix->find("menu backdrop") != std::string::npos,
               "fix line: every named fix has its place on the line, ran or not");
     }
@@ -1314,8 +1314,8 @@ void skinTurnCases() {
         const size_t a = static_cast<size_t>(at);
         if (a >= kSkinFirst && a < kSkinFirst + kSkinSections) skinVisited[a - kSkinFirst] = true;
     } while (at != 0 && cycle < 200);
-    check(cycle == 25 && !skinVisited[0] && !skinVisited[1] && !skinVisited[2] && !skinVisited[3] && !skinVisited[4],
-          "second skin turns: with none called this window the rotation gives them no turn (the cycle is the 25 it is now: the 20 before they existed and five added on 2026-10-13)");
+    check(cycle == 24 && !skinVisited[0] && !skinVisited[1] && !skinVisited[2] && !skinVisited[3] && !skinVisited[4],
+          "second skin turns: with none called this window the rotation gives them no turn (the cycle is the 24 it is now: the 20 before they existed, five added on 2026-10-13, less the FSS heal's door section)");
     for (size_t i = 0; i < kSkinSections; ++i) skinSection(i).occurrences = 1;
     at = 0;
     cycle = 0;
@@ -1326,8 +1326,8 @@ void skinTurnCases() {
         const size_t a = static_cast<size_t>(at);
         if (a >= kSkinFirst && a < kSkinFirst + kSkinSections) skinVisited[a - kSkinFirst] = true;
     } while (at != 0 && cycle < 200);
-    check(cycle == 30 && skinVisited[0] && skinVisited[1] && skinVisited[2] && skinVisited[3] && skinVisited[4],
-          "second skin turns: once called this window each takes its turn (30: the 25 and the five)");
+    check(cycle == 29 && skinVisited[0] && skinVisited[1] && skinVisited[2] && skinVisited[3] && skinVisited[4],
+          "second skin turns: once called this window each takes its turn (29: the 24 and the five)");
     // one of them alone
     for (size_t i = 0; i < kSkinSections; ++i) skinSection(i).occurrences = 0;
     skinSection(3).occurrences = 1;
@@ -1341,7 +1341,7 @@ void skinTurnCases() {
         if (a == kSkinFirst + 3) ++joinTurns;
         else if (a >= kSkinFirst && a < kSkinFirst + kSkinSections) ++otherSkin;
     } while (at != 0 && cycle < 200);
-    check(cycle == 26 && joinTurns == 1 && otherSkin == 0, "second skin turns: the join called alone has one turn a cycle and the others none");
+    check(cycle == 25 && joinTurns == 1 && otherSkin == 0, "second skin turns: the join called alone has one turn a cycle and the others none");
     for (auto& s : g_section) s = SectionState{};
 }
 
@@ -1487,7 +1487,7 @@ void instrumentCases() {
           "instruments: the hologram sub-sections sit between the resolve umbrella and UI resolve");
     check(isDoorSection(GpuCensusSection::DoorHoloNearLight), "instruments: the hologram sub-sections are door sections (K=4)");
     check(occurrenceCapFor(GpuCensusSection::DoorHoloResolveDraw) == 4, "instruments: a hologram sub-section caps at the door's 4");
-    check(kDoorBreakdownCount == 12, "instruments: twelve door items after the temporal whole (the profiler's eleven, then the sky ring)");
+    check(kDoorBreakdownCount == 11, "instruments: eleven door items after the temporal whole (the profiler's ten, then the sky ring)");
     check(GpuCensusSection::AlteredHdrHud > GpuCensusSection::AlteredUiLayer && GpuCensusSection::AlteredHdrHud < GpuCensusSection::AlteredFixFirst,
           "instruments: the moved HDR draw is an altered class, before the fix sections");
     check(kAlteredClassSections == 3 && std::strstr(kAlteredNames[2], "HDR HUD") != nullptr, "instruments: the altered class has its name");
