@@ -8,6 +8,8 @@
 #include "flat_hdr_crumbs.h"
 #include "flat_context_state.h"
 #include "flat_mono_resolve.h"
+#include "flat_celestial.h"    // planet patch motion: the rows' tangents for the records the resolve binds (fetchCelestialRecords)
+#include "celestial_motion.h"
 #include "xess_engine.h"
 #include "flat_projection_recipes.h"
 #include "flat_shader_classifier.h"
@@ -5076,6 +5078,48 @@ static void foregroundContractAtH(State& s,ID3D11DeviceContext* ctx,const FlatMo
     }
 }
 
+// Planet patch motion for the flat profile (celestial_motion.h): this frame's planet records, fetched for the resolve (its
+// FlatMonoResolveFrame::celestialRecords, with the two tangents). The tangents come from the frame's own camera rows and raster phases the way
+// flatMonoResolve reads them (the NDC phase of each row set, then flatCelestialTangents on both), and the records are the module's for eye 0 at
+// the render size. Skipped on a reset. Left null unless both row sets are a symmetric perspective and the module has a record; the two one-shot
+// notes say which of those happened.
+namespace {
+bool g_celestialRowsNoted = false, g_celestialBoundNoted = false;
+void fetchCelestialRecords(ID3D11DeviceContext* ctx, FlatMonoResolveFrame& f) {
+    f.celestialRecords = nullptr;
+    if (f.reset) return;
+    FlatProjectionJitter rowsNow{}, rowsBefore{};
+    if (!flatProjectionJitter(f.rowsJitterX, f.rowsJitterY, f.renderWidth, f.renderHeight, rowsNow) ||
+        !flatProjectionJitter(f.previousRowsJitterX, f.previousRowsJitterY, f.renderWidth, f.renderHeight, rowsBefore))
+        return;
+    float tanNow[4]{}, tanPrev[4]{};
+    float wLength = 0, worstDot = 0;   // of the first row set that fails, or of the current one
+    const bool nowOk = flatCelestialTangents(f.camera, rowsNow.ndcX, rowsNow.ndcY, tanNow, &wLength, &worstDot);
+    const bool prevOk = nowOk && flatCelestialTangents(f.previousCamera, rowsBefore.ndcX, rowsBefore.ndcY, tanPrev, &wLength, &worstDot);
+    if (!(nowOk && prevOk)) {
+        if (!g_celestialRowsNoted) {
+            g_celestialRowsNoted = true;
+            Log::get().note("flat celestial: the camera rows are not a symmetric perspective; planets keep the camera term (|w row| %.6f, worst "
+                            "orthogonality ratio %.3g, the %s frame's rows).",wLength,worstDot,nowOk?"previous":"current");
+        }
+        return;
+    }
+    CelestialEyeRecords records{};
+    if (!celestialMotionRecords(ctx, 0, tanNow, static_cast<int>(f.renderWidth), static_cast<int>(f.renderHeight), &records) || !records.srv) return;
+    f.celestialRecords = records.srv;
+    std::memcpy(f.celestialTanNow, tanNow, sizeof(tanNow));
+    std::memcpy(f.celestialTanPrev, tanPrev, sizeof(tanPrev));
+    if (!g_celestialBoundNoted) {
+        g_celestialBoundNoted = true;
+        const double tx = records.translation[0], ty = records.translation[1], tz = records.translation[2];
+        Log::get().note("flat celestial: planet patch records bound to the flat resolve (t18): %u bod%s with a record, nearest patch %.0f km, "
+                        "translation |t| %.2f m/frame, tangents (l, r, b, t) %.6f %.6f %.6f %.6f; their pixels take the body's own motion in place of the "
+                        "camera term.",records.records,records.records==1?"y":"ies",records.distance/1000.0,std::sqrt(tx*tx+ty*ty+tz*tz),
+                        tanNow[0],tanNow[1],tanNow[2],tanNow[3]);
+    }
+}
+}  // namespace
+
 FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances,
                                             char kind, uint32_t count, uint32_t start,
                                             int32_t base, uint32_t startInstance) {
@@ -6297,6 +6341,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         }
         return;
     }
+    fetchCelestialRecords(ctx, f);   // planet patch motion: this frame's records for the resolve's t18
     if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) {
         const char* temporalReason=s.reason;
         const char* fallbackReason=nullptr;
@@ -6588,6 +6633,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         }
     }
     reach("resolve");   // the frame is the resolver's from here
+    fetchCelestialRecords(ctx, f);   // planet patch motion: this frame's records for the resolve's t18
     if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) {
         const char* temporalReason = s.reason;
         // The backend (or the route's own guard) refused before H was written. Recover the jitter into H, or decline.
