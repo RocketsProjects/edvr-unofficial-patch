@@ -43,10 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight:** none owed; each 2026-09-16 flight did what it said.
-  Known, not fixed ("Status detail"): the ~220 m remap under head sway;
-  the "scanner is up" bit and one-step floor firing on the loading
-  screen's panel; the sky's ~+0.4 px/frame. Toolkit-ON check stands.
+- **Next flight (2026-10-15, built, not flown):** zoom a ringed planet at
+  `fix.fss_eye_sync` = `off`, `tiles`, `mirror`; read the `fss tiles:` lines
+  ("2026-10-15: the tile renderer, per view"). `tiles` is TEMPORARY (the
+  engine candidate: eye 1's tile dispatches draw from eye 0's buffers).
+  Known, not fixed: the ~220 m remap under head sway; the "scanner is up"
+  bit firing on the loading screen's panel; the sky's ~+0.4 px/frame.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -1581,6 +1583,116 @@ strokes, the complaint, are within noise of the head path.
   follow the head path within +-0.3 px/frame.
 - Noticed, not chased: the sky against the camera rows, +0.4 px/frame
   in 202857 under a head turn, exact in 194158.
+
+## 2026-10-15: the tile renderer, per view (instrument and candidate)
+
+Sean (2026-10-15): in the FSS in VR the ring's black-square reveal plays in
+the LEFT eye only, as stock. He wants it in BOTH eyes, as the flat screen
+shows it, fixed on the engine side. Round 33 already says why the eyes
+differ (the engine budgets the primary view's ring tiles); nothing has
+yet read the budget. This entry builds the reading and one candidate.
+
+What the code and the logs say (branch `claude/fss-tile-lockstep`):
+
+- READ (census `edvr_gfx_20261014_144320.log`, build 332841, DCX lines):
+  the tile renderer is `5998146D464F5C0E` at args+0 and `EB0245DE0BB23BB6`
+  at args+12 of ONE argument buffer, and a frame has two such pairs, each
+  with its own argument buffer, its own UAV pair (`u0,u1`), its own list
+  buffer in SRV slot 2 (a different one for each shader) and its own
+  constants. The hashes are current on 332841. Which pair is which eye is
+  INFERRED from the order; the instrument below names it.
+- READ (Ghidra, build 332841): the ring material's `gPlanetRingScanAlpha`
+  is a float at planet-object +0x718, ramped once per frame by
+  `FUN_14365b1c0` (RVA 0x365b1c0, dt-driven, up to 1.0 or down to 0.0) and
+  copied into the constant buffer by `FUN_143660e50` (RVA 0x3660e50) for
+  every view. It cannot differ between eyes. UNKNOWN whether the
+  `PlanetRingScan` material (RVA 0x3647a30, index 7) is the tile reveal.
+  The tile budget's own code, and the primary-view test, are NOT found.
+- `experimental.fss_res` could not have caused this: the stock repro has
+  no EDVR (round 21), and the matcher only inflates targets of exactly
+  eye/2 (the mono body target); the tile maps are full-eye 272x268.
+  INFERRED from `fss_res.h` and the census.
+- The exposure engine path (`exposure_chain.h`) copies exposure UAVs
+  `u0`-`u4` only; it touches no tile map. The bug predates it (reported
+  2026-08-24; the stock repro stands).
+
+The instrument, `fss tiles:` (no key; free outside a zoom window). In each
+zoom window (vscreen's arrival window; at most 6 a session, at most 10 s
+and 160 lines each) every dispatch of the two shaders is copied, 12 bytes
+of arguments, into a staging ring and mapped two frames later with
+`DO_NOT_WAIT`. Lines:
+
+    fss tiles: instrument armed -- ...                   (every session, at configure)
+    fss tiles: window N opened at frame F (...; lockstep=on|off)
+    fss tiles: f=N eye=E cs=<16 hex> groups=(x,y,z) occ=K args=A<id>+<off> srv=[...] uav=[a,b]
+    fss tiles: window N closed -- frames= tile dispatches= readbacks= dropped= lines= lockstep=... substituted=... declined(...)
+    fss tiles: window N groups -- eye0 large n= x=lo..hi mean= yz<=  | eye0 small ... | eye1 ...
+    fss tiles: window N sharing -- view pairs= sameArgsBuffer= sameUav0=; per SRV slot 0-7, same resource in both views / bound in both: ...
+
+`eye` is the order of first appearance of the argument buffer in the frame.
+`srv=[...]` shows each slot as `-` (unbound), `T<id>` (a texture) or
+`B<id>:<bytes>` (a buffer), ids interned by RESOURCE, so equal ids across
+the two eyes mean the eyes share it. No `armed` line: the build is wrong.
+`armed` but no `window opened`: no zoom window was reached (the journal
+gate and the zoom press are vscreen's). `window opened` and `tile
+dispatches=0`: the hashes changed on this build (the closing line lists
+the other indirect shaders it saw).
+
+Reading it: if eye 1's `groups` x is far above eye 0's, or eye 0's grows
+with the reveal while eye 1's is full, the budget is per view and the
+candidate is the right lever. If the two are equal and `sameArgsBuffer` is
+0, the budget is not in the arguments: the lists' contents or the
+constants carry it, and `tiles` should change nothing visible. If
+`sameArgsBuffer` is 1 or `sameUav0` is 1, the views share outputs and the
+whole model is wrong.
+
+The candidate, `fix.fss_eye_sync` = `tiles` (alone: no heal, no composite
+freeze). In the zoom window, when the PREVIOUS frame had exactly two
+argument buffers, eye 1's dispatch of either shader is issued with eye 0's
+argument buffer (same offset) and with eye 0's buffer SRVs for every slot
+where both views have a buffer of equal size and different resource (the
+list; slot 2 on 332841), then eye 1's own SRVs are put back. Textures and
+constants stay eye 1's. Every decline is counted and named once a window
+(`shape`, `noEye0`, `sameArgs`, `offset`, `noBuffers`). The rig
+(`tools\fss_tiles_test`) proves the restore on a fake context and on WARP
+with the debug layer, through the production ops. The name is not
+`lockstep`: that spelling is the legacy name of the composite freeze
+(`sync`) and live inis carry it.
+
+Flight plan (Sean's headset, VR, a ringed planet, Frontier install,
+`python tools\edvr_log.py --target frontier --expect-build HEAD --version`
+first):
+
+1. `fss_eye_sync = off`. Zoom onto a ringed planet and watch the reveal.
+   Expect the stock look: tiles in the left eye only. Read the `fss tiles:`
+   lines: this is the baseline of the group counts per eye.
+2. `fss_eye_sync = tiles` (live; edit with the Edit tool, diff before and
+   after). Zoom again. Expect the reveal in both eyes. Read
+   `lockstep engaged at f=` and the `substituted=` count; a `declined`
+   reason says which precondition failed.
+3. `fss_eye_sync = mirror`, for comparison (the image-level stamp, which
+   puts the left's blacks into the right).
+
+Verdicts: `tiles` shows the reveal in both eyes with `substituted>0` and a
+clean log: ship the substitution as the behaviour. `tiles` engaged and the
+right eye still differs: the budget is not in the lists or arguments;
+record `ruled out: eye-1 tile lists and arguments, because the right eye
+still differs with them replaced`, and the next lever is the constants
+(`cb`) or the producer of the lists. `declined`: read the reason; if it is
+`shape`, the frame has more than two argument buffers and the eye numbering
+needs the instrument's ids.
+
+Key retirement, if `tiles` works (proposed; nothing removed here):
+
+- Ship the substitution as the behaviour, drop the `tiles` value, and
+  propose removing `fix.fss_eye_sync` (`fss_eye_sync = on`; values on, off,
+  heal, mirror, sync, steady, tiles) together with the heal and the
+  composite freeze it switches, if the tiles make them unneeded.
+- Propose removing `advanced.census_fss_jump` (`#census_fss_jump = 0`).
+- `experimental.fss_res` (`#fss_res = 0`) and
+  `experimental.fss_panel_distance` (`#fss_panel_distance = 1.0`) are
+  separate decisions: neither touches the reveal; one is a sharpness cost,
+  the other a user preference.
 
 ## Open
 

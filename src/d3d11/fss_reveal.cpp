@@ -107,7 +107,7 @@ void fssRevealConfigure(Config& cfg) {
             s_badValueNoted = true;
             Log::get().note(
                 "fss_eye_sync \"%s\" is not on, off or a developer value "
-                "(heal, mirror, sync, steady); running on. Said once.",
+                "(heal, mirror, sync, steady, tiles); running on. Said once.",
                 cfg.getString("fix.fss_eye_sync", "on").c_str());
         }
     }

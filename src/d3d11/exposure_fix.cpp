@@ -23,6 +23,7 @@
 #include "engine_velocity.h"  // F2: the palette chain's dispatch feeds the second skin's join
 #include "skin_join.h"        // kChainHash
 #include "flat_runtime.h"
+#include "fss_tiles.h"      // fssTilesDispatchIndirect: the tile renderer's per-view dispatches
 #include "flat_temporal.h"  // flat discovery and capture-only dispatch forwarding
 #include "object_probe.h"   // objectProbeNoteDispatch: the skin ledger's view of the palette chain (armed eye runs only)
 #include "vr_world_route.h"  // g_vrWorldInternal: the VR world route's own dispatches pass straight through
@@ -709,6 +710,13 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
         drawCensusDispatch(self, 0, 0, 0, foreignContext(self), args, off);
     }
     if (!foreignContext(self)) s->computeThisFrame = true;
+
+    // The FSS tile renderer's per-view dispatches (fss_tiles.cpp): the `fss tiles` instrument and the tiles candidate. One bool
+    // outside a scanner zoom window. Owner context only; true means the module issued the dispatch itself.
+    if (fssTilesActive() && !foreignContext(self) &&
+        fssTilesDispatchIndirect(self, args, off, hashOf(bindingGet(BindSlot::Cs)), s->realDispatchIndirect)) {
+        return;
+    }
 
     s->realDispatchIndirect(self, args, off);
 }
