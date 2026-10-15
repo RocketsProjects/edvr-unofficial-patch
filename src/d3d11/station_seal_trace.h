@@ -5,10 +5,10 @@
 // writes nothing. The triggers, evaluated only while held:
 //   T1 the held cell kept stale this tick (its pose unreadable);
 //   T2 the held cell's centre moved more than kTraceJumpM from the previous tick's (a logged origin shift does not excuse it);
-//   T3 a cull or rig-veto count this tick above kTraceSpikeFactor times the median of the last kTraceMedian held ticks, and above kTraceSpikeFloor;
 //   T4 the own pad missing from kTraceAbsentPasses informative passes in a row.
+// T3 (a cull or rig-veto count above a median of the held ticks) was removed: it fired on seal onset and on 10x per-frame cull swings with every other
+// field steady (log edvr_gfx_20261015_165224). The culled and veto counts are still in every line.
 // At most kTraceDumpsMax dumps a session, at least kTraceSpacingMs between two of them. The rig pins each trigger, the ring, the dump shape and the line bound.
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -23,22 +23,18 @@ constexpr size_t kTracePost = 64;             // the records a dump writes after
 constexpr uint32_t kTraceDumpsMax = 4;        // dumps a session
 constexpr uint64_t kTraceSpacingMs = 30000;   // at least this long between two dumps, measured between their triggers
 constexpr float kTraceJumpM = 2.0f;           // T2: the held centre's move per tick
-constexpr size_t kTraceMedian = 30;           // T3: the held ticks the median is taken over
-constexpr uint64_t kTraceSpikeFloor = 200;    // T3: the count must also be above this
-constexpr uint64_t kTraceSpikeFactor = 3;     // T3: and above this many times the median
 constexpr uint32_t kTraceAbsentPasses = 3;    // T4: informative passes in a row without the own pad
 
 // The pass verdict of the tick, named for the line (station_pass_core.h's PassVerdict, mapped by the tick).
 enum class TraceVerdict : uint8_t { kInformative = 0, kEmpty, kUnfinished };
 // The held cell's refresh this tick: not held; rebuilt from the live pose and moved; rebuilt and unmoved; kept as it was because the pose was unreadable.
 enum class HeldRefresh : uint8_t { kNotHeld = 0, kRefreshed, kKeptStale, kNoChange };
-enum class TraceTrigger : uint8_t { kNone = 0, kStaleCell, kCellJump, kCullSpike, kOwnAbsent };
+enum class TraceTrigger : uint8_t { kNone = 0, kStaleCell, kCellJump, kOwnAbsent };
 
 inline const char* triggerName(TraceTrigger t) noexcept {
     switch (t) {
         case TraceTrigger::kStaleCell: return "T1";
         case TraceTrigger::kCellJump: return "T2";
-        case TraceTrigger::kCullSpike: return "T3";
         case TraceTrigger::kOwnAbsent: return "T4";
         case TraceTrigger::kNone: break;
     }
@@ -152,15 +148,6 @@ inline int formatTickLine(const TickRecord& r, char* out, size_t cap) noexcept {
                          static_cast<unsigned long long>(r.producerDelta), static_cast<unsigned long long>(r.cullDelta), ev);
 }
 
-// The median of the first n entries of a history (the upper middle for an even n); 0 for none.
-inline uint64_t traceMedian(const uint64_t* hist, size_t n) noexcept {
-    if (n == 0) return 0;
-    uint64_t tmp[kTraceMedian];
-    for (size_t i = 0; i < n; ++i) tmp[i] = hist[i];
-    std::nth_element(tmp, tmp + n / 2, tmp + n);
-    return tmp[n / 2];
-}
-
 // The emitter: one line at a time (the tick passes its log writer; the rig passes a capture).
 using TraceEmit = void (*)(void* ctx, const char* line);
 
@@ -178,11 +165,6 @@ struct SealTrace {
     bool prevActive = false;
     uint64_t traceSinceMs = 0;        // this dock's trace started
     uint64_t heldSinceMs = 0;         // the seal was taken
-    // T3: the held ticks' deltas, the last kTraceMedian of them (one slot per held tick, the two counts together)
-    uint64_t rigHist[kTraceMedian] = {};
-    uint64_t cullHist[kTraceMedian] = {};
-    size_t histCount = 0;
-    size_t histHead = 0;
     uint32_t absentRun = 0;           // T4: informative held passes in a row without the own pad
     // The dumps
     uint32_t dumps = 0;               // dumps written this session
@@ -204,13 +186,6 @@ struct SealTrace {
         char line[320];
         formatTickLine(r, line, sizeof(line));
         emit(ctx, line);
-    }
-
-    void pushHist(uint64_t rig, uint64_t cull) noexcept {
-        rigHist[histHead] = rig;
-        cullHist[histHead] = cull;
-        histHead = (histHead + 1) % kTraceMedian;
-        if (histCount < kTraceMedian) ++histCount;
     }
 
     // Called every tick the setting is on. The derived values and the window deltas are kept on every tick; the ring, the triggers and the dumps run
@@ -245,17 +220,10 @@ struct SealTrace {
 
         r.trigger = TraceTrigger::kNone;
         if (postLeft == 0 && r.held && active) {
-            const uint64_t medRig = traceMedian(rigHist, histCount);
-            const uint64_t medCull = traceMedian(cullHist, histCount);
-            const bool spike = histCount > 0 &&
-                               ((r.rigDelta > kTraceSpikeFloor && r.rigDelta > kTraceSpikeFactor * medRig) ||
-                                (r.cullDelta > kTraceSpikeFloor && r.cullDelta > kTraceSpikeFactor * medCull));
             if (r.ownSet && r.verdict == TraceVerdict::kInformative) absentRun = r.ownInPass ? 0 : absentRun + 1;
             if (r.refresh == HeldRefresh::kKeptStale) r.trigger = TraceTrigger::kStaleCell;
             else if (r.shiftM > kTraceJumpM) r.trigger = TraceTrigger::kCellJump;
-            else if (spike) r.trigger = TraceTrigger::kCullSpike;
             else if (absentRun == kTraceAbsentPasses) r.trigger = TraceTrigger::kOwnAbsent;
-            pushHist(r.rigDelta, r.cullDelta);
         } else if (!r.held) {
             absentRun = 0;
         }

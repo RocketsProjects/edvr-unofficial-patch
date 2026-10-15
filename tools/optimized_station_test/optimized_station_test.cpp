@@ -2732,44 +2732,41 @@ int main(int argc, char** argv) {
               "trace T2: a centre moved 2.5 m from the previous tick fires, with the origin shift logged or not");
     }
     {
-        // T3: a rig or cull count spike above 200 and above 3x the median of the held ticks (1 a tick here); 150 is under the floor
-        se::SealTrace tr;
-        std::vector<std::string> out;
-        uint64_t rig = 0;
-        for (uint32_t i = 0; i < 40; ++i) {
-            se::TickRecord r = heldTick(i, 100ull * i);
-            rig += 1;
-            r.rigVetoes = rig;
-            tr.step(r, captureLine, &out);
-        }
-        check(out.empty(), "trace T3: one rig veto a tick is quiet");
-        se::TickRecord small = heldTick(40, 4000);
-        rig += 150;
-        small.rigVetoes = rig;
-        tr.step(small, captureLine, &out);
-        check(out.empty(), "trace T3: a spike of 150 (under the 200 floor) is quiet");
-        se::TickRecord spike = heldTick(41, 4100);
-        rig += 300;
-        spike.rigVetoes = rig;
-        tr.step(spike, captureLine, &out);
-        check(!out.empty() && out[0].find("trigger T3 at frame 41") != std::string::npos, "trace T3: a rig veto spike of 300 (above 200 and 3x the median) fires");
-    }
-    {
+        // No T3 (removed, log 165224): a cull and rig-veto spike mid-seal, after a steady stream of 40 held ticks, writes no dump
         se::SealTrace tr;
         std::vector<std::string> out;
         uint64_t culled = 0;
+        uint64_t rig = 0;
         for (uint32_t i = 0; i < 40; ++i) {
             se::TickRecord r = heldTick(i, 100ull * i);
             culled += 2;
+            rig += 1;
             r.culled = culled;
+            r.rigVetoes = rig;
             tr.step(r, captureLine, &out);
         }
-        check(out.empty(), "trace T3: two culls a tick are quiet");
         se::TickRecord spike = heldTick(40, 4000);
         culled += 500;
+        rig += 300;
         spike.culled = culled;
+        spike.rigVetoes = rig;
         tr.step(spike, captureLine, &out);
-        check(!out.empty() && out[0].find("trigger T3 at frame 40") != std::string::npos, "trace T3: a cull spike of 500 (above 200 and 3x the median) fires");
+        check(out.empty(), "trace (T3 removed): a cull and rig-veto spike mid-seal writes no dump");
+    }
+    {
+        // No T3 (removed, log 165224): a cull and rig-veto spike two ticks into a seal, with no held history, writes no dump
+        se::SealTrace tr;
+        std::vector<std::string> out;
+        tr.step(heldTick(0, 0), captureLine, &out);
+        se::TickRecord b = heldTick(1, 22);
+        b.culled = 500;
+        b.rigVetoes = 300;
+        tr.step(b, captureLine, &out);
+        se::TickRecord c = heldTick(2, 45);
+        c.culled = 1000;
+        c.rigVetoes = 600;
+        tr.step(c, captureLine, &out);
+        check(out.empty() && tr.count == 3 && tr.at(0).sealedNow, "trace (T3 removed): a cull and rig-veto spike at seal onset writes no dump");
     }
     {
         // T4: the own pad missing from three informative passes in a row; an empty pass is no evidence; the pad back in a pass starts the run again
@@ -2876,13 +2873,13 @@ int main(int argc, char** argv) {
         r.rigDelta = ~0ull;
         r.producerDelta = ~0ull;
         r.cullDelta = ~0ull;
-        r.trigger = se::TraceTrigger::kCullSpike;
+        r.trigger = se::TraceTrigger::kOwnAbsent;
         char line[320] = {};
         const int n = se::formatTickLine(r, line, sizeof(line));
         check(n > 0 && n < 300 && std::strlen(line) < 300, "trace line: under 300 characters with every integer at 20 digits and the floats at their limits");
         check(std::string(line).rfind("f=4294967295 t=18446744073709551615 h=1 v=U th=1 pc=18446744073709551615 op=1 un=4294967295 rf=k ", 0) == 0 &&
                   std::strstr(line, "hc=99999.0,-99999.0,nan hs=99999.00 fs=99999.00 cv=1 cj=-99999.00 co=1 ") != nullptr &&
-                  std::strstr(line, "ev=seal+rel:mechanism+origin+hold+T3") != nullptr,
+                  std::strstr(line, "ev=seal+rel:mechanism+origin+hold+T4") != nullptr,
               "trace line: the keys in order, the floats clamped to 99999, the event words joined");
     }
     {
