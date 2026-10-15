@@ -43,12 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight (2026-10-15 late):** flight bca9d6b8: `tiles` does not fix
-  it; the list row is ruled out (a 2-3 frame gap, then identical lists); both
-  dumps caught the transit void. Next, no build: `fix.fss_eye_sync` =
-  `mirror` (the animation in both eyes), and a `census_fss_jump` flight for
-  the per-eye ring draws; then a longer instrument window. Known, not fixed:
-  the ~220 m remap; the loading-screen panel bit; the sky's drift.
+- **Next (2026-10-15, after the engine RE):** flight bca9d6b8 ruled out
+  `tiles` and the list row. The RE found no tile budget or view-0 reset;
+  slots 3-4 are the eye's depth and stencil; the G-buffer (t8-t11) was never
+  captured. Next build: a read-only hook at 0x36558a0 logging camera ID,
+  role, pass and body mode per eye, plus `fss tiles:` slots 8-11. No-build:
+  `fss_eye_sync = mirror`. Not fixed: the ~220 m remap; panel bit; sky drift.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -2030,6 +2030,104 @@ Next, ranked by evidence:
    for 600 frames after the all-small event, log the per-eye identity and a
    sampled hash of slots 3 and 4 and of slot 0 in that stretch, and start the
    eye run 20 frames after the event so it brackets the reveal's start.
+
+## 2026-10-15: engine RE of the ring reveal (Opus)
+
+Read-only static analysis of build 332841: Ghidra (EDAnalysis, `-readOnly
+-noanalysis`, scratch scripts outside the repo) and capstone on the Epic
+exe. Its PE stamp is 1788384820, the flight build's; its file size is
+103,469,056, not the 104,894,464 quoted for the Frontier exe (same stamp,
+so the same code: INFERRED). No flight, no code change. Observed fact for
+this entry (Sean, flight bca9d6b8, `off` and `tiles`): only the LEFT eye
+shows the black squares, and the right eye shows the ring already filled.
+
+**Verdict: the root cause is not settled statically.** No tile budget,
+dirty-tile list, progress counter or view-0-only reset was found on the
+CPU side of the ring or the tile pass. What the reading did settle is below.
+
+Corrections to the entries above:
+
+- **Slots 3 and 4 are not a ring G-buffer.** CONFIRMED from
+  `docs/shaders/tile-renderer-cs.asm`: t3 is a float 2D texture loaded as
+  one channel at the pixel (the scene depth) and t4 is the uint
+  `X32_G8X24` view of the same R32G8X24 depth (its stencil; census format
+  22). They are each eye's own depth-stencil and differ per eye by
+  construction. The shader's G-buffer is t8-t11 (four float 2D textures),
+  and `fss tiles:` reads SRV slots 0-7 only (`kSrvSlots = 8`,
+  `src/d3d11/fss_tiles_core.h:29`), so the per-eye G-buffer the dispatch
+  shades has never been compared. ruled out: SRV slots 3-4 as the ring's
+  offscreen G-buffer, because they are the eye's depth and stencil.
+- `FUN_140593850` does not allocate its outputs on every call. It caches
+  them on the pass object (+0x90/+0x98/+0xa0 luminance, +0xa8/+0xb0/+0xb8
+  illuminance) and reallocates only when the target size changes. Tile
+  size 16 px (8 when `DAT_145e70f7c` is set). No budget or invalidation in
+  it; the dispatches are issued by `FUN_140580f40` (not read). CONFIRMED.
+
+How the engine tells views apart (CONFIRMED unless marked):
+
+- A camera is a 0x900-byte object (ctor `FUN_1406bdce0`). +0x8e8 is its
+  camera ID, a bit index taken from an allocator mask (written at
+  0x6bde5b, set to -1 at 0x6bdd91); +0x8e0 is `1 << ID`.
+- "Main camera": `renderer->vtbl[0xa8]()->vtbl[0x70]()` returns an ID that
+  code compares with camera+0x8e8.
+- camera+0x8f8 points at the owning pipeline's settings block
+  (pipeline+0x70, written by `FUN_1428a4d30`). Block+0x10 is the stereo
+  role: 1 first eye, 2 second eye, 0 mono (INFERRED from its one use
+  below). Block+0x17 gates the PlanetRingScan and HotSpots draws
+  (`FUN_1436558a0`); block+0x19 gates the atmosphere passes
+  (`FUN_143654ff0`).
+
+| RVA | What | Per view? | Status |
+|---|---|---|---|
+| 0x36558a0 | ring pass entry: pass type `edx` (0, 3, 6, 7 seen), camera `r8`, render data arg 8; picks draws; pass 7 with ring+0x720 and `[data+0x198]+0x6c` draws PlanetRingScan (mode 3), pass 3 with `+0x80` the hot spots | every camera | CONFIRMED |
+| 0x36597f0 | ring material draw; mode 0 PlanetRing3/Miniature, 1 Fog, 2 VolumetricFog (GapFill when the pass is `renderer->vtbl[0x88]()->vtbl[0x40]()`), 3 PlanetRingScan | every camera | CONFIRMED |
+| 0x3659a1d, 0x3659f78 | `cmp [rdi+0x8e8], eax; jne` inside 0x36597f0: in body mode 2 (data+0x104 == 2) with ring+0x6b0 set and `DAT_145e89355`, only the main camera draws the ring, into the offscreen target ring+0x6b0 with the FSS camera substituted; other cameras return | main camera only | CONFIRMED code; that it is Finding 1's mono body layer is INFERRED |
+| 0x36540b0 | pass-6 ring draw: per-camera-ID float4 array at ring+0x640/0x650/0x658 (stored up vector). Role 1 writes its ID to ring+0x714 (0x365412c); role 2 copies role 1's entry and skips its own update (0x3654140) | role-aware | CONFIRMED |
+| 0x36ea4ac | StellarBodyEffects per-view prepare (`FUN_1436ea000`): main camera only runs `FUN_14363d220` (close-body slot assignment with fade timers, planet+0x838..0x8f8) and copies planet+0x9c0..0x9d0 into atmosphere+0x7e0 and ring+0x700..0x710 | main camera only | CONFIRMED |
+| 0x365b1c0 | scan alpha ramp ring+0x718 (direction +0x71c, active +0x720); also clears ring+0x6b0 every frame (0x365b1c6). Called once a frame from `FUN_1436e8430` | global, once a frame | CONFIRMED |
+| 0x3660e50 | ring constants, every view; the alpha and the 0x700 block are read, never advanced | every camera | CONFIRMED |
+| 0x36cf1f0 | SplineCuttingEffects: a GPU work queue (count +0xb4) dispatched and zeroed in the main camera's pass. Unrelated to the ring; it shows the engine's main-camera-consumes-the-queue pattern exists | main camera only | CONFIRMED |
+
+The six questions:
+
+1. What feeds slots 3-4: the eye's depth and stencil (above), per view,
+   one pass object per pipeline. No CPU-side budget was found for the ring
+   G-buffer; round 27's "budgeted tile subsets" has no counterpart in the
+   code read. UNKNOWN where the subset comes from; the uncompared t8-t11
+   are the first place to look.
+2. Primary-only logic: four main-camera tests and one role test, table
+   above. None is a tile budget or a consumed counter on the ring path. The
+   two that touch the ring and run for the left eye only are the mode-2
+   offscreen draw (0x3659a1d / 0x3659f78) and the prepare block (0x36ea4ac).
+3. Flat: one camera, role 0, and it is the main camera, so every
+   main-only branch runs for it and no role-2 copy happens. CONFIRMED
+   structurally. This is consistent with a main-only producer but does not
+   name one.
+4. The reset at zoom arrival: not found. ring+0x6b0's setter is not in
+   the ring module (59 writes of +0x6b0 in .text; the ring's are the ctor
+   at 0x3638a69 and the per-frame clear). UNKNOWN.
+5. Fix: none proposed; the mechanism is unproven. Hook points ready once
+   the observation names the branch, each pinned by RVA and prologue:
+   - `FUN_1436558a0` 0x36558a0, `40 55 57 41 54 41 55 41 56 48 81 EC 90 00 00 00`.
+   - `FUN_1436597f0` 0x36597f0, `40 55 53 56 57 41 54 41 56 41 57 48 8D AC 24 30 FF FF FF`.
+   - the main-camera tests at 0x3659a1d and 0x3659f78 (`39 87 E8 08 00 00 0F 85`):
+     a call-site wrap that answers "main" for the second eye would draw the
+     ring into the offscreen layer twice a frame from the FSS camera. Risk:
+     double cost and a race on the one target; only worth it if the
+     observation shows the left eye's squares come from that target.
+   - `FUN_1436540b0` 0x36540b0, `48 89 5C 24 10 48 89 6C 24 18 4C 89 4C 24 20`
+     (role copy at 0x3654140, `83 FF 02 0F 84`). Low risk; it only changes
+     the distant ring's stored up vector.
+6. The single observation: a read-only CodeHook at 0x36558a0 that, inside
+   the zoom window, logs per call the frame, `[r8+0x8e8]` (camera ID),
+   `[[r8+0x8f8]+0x10]` (role), `edx` (pass), `[[rsp+0x40]+0x104]` (body
+   mode), `[rcx+0x6b0] != 0` and `[rcx+0x718]` / `[rcx+0x720]`, and once a
+   window the main-camera ID. Reading: if in the arrival frames the left
+   eye's calls take mode 2 (offscreen) or a pass the right eye's do not,
+   the asymmetry is on this path and the table names the branch to patch.
+   If both eyes run the same pass and mode sequence, the CPU ring path is
+   symmetric, and the next measurement is the dispatch's G-buffer (widen
+   `fss tiles:` to slots 8-11).
 
 ## Open
 
