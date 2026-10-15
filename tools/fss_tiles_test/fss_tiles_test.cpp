@@ -242,6 +242,32 @@ void testBand() {
     check(ft::kBandBefore == 10 && ft::kBandAfter == 60 && ft::kMaxAutoRuns == 2 && ft::kGrid == 17, "the caps the task named");
 }
 
+void testV4Pure() {
+    check(ft::bytesPerPixel(10) == 8 && ft::bytesPerPixel(11) == 8 && ft::bytesPerPixel(2) == 16 && ft::bytesPerPixel(26) == 4 &&
+              ft::bytesPerPixel(28) == 4 && ft::bytesPerPixel(41) == 4 && ft::bytesPerPixel(61) == 1 && ft::bytesPerPixel(87) == 4,
+          "bytes per pixel of the colour formats the samples read");
+    check(ft::bytesPerPixel(19) == 0 && ft::bytesPerPixel(20) == 0 && ft::bytesPerPixel(0) == 0 && ft::bytesPerPixel(71) == 0 &&
+              ft::bytesPerPixel(89) == 0,
+          "depth-stencil, block-compressed and unknown formats are not sampled");
+    check(ft::nzChar(0, 256) == '.' && ft::nzChar(256, 256) == '#' && ft::nzChar(1, 256) == '1' && ft::nzChar(128, 256) == '5' &&
+              ft::nzChar(255, 256) == '8' && ft::nzChar(5, 0) == '.',
+          "one character per sampled box: none, all, or the share between");
+    uint8_t px[8] = {0, 0, 1, 0, 0, 0, 0, 9};
+    check(ft::countNonzero(px, 8) == 2 && ft::countNonzero(px, 0) == 0, "non-zero byte count");
+    char grid[100];
+    const int n = ft::formatGrid(grid, sizeof(grid), [](uint32_t x, uint32_t y) { return static_cast<char>(x == y ? '#' : '.'); });
+    check(n == 71 && std::strcmp(grid, "#......./.#....../..#...../...#..../....#.../.....#../......#./.......#") == 0,
+          "the 8 x 8 grid is eight rows of eight, joined by slashes");
+    char tiny[10];
+    ft::formatGrid(tiny, sizeof(tiny), [](uint32_t, uint32_t) { return 'x'; });
+    check(std::strlen(tiny) < 10, "a short buffer is cut, never overrun");
+    check(ft::kRevealFrames == 600 && ft::kRunOffsets[0] == 20 && ft::kRunOffsets[1] == 150 && ft::kFingerEvery == 10 && ft::kTileGrid == 8 &&
+              ft::kTilePx == 16 && ft::kBufRegions * ft::kBufRegionBytes == 4096,
+          "the numbers the task named");
+    check(std::strcmp(ft::roleName(ft::Role::GbufA), "slot3") == 0 && std::strcmp(ft::roleName(ft::Role::GbufB), "slot4") == 0,
+          "the write watch names the per-eye textures");
+}
+
 void testKeyParsing() {
     edvr::EyeSync t = edvr::eyeSyncParse("tiles");
     check(t.tiles && t.recognised && t.healMode == 0 && !t.lockstep && !t.steady && !t.any(), "tiles is its own value: no heal, no composite freeze");
@@ -542,6 +568,88 @@ void testStagingLike(Gpu& g) {
     first->Release();
 }
 
+// The v4 sampling path on a real device: 8 x 8 boxes of 16 x 16 pixels copied into a 128 x 128 staging twin of a 256 x 256
+// R16G16B16A16 texture whose lit region is known, and 16 x 256-byte regions of a 64 KB buffer.
+void testSampling(Gpu& g) {
+    ID3D11Device* d = g.dev.Get();
+    const uint32_t W = 256, H = 256, bpp = 8;
+    std::vector<uint8_t> img(W * H * bpp, 0);
+    for (uint32_t y = 0; y < H; ++y) {
+        for (uint32_t x = 0; x < W; ++x) {
+            if (x >= 128 && y >= 100 && y < 200) img[(y * W + x) * bpp + 1] = 7;   // a lit block, right of centre
+        }
+    }
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = W; td.Height = H; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; td.SampleDesc.Count = 1;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA sd{img.data(), W * bpp, 0};
+    ComPtr<ID3D11Texture2D> tex;
+    d->CreateTexture2D(&td, &sd, &tex);
+    D3D11_TEXTURE2D_DESC st{};
+    st.Width = st.Height = ft::kTileGrid * ft::kTilePx; st.MipLevels = st.ArraySize = 1; st.Format = td.Format; st.SampleDesc.Count = 1;
+    st.Usage = D3D11_USAGE_STAGING; st.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> stage;
+    check(SUCCEEDED(d->CreateTexture2D(&st, nullptr, &stage)), "a staging twin of the colour format");
+    for (uint32_t gy = 0; gy < ft::kTileGrid; ++gy) {
+        for (uint32_t gx = 0; gx < ft::kTileGrid; ++gx) {
+            D3D11_BOX box{};
+            box.left = (W - ft::kTilePx) * gx / (ft::kTileGrid - 1);
+            box.top = (H - ft::kTilePx) * gy / (ft::kTileGrid - 1);
+            box.right = box.left + ft::kTilePx; box.bottom = box.top + ft::kTilePx; box.back = 1;
+            g.ctx->CopySubresourceRegion(stage.Get(), 0, gx * ft::kTilePx, gy * ft::kTilePx, 0, tex.Get(), 0, &box);
+        }
+    }
+    D3D11_MAPPED_SUBRESOURCE m{};
+    const HRESULT hr = g.ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &m);
+    check(SUCCEEDED(hr), "the sampled boxes map");
+    if (SUCCEEDED(hr)) {
+        const uint8_t* p = static_cast<const uint8_t*>(m.pData);
+        char grid[100];
+        ft::formatGrid(grid, sizeof(grid), [&](uint32_t x, uint32_t y) {
+            uint32_t nz = 0;
+            for (uint32_t row = 0; row < ft::kTilePx; ++row) nz += ft::countNonzero(p + (y * ft::kTilePx + row) * m.RowPitch + x * ft::kTilePx * bpp, ft::kTilePx * bpp);
+            return ft::nzChar(nz, ft::kTilePx * ft::kTilePx * bpp);
+        });
+        g.ctx->Unmap(stage.Get(), 0);
+        // boxes start at (240 * gx / 7): the lit block (x >= 128, 100 <= y < 200) covers whole boxes of columns 4..7 (x0 = 137.. 240)
+        // in rows 3..5 (y0 = 102.., 137, 171 ... 205 > 199 is out)
+        check(std::strlen(grid) == 71 && grid[0] == '.' && grid[4 + 3 * 9] != '.' && grid[3 + 3 * 9] == '.',
+              "the sampled grid shows the lit block where it is and nothing where it is not");
+    }
+    std::vector<uint8_t> big(65536, 0);
+    for (uint32_t k = 5; k <= 6; ++k) {
+        const uint64_t o = ((65536ull - ft::kBufRegionBytes) * k / (ft::kBufRegions - 1)) & ~3ull;
+        for (uint32_t i = 0; i < ft::kBufRegionBytes; ++i) big[o + i] = 1;
+    }
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = 65536; bd.BindFlags = D3D11_BIND_SHADER_RESOURCE; bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+    D3D11_SUBRESOURCE_DATA bsd{big.data(), 0, 0};
+    ComPtr<ID3D11Buffer> buf;
+    d->CreateBuffer(&bd, &bsd, &buf);
+    D3D11_BUFFER_DESC sbd{};
+    sbd.ByteWidth = ft::kBufRegions * ft::kBufRegionBytes; sbd.Usage = D3D11_USAGE_STAGING; sbd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> sbuf;
+    check(SUCCEEDED(d->CreateBuffer(&sbd, nullptr, &sbuf)), "a staging buffer for the regions");
+    for (uint32_t i = 0; i < ft::kBufRegions; ++i) {
+        const uint64_t off = (static_cast<uint64_t>(bd.ByteWidth) - ft::kBufRegionBytes) * i / (ft::kBufRegions - 1);
+        D3D11_BOX box{};
+        box.left = static_cast<UINT>(off & ~3ull); box.right = box.left + ft::kBufRegionBytes; box.bottom = 1; box.back = 1;
+        g.ctx->CopySubresourceRegion(sbuf.Get(), 0, i * ft::kBufRegionBytes, 0, 0, buf.Get(), 0, &box);
+    }
+    D3D11_MAPPED_SUBRESOURCE bm{};
+    const HRESULT hb = g.ctx->Map(sbuf.Get(), 0, D3D11_MAP_READ, 0, &bm);
+    check(SUCCEEDED(hb), "the sampled regions map");
+    if (SUCCEEDED(hb)) {
+        const uint8_t* p = static_cast<const uint8_t*>(bm.pData);
+        uint32_t litRegions = 0;
+        for (uint32_t i = 0; i < ft::kBufRegions; ++i) {
+            if (ft::countNonzero(p + i * ft::kBufRegionBytes, ft::kBufRegionBytes) != 0) ++litRegions;
+        }
+        g.ctx->Unmap(sbuf.Get(), 0);
+        check(litRegions == 2, "exactly the two regions that hold non-zero bytes show as non-zero");
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // 4. Source pins
 
@@ -589,6 +697,23 @@ void testSourcePins(const std::string& root) {
             check(f != std::string::npos && c != std::string::npos && c > f && c - f < 1200 && real > c, what);
         }
     }
+    {
+        struct DPin { const char* fn; const char* call; };
+        const DPin dpins[] = {{"hookedDraw", "fssTilesNoteDraw(self, 1)"},
+                              {"hookedDrawIndexed", "fssTilesNoteDraw(self, 1)"},
+                              {"hookedDrawInstanced", "fssTilesNoteDraw(self, instances)"},
+                              {"hookedDrawIndexedInstanced", "fssTilesNoteDraw(self, instances)"},
+                              {"hookedDrawIndexedInstancedIndirect", "fssTilesNoteDraw(self, 1)"},
+                              {"hookedDrawInstancedIndirect", "fssTilesNoteDraw(self, 1)"}};
+        for (const DPin& pin : dpins) {
+            const size_t f = vs.find(std::string("void STDMETHODCALLTYPE ") + pin.fn + "(");
+            const size_t c = vs.find(pin.call, f);
+            const size_t next = vs.find("if (runtimeFlatProfile())", f);
+            char what[160];
+            std::snprintf(what, sizeof(what), "%s counts its draw for fss_tiles (owner context) before anything else", pin.fn);
+            check(f != std::string::npos && c != std::string::npos && c > f && c - f < 600 && next > c, what);
+        }
+    }
     const std::string tp = slurp(root + "/src/d3d11/temporal_pass.cpp");
     const size_t arm = tp.find("void temporalPassArmEyeDump()");
     const size_t note = tp.find("fssTilesNoteEyeDump();", arm);
@@ -616,14 +741,26 @@ void testSourcePins(const std::string& root) {
               has(cpp, "an event needs a step of %u") && has(cpp, "Band watch: armed"),
           "the band watch says it armed, what it saw in every window (zero events included) and each event");
     {
-        const size_t pend = cpp.find("g.autoRunPending = true;");
+        const size_t pend = cpp.find("g.runPending[k] = true;");
         const size_t bnd = cpp.find("void fssTilesFrameBoundary(");
         const size_t arm = cpp.find("temporalPassArmEyeDump();", bnd);
         check(pend != std::string::npos && bnd != std::string::npos && arm != std::string::npos && arm > bnd &&
                   cpp.find("temporalPassArmEyeDump();") == arm,
               "the automatic eye run is only ever started from the frame boundary, never from inside the dispatch hook");
-        check(has(cpp, "g.autoRuns < kMaxAutoRuns") && has(cpp, "!g.windowEventFired"), "one event a window and at most kMaxAutoRuns a session");
+        check(has(cpp, "g.autoRunsPlanned < kMaxAutoRuns") && has(cpp, "!g.windowEventFired") && has(cpp, "why == BandWatch::AllSmall"),
+              "one all-small event a window and at most kMaxAutoRuns planned runs a session");
+        check(has(cpp, "g.revealUntil = g.frame + kRevealFrames;") && has(cpp, "if (ev == WindowMachine::Closed) ev = WindowMachine::None;") &&
+                  has(cpp, "g.win.capturing = true;"),
+              "after the event the capture continues for kRevealFrames whatever the zoom window does");
     }
+    check(has(cpp, "fss tiles: gbuf f=%u") && has(cpp, "fss tiles: input f=%u eye%u") && has(cpp, "fss tiles: window %u upstream --") &&
+              has(cpp, "fss tiles: window %u inputs --") && has(cpp, "no render target of the window matched them"),
+          "the new lines exist, and every window says what the draw count and the fingerprints found, none included");
+    check(!has(cpp, "RSGetViewports(&nv, &vp);\n            UINT ns = 1;\n            D3D11_RECT sc{};\n            ctx->RSGetScissorRects(&ns, &sc);\n            if (!d->haveVp) {\n                d->vp0 = vp;") ||
+              has(cpp, "d->draws <= 2 || (d->draws & 15u) == 0"),
+          "the viewport and scissor are read for the first draws and one in sixteen, not for every draw");
+    check(has(cpp, "td.BindFlags & D3D11_BIND_DEPTH_STENCIL") && has(cpp, "td.SampleDesc.Count > 1"),
+          "depth-stencil and multisampled textures are named, never copied");
     check(has(cpp, "fss tiles: eye-dump key at f=%u") && has(cpp, "outside a capturing zoom window"), "the eye-dump key's reception is logged either way");
     check(has(cpp, "fss tiles: window %u opened") && has(cpp, "fss tiles: window %u closed") && has(cpp, "fss tiles: instrument armed"),
           "the instrument says it armed, opened and closed, so never-ran reads differently from zero");
@@ -650,6 +787,7 @@ int main(int argc, char** argv) {
     testKeyParsing();
     testV2Pure();
     testBand();
+    testV4Pure();
     testFakeRestore();
 
     const auto createDevice = edvr::systemD3D11CreateDevice();
@@ -667,6 +805,7 @@ int main(int argc, char** argv) {
         if (SUCCEEDED(hr)) {
             testWarp(g);
             testStagingLike(g);
+            testSampling(g);
             ComPtr<ID3D11InfoQueue> q;
             if (SUCCEEDED(g.dev.As(&q))) {
                 const UINT64 cnt = q->GetNumStoredMessagesAllowedByRetrievalFilter();

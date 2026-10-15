@@ -16,6 +16,7 @@
 #include "fss_tiles_core.h"
 #include "fss_tiles_d3d.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the automatic eye run
+#include "binding_shadow.h"   // bindingGet, bindingResolveProbe: the render target of a draw
 #include "journal_watch.h"   // journalFssFocus: the zoom window's authority
 
 // See fss_tiles_core.h for the story. Two jobs, both inside an FSS zoom window only:
@@ -31,6 +32,7 @@ namespace edvr {
 namespace detail {
 bool g_fssTilesActive = false;
 bool g_fssTilesWatch = false;
+bool g_fssTilesDraws = false;
 }  // namespace detail
 
 namespace {
@@ -101,7 +103,7 @@ struct State {
     WatchTable watch;
     uint32_t listLines = 0;
     uint32_t writeLines = 0;
-    uint32_t writes[kWriteCalls][6] = {};   // [call][Role]
+    uint32_t writes[kWriteCalls][8] = {};   // [call][Role]
     uint32_t samplesRead = 0;
     uint32_t sampleFiles = 0;
     uint32_t dumpFramesLeft = 0;            // the eye dump asked for the next frames' raw buffers
@@ -113,6 +115,50 @@ struct State {
     bool     haveLastInfo[2] = {};
     uint32_t lastLoggedFrame = 0;
     // v3: the band watch
+    // v4
+    struct FpItem {
+        bool     have = false;
+        bool     tex = false;
+        uint32_t id = 0, w = 0, h = 0, fmt = 0, bytes = 0, bpp = 0;
+    };
+    struct Fp {
+        uint32_t frame = 0;
+        bool     used = false;
+        bool     drained = true;
+        FpItem   it[6];                      // [eye * 3 + {slot 0, slot 3, slot 4}]
+        uint32_t cube[2][5] = {};            // slot 6: id, w, h, layers, format
+    };
+    struct GDraw {
+        const void* res = nullptr;
+        uint32_t eye = 0;
+        Role     role = Role::None;
+        uint32_t draws = 0, weight = 0;
+        bool     haveVp = false;
+        D3D11_VIEWPORT vp0{}, vpN{};
+        D3D11_RECT sc0{}, scN{};
+    };
+    struct GTot {
+        uint32_t frames = 0, draws = 0, weight = 0, minDraws = 0, maxDraws = 0, vpVaries = 0;
+        bool     haveVp = false;
+        D3D11_VIEWPORT vp0{};
+    };
+    Fp       fp[kStagingRing];
+    ID3D11Resource* fpPool[kStagingRing][6] = {};
+    uint32_t inputLines = 0, fpRead = 0;
+    uint32_t gridFrames[3] = {}, gridDiffer[3] = {};
+    GDraw    gd[8];
+    uint32_t gdN = 0;
+    GTot     gtot[3][2];
+    uint32_t gbufLines = 0;
+    void*    rtvKey[48] = {};
+    const void* rtvRes[48] = {};
+    uint32_t rtvN = 0;
+    bool     watchGbuf = false;
+    uint32_t revealUntil = 0;
+    uint32_t eventFrame = 0;
+    uint32_t runDue[2] = {};
+    bool     runPending[2] = {};
+    uint32_t autoRunsPlanned = 0;
     struct BandFrame {
         BandRec  rec;
         uint32_t rawBytes[4] = {};          // [eye * 2 + role]
@@ -203,11 +249,19 @@ void resetWindowTallies() {
     g.windowEvents = 0;
     g.afterLeft = 0;
     g.bandLines = g.bandFiles = 0;
+    g.inputLines = g.fpRead = 0;
+    for (auto& x : g.gridFrames) x = 0;
+    for (auto& x : g.gridDiffer) x = 0;
+    g.gdN = 0;
+    for (auto& r : g.gtot) for (auto& t : r) t = State::GTot();
+    g.gbufLines = 0;
+    g.rtvN = 0;
 }
 
 bool pendingReadbacks() {
     for (const FrameBuf& f : g.fb) if (f.used && !f.drained) return true;
     for (const Sample& f : g.smp) if (f.used && !f.drained) return true;
+    for (const State::Fp& f : g.fp) if (f.used && !f.drained) return true;
     return false;
 }
 
@@ -215,6 +269,11 @@ void refreshActive() {
     detail::g_fssTilesActive =
         g.win.capturing || (g.lockstep && g.win.open) || g.summaryDue || pendingReadbacks();
     detail::g_fssTilesWatch = g.win.capturing && g.watch.n > 0;
+    g.watchGbuf = false;
+    for (uint32_t i = 0; i < g.watch.n; ++i) {
+        if (g.watch.role[i] == Role::GbufA || g.watch.role[i] == Role::GbufB) g.watchGbuf = true;
+    }
+    detail::g_fssTilesDraws = g.win.capturing && g.watchGbuf;
 }
 
 bool ensureStaging(ID3D11DeviceContext* ctx) {
@@ -399,19 +458,25 @@ void processBand(const Sample& sm, const D3D11_MAPPED_SUBRESOURCE* m, const bool
     if (g.bringCount < kBandBefore + 1) ++g.bringCount;
 
     const BandWatch::Reason why = g.bandWatch.feed(f.rec.large[0], f.rec.large[1]);
-    if (why != BandWatch::None && g.win.open && !g.windowEventFired && g.autoRuns < kMaxAutoRuns) {
+    if (why == BandWatch::AllSmall && (g.win.open || g.win.capturing) && !g.windowEventFired && g.autoRunsPlanned < kMaxAutoRuns) {
         g.windowEventFired = true;
         ++g.windowEvents;
-        ++g.autoRuns;
-        g.autoRunPending = true;
         g.afterLeft = kBandAfter;
-        Log::get().note("fss tiles: band event at f=%u (%s): eye0 L=%u (row %.2f), eye1 L=%u (row %.2f). The 10 frames before, this one "
-                        "and the 60 after are logged as `band` lines and their raw lists written to edvr_logs\\fsstiles; the eye run "
-                        "starts at the next frame boundary (automatic run %u of %u this session).",
-                        sm.frame, why == BandWatch::AllSmall ? "a large list went to zero: every cell is now the small shader's"
-                                                             : "a large list moved by a whole row or more",
-                        f.rec.large[0], rowOfLarge(f.rec.large[0]), f.rec.large[1], rowOfLarge(f.rec.large[1]), g.autoRuns,
-                        kMaxAutoRuns);
+        g.eventFrame = sm.frame;
+        g.revealUntil = g.frame + kRevealFrames;
+        const uint32_t plan = kMaxAutoRuns - g.autoRunsPlanned < 2 ? kMaxAutoRuns - g.autoRunsPlanned : 2;
+        for (uint32_t k = 0; k < plan; ++k) {
+            g.runPending[k] = true;
+            g.runDue[k] = g.frame + kRunOffsets[k];
+        }
+        g.autoRunsPlanned += plan;
+        Log::get().note("fss tiles: band event at f=%u (a large list went to zero: every cell is now the small shader's): eye0 L=%u (row %.2f), "
+                        "eye1 L=%u (row %.2f). The 10 frames before, this one and the 60 after are logged as `band` lines and their raw lists "
+                        "written to edvr_logs\\fsstiles. Capture continues until f=%u (%u frames); %u automatic eye run(s) at f=%u%s (planned "
+                        "%u of %u this session); input and gbuf lines every %u frames.",
+                        sm.frame, f.rec.large[0], rowOfLarge(f.rec.large[0]), f.rec.large[1], rowOfLarge(f.rec.large[1]), g.revealUntil,
+                        kRevealFrames, plan, plan ? g.runDue[0] : 0u, plan > 1 ? " and the second later" : "", g.autoRunsPlanned,
+                        kMaxAutoRuns, kFingerEvery);
         // the frames before, oldest first (the ring holds this frame last)
         const uint32_t n = g.bringCount;
         for (uint32_t k = 0; k < n; ++k) {
@@ -570,11 +635,259 @@ void registerWatch(const Rec& r, ID3D11Buffer* args, const Slot* slot, const voi
     if (slot[0].isBuffer) g.watch.add(slot[0].res, Role::Big, r.eye);
     if (slot[1].isBuffer) g.watch.add(slot[1].res, Role::Info, r.eye);
     if (slot[2].isBuffer) g.watch.add(slot[2].res, Role::List, r.eye);
+    if (r.eye < 2 && slot[3].res && !slot[3].isBuffer) g.watch.add(slot[3].res, Role::GbufA, r.eye);
+    if (r.eye < 2 && slot[4].res && !slot[4].isBuffer) g.watch.add(slot[4].res, Role::GbufB, r.eye);
+}
+
+// ---- v4: the inputs ---------------------------------------------------------------------------------------------------
+bool ensureFpBuffer(ID3D11Device* dev, ID3D11Resource** st) {
+    if (*st) return true;
+    D3D11_BUFFER_DESC d{};
+    d.ByteWidth = kBufRegions * kBufRegionBytes;
+    d.Usage = D3D11_USAGE_STAGING;
+    d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Buffer* b = nullptr;
+    if (FAILED(dev->CreateBuffer(&d, nullptr, &b))) return false;
+    *st = b;
+    return true;
+}
+
+bool ensureFpTexture(ID3D11Device* dev, DXGI_FORMAT fmt, ID3D11Resource** st) {
+    if (*st) {
+        D3D11_TEXTURE2D_DESC have{};
+        static_cast<ID3D11Texture2D*>(*st)->GetDesc(&have);
+        if (have.Format == fmt) return true;
+        (*st)->Release();
+        *st = nullptr;
+    }
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = d.Height = kTileGrid * kTilePx;
+    d.MipLevels = d.ArraySize = 1;
+    d.Format = fmt;
+    d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_STAGING;
+    d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* t = nullptr;
+    if (FAILED(dev->CreateTexture2D(&d, nullptr, &t))) return false;
+    *st = t;
+    return true;
+}
+
+// Slots 0, 3 and 4 of the large dispatch, once a kFingerEvery frames, eyes 0 and 1: identity and size always, and a coarse sample
+// of the contents where it is safe (a colour texture, or the big buffer): 8 x 8 boxes of 16 x 16 pixels spread over a texture,
+// 16 regions of 256 bytes spread over the buffer. Depth-stencil, multisampled and unknown formats are named, not sampled.
+void queueFingerprint(ID3D11DeviceContext* ctx, const Rec& r, const Slot* slot) {
+    if (r.eye > 1 || csIndex(r.cs) != 0 || g.frame % kFingerEvery != 0) return;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return;
+    const uint32_t ring = g.frame % kStagingRing;
+    State::Fp& fp = g.fp[ring];
+    if (!fp.used || fp.frame != g.frame) {
+        if (fp.used && !fp.drained) ++g.dropped;
+        fp = State::Fp();
+        fp.frame = g.frame;
+        fp.used = true;
+        fp.drained = false;
+    }
+    static const uint32_t kSlots[3] = {0, 3, 4};
+    for (uint32_t k = 0; k < 3; ++k) {
+        const uint32_t s = kSlots[k];
+        if (!slot[s].res) continue;
+        ID3D11Resource* res = static_cast<ID3D11Resource*>(const_cast<void*>(slot[s].res));
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        State::FpItem& it = fp.it[r.eye * 3 + k];
+        it.id = g.ids.id(res);
+        ID3D11Resource** st = &g.fpPool[ring][r.eye * 3 + k];
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+            D3D11_BUFFER_DESC bd{};
+            static_cast<ID3D11Buffer*>(res)->GetDesc(&bd);
+            it.bytes = bd.ByteWidth;
+            if (bd.ByteWidth < kBufRegions * kBufRegionBytes * 2 || !ensureFpBuffer(dev, st)) continue;
+            for (uint32_t i = 0; i < kBufRegions; ++i) {
+                const uint64_t off = (static_cast<uint64_t>(bd.ByteWidth) - kBufRegionBytes) * i / (kBufRegions - 1);
+                D3D11_BOX box{};
+                box.left = static_cast<UINT>(off & ~3ull);
+                box.right = box.left + kBufRegionBytes;
+                box.bottom = 1;
+                box.back = 1;
+                ctx->CopySubresourceRegion(*st, 0, i * kBufRegionBytes, 0, 0, res, 0, &box);
+            }
+            it.have = true;
+        } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+            D3D11_TEXTURE2D_DESC td{};
+            static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
+            it.tex = true;
+            it.w = td.Width;
+            it.h = td.Height;
+            it.fmt = td.Format;
+            it.bpp = bytesPerPixel(td.Format);
+            if ((td.BindFlags & D3D11_BIND_DEPTH_STENCIL) || td.SampleDesc.Count > 1 || td.Width < kTileGrid * kTilePx ||
+                td.Height < kTileGrid * kTilePx || !it.bpp || !ensureFpTexture(dev, td.Format, st)) {
+                continue;
+            }
+            for (uint32_t gy = 0; gy < kTileGrid; ++gy) {
+                for (uint32_t gx = 0; gx < kTileGrid; ++gx) {
+                    D3D11_BOX box{};
+                    box.left = (td.Width - kTilePx) * gx / (kTileGrid - 1);
+                    box.top = (td.Height - kTilePx) * gy / (kTileGrid - 1);
+                    box.right = box.left + kTilePx;
+                    box.bottom = box.top + kTilePx;
+                    box.back = 1;
+                    ctx->CopySubresourceRegion(*st, 0, gx * kTilePx, gy * kTilePx, 0, res, 0, &box);
+                }
+            }
+            it.have = true;
+        }
+    }
+    if (slot[6].res) {
+        ID3D11Resource* res = static_cast<ID3D11Resource*>(const_cast<void*>(slot[6].res));
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+            D3D11_TEXTURE2D_DESC td{};
+            static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
+            fp.cube[r.eye][0] = g.ids.id(res);
+            fp.cube[r.eye][1] = td.Width;
+            fp.cube[r.eye][2] = td.Height;
+            fp.cube[r.eye][3] = td.ArraySize;
+            fp.cube[r.eye][4] = td.Format;
+        }
+    }
+    dev->Release();
+}
+
+void formatInputItem(char* out, size_t cap, const char* tag, const State::FpItem& it, const char* grid) {
+    if (!it.id) {
+        std::snprintf(out, cap, "%s -", tag);
+    } else if (!it.tex) {
+        std::snprintf(out, cap, "%s B%u %u bytes nz16=%s", tag, it.id, it.bytes, it.have ? grid : "(not sampled)");
+    } else {
+        std::snprintf(out, cap, "%s T%u %ux%u fmt%u nz8x8=%s", tag, it.id, it.w, it.h, it.fmt, it.have ? grid : "(not sampled: depth, multisampled or unknown format)");
+    }
+}
+
+void processFingerprint(State::Fp& fp, const D3D11_MAPPED_SUBRESOURCE* m) {
+    char grids[2][3][96] = {};
+    for (uint32_t e = 0; e < 2; ++e) {
+        for (uint32_t k = 0; k < 3; ++k) {
+            const State::FpItem& it = fp.it[e * 3 + k];
+            if (!it.have) continue;
+            const uint8_t* p = static_cast<const uint8_t*>(m[e * 3 + k].pData);
+            if (!it.tex) {
+                char tmp[kBufRegions + 1];
+                for (uint32_t i = 0; i < kBufRegions; ++i) tmp[i] = nzChar(countNonzero(p + i * kBufRegionBytes, kBufRegionBytes), kBufRegionBytes);
+                tmp[kBufRegions] = 0;
+                std::snprintf(grids[e][k], sizeof(grids[e][k]), "%s", tmp);
+            } else {
+                const uint32_t pitch = m[e * 3 + k].RowPitch;
+                formatGrid(grids[e][k], sizeof(grids[e][k]), [&](uint32_t x, uint32_t y) {
+                    uint32_t nz = 0;
+                    for (uint32_t row = 0; row < kTilePx; ++row) {
+                        nz += countNonzero(p + (y * kTilePx + row) * pitch + x * kTilePx * it.bpp, kTilePx * it.bpp);
+                    }
+                    return nzChar(nz, kTilePx * kTilePx * it.bpp);
+                });
+            }
+        }
+    }
+    ++g.fpRead;
+    static const char* const kTag[3] = {"slot0", "slot3", "slot4"};
+    for (uint32_t k = 0; k < 3; ++k) {
+        if (fp.it[k].have && fp.it[3 + k].have) {
+            ++g.gridFrames[k];
+            if (std::strcmp(grids[0][k], grids[1][k]) != 0) ++g.gridDiffer[k];
+        }
+    }
+    if (g.inputLines + 2 > kMaxInputLines) return;
+    for (uint32_t e = 0; e < 2; ++e) {
+        char a[200], b[260], c[260], line[900];
+        formatInputItem(a, sizeof(a), kTag[0], fp.it[e * 3 + 0], grids[e][0]);
+        formatInputItem(b, sizeof(b), kTag[1], fp.it[e * 3 + 1], grids[e][1]);
+        formatInputItem(c, sizeof(c), kTag[2], fp.it[e * 3 + 2], grids[e][2]);
+        std::snprintf(line, sizeof(line), "fss tiles: input f=%u eye%u | %s | %s | %s | cube T%u %ux%ux%u fmt%u", fp.frame, e, a, b, c,
+                      fp.cube[e][0], fp.cube[e][1], fp.cube[e][2], fp.cube[e][3], fp.cube[e][4]);
+        Log::get().note("%s", line);
+        ++g.inputLines;
+    }
+}
+
+void drainFingerprints(ID3D11DeviceContext* ctx) {
+    for (;;) {
+        State::Fp* pick = nullptr;
+        for (State::Fp& f : g.fp) {
+            if (!f.used || f.drained || g.frame < f.frame + kReadbackDelay) continue;
+            if (!pick || f.frame < pick->frame) pick = &f;
+        }
+        if (!pick) return;
+        const uint32_t ring = static_cast<uint32_t>(pick - g.fp);
+        D3D11_MAPPED_SUBRESOURCE m[6] = {};
+        bool mapped[6] = {};
+        bool ok = true;
+        for (uint32_t i = 0; i < 6 && ok; ++i) {
+            if (!pick->it[i].have) continue;
+            ok = SUCCEEDED(ctx->Map(g.fpPool[ring][i], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m[i]));
+            mapped[i] = ok;
+        }
+        if (ok) processFingerprint(*pick, m);
+        for (uint32_t i = 0; i < 6; ++i) {
+            if (mapped[i]) ctx->Unmap(g.fpPool[ring][i], 0);
+        }
+        if (ok) { pick->drained = true; continue; }
+        if (g.frame > pick->frame + 40) { pick->drained = true; ++g.dropped; continue; }
+        return;
+    }
+}
+
+// ---- v4: the draws into slots 3 and 4 -----------------------------------------------------------------------------------
+const void* rtvResource(void* rtv) {
+    for (uint32_t i = 0; i < g.rtvN; ++i) {
+        if (g.rtvKey[i] == rtv) return g.rtvRes[i];
+    }
+    ResourceInfo ri;
+    const void* res = bindingResolveProbe(rtv, &ri) ? ri.resource : nullptr;
+    if (g.rtvN < 48) {
+        g.rtvKey[g.rtvN] = rtv;
+        g.rtvRes[g.rtvN] = res;
+        ++g.rtvN;
+    }
+    return res;
+}
+
+void flushDraws(uint32_t frame) {
+    const bool line = frame % kFingerEvery == 0 && g.gbufLines < kMaxGbufLines;
+    for (uint32_t i = 0; i < g.gdN; ++i) {
+        State::GDraw& d = g.gd[i];
+        if (!d.draws) continue;
+        State::GTot& t = g.gtot[d.eye > 1 ? 2 : d.eye][d.role == Role::GbufA ? 0 : 1];
+        if (t.frames == 0 || d.draws < t.minDraws) t.minDraws = d.draws;
+        if (d.draws > t.maxDraws) t.maxDraws = d.draws;
+        ++t.frames;
+        t.draws += d.draws;
+        t.weight += d.weight;
+        if (!t.haveVp) { t.vp0 = d.vp0; t.haveVp = true; }
+        else if (d.haveVp && (d.vp0.Width != t.vp0.Width || d.vp0.Height != t.vp0.Height || d.vp0.TopLeftX != t.vp0.TopLeftX ||
+                              d.vp0.TopLeftY != t.vp0.TopLeftY || d.vpN.Width != t.vp0.Width || d.vpN.Height != t.vp0.Height)) {
+            ++t.vpVaries;
+        }
+        if (line) {
+            Log::get().note("fss tiles: gbuf f=%u eye%u slot%u T%u draws=%u instances=%u viewport first (%.0f,%.0f %.0fx%.0f) last (%.0f,%.0f %.0fx%.0f) "
+                            "scissor first (%d,%d,%d,%d) last (%d,%d,%d,%d)",
+                            frame, d.eye, d.role == Role::GbufA ? 3u : 4u, g.ids.id(d.res), d.draws, d.weight, d.vp0.TopLeftX, d.vp0.TopLeftY,
+                            d.vp0.Width, d.vp0.Height, d.vpN.TopLeftX, d.vpN.TopLeftY, d.vpN.Width, d.vpN.Height, d.sc0.left, d.sc0.top,
+                            d.sc0.right, d.sc0.bottom, d.scN.left, d.scN.top, d.scN.right, d.scN.bottom);
+            ++g.gbufLines;
+        }
+        d = State::GDraw();
+    }
+    g.gdN = 0;
 }
 
 void drainAll(ID3D11DeviceContext* ctx) {
     drain(ctx);
     drainSamples(ctx);
+    drainFingerprints(ctx);
 }
 
 void emitSummary() {
@@ -611,7 +924,7 @@ void emitSummary() {
         size_t wa = 0;
         wb[0] = 0;
         for (uint32_t c = 0; c < kWriteCalls; ++c) {
-            for (uint32_t r = 1; r < 6; ++r) {
+            for (uint32_t r = 1; r < 8; ++r) {
                 if (!g.writes[c][r]) continue;
                 wa += static_cast<size_t>(std::snprintf(wb + wa, sizeof(wb) - wa, "%s%s->%s x%u", wa ? ", " : "",
                                                         writeCallName(c), roleName(static_cast<Role>(r)), g.writes[c][r]));
@@ -625,6 +938,24 @@ void emitSummary() {
                     "a whole row, or a list going to zero); band lines %u, raw frames written %u",
                     g.windowNo, g.windowEvents, g.autoRuns, kMaxAutoRuns, g.bandWatch.lo[0], g.bandWatch.hi[0], g.bandWatch.lo[1],
                     g.bandWatch.hi[1], g.bandWatch.maxStep[0], g.bandWatch.maxStep[1], kGrid, g.bandLines, g.bandFiles);
+    {
+        char gb[560];
+        size_t ga = 0;
+        gb[0] = 0;
+        for (uint32_t e = 0; e < 2; ++e) {
+            for (uint32_t k = 0; k < 2; ++k) {
+                const State::GTot& t = g.gtot[e][k];
+                ga += static_cast<size_t>(std::snprintf(gb + ga, sizeof(gb) - ga, "%seye%u slot%u: frames with draws %u, draws %u (per frame %u..%u), instances %u, viewport changes %u",
+                                                        ga ? " | " : "", e, k ? 4u : 3u, t.frames, t.draws, t.minDraws, t.maxDraws, t.weight, t.vpVaries));
+            }
+        }
+        Log::get().note("fss tiles: window %u upstream -- draws into the per-eye textures of slots 3 and 4: %s", g.windowNo,
+                        g.watchGbuf ? gb : "no render target of the window matched them (the ring is not drawn into slot 3 or 4's resources through render target 0)");
+        Log::get().note("fss tiles: window %u inputs -- fingerprints read=%u lines=%u; sampled grids that differ between the eyes: slot0 %u of %u, slot3 %u of %u, "
+                        "slot4 %u of %u frames; gbuf lines %u",
+                        g.windowNo, g.fpRead, g.inputLines, g.gridDiffer[0], g.gridFrames[0], g.gridDiffer[1], g.gridFrames[1], g.gridDiffer[2],
+                        g.gridFrames[2], g.gbufLines);
+    }
     char sl[200];
     size_t sa = 0;
     sl[0] = 0;
@@ -758,6 +1089,7 @@ bool onTarget(ID3D11DeviceContext* ctx, ID3D11Buffer* args, UINT off, uint64_t h
     if (g.win.capturing) {
         r.substituted = sub;
         queueSample(ctx, r, slot);
+        queueFingerprint(ctx, r, slot);
     }
     if (g.win.capturing && ensureStaging(ctx)) {
         FrameBuf& fb = g.fb[g.frame % kStagingRing];
@@ -858,6 +1190,48 @@ void fssTilesNoteWriteSlow(const void* p, bool isView, uint32_t call) {
     });
 }
 
+void fssTilesNoteDrawSlow(ID3D11DeviceContext* ctx, uint32_t weight) {
+    if (!g.win.capturing || !g.watchGbuf) return;
+    guardedBudget(g.budget, [&] {
+        void* rtv = bindingGet(BindSlot::Rtv0);
+        if (!rtv) return;
+        const void* res = rtvResource(rtv);
+        if (!res) return;
+        const int i = g.watch.find(res);
+        if (i < 0) return;
+        const Role role = g.watch.role[i];
+        if (role != Role::GbufA && role != Role::GbufB) return;
+        State::GDraw* d = nullptr;
+        for (uint32_t k = 0; k < g.gdN; ++k) {
+            if (g.gd[k].res == res) d = &g.gd[k];
+        }
+        if (!d && g.gdN < 8) {
+            d = &g.gd[g.gdN++];
+            d->res = res;
+            d->eye = g.watch.eye[i];
+            d->role = role;
+        }
+        if (!d) return;
+        ++d->draws;
+        d->weight += weight;
+        if (d->draws <= 2 || (d->draws & 15u) == 0) {
+            UINT nv = 1;
+            D3D11_VIEWPORT vp{};
+            ctx->RSGetViewports(&nv, &vp);
+            UINT ns = 1;
+            D3D11_RECT sc{};
+            ctx->RSGetScissorRects(&ns, &sc);
+            if (!d->haveVp) {
+                d->vp0 = vp;
+                d->sc0 = sc;
+                d->haveVp = true;
+            }
+            d->vpN = vp;
+            d->scN = sc;
+        }
+    });
+}
+
 void fssTilesNoteEyeDump() {
     if (g.autoArming) {
         Log::get().note("fss tiles: automatic eye run started at f=%u (the band event); the eye dump writes to edvr_logs\\eyes and the "
@@ -884,29 +1258,46 @@ void fssTilesNoteZoomSignal(uint32_t frameNo, bool press) {
 }
 
 void fssTilesFrameBoundary(uint32_t frameNo, bool zoomOpen) {
+    if (g.win.capturing) flushDraws(g.frame);
     g.frame = frameNo;
     g.prevViews = g.views.n;
     g.views.reset();
     g.occ = 0;
     g.zoomOpen = zoomOpen;
-    const WindowMachine::Event ev = g.win.step(zoomOpen, frameNo, nowMs());
+    WindowMachine::Event ev = g.win.step(zoomOpen, frameNo, nowMs());
+    if (g.revealUntil) {
+        if (frameNo <= g.revealUntil) {
+            // The reveal is still to be captured: the zoom window's end does not end the capture.
+            if (ev == WindowMachine::Closed) ev = WindowMachine::None;
+            g.win.capturing = true;
+        } else {
+            g.revealUntil = 0;
+            if (g.win.capturing) {
+                g.win.capturing = false;
+                ev = WindowMachine::Closed;
+            }
+        }
+    }
     if (ev == WindowMachine::Opened) {
         g.windowNo = g.win.windows;
         resetWindowTallies();
         Log::get().note("fss tiles: window %u opened at frame %u (the zoom window; lockstep=%s) -- logging the tile "
                         "renderer's dispatches for up to %llu ms, at most %u lines. Band watch: armed, waiting for a whole-row move of a large list "
-                        "or one going to zero (automatic eye run, at most %u a session).",
+                        "or one going to zero; only the zero arms the reveal capture (%u frames) and the automatic eye runs (at most %u a session).",
                         g.windowNo, frameNo, g.lockstep ? "on" : "off", static_cast<unsigned long long>(kWindowMs),
-                        kMaxLinesPerWindow, kMaxAutoRuns);
+                        kMaxLinesPerWindow, kRevealFrames, kMaxAutoRuns);
     } else if (ev == WindowMachine::Closed) {
         g.summaryDue = true;
         g.summaryAfterFrame = frameNo + kReadbackDelay + 6;
     }
-    if (g.autoRunPending) {
-        g.autoRunPending = false;
-        g.autoArming = true;
-        temporalPassArmEyeDump();   // the eye run, from the Present tick like the key's own press
-        g.autoArming = false;
+    for (uint32_t k = 0; k < 2; ++k) {
+        if (g.runPending[k] && frameNo >= g.runDue[k]) {
+            g.runPending[k] = false;
+            ++g.autoRuns;
+            g.autoArming = true;
+            temporalPassArmEyeDump();   // the eye run, from the Present tick like the key's own press
+            g.autoArming = false;
+        }
     }
     if (g.signalPending) {
         g.signalPending = false;

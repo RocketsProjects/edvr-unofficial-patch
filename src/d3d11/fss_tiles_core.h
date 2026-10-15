@@ -285,7 +285,7 @@ inline double splitPercent(uint32_t large, uint32_t smallCount) {
 }
 
 // The roles a window's buffer can have, for the write watch.
-enum class Role : uint8_t { None = 0, Args, Out, List, Info, Big };
+enum class Role : uint8_t { None = 0, Args, Out, List, Info, Big, GbufA, GbufB };
 inline const char* roleName(Role r) {
     switch (r) {
         case Role::Args: return "args";
@@ -293,6 +293,8 @@ inline const char* roleName(Role r) {
         case Role::List: return "list";
         case Role::Info: return "info";
         case Role::Big:  return "t0";
+        case Role::GbufA: return "slot3";
+        case Role::GbufB: return "slot4";
         default:         return "?";
     }
 }
@@ -401,6 +403,65 @@ struct BandWatch {
         return r;
     }
 };
+
+// ---- v4: the reveal window, the inputs and the ring's offscreen draws (2026-10-15, after flight bca9d6b8) --------------------
+// Flight bca9d6b8: `tiles` ran and changed nothing; the eyes' lists are identical from the all-small event on, and both eye
+// runs caught the black transit void because the zoom window closed as the reveal began. Sean: only the LEFT eye shows the
+// black squares, the right eye shows the ring already filled. So the instrument now (1) keeps capturing for 600 frames after
+// the all-small event and starts the eye runs inside that stretch, (2) fingerprints each eye's inputs to the tile dispatch
+// (slot 0, the buffer of 21,936,256 bytes; slots 3 and 4, the per-eye textures; slot 6, the cube array) by sampling small
+// regions, and (3) counts the draws that render into slots 3 and 4, per eye, with their viewports and scissors.
+constexpr uint32_t kRevealFrames = 600;      // frames captured after the all-small event
+constexpr uint32_t kRunOffsets[2] = {20, 150};   // the two automatic eye runs, in frames after the event
+constexpr uint32_t kFingerEvery = 10;        // fingerprint and gbuf lines: one frame in this many
+constexpr uint32_t kMaxInputLines = 130;     // input lines a window
+constexpr uint32_t kMaxGbufLines = 130;      // gbuf lines a window
+constexpr uint32_t kTileGrid = 8;            // sampled boxes per axis in a texture
+constexpr uint32_t kTilePx = 16;             // box size in pixels (the squares' own size)
+constexpr uint32_t kBufRegions = 16;         // sampled regions of the 21 MB buffer
+constexpr uint32_t kBufRegionBytes = 256;
+
+// Bytes per pixel for the colour formats this can sample; 0 for anything else (depth, block-compressed, unknown).
+inline uint32_t bytesPerPixel(uint32_t f) {
+    if (f >= 1 && f <= 4) return 16;
+    if (f >= 5 && f <= 8) return 12;
+    if (f >= 9 && f <= 14) return 8;
+    if (f >= 15 && f <= 18) return 8;
+    if (f >= 23 && f <= 38) return 4;      // 10:10:10:2, 11:11:10, 8:8:8:8, 16:16
+    if (f >= 39 && f <= 43) return 4;      // R32 (not the depth ones' views)
+    if (f >= 48 && f <= 60) return 2;      // 8:8, 16
+    if (f >= 61 && f <= 65) return 1;
+    if (f >= 87 && f <= 93 && f != 89) return 4;   // B8G8R8A8 and its relatives
+    return 0;
+}
+
+// One character for a sampled box: '.' nothing non-zero, '#' every byte non-zero, 1-8 the share between.
+inline char nzChar(uint32_t nonzero, uint32_t n) {
+    if (!n || !nonzero) return '.';
+    if (nonzero >= n) return '#';
+    const uint32_t d = 1 + (nonzero * 8) / n;
+    return static_cast<char>('0' + (d > 9 ? 9 : d));
+}
+
+inline uint32_t countNonzero(const uint8_t* p, size_t n) {
+    uint32_t c = 0;
+    for (size_t i = 0; i < n; ++i) c += p[i] != 0;
+    return c;
+}
+
+// An 8 x 8 grid as "row/row/.../row" (71 characters), from a function of (x, y).
+template <class F>
+inline int formatGrid(char* out, size_t cap, F&& at) {
+    size_t n = 0;
+    for (uint32_t y = 0; y < kTileGrid; ++y) {
+        for (uint32_t x = 0; x < kTileGrid; ++x) {
+            if (n + 2 < cap) out[n++] = at(x, y);
+        }
+        if (y + 1 < kTileGrid && n + 2 < cap) out[n++] = '/';
+    }
+    if (cap) out[n < cap ? n : cap - 1] = 0;
+    return static_cast<int>(n);
+}
 
 // ---- the state-restoring substitution ------------------------------------------------------------------------------
 // Ops supplies: void* getSrv(uint32_t slot) (a reference the caller releases), void setSrv(uint32_t slot, void* view),
