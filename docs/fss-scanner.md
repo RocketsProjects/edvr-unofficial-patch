@@ -43,12 +43,13 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next flight (2026-10-15 night, v3 built, not flown):** two zooms, no
-  keys, `fix.fss_eye_sync` = `off` then `tiles`, set in the ini before launch.
-  The band watch fires the eye run itself on a whole-row move of a large list
-  ("2026-10-15 (night)"). Flight e2e182a6: both eyes cover all 289 cells,
-  writes symmetric, the large/small row differs at the zoom. Known, not
-  fixed: the ~220 m remap; the loading-screen panel bit; the sky's drift.
+- **Next flight (2026-10-15 late):** flight bca9d6b8: `tiles` does not fix
+  it and the list row is ruled out (the row gap is 2-3 frames, then the lists
+  are identical per eye); both dumps were of the transit void. Next, no
+  build: `fix.fss_eye_sync = mirror` (the practical answer, "the animation in
+  both eyes"), and a `census_fss_jump` flight for the per-eye ring draws.
+  Then a longer instrument window. Known, not fixed: the ~220 m remap; the
+  loading-screen panel bit; the sky's drift.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -1957,6 +1958,79 @@ Reading rules:
 - Either run: compare the two events' frame counts from the zoom press to the
   event (about 3 s at 90 Hz is the arrival) and the large-list sizes before
   the event; a row event early in the transit is not the arrival.
+
+## 2026-10-15 (late): flight bca9d6b8, `tiles` does not fix it
+
+Flight on test build K (`v0.20.0-rc.1-85-gbca9d6b8`, Frontier, VR), two
+launches, no keys. `edvr_gfx_20261015_075527.log` is `off` (the instrument
+line says the candidate is off, `lockstep=off`); `edvr_gfx_20261015_075814.log`
+is `tiles` (`lockstep=on`). Sean: "tiles doesn't fix it still". Read-only
+analysis.
+
+Did it run:
+
+- `off`: window 1 opened at f12037; the band event fired at f12039 (a large
+  list went to zero), the eye run started at f12042 (frames 12043-12058 in the
+  dump). The zoom window then closed after 21 frames (f12058).
+- `tiles`: window 1 (f11431, 901 frames) never left the static 136 / 136 state,
+  no zoom arrival, no event. Window 2 (f12837): `lockstep engaged` at f12838,
+  `substituted=634`, `declined(shape=44)` (frames after one with a third
+  argument-buffer pass), band event at f13152 (a large list moved by a whole
+  row: eye 0 136 -> 225, eye 1 181), large lists to zero at f13155, eye run from
+  f13156. All 34 band lines carry `ran: eye1 drew eye0's lists`.
+
+What the rows say:
+
+- READ: the row mismatch is short. `off`: f12037-12038 eye 0 L=226 (row 3.71),
+  eye 1 L=187 (row 6.00), gap 2.29 rows; f12039 on both eyes L=0, S=289 (all
+  cells small) and the own row gap is 0.00 for every later frame. `tiles`:
+  f13152-13154 eye 0 225 / 226 against eye 1's own 181 (gap 2.59-2.65), eye 1
+  drew eye 0's (`ran` row 3.76); from f13155 both L=0 and the gap 0.00. From
+  the all-small state on, the two eyes' lists are the same size and the engine
+  itself puts them on one row, so the substitution has nothing to change.
+- READ, the eye runs: both runs captured the transit void. `off`: frames
+  12043-12054 are black in both eyes (maximum luma 0-1), and the reveal starts in
+  the last four frames (16 x 16 blocks lit, left 310, 448, 563, 678; right 369,
+  490, 572, 635). `tiles`: all 16 frames (13156-13171) black in both eyes. The
+  windows closed (f12058, f13176) as the reveal began, so neither the instrument
+  nor the dump saw it. No left-only squares were measured in these runs.
+
+Classification: the large/small row mismatch is NOT the lever. ruled out: the
+large/small list row (the `tiles` substitution) as the source of the left-only
+reveal, because the mismatch lasts two or three frames before the all-small
+state, the lists are identical in size from then on in both eyes, `tiles` ran
+with `ran` present on every frame and Sean still sees the reveal in one eye.
+ruled out: the tile pass's schedule (group counts, lists, arguments) as the
+source, for the same reason and flight e2e182a6's symmetric clears. UNKNOWN
+but supported: the blacks come from the per-eye INPUTS of the tile dispatch,
+not its schedule: SRV slots 0 (21,936,256 bytes), 1 (light records), 3 and 4
+(per-eye textures, T5 / T6 in the lines) differ per eye, while 5-7 are shared.
+INFERRED: slots 3 and 4 are the ring's offscreen G-buffer, which round 27
+measured as a budgeted subset of 16 x 16 tiles per frame over a cleared target
+(unbudgeted tiles sample zero normals and shade black); the producer is then
+the per-eye ring scene draws, upstream of this pass.
+
+Next, ranked by evidence:
+
+1. `mirror` now, no build: `fix.fss_eye_sync = mirror` (set in the ini before
+   launch). It stamps the left eye's hard-black pixels into the right at the
+   infinity shift, so the reveal plays in both eyes, as the flat screen shows
+   it. It exists, is supported on the native path (`healMode 2`: target the right
+   eye, donor the left; `native_fss.cpp`) and was the old round-39 answer; it is
+   gated by the zoom window and the scanner chrome, so it acts while the
+   scanner is up. Not flown on this build. It is the practical answer to "the
+   animation in both eyes" while the engine cause stays open. Cost: a misread
+   pixel stamps black on a dark surface (near invisible).
+2. The ring draws, no build: `advanced.census_fss_jump = 1` arms a census at
+   the zoom's first frame; read it for the per-eye ring draws (the 13,248-vertex
+   ring mesh, the ring quad and mesh draws of rounds 16-18) and their instance
+   counts and targets, and compare the eyes at the arrival and during the reveal.
+   The census covers a fixed number of frames from the press, so check that it
+   spans the 13 frames after the all-small event.
+3. A longer window (small build): keep the band watch and the lists capturing
+   for 600 frames after the all-small event, log the per-eye identity and a
+   sampled hash of slots 3 and 4 and of slot 0 in that stretch, and start the
+   eye run 20 frames after the event so it brackets the reveal's start.
 
 ## Open
 
