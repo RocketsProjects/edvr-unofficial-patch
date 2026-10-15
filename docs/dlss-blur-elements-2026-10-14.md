@@ -56,9 +56,9 @@
   light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (4); FUN_14369C9C0 as the railing's writer (hooked, 0 calls since launch);
   B75A6FF2 as an effect-only pair (~7M px/draw, the sky; flight d3013197); 68DDDEF0 as a weapons-only pair (constant ~200k px/draw background particles; hiding them
   shimmered the stars, flight 40b6dbc0). Option A has no safe pair left.
-- **Cockpit rim (static outline crawls against a star):** ruled out: sun glare; upscale ratio; motion, 10 m split, kind-4, history reset (capture 04:54). Open: the
-  jitter the rim is drawn with. BUILT on `claude/rim-jitter`, NOT FLOWN: inspector `jitter=`, camera blocks, 30 s `jitter census:`, and TEMPORARY key
-  `advanced.jitter_test = normal|off|flip_x|flip_y|flip_both` (default normal, live, VR only; remove when the arc closes). Flight plan: journal 2026-10-15, the discriminator.
+- **Cockpit rim (static outline crawls against a star):** ruled out: sun glare; upscale ratio; motion, 10 m split, kind-4, history reset (capture 04:54); jitter (test build H:
+  no `advanced.jitter_test` mode helps). Clue: AA off shows a thin dashed white line on the rim's top edge, aliased by the game. Next: name that draw (journal 2026-10-15, the dashed
+  edge line). `claude/rim-jitter` carries the inspector `jitter=`/camera-block lines and the TEMPORARY key `advanced.jitter_test`; propose removing the key (quoted), awaiting Sean.
 
 ## Triage
 
@@ -280,6 +280,12 @@ arrived (a menu, no VR), none was a candidate, or none reached the window.
   LDR input (a clipped star at 1.0 beside a dark rim does not conserve energy between phases), is what is left. (3) `normal` again: crawls? (4) `flip_x`, `flip_y`, `flip_both`: does one converge (the
   rim and the star both settle, with the edge sharper than in `normal`)? One that converges means the sign DLSS is told is wrong against the game's rows, and that flip is the fix, to ship as the
   behaviour with the key removed. If none converges and `normal` crawls and `off` is still, the main camera and the shell disagree (candidate 1), and the draw lines say which block.
+
+- **2026-10-15, the dashed edge line on the cockpit rim (read-only).** ruled out: jitter as the cause of the rim crawl, because on test build H none of `advanced.jitter_test` = off, flip_x,
+  flip_y, flip_both changed it (Sean). New clue: with AA off the rim's top edge (Mandalay) carries a thin bright dashed white line along its length, and some lower trim edges too: a
+  sub-pixel highlight the game itself aliases. Captures: none from H; G's 04:54:04 capture has the box on the top edge (1344 shell pixels, 960 sky). Every draw that wrote in the box is
+  TRIANGLELIST or TRIANGLESTRIP, no LINELIST/LINESTRIP: #6/#10/#11 BFE51414CC3024B4/DB79AE788E049DFD (opaque G-buffer, six render targets, 164784/80775/28722 indices, depth write, stencil
+  REPLACE, cull back) and #21 EB5234DB/B7D50283 (948 indices); no blend, no dedicated highlight draw. So the dashes come from the shell's geometry or its lighting, not a line primitive.
 
 - **2026-10-14 (from main, `claude/srv-split`): a sixth case, SRV driving.** ROOT CAUSE, fix BUILT, NOT FLOWN: terrain 5 to 8 m from an SRV took the head path because the
   ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV (docs/per-object-motion.md "The split in an SRV, 2026-10-14"). Not one of the five elements. The same
