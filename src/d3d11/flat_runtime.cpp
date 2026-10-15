@@ -317,6 +317,9 @@ struct State {
     // NVIDIA. Read at the frame boundary; dlssExposureRead is false until the first read, so the first read is logged too.
     FlatDlssExposure dlssExposure = FlatDlssExposure::Scene;
     bool dlssExposureRead = false;
+    // advanced.flat_refusal_view: paint the prep's classes into the resolved image. Read once a Present; refusalViewRead makes the first read
+    // say its value, so a refused key shows in the log as "off" rather than as silence.
+    bool refusalView = false, refusalViewRead = false;
     // The camera term's translation precision (design doc section 104): row 275 is the render origin the camera term subtracts
     // frame to frame (cameraBefore, flat_mono_shader_source.h). One 5 s window over the non-reset frames handed to the resolver.
     struct CameraOriginWindow { uint64_t frames = 0, moved = 0; float maxAbs = 0, maxStep = 0, minStep = 0; float last[3] = {}; };
@@ -3745,6 +3748,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const bool enabled = temporalModeEnabled(mode);
     const auto model = Config::get().getString("fix.temporal_aa_model", "k");
     const auto preset = temporalPresetFor(model);
+    const bool refusalViewWanted = Config::get().getBool("advanced.flat_refusal_view", false);
+    if (refusalViewWanted != s.refusalView || !s.refusalViewRead) {
+        s.refusalView = refusalViewWanted; s.refusalViewRead = true;
+        Log::get().note("flat runtime: refusal view %s (advanced.flat_refusal_view): %s", refusalViewWanted ? "on" : "off", flatMonoViewLegend());
+    }
     if (s.preset != preset.full) {
         s.preset = preset.full;
         dlaaSetPreset(preset.full);
@@ -6038,21 +6046,24 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             if (k.camera) { ui.haveRows = true; std::memcpy(ui.rows, d.camera, sizeof(ui.rows)); }
             ui.phaseX = s.phase.currentX; ui.phaseY = s.phase.currentY;
             ask = flatUiLayerDecide(ctx, ui);   // a cockpit HUD family's draw, or kNotAsked
+            // The route so far, for the tone branches below: the HDR route once it treated this frame, else the resolve plan's
+            // (trained-native, trained-upscale, ...), or none yet. Computed only when a tone branch runs, as before.
+            const auto routeSoFar = [&]() -> const char* {
+                return s.hdrTreated ? "hdr"
+                    : s.haveResolvePlan ? flatResolveRoute(s.plannedResolve.mode, s.plannedResolve.renderWidth, s.plannedResolve.renderHeight,
+                                                           s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
+                                        : "no-plan";
+            };
             if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; }
             else if (ask == FlatUiLayerAsk::kRefused) {}   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
-            // The registry's tone pass, map tonemap, or the two physically verified E894 LDR-source writers.
-            // The E894 pair remains UI-only: it does not enter the global tone registry or mono HDR selector.
+            // The registry's tone pass, map tonemap, or the physically verified E894 and EDHM 0D43 LDR-source writers.
+            // The E894 and 0D43 pairs remain UI-only: they do not enter the global tone registry or mono HDR selector.
             else if (tone || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u || flatUiSourceTonePair(k.vs, k.ps)) {
-                // The route so far: the HDR route once it treated this frame, else the resolve plan's (trained-native,
-                // trained-upscale, ...), or none yet.
-                const char* route = s.hdrTreated ? "hdr"
-                    : s.haveResolvePlan ? flatResolveRoute(s.plannedResolve.mode, s.plannedResolve.renderWidth, s.plannedResolve.renderHeight,
-                                                           s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
-                                        : "no-plan";
+                const char* route = routeSoFar();
                 if (flatUiSourceTonePair(k.vs, k.ps)) {
-                    // Both physical captures issued one fullscreen triangle. Keep a partial draw from bootstrapping proof.
+                    // Each physical capture (E894 and 0D43) issued one fullscreen triangle. Keep a partial draw from bootstrapping proof.
                     if ((kind == 'D' || kind == 'N') && count == 3 && instances == 1 && startInstance == 0)
                         uiTone = flatUiLayerSourceToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
                                                                 k.color, k.width, k.height, route);
@@ -6073,12 +6084,19 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 if (copySrv) copySrv->GetResource(&copySource);
                 flatUiLayerNoteCopy(s.prefix.frame, copySource.Get(), k.color);
             }
-            // Any other full-screen triangle may be the game's tonemap under a pair the flat list does not know: VR's
-            // structural admission, by the HUD source it reads.
+            // Any other full-screen triangle may be the game's tonemap under a pair the flat list does not know. An unknown pair
+            // that passes the full physical shape grants proof as a named pair does (Sean, 2026-10-15: a new EDHM version or settings
+            // tier must not need a named pair). Anything else is the probe's near miss and VR's structural admission, as before.
             else if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) {
-                flatUiLayerProbeUnknownSourceTone(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
-                    k.color, k.width, k.height, kind, count, instances, startInstance);
-                uiTone = flatUiLayerToneAdmit(ctx, s.prefix.frame, k.width, k.height, kind, count, instances, startInstance);
+                bool shapeAdmitted = false;
+                if (flatUiLayerShapeToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps, k.color, k.width, k.height,
+                                                  startInstance, routeSoFar(), shapeAdmitted))
+                    uiTone = shapeAdmitted;
+                else {
+                    flatUiLayerProbeUnknownSourceTone(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
+                        k.color, k.width, k.height, kind, count, instances, startInstance);
+                    uiTone = flatUiLayerToneAdmit(ctx, s.prefix.frame, k.width, k.height, kind, count, instances, startInstance);
+                }
             }
         }
         // A draw the layer leaves, while it holds this frame's HUD: a write of the depth buffer a seed copied makes it stale.
@@ -6170,7 +6188,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight; f.frame = s.prefix.frame; f.mode = s.engine;
     f.jitterCycle=s.phase.phaseCount;
     // The refusal census on the copy route too (render below the output: DLSS or FSR upscaling), as on the HDR route.
-    f.refusalView = 0u;
+    f.refusalView = s.refusalView ? 1u : 0u;
     f.refusalCensus = s.refusalCensusFrames > 0;
     if (s.refusalCensusFrames) --s.refusalCensusFrames;
     nativeScale.store(f.renderWidth >= f.outputWidth && f.renderHeight >= f.outputHeight,
@@ -6545,7 +6563,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         return false;
     };
     FlatMonoResolveFrame f{}; f.color = hdrView.Get(); f.depth = s.depthView.Get(); f.hdr = true;
-    f.refusalView = 0u;
+    f.refusalView = s.refusalView ? 1u : 0u;
     f.refusalCensus = s.refusalCensusFrames > 0;
     if (s.refusalCensusFrames) --s.refusalCensusFrames;
     if(selected.mixedCamera) {
