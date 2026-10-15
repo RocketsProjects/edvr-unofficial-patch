@@ -1173,6 +1173,8 @@ float g_upAxis[3] = {};                    // the shaft axis (the pad box's W ax
 bool g_upKnown = false;
 float g_floorPrevCam[3] = {};
 bool g_floorPrevCamOk = false;
+bool g_floorSawAboard = false;             // the commander has been seated this session: a hold that starts is a disembark; else it is a load-in on foot
+bool g_floorStrictNext = false;            // the next reset came from Status going unknown: the floor is not taken where the pad height is unknown
 uint64_t g_floorNextMs = 0;
 uint32_t g_floorLines = 0;
 sealed::GameView g_waitLast;              // the waiting line last written (built v14.23: the game's pad state)
@@ -1566,6 +1568,8 @@ void floorHoldDrop(const char* why, bool full) noexcept {
         Log::get().note("optimized station: on foot, hangar floor hold OFF (%s).", why);
     }
     g_floor.reset();
+    g_floor.strict = g_floorStrictNext;
+    g_floorStrictNext = false;
     g_floorHolding = false;
     g_floorPrevCamOk = false;
     if (full) g_upKnown = false;
@@ -1584,8 +1588,12 @@ void floorHoldTick() noexcept {
             g_upKnown = true;
         }
     }
+    if (g_aboardNow) g_floorSawAboard = true;
     if (g_aboardNow || !g_dockedNow.load(std::memory_order_acquire) || !g_statusKnownNow) {
-        if (g_floorHolding || g_floor.haveFloor) floorHoldDrop(g_aboardNow ? "aboard the ship" : "undocked, or Status unknown", false);
+        if (g_floorHolding || g_floor.haveFloor) {
+            g_floorStrictNext = !g_statusKnownNow;   // Status gone mid-shaft: the next floor needs the pad's height
+            floorHoldDrop(g_aboardNow ? "aboard the ship" : "undocked, or Status unknown", false);
+        }
         return;
     }
     const bool eligible = (g_statusFlags2Now & sealed::kFlags2OnFoot) != 0 && (g_statusFlags2Now & sealed::kFlags2OnFootInHangar) != 0;
@@ -1597,7 +1605,17 @@ void floorHoldTick() noexcept {
     const bool jumped = g_floorPrevCamOk && sealed::distance(g_frameCam, g_floorPrevCam) > sealed::kFloorJumpM;
     for (int k = 0; k < 3; ++k) g_floorPrevCam[k] = g_frameCam[k];
     g_floorPrevCamOk = true;
-    const bool changed = g_floor.step(eligible, g_upKnown, u, jumped, t);
+    bool padRelOk = false;
+    float padRel = 0.0f;
+    if (g_pickCell.has && g_pickCell.box) {   // the camera's height over the pad plane along the shaft axis (positive above), from the pad's own box
+        float xc[3] = {}, xp[3] = {};
+        if (sealed::boxCoordsOf(g_pickCell, g_frameCam, xc) && sealed::boxCoordsOf(g_pickCell, g_pickCell.centre, xp)) {
+            padRel = xc[2] - xp[2];
+            padRelOk = std::isfinite(padRel);
+        }
+    }
+    g_floor.startWhy = g_floorSawAboard ? "disembarked, settling" : "load-in on foot";
+    const bool changed = g_floor.step(eligible, g_upKnown, u, jumped, t, padRelOk, padRel);
     g_floorHolding = g_floor.holding;
     if (changed && g_floorLines < 400) {
         ++g_floorLines;

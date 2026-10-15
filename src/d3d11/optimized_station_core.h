@@ -1855,6 +1855,15 @@ constexpr float kFloorEngageBandM = 0.3f;       // back within this of the remem
 constexpr int kFloorSettleSamples = 10;         // one second still before the first floor is taken (the disembark moves the camera 3 m in 4 s)
 constexpr int kFloorBackSamples = 3;
 constexpr float kFloorJumpM = 20.0f;            // a camera jump (the concourse's frame was 797 m away; an origin rebase is 50 m) ends the hold and keeps the floor
+// 2026-10-14, test build E (log edvr_gfx_20261014_195451.log, VR): the rule armed at a load-in on foot (hold ON at 19:57:56.269, the sun skip off 0.0 s later, sealed 0.7 s after) and
+// released at the ride's start at 0.62 m of rise and 3.60 m/s. Two things follow. (1) The release needs a RIDE'S speed as well as the rise: the lift's first full sample reads 3.0 m/s
+// or more, the 0.56 m platform step 1.7 m/s, a boarding ramp under 1 m/s; a slow rise releases only at kFloorStepM (a rise no floor makes). (2) A load-in in the concourse puts the
+// camera at the top of the hangar's shaft (the trace: 123 m down the pad's axis) when the hangar frame returns, and the shaft has stops (62.8, 73.4, 118.5 m): the first floor must
+// not be taken there. The pad is the reference: the floor (the lift's bottom, the walkway) is at or above the pad's plane (+14.4 m in the medium hangar of both logs), the whole shaft
+// is below it (-46 to -104 m). A floor is taken only with the camera not more than kFloorBelowPadM under the pad plane; after a loss of eligibility (the concourse, Status gone) an unknown
+// pad height is not accepted either.
+constexpr float kFloorRideMps = 2.0f;           // vertical speed of a ride (the step is 1.7 m/s, a ramp under 1 m/s, a ride's first full sample 3.0 m/s or more)
+constexpr float kFloorBelowPadM = 3.0f;         // a first floor must be at least this near the pad plane or above it
 struct FloorHold {
     bool holding = false;       // on the floor: the sun skip and the seal may stand on foot
     bool haveFloor = false;
@@ -1863,17 +1872,21 @@ struct FloorHold {
     float prevU = 0.0f;
     uint64_t prevMs = 0;
     int settle = 0, back = 0;
+    bool strict = false;            // eligibility was lost (the concourse, Status gone) and regained: an unknown pad height does not allow a first floor
+    const char* startWhy = "on foot in the hangar, settling";   // the log's reason when the hold starts provisionally (the caller says: load-in, or the disembark)
     float rise = 0.0f, vu = 0.0f;   // the last sample's rise over the floor and vertical speed (for the log)
     char why[120] = {};
     void reset() noexcept { *this = FloorHold{}; }
     // One sample. eligible: docked, Status known, not aboard, on foot and in the hangar (Flags2 bits 0 and 13). upOk: the shaft axis is known. u: the camera's height along it.
     // jumped: the camera moved more than kFloorJumpM since the last sample. Returns true when `holding` changed (why says why).
-    bool step(bool eligible, bool upOk, float u, bool jumped, uint64_t ms) noexcept {
+    // padRelOk/padRel: the camera's height over the pad plane along the shaft axis, when the pad's box is built (positive above).
+    bool step(bool eligible, bool upOk, float u, bool jumped, uint64_t ms, bool padRelOk = false, float padRel = 0.0f) noexcept {
         const bool was = holding;
         if (!eligible || !upOk) {
             holding = false;
             settle = back = 0;
             havePrev = false;
+            if (!eligible) strict = true;
             std::snprintf(why, sizeof(why), "%s", !eligible ? "not on foot in the hangar (Status)" : "the shaft axis is unknown");
             return was;
         }
@@ -1894,7 +1907,16 @@ struct FloorHold {
             return was;
         }
         if (!haveFloor) {
-            // Provisional hold from the disembark: the camera is not on a ride yet, and the sun must not flash back while it settles.
+            // A first floor needs the camera at the pad's level or above (the shaft below it has stops that are not floors); with the pad height unknown it is allowed at a disembark or
+            // a load-in, not after a loss of eligibility.
+            const bool allowed = padRelOk ? padRel >= -kFloorBelowPadM : !strict;
+            if (!allowed) {
+                holding = false;
+                settle = 0;
+                std::snprintf(why, sizeof(why), "%s", padRelOk ? "in the shaft, below the hangar floor" : "arrived from the concourse, the floor not yet known");
+                return was;
+            }
+            // Provisional hold from the disembark or the load-in: the camera is not on a ride yet, and the sun must not flash back while it settles.
             holding = true;
             rise = 0.0f;
             if (vOk && vuNow < kFloorStillMps) ++settle;
@@ -1902,9 +1924,10 @@ struct FloorHold {
             if (settle >= kFloorSettleSamples) {
                 floorU = u;
                 haveFloor = true;
+                strict = false;
                 std::snprintf(why, sizeof(why), "settled on the hangar floor");
             } else if (!was) {
-                std::snprintf(why, sizeof(why), "on foot in the hangar, settling");
+                std::snprintf(why, sizeof(why), "%s", strict ? "arrived on the hangar floor from the lift" : startWhy);
             }
             return holding != was;
         }
@@ -1917,7 +1940,8 @@ struct FloorHold {
                 rise = 0.0f;
                 return false;
             }
-            if (absRise > kFloorReleaseRiseM) {
+            // A ride, not a step or a ramp: the rise is past the margin AND at a ride's speed; a slow rise is released only past a step (no floor rises that far).
+            if ((absRise > kFloorReleaseRiseM && vOk && vuNow >= kFloorRideMps) || absRise > kFloorStepM) {
                 holding = false;
                 back = 0;
                 std::snprintf(why, sizeof(why), "rose %.2f m off the floor (%.2f m/s vertical)", static_cast<double>(rise), static_cast<double>(vuNow));

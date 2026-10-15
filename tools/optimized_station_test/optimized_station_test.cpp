@@ -1201,6 +1201,73 @@ int main(int argc, char** argv) {
         check(firstEngage(&st, in, 2000, 12000) == 0, "floor seal: on foot off the floor never seals");
     }
 
+    // ---- Load-in on foot, the concourse load-in and the lift down, and the ride-speed gate (test build E, edvr_gfx_20261014_195451.log) ---------------------------------------
+    {
+        // Load-in on foot in the hangar: the first eligible sample holds (the pad's box may not be built yet: unknown height), the floor is taken after a second, and the log says why.
+        se::FloorHold f;
+        f.startWhy = "load-in on foot";
+        bool changed = f.step(true, true, 0.99f, false, 1000, false, 0.0f);
+        check(changed && f.holding && std::strcmp(f.why, "load-in on foot") == 0, "load-in: on foot in the hangar, the first sample arms the hold with the reason 'load-in on foot'");
+        uint64_t ms = 1000;
+        for (int i = 0; i < 12; ++i) f.step(true, true, 0.99f, false, ms += 100, true, 14.4f);
+        check(f.holding && f.haveFloor && std::fabs(f.floorU - 0.99f) < 0.001f, "load-in: after a second still the floor is taken at the standing height, still holding");
+        // the ride start releases it at a ride's speed (log: 0.62 m at 3.6 m/s)
+        f.step(true, true, 1.20f, false, ms += 100, true, 14.6f);   // 2.1 m/s over 0.1 s, 0.21 m: holds
+        check(f.holding, "load-in: the first 0.21 m of the ride still holds");
+        f.step(true, true, 1.61f, false, ms += 100, true, 15.0f);   // 4.1 m/s, 0.62 m
+        check(!f.holding && std::strstr(f.why, "rose 0.62 m") != nullptr, "load-in: 0.62 m at 4 m/s releases, as in the flown log");
+    }
+    {
+        // Load-in in the CONCOURSE, then the lift down: the hangar frame returns at the top of the shaft (padRel about -104), the ride has stops at -46, -56, -99 and the bottom is +14.4.
+        se::FloorHold f;
+        f.startWhy = "load-in on foot";
+        uint64_t ms = 1000;
+        for (int i = 0; i < 50; ++i) f.step(false, true, 0.0f, false, ms += 100, false, 0.0f);   // in the concourse: in-hangar 0
+        check(!f.holding && f.strict && !f.haveFloor, "concourse load-in: not eligible, not holding; the next floor needs the pad's height");
+        // back in the hangar frame at the top of the shaft, still for 8 s, with the pad height unknown (the box flickers) and then known
+        for (int i = 0; i < 40; ++i) f.step(true, true, 123.1f, false, ms += 100, false, 0.0f);
+        check(!f.holding && !f.haveFloor, "concourse load-in: at the shaft's top with the pad height unknown nothing is held and no floor is taken");
+        for (int i = 0; i < 40; ++i) f.step(true, true, 123.1f, false, ms += 100, true, -103.7f);
+        check(!f.holding && !f.haveFloor && std::strstr(f.why, "shaft") != nullptr, "concourse load-in: at the shaft's top (104 m under the pad) nothing is held");
+        // the ride down with a 15 s stop at -46 m: no floor there either
+        float z = 123.1f;
+        for (int i = 0; i < 20; ++i) { z -= 0.7f; f.step(true, true, z, false, ms += 100, true, -103.7f + (123.1f - z) * 0.96f); }
+        for (int i = 0; i < 150; ++i) f.step(true, true, z, false, ms += 100, true, -103.7f + (123.1f - z) * 0.96f);
+        check(!f.holding && !f.haveFloor, "concourse load-in: a stop in the shaft, however long, is not a floor");
+        // down to the bottom: the lift platform (0.43), the camera passes the pad plane going down to +14.4
+        const float zBottom = 0.43f;
+        while (z > zBottom + 0.7f) { z -= 0.7f; f.step(true, true, z, false, ms += 100, true, 14.4f - (z - zBottom) * 0.96f); }
+        f.step(true, true, zBottom, false, ms += 100, true, 14.4f);
+        check(f.holding, "concourse load-in: reaching the bottom (pad level or above) arms the hold");
+        for (int i = 0; i < 12; ++i) f.step(true, true, zBottom, false, ms += 100, true, 14.4f);
+        check(f.holding && f.haveFloor && std::fabs(f.floorU - zBottom) < 0.001f, "concourse load-in: the floor is taken on the lift's bottom platform after a second still");
+        // stepping off the platform: +0.56 m over 0.3 s (1.9 m/s): no release
+        float zz = zBottom;
+        for (int i = 0; i < 3; ++i) { zz += 0.187f; f.step(true, true, zz, false, ms += 100, true, 14.4f + (zz - zBottom)); }
+        check(f.holding, "concourse load-in: stepping off the lift platform onto the floor (+0.56 m, 1.9 m/s) does not release");
+        for (int i = 0; i < 12; ++i) f.step(true, true, zz, false, ms += 100, true, 14.4f + (zz - zBottom));
+        check(f.holding && std::fabs(f.floorU - zz) < 0.001f, "concourse load-in: and the floor follows to the new level");
+    }
+    {
+        // The ride-speed gate: a step, a ramp and a ride.
+        auto riseAt = [](float metres, float seconds, float startRise) {
+            se::FloorHold f;
+            uint64_t ms = 1000;
+            for (int i = 0; i < 14; ++i) f.step(true, true, 0.0f, false, ms += 100);   // floor taken at u = 0
+            const int n = static_cast<int>(seconds * 10.0f + 0.5f);
+            for (int i = 1; i <= n; ++i) {
+                f.step(true, true, startRise + metres * static_cast<float>(i) / static_cast<float>(n), false, ms += 100);
+                if (!f.holding) return false;
+            }
+            return true;
+        };
+        check(riseAt(0.56f, 0.3f, 0.0f), "ride gate: a 0.56 m step in 0.3 s (1.9 m/s) holds");
+        check(riseAt(0.9f, 1.0f, 0.0f), "ride gate: 0.9 m climbed at 0.9 m/s (a steep ramp) holds");
+        check(!riseAt(1.2f, 2.0f, 0.0f), "ride gate: a slow rise past a step (1.2 m at 0.6 m/s) releases at last (no floor rises that far)");
+        check(!riseAt(1.5f, 0.5f, 0.0f), "ride gate: 1.5 m in 0.5 s (3 m/s) releases");
+        check(se::kFloorRideMps > 1.7f && se::kFloorRideMps < 3.0f, "ride gate: the speed sits between the measured step (1.7 m/s) and the ride's first full sample (3.0 m/s)");
+    }
+
     // ---- TEMPORARY: the lift trace (ride detection, holder tracking, line formats) ---------------------------------------------------------------------
     {
         se::LiftTrace tr;
