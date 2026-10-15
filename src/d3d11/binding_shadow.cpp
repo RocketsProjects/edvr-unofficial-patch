@@ -65,6 +65,7 @@ Slot& slotOf(BindSlot s) { return detail::g_bindingSlots[static_cast<size_t>(s)]
 bool describeResource(ID3D11Resource* res, ResourceInfo* out) {
     D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
     res->GetType(&dim);
+    out->dim = static_cast<uint32_t>(dim);
     if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
         D3D11_BUFFER_DESC d{};
         static_cast<ID3D11Buffer*>(res)->GetDesc(&d);

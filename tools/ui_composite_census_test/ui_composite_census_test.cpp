@@ -819,7 +819,7 @@ void pins() {
     const std::string vscAll = squeeze(vsc);
     const auto keptPlaces = [](const std::string& depthSrc, const std::string& vscSrc, const std::string& hdr) {
         return has(depthSrc, "constexpr uint64_t kNullPsMesh = 0xB018D143700AB803ull;") && countOf(depthSrc, "g_exclude[g_excludeCount++]=kNullPsMesh;") == 1 &&
-               countOf(depthSrc, "kNullPsMesh") == 2 && countOf(vscSrc, "f.excluded=uiDepthIsExcluded(f.vs);") == 1 &&
+               countOf(depthSrc, "kNullPsMesh") == 2 && countOf(vscSrc, "f.excluded=uiDepthIsExcluded(f.vs);") == 2 &&   /* the post-tonemap tier and (2026-10-15) the lit-target data-flow rule */
                has(hdr, "{0xB018D143700AB803ull, 0x258B95AC99520C1Full, \"null-output quad\"},");
     };
     check(!censusHdr.empty() && keptPlaces(depthAll, vscAll, censusHdr),

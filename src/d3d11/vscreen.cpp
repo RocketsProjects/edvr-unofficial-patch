@@ -2995,7 +2995,7 @@ void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UIN
     }
     // The panel tag (ui_panel_tag.h, observe only): the shadow's cells were just written, so the slots' panel bits are tagged from them
     // now, at the bind, and the draws that follow read one byte. One load and a branch while the layer or the interface depth pass is off.
-    if (uiLayerLive() && uiDepthWantsDraws()) uiDepthTagBind(start, n);
+    if (g_panelTagLive) uiDepthTagBind(start, n);
     g_state->realPSSetShaderResources(self, start, n, srvs);
 }
 
@@ -3850,6 +3850,8 @@ __declspec(noinline) void curvedScreenSwallowed(ID3D11DeviceContext* self, DrawV
 // render-size change is taken from its first draw (ui_layer_math.h's
 // uiLayerFamilyFor, the rule; this gathers its facts, lazily, in its order).
 // The two composites' outcomes are counted for the layer's family census.
+// Set by uiLayerFamilyOf: the family it returned was given by the lit-target data-flow rule, not by a vertex-shader hash (the census tells them apart).
+thread_local bool t_familyByTag = false;
 __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count) {
     UiFamilyFacts f;
     f.targetKind = uiLayerTargetKind();
@@ -3859,6 +3861,14 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     // HDR draws need no extra hash read.
     if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust))
         f.ps = bindingShaderHash(BindSlot::Ps);
+    // The lit HDR target's data-flow rule (ui_layer_math.h, kPanelTag): a draw no vertex-shader hash names that samples a learned panel surface is a
+    // cockpit holo panel. The tag is one byte (ui_panel_tag.h, set at the bind); ui_depth's exclude list still wins (the null-output quad keeps a leftover
+    // surface bound). VR profile only: the flat profile's holo families have their own recipes (flat_ui_layer), which this does not touch.
+    t_familyByTag = false;
+    if (f.targetKind == 1 && uiPanelTagMask() != 0 && !runtimeFlatProfile()) {
+        f.panelTagged = true;
+        f.excluded = uiDepthIsExcluded(f.vs);
+    }
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,
         // which samples a stale surface and draws nothing, and the ini's
@@ -3876,6 +3886,7 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     }
     UiFamilyWhy why = UiFamilyWhy::kOther;
     const UiLayerFamily family = uiLayerFamilyFor(f, &why);
+    t_familyByTag = why == UiFamilyWhy::kPanelTag;
     if (f.vs == kUiVsPanel || f.vs == kUiVsLoader) {
         if (why == UiFamilyWhy::kNoSurface && !f.ps) f.ps = bindingShaderHash(BindSlot::Ps);
         uiLayerNoteFamilyProbe(f.vs, f.ps, static_cast<int>(family), static_cast<int>(why));
@@ -4027,7 +4038,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count);
         // The boundary census (ui_panel_tag.h, observe only): this eye draw's target class and whether the hash rule named it; the tag's bit
         // is read inside. Nothing it counts is used here.
-        if (uiDepthWantsDraws()) uiDepthBoundaryNoteDraw(uiLayerTargetKind(), uiLayerTargetResource(), uiFamily != UiLayerFamily::kNone);
+        if (uiDepthWantsDraws())
+            uiDepthBoundaryNoteDraw(uiLayerTargetKind(), uiLayerTargetResource(), uiFamily != UiLayerFamily::kNone && !t_familyByTag,
+                                    uiFamily != UiLayerFamily::kNone && t_familyByTag);
         compositeCounted = uiDepthScope.composite;
         compositeFamily = uiFamily;
         barsFamily = uiFamily == UiLayerFamily::kSupercruiseBars;

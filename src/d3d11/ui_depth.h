@@ -110,11 +110,12 @@ int uiDepthSampledSurfaceSlot();
 //                       fall in 0..3 are tagged from the shadow (a pointer-hash probe; a view not seen lately is resolved once). When the
 //                       learned set has changed since the bits were made, all four slots are recomputed.
 //   uiDepthBoundaryNoteDraw  one owner draw into an eye target (targetKind: uiLayerTargetKind, 1 the lit HDR target, 2 the 8-bit
-//                       post-tonemap one; listed: the hash rule named a family). Reads the bit; scans no slot.
+//                       post-tonemap one; listed: a vertex-shader hash named a family; caught: the lit-target rule took the draw as a cockpit
+//                       panel for what it samples). Reads the bit; scans no slot.
 //   uiDepthBoundaryReport    the layer's 30 s tick: the two "ui boundary" lines, then the window starts over.
 // All three are one test while the interface depth pass is off.
 void uiDepthTagBind(unsigned start, unsigned n);
-void uiDepthBoundaryNoteDraw(int targetKind, const void* target, bool listed);
+void uiDepthBoundaryNoteDraw(int targetKind, const void* target, bool listed, bool caught);
 void uiDepthBoundaryReport(uint64_t layerFrames, const char* profile);
 // The engine's UI node probe (ui_node_probe.h) tells the census where its calls fell among the draws.
 void uiDepthBoundaryDrawPosition(uint32_t* lit, uint32_t* ldr, unsigned long* thread);

@@ -2376,41 +2376,102 @@ int uiDepthSampledSurfaceSlot() {
 }
 
 // ---- the panel tag and the boundary census (ui_panel_tag.h) --------------------------------------------------------------------
-// OBSERVE ONLY. The tag answers "does this PS SRV slot hold a learned panel surface" when the view is bound, so the lit target's draws can
-// ask the data-flow question with one load. Not the draw path's: this runs in the PSSetShaderResources hook, a few hundred binds a frame.
+// The tag answers "does this PS SRV slot hold a learned panel surface" when the view is bound, so the lit target's draws can ask the data-flow
+// question with one load (uiLayerFamilyOf reads it for the lit-target rule; the census counts with it). It runs in the PSSetShaderResources hook, a few hundred
+// binds a frame, and only while the UI layer is live (g_panelTagLive).
 namespace {
 
-PtrMemo<kMemoSize> g_tagMemo;            // view -> flags | (learned-set generation << 8); an entry from another generation is asked again
+// What the tagger keeps of a view it has judged. A change to the learned set re-judges a 2D texture from the identity and shape kept here, with no COM call; a view
+// that is no 2D texture (a 3D or 1D texture, a buffer) is never a panel and is not asked again until its entry expires; one that could not be resolved at all is
+// asked again only after a short while. (The first flight resolved ~125 such views a frame on every bind: GetResource, GetType, Release each time.)
+struct TagEntry {
+    const void* view = nullptr;
+    uint32_t frame = 0;      // the frame it was resolved
+    uint32_t gen = 0;        // the learned-set generation its flags are for (state 1)
+    ResourceInfo info;       // identity and shape (state 1)
+    uint8_t state = 0;       // 0 empty, 1 a 2D texture, 2 known to be no 2D texture, 3 could not be resolved (dim 0: a faulted or null probe)
+    uint8_t flags = 0;
+};
+constexpr uint32_t kTagTable = 1024;       // a power of two
+constexpr uint32_t kTagProbeLen = 4;
+constexpr uint32_t kTagUnknownLife = 30;   // frames before an unresolvable view is tried again
+TagEntry g_tagTab[kTagTable];
 UiBoundaryWindow g_boundary;
+UiBoundaryAnnounced g_panelAnnounced;
 uint32_t g_tagSeenGen = 1;               // the learned-set generation the window last counted a change at
 uint32_t g_tagVerifyThisFrame = 0;
 bool g_tagTouched = false;                // the bind hook has run at least once (the frame boundary re-tags only then)
 uint32_t g_boundaryLit = 0, g_boundaryLdr = 0;   // eye draws counted this frame (the node probe reads them)
-unsigned long g_boundaryThread = 0;      // the thread of the last counted draw
+unsigned long g_boundaryThread = 0;      // the thread of a sampled counted draw
 
-// One view's flags: a probe of the memo, and only for a view not seen lately (or seen before the learned set last changed) a resolve --
-// the view is certainly live now, it is being bound. A view that cannot be resolved is "unknown", not "no": counted, left unmemoised.
+uint32_t tagHome(const void* p) {
+    return static_cast<uint32_t>((reinterpret_cast<uintptr_t>(p) >> 4) * 2654435761u) & (kTagTable - 1);
+}
+TagEntry* tagFind(const void* view) {
+    const uint32_t h = tagHome(view);
+    for (uint32_t i = 0; i < kTagProbeLen; ++i) {
+        TagEntry& e = g_tagTab[(h + i) & (kTagTable - 1)];
+        if (e.view == view && e.state) return &e;
+    }
+    return nullptr;
+}
+TagEntry& tagSlotFor(const void* view) {
+    const uint32_t h = tagHome(view);
+    TagEntry* victim = &g_tagTab[h];
+    uint32_t oldest = 0;
+    for (uint32_t i = 0; i < kTagProbeLen; ++i) {
+        TagEntry& e = g_tagTab[(h + i) & (kTagTable - 1)];
+        if (!e.state || e.view == view) return e;
+        const uint32_t age = g_frame - e.frame;
+        if (age >= oldest) { oldest = age; victim = &e; }
+    }
+    return *victim;
+}
+
+// One view's flags.
 uint8_t tagClassify(void* view) {
     if (!view) return 0;
     UiBoundaryWindow& w = g_boundary;
-    uint64_t memo = 0;
-    if (g_tagMemo.get(view, g_frame, kMemoLifeFrames, &memo) && static_cast<uint32_t>(memo >> 8) == g_panelLearnGen) {
-        ++w.memoHits;
-        return static_cast<uint8_t>(memo & 3u);
+    TagEntry* e = tagFind(view);
+    if (e) {
+        const uint32_t age = g_frame - e->frame;
+        if (e->state == 3) {
+            if (age < kTagUnknownLife) { ++w.unknownHits; return 0; }
+        } else if (age < kMemoLifeFrames) {
+            if (e->state == 2) { ++w.memoHits; return 0; }
+            if (e->gen == g_panelLearnGen) { ++w.memoHits; return e->flags; }
+            // The learned set changed since: re-judge from what was kept, no resolve.
+            const uint8_t f = static_cast<uint8_t>((surfaceMatches(e->info) ? kPanelFlagSurface : 0) | (e->flags & kPanelFlagEyeSized));
+            e->flags = f;
+            e->gen = g_panelLearnGen;   // AFTER surfaceMatches: it evicts a recycled address, which moves the generation
+            ++w.rechecked;
+            return f;
+        }
     }
     ResourceInfo info;
-    if (!bindingResolve(view, &info)) {
+    const bool ok = bindingResolve(view, &info);   // the view is certainly live now, it is being bound
+    TagEntry& t = e ? *e : tagSlotFor(view);
+    t.view = view;
+    t.frame = g_frame;
+    t.flags = 0;
+    if (!ok && info.dim == 0) {   // GetType never ran: not knowable. Counted, and tried again after a short while.
+        t.state = 3;
         ++w.unresolved;
         return 0;
     }
-    uint8_t flags = 0;
-    if (info.isTexture2D) {
-        if (surfaceMatches(info)) flags |= kPanelFlagSurface;
-        if (vScreenIsEyeSized(info.a, info.b)) flags |= kPanelFlagEyeSized;
+    if (!ok || !info.isTexture2D) {   // a 3D or 1D texture, or a buffer: never a panel surface
+        t.state = 2;
+        ++w.otherDim;
+        return 0;
     }
+    uint8_t flags = 0;
+    if (surfaceMatches(info)) flags |= kPanelFlagSurface;
+    if (vScreenIsEyeSized(info.a, info.b)) flags |= kPanelFlagEyeSized;
     ++w.resolved;
-    // The generation AFTER surfaceMatches: it evicts a recycled address, which moves the generation, and this answer is about the set as it is now.
-    g_tagMemo.put(view, g_frame, static_cast<uint64_t>(flags) | (static_cast<uint64_t>(g_panelLearnGen) << 8));
+    t.state = 1;
+    t.info = info;
+    t.flags = flags;
+    t.gen = g_panelLearnGen;   // AFTER surfaceMatches, as above
     return flags;
 }
 
@@ -2430,7 +2491,8 @@ void tagRetagAll() {
     ++w.retags;
 }
 
-// The slow, memo-free answer for the slots bound now, against the bits: the sampled check that says whether the tag was right.
+// The slow, memo-free answer for the slots bound now, against the bits: the sampled check that says whether the tag was right. A slot whose view cannot be
+// resolved at all is counted as unknown (the check's "0 missed" does not cover it); a view of another kind (3D, 1D, a buffer) is known not to be a panel.
 void tagVerify() {
     static const BindSlot kSlots[kPanelTagSlots] = {BindSlot::PsSrv0, BindSlot::PsSrv1, BindSlot::PsSrv2, BindSlot::PsSrv3};
     UiBoundaryWindow& w = g_boundary;
@@ -2439,8 +2501,11 @@ void tagVerify() {
     uint8_t truth = 0;
     for (uint32_t i = 0; i < kPanelTagSlots; ++i) {
         void* view = bindingGet(kSlots[i]);
+        if (!view) continue;
         ResourceInfo info;
-        if (view && bindingResolve(view, &info) && info.isTexture2D && surfaceMatches(info)) truth = static_cast<uint8_t>(truth | (1u << i));
+        const bool ok = bindingResolve(view, &info);
+        if (!ok && info.dim == 0) { ++w.verifyUnknown; continue; }
+        if (ok && info.isTexture2D && surfaceMatches(info)) truth = static_cast<uint8_t>(truth | (1u << i));
     }
     const uint8_t have = g_panelTag.panel;
     if (truth & static_cast<uint8_t>(~have)) {
@@ -2470,7 +2535,7 @@ void uiDepthTagBind(unsigned start, unsigned n) {
     }
 }
 
-void uiDepthBoundaryNoteDraw(int targetKind, const void* target, bool listed) {
+void uiDepthBoundaryNoteDraw(int targetKind, const void* target, bool listed, bool caught) {
     if (targetKind == 0 || !uiDepthWantsDraws()) return;
     UiBoundaryWindow& w = g_boundary;
     ++w.noteCalls;
@@ -2482,14 +2547,18 @@ void uiDepthBoundaryNoteDraw(int targetKind, const void* target, bool listed) {
     const bool tagged = mask != 0;
     if (targetKind == 1) {
         w.noteLit(target, tagged, listed);
-        if (tagged && !listed) w.nameUnlisted(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));
+        if (tagged) {
+            static const uint8_t kLowestSlot[16] = {0, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0};
+            ++w.slotTagged[kLowestSlot[mask & 15]];
+            if (!listed) w.nameUnlisted(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), caught);
+        }
         ++g_boundaryLit;
     } else {
         w.noteLdr(target, tagged || listed, tagged, g_panelTag.eye != 0);
         ++g_boundaryLdr;
     }
-    g_boundaryThread = GetCurrentThreadId();
     if (timed) {
+        g_boundaryThread = GetCurrentThreadId();   // sampled: the node probe asks only whether the calls are on the eye draws' thread
         ++w.noteSamples;
         w.noteTicks += static_cast<uint64_t>(qpcNow() - t0);
     }
@@ -2514,6 +2583,11 @@ void uiDepthBoundaryReport(uint64_t layerFrames, const char* profile) {
     const UiBoundaryText text = uiBoundaryText(g_boundary, c, layerFrames);
     Log::get().note("%s", text.census.c_str());
     Log::get().note("%s", text.cost.c_str());
+    // Once a session for each vertex shader the lit-target rule caught that the hash list does not name.
+    for (uint32_t i = 0; i < g_boundary.used; ++i) {
+        const std::string said = boundaryAnnounce(g_boundary.pairs[i], g_panelAnnounced);
+        if (!said.empty()) Log::get().note("%s", said.c_str());
+    }
     g_boundary.reset();
     g_tagSeenGen = g_panelLearnGen;
 }
@@ -4161,7 +4235,7 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     g_boundary.frameEnd();
     g_tagVerifyThisFrame = 0;
     g_boundaryLit = g_boundaryLdr = 0;
-    if (!uiDepthWantsDraws()) g_panelTag.gen = 0;   // not tagging: the first bind after the pass comes back recomputes all four
+    if (!uiDepthWantsDraws() || !g_panelTagLive) g_panelTag.gen = 0;   // not tagging (the pass off, or the layer not live): the first bind after recomputes all four
     else if (g_tagTouched && uiPanelTagStale()) tagRetagAll();   // only once the bind hook has run: a rig that never binds has no shadow to read
     releaseChromeHeld();   // the pass, which stages an eye run, has run for the frame
     g_uiContent.retire(g_frame);
