@@ -42,6 +42,7 @@
 #include "scene_inspector.h"   // the scene inspector: the same ask for its frame, and the DLSS output; one relaxed load a frame unarmed
 #include "effect_history.h"   // the effect rule: the listed glows' own light, bound for the motion shader on the NVIDIA path
 #include "effect_history_core.h"   // its share, floor and the probe.w bit
+#include "jitter_probe_core.h"      // the jitter check: what each scene-block write carries (the 30 s census)
 #include "ui_resolve.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
@@ -2236,6 +2237,10 @@ struct ObservedRowsWrite {
     float proj[2] = {};
     uint32_t frame = 0, seq = 0;
     bool rowsValid = false;
+    // The jitter check (jitter_probe_core.h): what this write's view-projection rows (cb1[270..273]) carry against the jitter the pass published for the frame.
+    // jitJudged is false for a write too small to hold the rows or whose rows are not a camera's.
+    bool jitJudged = false;
+    jitterprobe::JitterKind jitKind = jitterprobe::JitterKind::NotAvailable;
 };
 // 256: in space the game writes the block over a hundred times a frame
 // (114 measured 2026-09-04), and a ring of 48 had lost the frame's early
@@ -2248,6 +2253,8 @@ uint32_t    g_rowsObservedSeq = 0;   // all mapped writes, including rejected ro
 uint32_t    g_rowsObservedWrites = 0;
 uint32_t    g_rowsObservedEvictions = 0;
 ObservedRowsWrite g_rowsObserved[32];
+jitterprobe::JitterCensus g_jitCensus;    // the jitter check's 30 s window (temporalPassFrameBoundary prints and clears it)
+int64_t g_jitCensusTicks = 0;
 const void* g_boundBuf = nullptr;    // the object bound at this frame's first scene draw
 bool        g_boundSeen = false;
 uint32_t    g_boundLatchSeq = 0;
@@ -5385,7 +5392,23 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     ++g_rowsObservedWrites;
     const uint32_t observedSeq = g_rowsObservedSeq++;
     ObservedRowsWrite* observed = res ? observedRowsSlot(res) : nullptr;
+    // The jitter check: what this block's projection carries, read from the data as written. Every write of every scene-sized block counts toward the census;
+    // the frame's tally keeps the last write of each buffer.
+    ++g_jitCensus.writes;
+    jitterprobe::JitterKind jitKind = jitterprobe::JitterKind::NotAvailable;
+    bool jitJudged = false;
+    if (bytes >= (jitterprobe::kVpRowsFirst + 4) * 16) {
+        JitterRef ref;
+        if (jitterRefRead(&ref)) {
+            const jitterprobe::Decomposed dec = jitterprobe::decomposeVp(static_cast<const float*>(data) + jitterprobe::kVpRowsFirst * 4);
+            const jitterprobe::JitterFacts jf = jitterprobe::judgeEitherEye(dec, ref);
+            jitKind = jf.kind;
+            jitJudged = jf.kind != jitterprobe::JitterKind::NotAvailable;
+        }
+    }
     if (observed) {
+        observed->jitJudged = jitJudged;
+        observed->jitKind = jitKind;
         observed->frame = g_rowsFrame;
         observed->seq = observedSeq;
         observed->rowsValid = rowsValid;
@@ -5645,6 +5668,31 @@ void temporalPassFrameBoundary() {
     g_miniBound = false;
     detail::g_cameraDrawWatch = false;
     temporalPassSkyDiagTick();
+    // The jitter check's census: the frame's distinct scene buffers, and what the last write of each carried.
+    {
+        uint32_t blocks = 0;
+        for (const ObservedRowsWrite& w : g_rowsObserved) {
+            if (!w.resource || w.frame != g_rowsFrame) continue;
+            ++blocks;
+            if (!w.jitJudged) { ++g_jitCensus.notAvailable; continue; }
+            switch (w.jitKind) {
+                case jitterprobe::JitterKind::Published: ++g_jitCensus.published; break;
+                case jitterprobe::JitterKind::None: ++g_jitCensus.none; break;
+                case jitterprobe::JitterKind::Other: ++g_jitCensus.other; break;
+                default: ++g_jitCensus.flipped; break;
+            }
+        }
+        g_jitCensus.blocks += blocks;
+        ++g_jitCensus.frames;
+        const int64_t now = static_cast<int64_t>(GetTickCount64());
+        if (g_jitCensusTicks == 0) g_jitCensusTicks = now;
+        if (now - g_jitCensusTicks >= 30000) {
+            g_jitCensusTicks = now;
+            char line[700];
+            if (jitterprobe::formatJitterCensus(line, sizeof(line), g_jitCensus, 30) > 0 && g_jitCensus.blocks) Log::get().note("%s", line);
+            g_jitCensus = jitterprobe::JitterCensus();
+        }
+    }
     ++g_rowsFrame;
     g_rowsWritesSum += g_rowsWrites;
     ++g_rowsFramesSum;

@@ -9,8 +9,8 @@
 - **The five elements:** (1) the hologram over the landing pad; (2) the gantry railing while the pad moves; (3) the hologram adverts; (4) weapons fire;
   (5) the station "mail slot" force field. (The inspector's captures: cap1-2 railing, cap3 pad, cap4 force field, cap5 advert, cap6 weapons, cap7 another
   ship's engine flares.)
-- **Environment:** DLSS preset K, 2016x2017 in, 4032x4034 out per eye, Elite supersampling 1.0, native OpenXR runtime, Frontier. K ignores the reactive mask
-  (dlaa.cpp:711); what K honours is depth and motion, plus EDVR's post-DLSS UI resolve, which replaces covered pixels with the current raster.
+- **Environment:** DLSS preset K, 2016x2017 in, 4032x4034 out per eye, SS 1.0, native OpenXR, Frontier. K ignores the reactive mask (dlaa.cpp:711); it honours depth and
+  motion, plus EDVR's post-DLSS UI resolve, which replaces covered pixels with the current raster.
 - **Findings (PROVEN from the captures):**
   1. **The railing's 2 px "mismatch" was a tool bug, not a pass fault.** The decision texture's path 2 is the WORLD camera term (temporal_shader_source.h:910,
      `count15 ? 2 : 1`, count15 set only in the world branch), path 1 the head's. The inspector had them reversed, so a pixel that correctly took the world
@@ -42,7 +42,6 @@
   (own blend, the game's depth view tested, nothing written to the game's targets, state restored), per eye, found by the scene depth it tests against; the pass binds
   it at t5 and the game's HDR target at t16 (probe.w bit 32768). Census every 30 s: `effect history: last 30 s ...`. Inspector: `effect rule:` line,
   `HIDDEN(effect rule)`, magenta in path.png, CSV column `effect_hidden`. Tests: tools\effect_history_test (WARP, in build.bat).
-- **Build B captures:** boxes missed. Advert: no 4654/95D0 draw (pass live: 117 world markers/frame). Pad: 1C506222/2519C905 (additive, depth-only) a candidate, NOT listed. Railing: kind 4 on 256/256 and 183 px.
 - **Flat comparison (Sean, test build D, flat + DLAA native): pad holograms and railings are fine; both blur in VR (HMD Quality 0.5, 2016 -> 4032, K).**
   (2) The railing, from code: kind 4 = a marker whose depth is not the scene's. Flat's prep treats the same pixel differently (flat_mono_shader_source.h:142,
   flat_mono_resolve.cpp:972 "steady detail"): it REFUSES history unless last frame's depth confirms the camera term (`historyDepthMatches`, both directions, 1%).
@@ -52,13 +51,14 @@
 - **Kind-4 depth check (flat parity, NOT FLOWN):** a kind-4 pixel keeps its history only where last frame's depth at the camera term's position confirms the
   predicted depth within 1% (4 texels, either way); else hidden. Kinds 1, 2, 3, 5, 6 untouched. Expect on the railing: box stats `by the kind-4 depth check N` > 0,
   `HIDDEN(kind4 depth)`, orange in path.png; the 30 s `kind-4 depth check:` line tens of px per eye-frame with a moving pad, near none still (high on a still scene = refusing real surfaces).
-- **Open:** a pad-hologram capture that names its draws; an advert capture with the box on it; weapons fire, flares (option A, NOT FLOWN); the force field.
+- **Open (build B: boxes missed; advert: no 4654/95D0 draw; railing kind 4 on 256/256):** a pad-hologram capture naming its draws; an advert capture with the box on it; weapons fire, flares (option A, NOT FLOWN); the force field.
 - **Ruled out:** railing motion mismatch (tool label bug); the 2026-09-29 pad-into-layer rule (9122f31e); reactive bias or sharpening (docs/hologram-depth-2026-09-24.md);
   light-volume pairs as effects (finding 3); `B75A6FF2` as the pad hologram (4); FUN_14369C9C0 as the railing's writer (hooked, 0 calls since launch);
   B75A6FF2 as an effect-only pair (~7M px/draw, the sky; flight d3013197); 68DDDEF0 as a weapons-only pair (constant ~200k px/draw background particles; hiding them
   shimmered the stars, flight 40b6dbc0). Option A has no safe pair left.
-- **Cockpit rim (static outline crawls against a star, converges never):** ruled out: sun glare (persists with fix.sun_glare = off); upscale ratio (persists at HMD Quality
-  1.0); motion, 10 m split, kind-4, history reset (capture 04:54). Open: the jitter the rim is drawn with (journal 2026-10-15, jitter check). Next: a temporary jitter A/B key.
+- **Cockpit rim (static outline crawls against a star):** ruled out: sun glare; upscale ratio; motion, 10 m split, kind-4, history reset (capture 04:54). Open: the
+  jitter the rim is drawn with. BUILT on `claude/rim-jitter`, NOT FLOWN: inspector `jitter=`, camera blocks, 30 s `jitter census:`, and TEMPORARY key
+  `advanced.jitter_test = normal|off|flip_x|flip_y|flip_both` (default normal, live, VR only; remove when the arc closes). Flight plan: journal 2026-10-15, the discriminator.
 
 ## Triage
 
@@ -251,6 +251,35 @@ arrived (a menu, no VR), none was a candidate, or none reached the window.
   removes a jitter that was never there (a crawl of the jitter's amplitude, relative to the jittered star: the symptom); (2) the sign convention is wrong for the
   game's rows; (3) the input is LDR (hdr=0, pre-exposure 1.0, no exposure texture): a clipped star at 1.0 beside a dark rim does not conserve energy between phases.
   Discriminating A/B: jitter off (the edge should be perfectly still if (1) or (2)); then flip_y, flip_x, flip_both. Not built.
+
+- **2026-10-15, the jitter discriminator (`claude/rim-jitter`, BUILT, NOT FLOWN).** Instrument and A/B together, so one flight separates the three candidates.
+  *Instrument.* Per tested draw, the inspector copies the scene block bound at VS slot 1 (a constant buffer of 4432+ bytes: the depth encoding cb1[198] = (0,0,A,B) and the
+  eye view-projection rows cb1[270..273]) at the draw, reads both at the report, and decomposes the projection (P02, P12 from the rows, the view rotation taken as
+  orthonormal) against the frustum the pass advertised unjittered. Verdict per draw: `jitter=published` (the pass's pixel jitter this frame, within 0.05 px),
+  `none` (zero), `other(+x,+y px)`, `published(x flipped)` / `(y flipped)` / `(both flipped)` (the rows carry the published jitter with that sign reversed: the sign-convention
+  error), or `n/a` (no scene block, or P00/P11 do not match the advertised frustum, so no verdict is claimed). The draw line reads `role=... cam=#N jitter=... srv=[...]`; the CSV has
+  the columns `cam,jitter`. Report lines: `scene inspect jitter reference:` (the pass frame, published jitter and tangent shift, how many scene-block draws were judged, the key's mode) and one
+  `scene inspect camera block: #N buffer=0x... , D draws; jitter published K, none M; depth encoding A= B=` per distinct buffer (first eight), the busiest being #1. A block whose
+  depth encoding differs from #1's is named `a SEPARATE CAMERA (near/far)`: that is the cockpit's own camera block, if the shell reads it. The pass publishes the reference
+  lock-free (`jitter_reference.h`) and also classifies each observed scene-block write; every 30 s: `jitter census: last 30 s ...: N scene blocks written per frame, of which a carry the published
+  jitter, b none, c another shift, d a sign-flipped match`. Reading it: one block carrying the jitter and another carrying none, with the cockpit shell on the second, is candidate (1).
+  Caveats: the block is read at the draw, not at the bind; a game that updates a block in place after the draw is misjudged (the census sees writes, the inspector sees draws,
+  and they should agree); under `off` the published jitter is zero, so a block reads `published` and `none` alike.
+  *Temporary key `advanced.jitter_test` (edvr.ini [advanced]; native_temporal.cpp).* `normal` as shipped. `off`: no tangent shift is advertised, so the game's projection stops jittering, and DLSS
+  is handed zero. `flip_x`, `flip_y`, `flip_both`: the projection is shifted exactly as in `normal`, and the jitter DLSS (and the pass's own consumers) is told has that component reversed.
+  **The flips apply to the DLSS-told side only, not to both.** Reversing the jitter in the projection and in what DLSS is told together is the mirrored Halton sequence, which DLSS cannot tell from the
+  original, so it would test nothing; the only pairing the pass cannot prove offline is the sign DLSS is told against the rows the game builds (settled on tools\smoke's rig, never flown), and
+  a flip on the told side changes exactly that. The projection side is never flipped, so `jitter=` in the inspector keeps judging the shipped shift in every mode. Read live each frame; an unknown
+  word reads normal and the log says so once; a non-normal mode is logged once (`temporal aa: advanced.jitter_test (TEMPORARY A/B key) = ...`). VR only (the flat profile ignores it).
+  *Tests.* tools\scene_inspector_test: the decomposition on synthetic rows (published, none, other, each flip, an unusable frustum, the Pimax asymmetric frustum), the key's maths and names,
+  the draw line and CSV fields, the census line, and the device scenario S10 (scene-sized blocks at VS slot 1: published, a separate unjittered camera by depth encoding, another shift, no block).
+  *Flight plan.* Face the star with the rim still, in the same spot each time, for 10-15 s per mode, logging each; read `jitter census:` once per mode from the 30 s line.
+  (1) `normal`: confirm it crawls (the baseline). Press `hotkey.scene_inspect` on the rim with the box over it, once, and read the `jitter=` of the cockpit shell draws (BFE51414CC3024B4 /
+  EB5234DB; #6, #10, #11, #21 in the 04:54 capture) and the `camera block` lines: `jitter=none` on `cam=#2` with `a SEPARATE CAMERA` means the shell is drawn with a projection that carries no
+  jitter (candidate 1); `published` on every draw means it is not. (2) `off`: the edge should be perfectly still, but aliased. If it still crawls, the jitter is not the cause and candidate (3), the
+  LDR input (a clipped star at 1.0 beside a dark rim does not conserve energy between phases), is what is left. (3) `normal` again: crawls? (4) `flip_x`, `flip_y`, `flip_both`: does one converge (the
+  rim and the star both settle, with the edge sharper than in `normal`)? One that converges means the sign DLSS is told is wrong against the game's rows, and that flip is the fix, to ship as the
+  behaviour with the key removed. If none converges and `normal` crawls and `off` is still, the main camera and the shell disagree (candidate 1), and the draw lines say which block.
 
 - **2026-10-14 (from main, `claude/srv-split`): a sixth case, SRV driving.** ROOT CAUSE, fix BUILT, NOT FLOWN: terrain 5 to 8 m from an SRV took the head path because the
   ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV (docs/per-object-motion.md "The split in an SRV, 2026-10-14"). Not one of the five elements. The same

@@ -96,6 +96,9 @@ struct Cand {
     uint32_t clearEpoch = 0;       // the number of clears of its target seen before it
     const char* untested = "";     // why it was not measured, "" if it was queried
     bool neverDrawn = false;       // EDVR's verdict withholds the draw: it is not on screen, so it is out of every stack
+    int rowSlot = -1;              // its slot in the rows staging buffer (the scene block's depth row and view-projection rows at the draw), -1 when VS slot 1 held none
+    uint64_t cbAddr = 0;           // the scene block's buffer (a name)
+    uint32_t cbBytes = 0;
 };
 
 struct Target {
@@ -165,6 +168,15 @@ ID3D11DeviceContext* g_ctx = nullptr;   // AddRef'd while a query or a staging c
 bool g_queryFailed = false;
 HRESULT g_queryFailHr = S_OK;
 uint32_t g_faults = 0;
+// The jitter check: the scene block's depth row and view-projection rows at each tested draw, copied into one staging buffer a slot at a time and read at the report,
+// and the jitter the pass had published for the frame (read at the first draw and again when collecting ends).
+constexpr uint32_t kRowsSlotBytes = 16 + 64;   // cb1[198], then cb1[270..273]
+ID3D11Buffer* g_rowsStage = nullptr;
+uint32_t g_rowsStageCount = 0;
+JitterRef g_jitRef, g_jitRefEnd;
+bool g_jitRefHave = false, g_jitRefEndHave = false;
+std::vector<CamBlockInfo> g_camBlocks;
+uint32_t g_camJudged = 0, g_camScene = 0;
 
 std::map<std::string, ID3D11RasterizerState*> g_rsClones;
 std::map<std::string, ID3D11BlendState*> g_bsClones;
@@ -400,6 +412,7 @@ void drawImpl(ID3D11DeviceContext* ctx, const SceneDrawInfo& info, SceneReplayFn
     else ++c.eyeUnknown;
     if (eye == 1) return;   // the left eye is enough: the right eye's pass is the same draws
     g_seen.fetch_add(1, std::memory_order_relaxed);
+    if (!g_jitRefHave) g_jitRefHave = jitterRefRead(&g_jitRef);   // the jitter the pass published for the frame being drawn (its begin() ran before these draws)
     if (g_cands.size() >= kMaxDraws) {
         ++c.overCap;
         return;
@@ -580,6 +593,34 @@ void drawImpl(ID3D11DeviceContext* ctx, const SceneDrawInfo& info, SceneReplayFn
         copyText(row.srv, sizeof(row.srv), s.c_str());
     }
     fillRoutes(cand, info);
+    // The jitter check: the scene block this draw's vertex shader had at slot 1 (cb1), its depth row and its view-projection rows copied out now (the game rewrites
+    // the block between draws), judged at the report. A buffer smaller than a scene block, or none, leaves the draw unjudged (jitter=n/a).
+    if (devFl.get() && g_rowsStageCount < kMaxDraws) {
+        Com<ID3D11Buffer> sceneCb;
+        ctx->VSGetConstantBuffers(1, 1, sceneCb.put());
+        D3D11_BUFFER_DESC cbd{};
+        if (sceneCb.get()) sceneCb->GetDesc(&cbd);
+        if (sceneCb.get() && cbd.ByteWidth >= jitterprobe::kSceneBytesMin && cbd.ByteWidth <= jitterprobe::kSceneBytesMax) {
+            if (!g_rowsStage) {
+                D3D11_BUFFER_DESC stageDesc{};
+                stageDesc.ByteWidth = kMaxDraws * kRowsSlotBytes;
+                stageDesc.Usage = D3D11_USAGE_STAGING;
+                stageDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                if (FAILED(devFl->CreateBuffer(&stageDesc, nullptr, &g_rowsStage))) g_rowsStage = nullptr;
+            }
+            if (g_rowsStage) {
+                const UINT at = g_rowsStageCount * kRowsSlotBytes;
+                const D3D11_BOX depthRow = {jitterprobe::kDepthRow * 16u, 0, 0, jitterprobe::kDepthRow * 16u + 16u, 1, 1};
+                const D3D11_BOX vpRows = {jitterprobe::kVpRowsFirst * 16u, 0, 0, jitterprobe::kVpRowsFirst * 16u + 64u, 1, 1};
+                ctx->CopySubresourceRegion(g_rowsStage, 0, at, 0, 0, sceneCb.get(), 0, &depthRow);
+                ctx->CopySubresourceRegion(g_rowsStage, 0, at + 16u, 0, 0, sceneCb.get(), 0, &vpRows);
+                cand.rowSlot = static_cast<int>(g_rowsStageCount++);
+                cand.cbAddr = reinterpret_cast<uint64_t>(sceneCb.get());
+                cand.cbBytes = cbd.ByteWidth;
+                holdCtx(ctx);
+            }
+        }
+    }
     cand.fact.rt = row.rt;
     cand.fact.occluder = isOccluder(cand.cls, cand.depthWrite, bd);
     cand.fact.depthWrite = cand.depthWrite;
@@ -862,6 +903,14 @@ void releaseAll() {
     }
     g_cands.clear();
     g_cands.shrink_to_fit();
+    if (g_rowsStage) {
+        g_rowsStage->Release();
+        g_rowsStage = nullptr;
+    }
+    g_rowsStageCount = 0;
+    g_camBlocks.clear();
+    g_camJudged = g_camScene = 0;
+    g_jitRefHave = g_jitRefEndHave = false;
     g_targets.clear();
     g_clearAt.clear();
     g_clearRt.clear();
@@ -966,12 +1015,97 @@ bool writePng(const std::wstring& path, const uint8_t* rgb, uint32_t w, uint32_t
     return writeFile(path, png.data(), png.size());
 }
 
+// The jitter check: reads the rows staged at each draw, judges each draw's projection against the published jitter, groups the draws by scene buffer (block #1 is the
+// one most draws read), and fills every draw's `cam` and `jitter`. Run once at the start of the report; the staging copies finished long before (the queries answered).
+void analyseCameraBlocks() {
+    g_camBlocks.clear();
+    g_camJudged = g_camScene = 0;
+    for (Cand& cd : g_cands) {
+        copyText(cd.row.cam, sizeof(cd.row.cam), "-");
+        copyText(cd.row.jitter, sizeof(cd.row.jitter), "n/a");
+    }
+    if (!g_rowsStage || g_rowsStageCount == 0 || !g_ctx) return;
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(g_ctx->Map(g_rowsStage, 0, D3D11_MAP_READ, 0, &m)) || !m.pData) return;
+    const uint8_t* base = static_cast<const uint8_t*>(m.pData);
+    std::vector<uint64_t> addrs;
+    std::vector<size_t> blockOf(g_cands.size(), static_cast<size_t>(-1));
+    for (size_t i = 0; i < g_cands.size(); ++i) {
+        Cand& cd = g_cands[i];
+        if (cd.rowSlot < 0) continue;
+        ++g_camScene;
+        float f[20];
+        std::memcpy(f, base + static_cast<size_t>(cd.rowSlot) * kRowsSlotBytes, sizeof(f));
+        jitterprobe::JitterFacts jf;
+        if (g_jitRefHave) jf = jitterprobe::judgeEitherEye(jitterprobe::decomposeVp(f + 4), g_jitRef);
+        if (jf.kind != jitterprobe::JitterKind::NotAvailable) ++g_camJudged;
+        jitterprobe::jitterText(cd.row.jitter, sizeof(cd.row.jitter), jf);
+        size_t at = 0;
+        while (at < addrs.size() && addrs[at] != cd.cbAddr) ++at;
+        if (at == addrs.size()) {
+            addrs.push_back(cd.cbAddr);
+            CamBlockInfo b;
+            b.addr = cd.cbAddr;
+            b.bytes = cd.cbBytes;
+            b.a = f[2];
+            b.b = f[3];
+            g_camBlocks.push_back(b);
+        }
+        CamBlockInfo& b = g_camBlocks[at];
+        ++b.draws;
+        ++b.kinds[static_cast<size_t>(jf.kind)];
+        if (std::fabs(f[2] - b.a) > 1e-9f || std::fabs(f[3] - b.b) > 1e-6f * std::fabs(b.b)) b.abVaries = true;
+        blockOf[i] = at;
+    }
+    g_ctx->Unmap(g_rowsStage, 0);
+    // Ids by draws, the busiest first; a draw's cam names its block.
+    std::vector<size_t> order(g_camBlocks.size());
+    for (size_t k = 0; k < order.size(); ++k) order[k] = k;
+    std::stable_sort(order.begin(), order.end(), [](size_t a, size_t b) { return g_camBlocks[a].draws > g_camBlocks[b].draws; });
+    std::vector<uint32_t> idOf(g_camBlocks.size(), 0);
+    for (size_t rank = 0; rank < order.size(); ++rank) {
+        idOf[order[rank]] = static_cast<uint32_t>(rank + 1);
+        g_camBlocks[order[rank]].id = static_cast<uint32_t>(rank + 1);
+    }
+    for (size_t i = 0; i < g_cands.size(); ++i)
+        if (blockOf[i] != static_cast<size_t>(-1)) std::snprintf(g_cands[i].row.cam, sizeof(g_cands[i].row.cam), "#%u", idOf[blockOf[i]]);
+    std::sort(g_camBlocks.begin(), g_camBlocks.end(), [](const CamBlockInfo& a, const CamBlockInfo& b) { return a.id < b.id; });
+}
+
+// The camera-block section of the report: the reference, then one line per block (the first eight).
+void sayCameraBlocks() {
+    char line[kLineBuf];
+    if (g_jitRefHave) {
+        formatJitterReferenceLine(line, sizeof(line), g_jitRef, g_camJudged, g_camScene,
+                                  jitterprobe::jitterTestName(static_cast<jitterprobe::JitterTest>(g_jitRef.test <= 4u ? g_jitRef.test : 0u)));
+        say(line);
+        if (g_jitRefEndHave && g_jitRefEnd.frame != g_jitRef.frame) {
+            std::snprintf(line, sizeof(line), "scene inspect jitter reference: the pass published another frame (%llu) before the capture frame ended (%llu at its first draw): the first is the one used",
+                          static_cast<unsigned long long>(g_jitRefEnd.frame), static_cast<unsigned long long>(g_jitRef.frame));
+            say(line);
+        }
+    } else {
+        say("scene inspect jitter reference: the pass had published none (the VR temporal pass is not running), so no draw's projection is judged (jitter=n/a)");
+    }
+    const size_t shown = std::min<size_t>(g_camBlocks.size(), 8);
+    for (size_t i = 0; i < shown; ++i) {
+        formatCamBlockLine(line, sizeof(line), g_camBlocks[i], i ? &g_camBlocks[0] : nullptr);
+        say(line);
+    }
+    if (g_camBlocks.size() > shown) {
+        std::snprintf(line, sizeof(line), "scene inspect camera block: and %zu more", g_camBlocks.size() - shown);
+        say(line);
+    }
+    if (g_camBlocks.empty()) say("scene inspect camera block: none: no tested draw had a scene-sized constant buffer at VS slot 1");
+}
+
 void writeReport() {
     const uint32_t capId = g_capId;
     const std::string st = stamp();
     FrameCounts& c = g_counts;
     c.targets = static_cast<uint32_t>(g_targets.size());
     char line[kLineBuf];
+    analyseCameraBlocks();
 
     // Draws before the latest clear of their own target are not on screen: they are out of the stacks and the listing.
     std::vector<bool> cleared(g_cands.size(), false);
@@ -1211,6 +1345,8 @@ void writeReport() {
         if (status[i].status != Status::Buried || g_targets[g_cands[i].row.rt].role == Role::Intermediate) continue;
         if (formatOccludedLine(line, sizeof(line), g_cands[i].row, status[i].by) > 0) say(line);
     }
+
+    sayCameraBlocks();
 
     // The pixels, DLSS and the files.
     if (inputsRead) {
@@ -1507,6 +1643,7 @@ void sceneInspectFrameBoundary(uint32_t gameFrame) noexcept {
             say(line);
         } else if (p == kCollecting) {
             g_prodAtEnd = readProducers();
+            g_jitRefEndHave = jitterRefRead(&g_jitRefEnd);   // the jitter published as the frame ended: the same frame's, or the report says it moved
             g_phase.store(kReading, std::memory_order_release);
             g_readTicks = 0;
             if (g_ctx) g_ctx->Flush();

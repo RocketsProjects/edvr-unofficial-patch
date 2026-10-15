@@ -829,6 +829,155 @@ void testImages() {
     check(std::strlen(motionImageLegend()) > 10 && std::strlen(pathImageLegend()) > 10, "the image legends exist");
 }
 
+// ---- the jitter check ---------------------------------------------------------------------------------------------------------------------
+// The scene block's four view-projection rows (cb1[270..273]) for a camera with the given jittered tangents: row k (a world axis) holds that axis' clip x, y, z, w
+// coefficients, the translation row last (flat_mono_shader_source.h cameraBefore). R is the view rotation, row-major (view = R * world).
+void makeVpRows(float out[16], const float f[4], float dx, float dy, const float R[9]) {
+    const float l = f[0] + dx, r = f[1] + dx, d = f[2] + dy, u = f[3] + dy;
+    const float p00 = 2.0f / (r - l), p02 = (r + l) / (r - l), p11 = 2.0f / (u - d), p12 = (u + d) / (u - d);
+    for (int k = 0; k < 3; ++k) {
+        out[k * 4 + 0] = p00 * R[0 * 3 + k] + p02 * R[2 * 3 + k];
+        out[k * 4 + 1] = p11 * R[1 * 3 + k] + p12 * R[2 * 3 + k];
+        out[k * 4 + 2] = 0.025f * R[2 * 3 + k];
+        out[k * 4 + 3] = -R[2 * 3 + k];
+    }
+    out[12] = 0.1f; out[13] = -0.2f; out[14] = 0.3f; out[15] = 0.4f;   // the translation row: anything
+}
+void rotationYawPitch(float R[9], float yawDeg, float pitchDeg) {
+    const float y = yawDeg * 0.0174532925f, p = pitchDeg * 0.0174532925f;
+    const float cy = std::cos(y), sy = std::sin(y), cp = std::cos(p), sp = std::sin(p);
+    // view = Rp * Ry
+    const float Ry[9] = {cy, 0, sy, 0, 1, 0, -sy, 0, cy}, Rp[9] = {1, 0, 0, 0, cp, -sp, 0, sp, cp};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) R[i * 3 + j] = Rp[i * 3 + 0] * Ry[0 * 3 + j] + Rp[i * 3 + 1] * Ry[1 * 3 + j] + Rp[i * 3 + 2] * Ry[2 * 3 + j];
+}
+
+void testJitterProbe() {
+    namespace jp = edvr::jitterprobe;
+    // Frame 2785 of the 04:45 log: jitter (-0.25, +0.1667) px at 2016x2017, tangent shift (0.000264001, 0.000175997) for an eye with (r-l) = 2.129, (u-d) = 2.130.
+    const float f[4] = {-1.20f, 0.929f, -1.065f, 1.065f};   // asymmetric: the canted Pimax shape
+    const uint32_t w = 2016, h = 2017;
+    const float jx = -0.25f, jy = 0.1666667f;
+    const float dx = -jx * (f[1] - f[0]) / w, dy = jy * (f[3] - f[2]) / h;
+    check(std::fabs(dx - 0.000264001f) < 2e-6f && std::fabs(dy - 0.000176f) < 2e-6f, "the tangent shift of the logged frame: dx = -jx (r-l)/w, dy = jy (b-t)/h");
+    float R[9];
+    rotationYawPitch(R, 31.0f, -12.0f);
+    float rows[16];
+    makeVpRows(rows, f, dx, dy, R);
+    const jp::Decomposed d = jp::decomposeVp(rows);
+    check(d.ok && std::fabs(d.p00 - 2.0f / (f[1] - f[0])) < 1e-4f && std::fabs(d.p11 - 2.0f / (f[3] - f[2])) < 1e-4f, "the rows decompose to the frustum's scale, for a rotated camera");
+    const jp::JitterFacts pub = jp::judgeJitter(d, f, w, h, jx, jy);
+    check(pub.kind == jp::JitterKind::Published && std::fabs(pub.jx - jx) < 0.002f && std::fabs(pub.jy - jy) < 0.002f, "rows built with the published shift read as published (jx, jy recovered to a 500th of a pixel)");
+    // None: the same camera with no shift.
+    float none[16];
+    makeVpRows(none, f, 0, 0, R);
+    check(jp::judgeJitter(jp::decomposeVp(none), f, w, h, jx, jy).kind == jp::JitterKind::None, "rows with no shift read as none");
+    // Another shift, and each flip: the game's rows answering the tangent shift the other way would read as a flipped match.
+    float other[16];
+    makeVpRows(other, f, 3.0f * dx, -2.0f * dy, R);
+    const jp::JitterFacts oth = jp::judgeJitter(jp::decomposeVp(other), f, w, h, jx, jy);
+    check(oth.kind == jp::JitterKind::Other && std::fabs(oth.jx - 3.0f * jx) < 0.005f && std::fabs(oth.jy + 2.0f * jy) < 0.005f, "a different shift reads as other, with its pixels");
+    float fx[16], fy[16], fb[16];
+    makeVpRows(fx, f, -dx, dy, R);
+    makeVpRows(fy, f, dx, -dy, R);
+    makeVpRows(fb, f, -dx, -dy, R);
+    check(jp::judgeJitter(jp::decomposeVp(fx), f, w, h, jx, jy).kind == jp::JitterKind::PublishedXFlipped, "x reversed reads as published(x flipped)");
+    check(jp::judgeJitter(jp::decomposeVp(fy), f, w, h, jx, jy).kind == jp::JitterKind::PublishedYFlipped, "y reversed reads as published(y flipped)");
+    check(jp::judgeJitter(jp::decomposeVp(fb), f, w, h, jx, jy).kind == jp::JitterKind::PublishedBothFlipped, "both reversed reads as published(both flipped)");
+    // The tolerance: a fiftieth of a pixel.
+    float near1[16];
+    makeVpRows(near1, f, dx * 1.05f, dy, R);   // 5% of a quarter pixel = 0.0125 px off
+    check(jp::judgeJitter(jp::decomposeVp(near1), f, w, h, jx, jy).kind == jp::JitterKind::Published, "0.0125 px off still reads as published");
+    float far1[16];
+    makeVpRows(far1, f, dx * 1.2f, dy, R);     // 0.05 px off
+    check(jp::judgeJitter(jp::decomposeVp(far1), f, w, h, jx, jy).kind == jp::JitterKind::Other, "0.05 px off reads as other");
+    // Not a camera: rows with no orthonormal view part, and a block whose scale is not the advertised frustum's.
+    float junk[16] = {};
+    junk[0] = 5.0f;
+    check(!jp::decomposeVp(junk).ok && jp::judgeJitter(jp::decomposeVp(junk), f, w, h, jx, jy).kind == jp::JitterKind::NotAvailable, "rows that are not a camera's are n/a");
+    const float wrong[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
+    check(jp::judgeJitter(d, wrong, w, h, jx, jy).kind == jp::JitterKind::NotAvailable, "rows of another frustum (P00 off by more than 5%) are n/a, not 'other'");
+    float nan[16];
+    std::memcpy(nan, rows, sizeof(nan));
+    nan[5] = NAN;
+    check(!jp::decomposeVp(nan).ok, "a NaN row is not a camera");
+    char t[64];
+    jp::jitterText(t, sizeof(t), oth);
+    check(std::strcmp(t, "other(-0.750,-0.333 px)") == 0, "the text of an 'other' verdict carries the pixels");
+    jp::jitterText(t, sizeof(t), pub);
+    check(std::strcmp(t, "published") == 0, "the text of a published verdict");
+    jp::JitterFacts na;
+    jp::jitterText(t, sizeof(t), na);
+    check(std::strcmp(t, "n/a") == 0, "and of an unjudged draw");
+    // Either eye: the block belongs to eye 1 (the mirrored frustum).
+    edvr::JitterRef ref;
+    ref.known = true;
+    ref.frame = 2785;
+    ref.jx = jx;
+    ref.jy = jy;
+    const float f1[4] = {-0.929f, 1.20f, -1.065f, 1.065f};
+    std::memcpy(ref.frusta[0], f, sizeof(f));
+    std::memcpy(ref.frusta[1], f1, sizeof(f1));
+    ref.width[0] = ref.width[1] = w;
+    ref.height[0] = ref.height[1] = h;
+    float rows1[16];
+    makeVpRows(rows1, f1, -jx * (f1[1] - f1[0]) / w, jy * (f1[3] - f1[2]) / h, R);
+    check(jp::judgeEitherEye(jp::decomposeVp(rows1), ref).kind == jp::JitterKind::Published, "a block of eye 1's frustum is judged against eye 1");
+    check(jp::judgeEitherEye(jp::decomposeVp(rows), ref).kind == jp::JitterKind::Published, "and eye 0's against eye 0");
+    // The published reference round-trips through the lock-free record.
+    edvr::jitterRefPublish(ref);
+    edvr::JitterRef back;
+    check(edvr::jitterRefRead(&back) && back.frame == 2785 && back.jx == jx && back.jy == jy && back.width[1] == w && back.height[0] == h && back.frusta[1][0] == f1[0],
+          "the jitter reference round-trips through its seqlock record");
+    // The census line.
+    jp::JitterCensus c;
+    c.frames = 2700;
+    c.blocks = 8100;
+    c.published = 2700;
+    c.none = 5400;
+    c.writes = 300000;
+    char line[700];
+    const int n = jp::formatJitterCensus(line, sizeof(line), c, 30);
+    check(n > 0 && n < 700 && has(line, "jitter census: last 30 s, 2700 frames: 3.00 scene blocks written per frame") && has(line, "of which 1.00 carry the published jitter, 2.00 none") &&
+              has(line, "111.1 block writes per frame"),
+          "the census line: blocks per frame, how many carry the jitter");
+    // The temporary key.
+    bool known = false;
+    check(jp::parseJitterTest("normal", &known) == jp::JitterTest::Normal && known && jp::parseJitterTest("", &known) == jp::JitterTest::Normal && known, "advanced.jitter_test: normal and empty");
+    check(jp::parseJitterTest("OFF") == jp::JitterTest::Off && jp::parseJitterTest("flip_x") == jp::JitterTest::FlipX && jp::parseJitterTest("Flip_Y") == jp::JitterTest::FlipY &&
+              jp::parseJitterTest("flip_both") == jp::JitterTest::FlipBoth, "...off and each flip, in any case");
+    check(jp::parseJitterTest("sideways", &known) == jp::JitterTest::Normal && !known, "...and an unknown word reads normal, said unknown");
+    const jp::JitterTestEffect ne = jp::jitterTestEffect(jp::JitterTest::Normal), oe = jp::jitterTestEffect(jp::JitterTest::Off), xe = jp::jitterTestEffect(jp::JitterTest::FlipX),
+                               ye = jp::jitterTestEffect(jp::JitterTest::FlipY), be = jp::jitterTestEffect(jp::JitterTest::FlipBoth);
+    check(ne.jitter && ne.signX == 1 && ne.signY == 1, "normal: jitter on, signs as is (the shipped values)");
+    check(!oe.jitter, "off: no jitter at all (nothing advertised, DLSS told zero)");
+    check(xe.jitter && xe.signX == -1 && xe.signY == 1 && ye.jitter && ye.signX == 1 && ye.signY == -1 && be.jitter && be.signX == -1 && be.signY == -1, "each flip reverses its component only, on what DLSS is told");
+    check(std::strcmp(jp::jitterTestName(jp::JitterTest::FlipBoth), "flip_both") == 0 && std::strcmp(jp::jitterTestName(jp::JitterTest::Off), "off") == 0, "the names round-trip");
+    // The draw line and the camera-block lines.
+    DrawRow row;
+    std::snprintf(row.cam, sizeof(row.cam), "#2");
+    std::snprintf(row.jitter, sizeof(row.jitter), "other(+0.311,-0.123 px)");
+    char dl[kLineBuf];
+    const int dn = formatDrawLine(dl, sizeof(dl), row);
+    check(dn > 0 && static_cast<size_t>(dn) < kLineMax && has(dl, "role=") && has(dl, " cam=#2 jitter=other(+0.311,-0.123 px) srv=["), "the draw line carries cam= and jitter= before srv=");
+    DrawRow bare;
+    formatDrawLine(dl, sizeof(dl), bare);
+    check(has(dl, " cam=- jitter=n/a srv=["), "a draw with no scene block reads cam=- jitter=n/a");
+    const std::string hdr = drawsCsvHeader(), crow = drawsCsvRow(1, row, -1, VerdictOut());
+    check(has(hdr.c_str(), "target_role,cam,jitter,srv") && has(crow.c_str(), "#2,\"other(+0.311,-0.123 px)\","), "the draws CSV carries both columns");
+    CamBlockInfo b1, b2;
+    b1.id = 1; b1.addr = 0xABC; b1.bytes = 4480; b1.draws = 187; b1.kinds[static_cast<size_t>(jp::JitterKind::Published)] = 187; b1.a = 0.0f; b1.b = 0.025f;
+    b2.id = 2; b2.addr = 0xDEF; b2.bytes = 4480; b2.draws = 12; b2.kinds[static_cast<size_t>(jp::JitterKind::None)] = 12; b2.a = 0.0f; b2.b = 0.1f;
+    char bl[kLineBuf];
+    check(formatCamBlockLine(bl, sizeof(bl), b1, nullptr) > 0 && has(bl, "scene inspect camera block: #1 buffer=0xABC 4480 bytes, 187 draws; jitter published 187; depth encoding A=0 B=0.025") && !has(bl, "SEPARATE"),
+          "the main block's line");
+    check(formatCamBlockLine(bl, sizeof(bl), b2, &b1) > 0 && has(bl, "jitter none 12") && has(bl, "a SEPARATE CAMERA (near/far): its depth encoding differs from #1's (A=0 B=0.025)"), "a block with another depth encoding is named a separate camera");
+    b2.b = 0.025f;
+    check(formatCamBlockLine(bl, sizeof(bl), b2, &b1) > 0 && has(bl, "a separate buffer with the same depth encoding as #1's"), "...and a separate buffer with the same encoding says only that");
+    check(formatJitterReferenceLine(bl, sizeof(bl), ref, 41, 187, "flip_y") > 0 && has(bl, "pass frame 2785, published jitter (-0.2500, +0.1667) px") && has(bl, "41 of 187 scene-block draws judged; advanced.jitter_test=flip_y"),
+          "the reference line");
+}
+
 void testKind4Reading() {
     // A pixel the stale-marker depth check hid (decision value 65536, with the hidden bit 16): the flag, the stats, the pixel line, the CSV, the image colour.
     const DecisionFlags f = edvr::blend::decodeFlags(static_cast<float>(65536u + 16u + 2u + (4u << 12)));
@@ -854,6 +1003,7 @@ void testKind4Reading() {
 }
 
 void testAim() {
+    testJitterProbe();
     testKind4Reading();
     char b[kLineBuf];
     int n = formatAimLine(b, sizeof(b), 3000, 48, true);
@@ -1228,7 +1378,8 @@ std::vector<DrawSpec> runSpecs() {
 }
 
 // Runs the six draws; with the module armed, offers each one first. Returns the draws' count and records S1 on the way.
-std::string drawRun(Rig& r, bool offer, unsigned* snapshotsTaken, int scissor = 0) {
+// `hook`, when given, runs before each draw is offered (the jitter scenarios bind another scene block part way through the frame).
+std::string drawRun(Rig& r, bool offer, unsigned* snapshotsTaken, int scissor = 0, void (*hook)(Rig&, size_t) = nullptr) {
     std::string diffs;
     beginFrame(r, scissor ? 1 : 0);
     if (offer) {
@@ -1238,6 +1389,7 @@ std::string drawRun(Rig& r, bool offer, unsigned* snapshotsTaken, int scissor = 
     const std::vector<DrawSpec> specs = runSpecs();
     for (size_t i = 0; i < specs.size(); ++i) {
         setSpec(r, specs[i]);
+        if (hook) hook(r, i);
         if (offer) {
             Snapshot before, after;
             takeSnapshot(r.g.ctx.Get(), &before);
@@ -1394,8 +1546,43 @@ struct Capture {
     unsigned snapshots = 0;
 };
 
+// The jitter scenarios' scene blocks (a constant buffer of scene size at VS slot 1: the depth row at float 792, the view-projection rows at float 1080) and the hooks that
+// bind them part way through the frame.
+ComPtr<ID3D11Buffer> g_sceneA, g_sceneB, g_sceneC;
+ComPtr<ID3D11Buffer> makeSceneBlock(Rig& r, float dx, float dy, float depthB) {
+    std::vector<float> data(1120, 0.0f);   // 4480 bytes
+    const float f[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
+    float R[9];
+    rotationYawPitch(R, 10.0f, 5.0f);
+    data[792 + 3] = depthB;
+    makeVpRows(&data[1080], f, dx, dy, R);
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = static_cast<UINT>(data.size() * sizeof(float));
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA init{data.data(), 0, 0};
+    ComPtr<ID3D11Buffer> b;
+    hr(r.g.dev->CreateBuffer(&bd, &init, b.GetAddressOf()));
+    return b;
+}
+void bindSceneA(Rig& r, size_t) {
+    ID3D11Buffer* b = g_sceneA.Get();
+    r.g.ctx->VSSetConstantBuffers(1, 1, &b);
+}
+void bindSceneC(Rig& r, size_t) {
+    ID3D11Buffer* b = g_sceneC.Get();
+    r.g.ctx->VSSetConstantBuffers(1, 1, &b);
+}
+void bindSceneAThenB(Rig& r, size_t i) {
+    ID3D11Buffer* b = i < 4 ? g_sceneA.Get() : g_sceneB.Get();
+    r.g.ctx->VSSetConstantBuffers(1, 1, &b);
+}
+void bindSceneNone(Rig& r, size_t) {
+    ID3D11Buffer* b = nullptr;
+    r.g.ctx->VSSetConstantBuffers(1, 1, &b);
+}
+
 // One whole capture: press, boundary, the draws (offered), the pass's offers, boundaries until the report.
-Capture capture(Rig& r, Synth* synth, uint32_t* frame, bool offerInputs = true) {
+Capture capture(Rig& r, Synth* synth, uint32_t* frame, bool offerInputs = true, void (*hook)(Rig&, size_t) = nullptr) {
     Capture c;
     c.logFrom = edvr::g_lines.size();
     edvr::sceneInspectRequest("rig");
@@ -1403,7 +1590,7 @@ Capture capture(Rig& r, Synth* synth, uint32_t* frame, bool offerInputs = true) 
     check(edvr::sceneInspectWantsDraws(), "after the boundary the module is collecting");
     // The pass runs after the draws; an offer before any draw is the previous frame's and is not taken.
     check(!edvr::sceneInspectInputsWanted(), "no inputs are wanted before a draw of the captured frame has been seen");
-    c.diffs = drawRun(r, true, &c.snapshots);
+    c.diffs = drawRun(r, true, &c.snapshots, 0, hook);
     if (synth && offerInputs) {
         check(edvr::sceneInspectInputsWanted(), "after the frame's draws the pass's inputs are wanted");
         edvr::sceneInspectInputsOffer(r.g.ctx.Get(), synth->in);
@@ -1766,6 +1953,78 @@ void runDevice() {
         check(has(lineWith(from2, "scene inspect box stats:"), "2304 pixels read"), "S9: all 2304 box pixels read");
         g_reticle.available = false;
         edvr::sceneInspectSetBoxSideForTest(16);
+    }
+
+    // ---- S10: the jitter check: each draw's projection read at the draw, judged against the published jitter, the blocks named ----------------------------------
+    {
+        namespace jp = edvr::jitterprobe;
+        edvr::sceneInspectSetBoxSideForTest(16);
+        g_reticle.available = false;
+        const float f[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
+        const float jx = -0.25f, jy = 0.1666667f;
+        edvr::JitterRef ref;
+        ref.known = true;
+        ref.frame = 77;
+        ref.jx = jx;
+        ref.jy = jy;
+        for (int e = 0; e < 2; ++e) {
+            std::memcpy(ref.frusta[e], f, sizeof(f));
+            ref.width[e] = ref.height[e] = kSize;
+            ref.shift[e][0] = -jx * 2.0f / kSize;
+            ref.shift[e][1] = jy * 2.0f / kSize;
+        }
+        edvr::jitterRefPublish(ref);
+        const float dx = ref.shift[0][0], dy = ref.shift[0][1];
+        g_sceneA = makeSceneBlock(r, dx, dy, 0.025f);          // carries the published shift
+        g_sceneB = makeSceneBlock(r, 0.0f, 0.0f, 0.1f);        // carries none, and another depth encoding: a separate near/far camera
+        g_sceneC = makeSceneBlock(r, 3.0f * dx, -2.0f * dy, 0.025f);   // another shift
+        Synth sj;
+        makeSynth(r, sj, 1.6f, 1.6f);
+        // 1: every draw reads block A.
+        Capture a = capture(r, &sj, &frame, true, &bindSceneA);
+        const std::string a2 = lineWith(a.logFrom, "scene inspect draw: #2 ");
+        check(has(a2, " cam=#1 jitter=published srv=["), "S10: a draw reading the block that carries the published shift reads jitter=published, cam=#1");
+        check(has(lineWith(a.logFrom, "scene inspect camera block: #1"), "7 draws; jitter published 7; depth encoding A=0 B=0.025"), "S10: the block line: one block, seven draws, all published, its depth encoding");
+        check(lineWith(a.logFrom, "scene inspect camera block: #2").empty(), "S10: and no second block");
+        check(has(lineWith(a.logFrom, "scene inspect jitter reference:"), "pass frame 77, published jitter (-0.2500, +0.1667) px") && has(lineWith(a.logFrom, "scene inspect jitter reference:"), "7 of 7 scene-block draws judged"),
+              "S10: the reference line, and every draw judged");
+        check(!lineWith(a.logFrom, "scene inspect: complete cap=").empty() && a.diffs.empty(), "S10: the capture completes and the staging copies moved no state");
+        // 2: a separate camera part way through the frame.
+        Capture m = capture(r, &sj, &frame, true, &bindSceneAThenB);
+        check(has(lineWith(m.logFrom, "scene inspect camera block: #1"), "4 draws; jitter published 4"), "S10: block #1 is the buffer most draws read (four, published)");
+        const std::string mb = lineWith(m.logFrom, "scene inspect camera block: #2");
+        check(has(mb, "3 draws; jitter none 3") && has(mb, "depth encoding A=0 B=0.1") && has(mb, "a SEPARATE CAMERA (near/far): its depth encoding differs from #1's (A=0 B=0.025)"),
+              "S10: the other buffer is #2: three draws that carry no jitter, named a separate camera by its depth encoding");
+        check(has(lineWith(m.logFrom, "scene inspect draw: #6 "), " cam=#2 jitter=none srv=["), "S10: a draw that read the separate block says cam=#2 jitter=none");
+        check(has(lineWith(m.logFrom, "scene inspect draw: #2 "), " cam=#1 jitter=published srv=["), "S10: and one that read the main block says cam=#1 jitter=published");
+        // 3: another shift.
+        Capture o = capture(r, &sj, &frame, true, &bindSceneC);
+        check(has(lineWith(o.logFrom, "scene inspect draw: #2 "), " jitter=other(-0.750,-0.333 px) srv=["), "S10: a block with another shift reads other(+-pixels): three times x, minus twice y");
+        // 4: no scene block at slot 1.
+        Capture n = capture(r, &sj, &frame, true, &bindSceneNone);
+        check(has(lineWith(n.logFrom, "scene inspect draw: #2 "), " cam=- jitter=n/a srv=["), "S10: no scene block at VS slot 1: cam=- jitter=n/a");
+        check(has(lineWith(n.logFrom, "scene inspect camera block: none"), "no tested draw had a scene-sized constant buffer at VS slot 1"), "S10: and the report says there were no blocks, not nothing");
+        // 5: the draws CSV carries the columns.
+        {
+            const std::string filesLine = lineWith(a.logFrom, "scene inspect files:");
+            const size_t at = filesLine.find("draws_csv=");
+            check(at != std::string::npos, "S10: the files line names the draws CSV");
+            const std::string name = filesLine.substr(at + 10, filesLine.find(' ', at) - at - 10);
+            FILE* fcsv = _wfopen((g_logDir + L"\\" + std::wstring(name.begin(), name.end())).c_str(), L"rb");
+            std::string text;
+            if (fcsv) {
+                char buf[4096];
+                size_t got;
+                while ((got = std::fread(buf, 1, sizeof(buf), fcsv)) > 0) text.append(buf, got);
+                std::fclose(fcsv);
+            }
+            check(has(text, "target_role,cam,jitter,srv") && has(text, ",#1,published,"), "S10: the draws CSV has the cam and jitter columns, filled");
+        }
+        ID3D11Buffer* none = nullptr;
+        r.g.ctx->VSSetConstantBuffers(1, 1, &none);
+        g_sceneA.Reset();
+        g_sceneB.Reset();
+        g_sceneC.Reset();
     }
 
     // Cost: what an idle session pays, per call. The figures are printed (docs\scene-inspector-2026-10-14.md quotes them); the bound is loose, so only an
