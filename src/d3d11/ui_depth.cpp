@@ -2732,9 +2732,10 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
         // The cockpit panels with Disable GUI effects on (holo_material.h) have NO stand-in, on purpose: the UI layer takes them out of the
         // scene instead (docs/ui-layer-2026-09-23.md, 2026-10-01), and a line that says "still swims" for a pair the layer took would send the
         // next reader after a fault that is not there. With fix.ui_quality off they are left alone, and do swim.
-        noteFamily(h, ph, h == kHoloGuiFxOffVs
-                              ? "the cockpit holo panel with Disable GUI effects on: no depth stand-in (its output "
-                                "signature is not the stand-in's input); the UI layer takes it out of the scene, and "
+        // ...and the third panel vertex shader (kHoloPanelAltVs, build 332841, issue 90) is in the same position: the layer takes it, and it has no stand-in.
+        noteFamily(h, ph, h == kHoloGuiFxOffVs || h == kHoloPanelAltVs
+                              ? "a cockpit holo panel (Disable GUI effects on, or build 332841's third panel shader): no depth stand-in (its "
+                                "output signature is not the stand-in's input); the UI layer takes it out of the scene, and "
                                 "with fix.ui_quality off it is left alone and still swims"
                               : "samples a learned surface but has no depth shader of "
                                 "its own yet, and none of this build's stands in; "

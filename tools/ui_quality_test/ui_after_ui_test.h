@@ -707,7 +707,22 @@ void testGuiFxOffCockpit() {
         check(left == 24 && !r.eye[0].hdrTaken && !r.eye[1].hdrTaken,
               "control: a vertex shader the rule does not name leaves all 24 draws in the game's frame (the teeth)");
     }
-    check(counted == 72, "(the three taken frames counted 24 each)");
+    // Issue 90 (Tomcatt, game build 332841): the panels are drawn with a THIRD vertex shader, vs 925ACEDA0153AA5B (ps 738A98ED038E58B7 stock,
+    // 9BBEB813F471B4E3 under EDHM), 22-25 draws a frame in the lit HDR target and left in the scene as "no family" until the game switched to
+    // 1989E6D3. Through the same recorded structure it is taken like the others, whichever pixel shader it draws with.
+    check(kUiVsHoloAlt == 0x925ACEDA0153AA5Bull, "issue 90: the third panel vertex shader is the logged one");
+    check(takenCount(guiFxOffFrame(kUiVsHoloAlt, 0x738A98ED038E58B7ull), nullptr) == 24 &&
+              takenCount(guiFxOffFrame(kUiVsHoloAlt, 0x9BBEB813F471B4E3ull), nullptr) == 24,
+          "issue 90: vs 925ACEDA0153AA5B is the cockpit holo panels: all 24 recorded draws are taken into the HDR layer with the stock or the EDHM pixel shader");
+    {
+        Router r;
+        const std::vector<Verdict> v = route(guiFxOffFrame(kUiVsHoloAlt ^ 1ull, 0x738A98ED038E58B7ull), true, &r);
+        unsigned left = 0;
+        for (Verdict x : v) left += x == Verdict::kLeftFrame ? 1u : 0u;
+        check(left == 24 && !r.eye[0].hdrTaken && !r.eye[1].hdrTaken,
+              "issue 90 control: a vertex shader one bit from 925ACEDA leaves all 24 draws in the game's frame");
+    }
+    check(counted == 120, "(the five taken frames counted 24 each)");
 }
 
 // --------------------------------------------------------- 5. the wiring

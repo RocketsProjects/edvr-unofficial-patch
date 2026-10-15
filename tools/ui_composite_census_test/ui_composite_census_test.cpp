@@ -59,6 +59,8 @@ void check(bool ok, const char* label) {
 // The pair the disassembly named (docs\ui-layer-2026-09-23.md, 2026-10-01) and the stock pair it replaces.
 constexpr uint64_t kGuiFxVs = 0x1989E6D3B405FDE0ull, kGuiFxPs = 0xEAB8A1C95A13FFBEull;
 constexpr uint64_t kStockVs = 0x81216C77F90DEDD6ull, kStockPs = 0xA2965EC2931A39C8ull;
+// The third panel vertex shader (issue 90, game build 332841; edvr_gfx_20261014_224826 / _225842): 22-25 composite draws a frame as "no family".
+constexpr uint64_t kAltVs = 0x925ACEDA0153AA5Bull, kAltPs = 0x738A98ED038E58B7ull, kAltEdhmPs = 0x9BBEB813F471B4E3ull;
 // The null-output quad (Frontier shader dump of 2026-09-06: vs_B018D143700AB803.dxbc a position-only mesh vertex shader, ps_258B95AC99520C1F.dxbc `mov o0.xyzw, l(0,0,0,0)` with
 // no input): the pair the 15:09 flight's census named as a composite left in the scene (log edvr_gfx_20261001_150919.log, 2.00 draws a frame on the loading screen).
 constexpr uint64_t kNullVs = 0xB018D143700AB803ull, kNullPs = 0x258B95AC99520C1Full;
@@ -78,10 +80,13 @@ void caseR1() {
     why = UiFamilyWhy::kOther;
     check(uiLayerFamilyFor(hdr(kGuiFxVs), &why) == UiLayerFamily::kHolo && why == UiFamilyWhy::kDirect,
           "R1b: the vertex shader of Disable GUI effects names the cockpit holo panels on the lit HDR target, a direct shader, exactly as the stock one does");
+    why = UiFamilyWhy::kOther;
+    check(uiLayerFamilyFor(hdr(kAltVs), &why) == UiLayerFamily::kHolo && why == UiFamilyWhy::kDirect,
+          "R1b2: vs 925ACEDA0153AA5B (issue 90, build 332841) names the cockpit holo panels on the lit HDR target, a direct shader, as the other two do");
     UiFamilyFacts ldr;
     ldr.targetKind = 2;           // the post-tonemap eye target
     ldr.learnedSurface = true;
-    for (uint64_t vs : {kStockVs, kGuiFxVs}) {
+    for (uint64_t vs : {kStockVs, kGuiFxVs, kAltVs}) {
         ldr.vs = vs;
         why = UiFamilyWhy::kOther;
         check(uiLayerFamilyFor(ldr, &why) == UiLayerFamily::kHolo && why == UiFamilyWhy::kLearnedSurface,
@@ -89,13 +94,13 @@ void caseR1() {
     }
     // A vertex shader one bit from either names nothing on the HDR target (the rule is an exact compare), and so does zero.
     bool nothing = true;
-    for (uint64_t vs : {kGuiFxVs ^ 1ull, kStockVs ^ 1ull, kGuiFxVs ^ 0x8000000000000000ull, kStockVs ^ 0x100ull, kGuiFxPs, kStockPs, 0ull}) {
+    for (uint64_t vs : {kGuiFxVs ^ 1ull, kStockVs ^ 1ull, kGuiFxVs ^ 0x8000000000000000ull, kStockVs ^ 0x100ull, kAltVs ^ 1ull, kAltPs, kAltEdhmPs, kGuiFxPs, kStockPs, 0ull}) {
         why = UiFamilyWhy::kOther;
         nothing = nothing && uiLayerFamilyFor(hdr(vs), &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap;
     }
     check(nothing, "R1d: a vertex shader one bit away from either, a pixel shader's hash, and zero name nothing on the HDR target");
     // Not an eye target: no family, whatever the shaders say.
-    for (uint64_t vs : {kStockVs, kGuiFxVs}) {
+    for (uint64_t vs : {kStockVs, kGuiFxVs, kAltVs}) {
         UiFamilyFacts f = hdr(vs);
         f.targetKind = 0;
         why = UiFamilyWhy::kOther;
@@ -104,9 +109,12 @@ void caseR1() {
     }
     check(kHoloGuiFxOffVs == kGuiFxVs && kHoloGuiFxOffPs == kGuiFxPs && kUiVsHoloGuiFxOff == kGuiFxVs && kUiVsHolo == kStockVs,
           "R1f: the hashes are the disassembled ones: vs 1989E6D3B405FDE0 / ps EAB8A1C95A13FFBE with the setting on, vs 81216C77F90DEDD6 without");
-    check(uiVsIsHoloPanel(kStockVs) && uiVsIsHoloPanel(kGuiFxVs) && !uiVsIsHoloPanel(kUiVsFlightHud) && !uiVsIsHoloPanel(kUiVsSprite) &&
-              !uiVsIsHoloPanel(kUiVsPanel) && !uiVsIsHoloPanel(0) && !uiVsIsHoloPanel(kGuiFxPs),
-          "R1g: uiVsIsHoloPanel is true for exactly the two holo-panel vertex shaders");
+    check(kHoloPanelAltVs == kAltVs && kUiVsHoloAlt == kAltVs,
+          "R1f2: the third panel vertex shader's hash is the logged one: vs 925ACEDA0153AA5B");
+    check(uiVsIsHoloPanel(kStockVs) && uiVsIsHoloPanel(kGuiFxVs) && uiVsIsHoloPanel(kAltVs) && !uiVsIsHoloPanel(kUiVsFlightHud) &&
+              !uiVsIsHoloPanel(kUiVsSprite) && !uiVsIsHoloPanel(kUiVsPanel) && !uiVsIsHoloPanel(0) && !uiVsIsHoloPanel(kGuiFxPs) &&
+              !uiVsIsHoloPanel(kAltPs) && !uiVsIsHoloPanel(kAltEdhmPs) && !uiVsIsHoloPanel(kAltVs ^ 1ull),
+          "R1g: uiVsIsHoloPanel is true for exactly the three holo-panel vertex shaders");
     check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kHolo), "cockpit holo panels") == 0,
           "R1h: the family's census name is unchanged: the 30 s lines and the reader name it \"cockpit holo panels\"");
     UiFamilyWhy wh = UiFamilyWhy::kOther;
@@ -636,7 +644,7 @@ void pins() {
     const std::string rule = functionBody(math, "inline UiLayerFamily uiLayerFamilyFor(");
     const auto rulePlaces = [](const std::string& body, const std::string& whole) {
         return countOf(body, "uiVsIsHoloPanel(f.vs)?UiLayerFamily::kHolo") == 2 && countOf(whole, "f.vs==kUiVsHolo") == 0 &&
-               has(whole, "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff; }");
+               has(whole, "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff || vs == kUiVsHoloAlt; }");
     };
     const std::string mathAll = squeeze(math);
     check(!rule.empty() && rulePlaces(rule, mathAll),
@@ -648,7 +656,7 @@ void pins() {
         if (a != std::string::npos) noHdr.replace(a, squeeze(one).size(), "f.vs==kUiVsHolo?UiLayerFamily::kHolo");
         const size_t b = noLdr.rfind(squeeze(one));
         if (b != std::string::npos) noLdr.replace(b, squeeze(one).size(), "f.vs==kUiVsHolo?UiLayerFamily::kHolo");
-        stockOnly = edited(mathAll, "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff; }",
+        stockOnly = edited(mathAll, "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff || vs == kUiVsHoloAlt; }",
                            "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo; }");
         check(!rulePlaces(noHdr, noHdr) && !rulePlaces(noLdr, noLdr) && !rulePlaces(rule, stockOnly),
               "P1 control: with the HDR branch, the post-tonemap branch or the predicate naming only the stock panels, the pin fails");
@@ -686,8 +694,10 @@ void pins() {
     const std::string familyList = functionBody(depth, "uint32_t holoBuildFamilyList(");
     const auto depthLeftOut = [](const std::string& all, const std::string& table, const std::string& list) {
         return !table.empty() && !list.empty() && countOf(all, "kHoloGuiFxOffVs") == 1 && countOf(all, "kHoloGuiFxOffPs") == 0 &&
-               has(all, "noteFamily(h, ph, h == kHoloGuiFxOffVs ?") && countOf(all, "0x1989E6D3B405FDE0") == 0 && countOf(all, "0xEAB8A1C95A13FFBE") == 0 &&
-               table.find("kHoloGuiFxOff") == std::string::npos && list.find("kHoloGuiFxOff") == std::string::npos;
+               has(all, "noteFamily(h, ph, h == kHoloGuiFxOffVs || h == kHoloPanelAltVs ?") && countOf(all, "kHoloPanelAltVs") == 1 &&
+               countOf(all, "0x1989E6D3B405FDE0") == 0 && countOf(all, "0xEAB8A1C95A13FFBE") == 0 && countOf(all, "0x925ACEDA0153AA5B") == 0 &&
+               table.find("kHoloGuiFxOff") == std::string::npos && list.find("kHoloGuiFxOff") == std::string::npos &&
+               table.find("kHoloPanelAltVs") == std::string::npos && list.find("kHoloPanelAltVs") == std::string::npos;
     };
     check(depthLeftOut(depthAll, standIns, familyList),
           "P2b: ui_depth.cpp names the Disable-GUI-effects vertex shader once, in its family note, and neither shader in the stand-in table or the hologram-depth family list: "
@@ -700,8 +710,13 @@ void pins() {
         inList.insert(inList.size() - 1, "out[count++]=kHoloGuiFxOffVs;");   // before the function's closing brace
         ps += "kHoloGuiFxOffPs";
         twice += "kHoloGuiFxOffVs";
+        std::string altTable = standIns, altList = familyList, altTwice = depthAll;
+        altTable.insert(altTable.size() - 2, "kHoloPanelAltVs");
+        altList.insert(altList.size() - 1, "out[count++]=kHoloPanelAltVs;");
+        altTwice += "kHoloPanelAltVs";
         check(!depthLeftOut(depthAll, inTable, familyList) && !depthLeftOut(depthAll, standIns, inList) && !depthLeftOut(ps, standIns, familyList) &&
-                  !depthLeftOut(twice, standIns, familyList),
+                  !depthLeftOut(twice, standIns, familyList) && !depthLeftOut(depthAll, altTable, familyList) &&
+                  !depthLeftOut(depthAll, standIns, altList) && !depthLeftOut(altTwice, standIns, familyList),
               "P2b control: with the pair in the stand-in table, in the hologram-depth family list, its pixel shader named, or its vertex shader named a second time, the pin fails");
     }
 

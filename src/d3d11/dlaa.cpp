@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <windows.h>
+#include <winver.h>   // GetFileVersionInfo*, VS_FIXEDFILEINFO (version.lib is on the d3d11 DLL's link line)
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -19,6 +20,7 @@
 #include "perf_monitor.h"   // the feature's creation is an event with a duration
 #include "gpu_timing.h"
 #include "gpu_adapter_name.h"  // adapterName -- shared with fsr3_engine.cpp
+#include "dlss_runtime_version.h"  // the DLSS runtime's file version, as a log line (pure)
 
 #ifdef EDVR_HAVE_NGX
 // NVIDIA's SDK, as shipped: nvsdk_ngx.h declares the D3D11 entry points,
@@ -307,6 +309,46 @@ void logDlssModesOnce(uint32_t outW, uint32_t outH, const DlssModeRange modes[kD
     Log::get().note("dlss: modes for %ux%u: %s", outW, outH, line);
 }
 
+// The DLSS runtime's file version, logged ONCE per session (VR and flat both come through ensureFeature). Asked after the first
+// feature create returns, success or refusal: nvngx_dlss.dll is mapped by NGX's feature create, not by its init, so asking at
+// init would find nothing. Reads the mapped module's own file (GetModuleHandle, GetModuleFileName, then the version resource); if
+// it is not mapped, the copy beside the game's executable, said as such. Never throws, never loads the DLL itself.
+void logDlssRuntimeVersionOnce() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    wchar_t path[MAX_PATH] = {};
+    DlssRuntimeSource source = DlssRuntimeSource::kNone;
+    if (HMODULE mod = GetModuleHandleW(L"nvngx_dlss.dll")) {
+        if (GetModuleFileNameW(mod, path, MAX_PATH) > 0) source = DlssRuntimeSource::kLoaded;
+    }
+    if (source == DlssRuntimeSource::kNone) {
+        wchar_t dir[MAX_PATH] = {};
+        if (GetModuleFileNameW(nullptr, dir, MAX_PATH) > 0) {
+            if (wchar_t* slash = wcsrchr(dir, L'\\')) *slash = 0;
+            _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\nvngx_dlss.dll", dir);
+            if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) source = DlssRuntimeSource::kBesideGame;
+        }
+    }
+    DlssRuntimeVersion version;
+    std::string narrow;
+    if (source != DlssRuntimeSource::kNone) {
+        char utf8[MAX_PATH * 3] = {};
+        if (WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8, static_cast<int>(sizeof(utf8)), nullptr, nullptr) > 0) narrow = utf8;
+        DWORD ignored = 0;
+        const DWORD size = GetFileVersionInfoSizeW(path, &ignored);
+        if (size > 0) {
+            std::vector<unsigned char> block(size);
+            VS_FIXEDFILEINFO* info = nullptr;
+            UINT infoLen = 0;
+            if (GetFileVersionInfoW(path, 0, size, block.data()) &&
+                VerQueryValueW(block.data(), L"\\", reinterpret_cast<LPVOID*>(&info), &infoLen) && info && infoLen >= sizeof(VS_FIXEDFILEINFO))
+                version = dlssVersionFromFixed(info->dwFileVersionMS, info->dwFileVersionLS);
+        }
+    }
+    Log::get().note("%s", dlssRuntimeLine(source, version, narrow).c_str());
+}
+
 // The full-frame feature for one upscaler slot (an eye's, or the VR world route's third): made when it is missing or its key
 // (the sizes, the preset generation, the route's bit) has moved, left alone otherwise. Each slot keeps its own key, its own
 // handle and so its own history; the preset generation is shared, so dlaaSetPreset remakes every slot's feature. The
@@ -443,6 +485,7 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
                               : 0.0;
         create.result("ngx=0x%08X handle=%u", static_cast<unsigned>(cr), f.handle ? 1u : 0u);
         create.close();   // after the duration above is taken: the crumb's own write is not part of the creation's time
+        logDlssRuntimeVersionOnce();   // after the close: the log write and the file read are not part of the creation's time either
         perfMonitorNoteEvent(kEvNgx, ms);
         if (createMs) *createMs = ms;
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
@@ -564,10 +607,13 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
         // the GPU it was refused on. The runtime name, headset and refresh
         // rate are already on record, but in the OpenXR module's own
         // edvr_openxr_*.log, not this one; not repeated here. The driver
-        // version and the DLSS runtime's own version are not read anywhere.
+        // version is not read anywhere; the DLSS runtime's file version is
+        // logged once with the first feature (logDlssRuntimeVersionOnce: the
+        // DLL is mapped by then, not at NGX's init).
         Log::get().note(
-            "dlaa: first asked for on %s. Driver version and the DLSS "
-            "runtime's own version are not read by this build; the OpenXR "
+            "dlaa: first asked for on %s. The graphics driver's version is not "
+            "read by this build; the DLSS runtime's file version follows with "
+            "the first feature (the 'dlaa: DLSS runtime' line); the OpenXR "
             "runtime name, headset and refresh rate are in that module's "
             "own log, not this one.",
             adapterName(dev));

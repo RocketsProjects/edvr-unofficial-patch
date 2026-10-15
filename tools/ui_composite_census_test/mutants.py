@@ -73,7 +73,7 @@ def drop(old):
 
 # ---- the anchors: text of the production headers, verbatim (the self-test finds each exactly once) -------------------------
 # ui_layer_math.h
-PRED = "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff; }\n"
+PRED = "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff || vs == kUiVsHoloAlt; }\n"
 HDR_USE = "        out = uiVsIsHoloPanel(f.vs)    ? UiLayerFamily::kHolo\n"
 LDR_USE = "              : uiVsIsHoloPanel(f.vs)  ? UiLayerFamily::kHolo\n"
 KUI = "constexpr uint64_t kUiVsHoloGuiFxOff = kHoloGuiFxOffVs;\n"
@@ -134,9 +134,11 @@ MUTANTS = [
     # ---- R1: the family rule ---------------------------------------------------------------------------------------------------
     M("holo-vs-stock-only", "R1b", [(PRED, "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo; }\n")],
       "the predicate names only the stock holo-panel vertex shader: Disable GUI effects stays unnamed (the field's defect)", MATH),
-    M("holo-vs-effects-off-only", "R1a", [(PRED, "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHoloGuiFxOff; }\n")],
+    M("holo-vs-effects-off-only", "R1a", [(PRED, "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHoloGuiFxOff || vs == kUiVsHoloAlt; }\n")],
       "the predicate names only the new vertex shader: the stock panels are dropped", MATH),
-    M("holo-vs-anything", "R1d", [(PRED, "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff || vs != 0; }\n")],
+    M("holo-vs-alt-dropped", "R1b2", [(PRED, "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff; }\n")],
+      "the predicate drops build 332841's third panel vertex shader (vs 925ACEDA, issue 90): the field's 22-25 draws a frame left in the scene", MATH),
+    M("holo-vs-anything", "R1d", [(PRED, "constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff || vs == kUiVsHoloAlt || vs != 0; }\n")],
       "every vertex shader is a holo panel", MATH),
     M("hdr-branch-stock-only", "R1b", [(HDR_USE, "        out = f.vs == kUiVsHolo    ? UiLayerFamily::kHolo\n")],
       "the lit HDR target's branch compares the stock hash by itself: the panels with the setting on are not named there", MATH),

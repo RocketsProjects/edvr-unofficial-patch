@@ -1039,6 +1039,17 @@ REM tools\dlaa_mode_test\mutants.py --self-test holds the mutation list to the s
 python "tools\dlaa_mode_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_dlss_runtime_version_test
+echo [edvr] === dlss_runtime_version_test.exe ===
+if not exist "%OBJ%\dlss_runtime_version" mkdir "%OBJ%\dlss_runtime_version"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\dlss_runtime_version\\" /Fe"%BUILD%\dlss_runtime_version_test.exe" ^
+    "tools\dlss_runtime_version_test\dlss_runtime_version_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: dlss_runtime_version_test build failed & exit /b 1 )
+"%BUILD%\dlss_runtime_version_test.exe" --dry-run || exit /b 1
+"%BUILD%\dlss_runtime_version_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_format_support_test
 REM The device capability log (src\d3d11\format_support_log.h): its pure decode, line
 REM formats and lock-free ledger; the two vtable slots the device hook patches, held
