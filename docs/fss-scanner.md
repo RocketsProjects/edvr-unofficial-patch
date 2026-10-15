@@ -43,12 +43,12 @@ before 2026-09-29 is kept in "Status detail".*
   refutations (rounds two to fourteen, 31, 33, Method notes 3-4) are in
   the journal chapters of those names, the ghost ones in "2026-09-16: the
   Quest 3 ghost under the native path".
-- **Next (after flight aba75537, v9, VALID):** both eyes composite the same,
-  finished layer (same draw, after camera 1's). Ordering ruled out. Left-only
-  black blocks are imaged on the ring at f23376-79. The composite is depth
-  tested (GEQUAL, no write) against each eye's OWN depth. Next: per eye,
-  snapshot the ring region of the eye target and depth before and after the
-  composite. Fallback `mirror`.
+- **Next (v10, built, not flown):** `off`, one zoom, no keys. v9: both eyes
+  composite the same finished layer, same quad, after camera 1's draws,
+  depth-tested per eye; timing ruled out. v10 dumps, at arrival +0..+30, each
+  eye's composite target (before, after, frame end) and depth as 16 px
+  blocks, classifies the black blocks (rejected by depth, overwritten, never
+  covered) and logs the suspect quad families. Read `verdict`. Fallback `mirror`.
 - **Environment:** The OpenXR Toolkit's own upscaler (`E861`/`B742`)
   confounded many rounds; the fix is proven Toolkit-OFF only. Reproduces
   under OpenComposite and native SteamVR (also via Steam Link), two
@@ -3028,6 +3028,95 @@ verdict: either have the role-2 path receive the same occluder, or have the
 composite skip its depth test during the reveal. Proposed hook: the composite
 draw, VS `953C8123` / PS `A473A867`, by shader identity at draw time. Not
 built.
+
+## 2026-10-15 (v10): what is under and after the composite, per eye (built, not flown)
+
+Flight aba75537 (v9) ruled out timing and a second ring image: both eyes
+composite the same finished layer with VS 953C8123 / PS A473A867, GREATER_EQUAL
+against each eye's own depth, after camera 1's ring draws. What is left is the
+depth the quad is tested against and what is drawn into the eye's target after
+it. v10 measures both. Same trigger as v9 (the first ring-pass call with
+ring+0x6b0 set, chrome held; the v9 replay case is kept). Full `build.bat`
+green, fss_tiles_test 273 checks, no config key.
+
+At the arrival, for frames +0..+30 (`kDumpFrames`), per eye:
+
+- **The composite** is found as v9 found the compositors: the draw outside the
+  ring pass that samples the layer into an eye-sized target (512+ square). The
+  eye is the order its target first appeared.
+- **Target snapshots** of that target, reduced on the GPU (copy, `GenerateMips`)
+  to one texel per 16 x 16 px block: just before the composite, just after it
+  (the next draw the hook sees) and at the end of the frame. Whole eye (the
+  ring region is not known), 126 x 126 blocks at 2016.
+- **Depth and stencil** bound at the composite, copied whole into a staging
+  twin and reduced on the CPU to min and max depth and max stencil per block
+  from every 4th texel (16 samples a block).
+- **Files**, in `edvr_logs\fsstiles`: `v10_f<frame>_e<eye>_<name>.pgm`, names
+  `rt_before`, `rt_after`, `rt_final` (brightness class x28: 0 exactly black,
+  1 below 0.001, 6 is 0.3 to 1, 9 above 10), `depth_min`, `depth_max` (x255),
+  `stencil_max` (as is, when the depth has stencil) and `verdict` (class x40).
+  One texel is one block.
+- **Verdict line** per eye-frame: `verdict f=F eyeE composite target T.., depth
+  T.., WxH blocks of 16 px: black at the end of the frame N; the composite
+  changed K block(s) (largest block-minimum depth it wrote through Q); of the
+  black blocks: depth above everything it wrote through (rejected) a,
+  overwritten after the composite b, never covered c, written black by the
+  composite d, no depth to judge e`. And `verdict f=F pair`: the blocks black
+  in one eye and not black in the other at the same position, by class.
+  Rules: a block is black when its brightest channel mean is under 0.001 at
+  the end of the frame. If the composite changed it (after != before) it is
+  overwritten (the composite wrote something that is black again) or written
+  black. If not: with no depth it is "no depth to judge", with the block's
+  minimum depth above Q it is rejected by depth, otherwise never covered
+  (depth would have let the quad through; the layer was empty there or
+  something else stopped it). Q is a lower bound of the quad's depth, so
+  "rejected" is "above everything the composite did write through", not
+  proof of the quad's own depth. Left against right is by block position, so
+  parallax of a block or two blurs it.
+
+Per eye, per frame, for the four suspect families (VS 5DA53D8B with PS
+E23C4525 or BF0CE0DA, VS 4A0748B6 with PS 1E1E004B or 4411D5EF), through the
+whole capture (every frame for 40, then one in ten):
+
+- `suspect f=F eyeE family N (vs ps) into T.. WxH fmt, depth T..: draws=D
+  (before the composite b, after a) instances=I draw #a..#b viewport (..)
+  scissor (..) | depth on|off func N write yes|no, stencil on|off ref N read
+  mask write mask func N ops fail,depthfail,pass [the state VARIES] |
+  bindings: N distinct hash(es) (top: hash xN, ..)`. The eye is the depth
+  buffer's (the composite's left @40, right @44). The binding hash is the
+  identity of the pixel shader's t0-t7 and vertex constant buffer 0.
+- `suspect cb f=F draw #n family N into T.. (depth T..): vertex|pixel
+  constant buffer 0 B.. from constant N, 64 bytes hash H, floats .., ints ..`:
+  the first 6 suspect draws per depth buffer a frame, for the first 40 frames,
+  read back from the GPU; to say what drives the per-eye count, compare these
+  across the eyes and across the draws of a burst.
+- Summary: per family and eye the frames, draws (most in a frame, mean),
+  before and after the composite, instances; the draws a frame series
+  `frame offset:eye0/eye1`; `ring dump` counts; verdict totals per eye and
+  the asymmetry totals.
+
+Limits. The "after" snapshot is taken before the next draw, so a clear or copy
+between the two lands in it. The final snapshot is of the composite's own
+target at the end of the frame, which may not be the image the headset gets
+(compare the eye runs). Cost: three GPU reductions and one 16 MB depth copy per
+eye per frame for 31 frames, plus a CPU pass over about 1/16 of the depth.
+
+Flight plan, unchanged: `fix.fss_eye_sync = off`, one zoom, no keys, do not
+press zoom twice.
+
+How to read it:
+
+1. `capture N valid=yes`, three eye runs, and `ring dump armed at f=..`.
+2. The pair line first: which class holds the blocks that are black in the
+   left and not in the right. `rejected by depth` points at the depth the left
+   eye carries over the ring (the suspect quads and the stencil writes are the
+   producers: compare `depth_min` of the two eyes and the suspect counts in
+   the same frames). `overwritten after the composite` points at a later draw:
+   `rt_after` against `rt_final` names the frame, the suspect lines name draws
+   after the composite. `never covered` with depth that would pass points at the
+   layer or the composite's coverage.
+3. The grey images: `verdict` shows where the blocks are, `depth_min` what sits
+   over them.
 
 ## Open
 

@@ -902,6 +902,85 @@ void testReducedCapture(Gpu& g) {
     }
 }
 
+void testV10Gpu(Gpu& g) {
+    ID3D11Device* d = g.dev.Get();
+    // the block reduction on a real device: a typeless 64 x 64 eye, white in x < 24, black beyond (block column 1 is half white)
+    std::vector<uint32_t> px(64 * 64);
+    for (uint32_t y = 0; y < 64; ++y) for (uint32_t x = 0; x < 64; ++x) px[y * 64 + x] = x < 24 ? 0xFFFFFFFFu : 0xFF000000u;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = td.Height = 64; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS; td.SampleDesc.Count = 1; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA sd{px.data(), 64 * 4, 0};
+    ComPtr<ID3D11Texture2D> src;
+    check(SUCCEEDED(d->CreateTexture2D(&td, &sd, &src)), "a typeless eye texture for the block reduction");
+    ft::BlockReducer red;
+    ID3D11Texture2D* stage = nullptr;
+    uint32_t bw = 0, bh = 0;
+    DXGI_FORMAT typed = DXGI_FORMAT_UNKNOWN;
+    const char* why = "";
+    const bool ok = src && red.reduce(d, g.ctx.Get(), src.Get(), &stage, &bw, &bh, &typed, &why);
+    check(ok && bw == 4 && bh == 4 && typed == DXGI_FORMAT_R8G8B8A8_UNORM, ok ? "the reduction yields one texel per 16 px block and names the typed format" : why);
+    if (ok) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(g.ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) {
+            float peak[16];
+            ft::colorBlocks(static_cast<const uint8_t*>(m.pData), m.RowPitch, static_cast<uint32_t>(typed), bw, bh, peak);
+            g.ctx->Unmap(stage, 0);
+            check(peak[0] > 0.99f && peak[1] > 0.4f && peak[1] < 0.6f && peak[2] == 0.0f && peak[3] == 0.0f && peak[12] > 0.99f,
+                  "the white blocks are white, the half-white block is half bright, the black blocks are exactly black");
+        } else {
+            check(false, "the block staging maps");
+        }
+        // the same reducer again with a second source reuses its mip texture
+        ID3D11Texture2D* first = red.tex;
+        const bool again = red.reduce(d, g.ctx.Get(), src.Get(), &stage, &bw, &bh, &typed, &why);
+        check(again && red.tex == first, "the mip texture is reused for the same shape");
+    }
+    if (stage) stage->Release();
+    red.release();
+    // a target the mip chain cannot reduce is refused with a reason, not a fault
+    {
+        D3D11_TEXTURE2D_DESC tinyDesc = td;
+        tinyDesc.Width = tinyDesc.Height = 8;
+        ComPtr<ID3D11Texture2D> tiny;
+        std::vector<uint32_t> p2(64, 0);
+        D3D11_SUBRESOURCE_DATA s2{p2.data(), 32, 0};
+        d->CreateTexture2D(&tinyDesc, &s2, &tiny);
+        ft::BlockReducer r2;
+        ID3D11Texture2D* st2 = nullptr;
+        const char* w2 = "";
+        check(tiny && !r2.reduce(d, g.ctx.Get(), tiny.Get(), &st2, &bw, &bh, &typed, &w2) && w2[0], "an 8 px target is refused with a reason");
+        if (st2) st2->Release();
+    }
+    // depth: D32_FLOAT, D32_FLOAT_S8X24_UINT and D24_UNORM_S8_UINT, cleared to a depth and a stencil, copied whole and read as blocks
+    struct Case { DXGI_FORMAT fmt; ft::DepthKind kind; float depth; uint8_t stencil; };
+    const Case cases[3] = {{DXGI_FORMAT_D32_FLOAT, ft::DepthKind::D32, 0.25f, 0}, {DXGI_FORMAT_D32_FLOAT_S8X24_UINT, ft::DepthKind::D32S8, 0.75f, 3}, {DXGI_FORMAT_D24_UNORM_S8_UINT, ft::DepthKind::D24S8, 0.5f, 9}};
+    for (const Case& c : cases) {
+        D3D11_TEXTURE2D_DESC dd{};
+        dd.Width = dd.Height = 64; dd.MipLevels = dd.ArraySize = 1; dd.Format = c.fmt; dd.SampleDesc.Count = 1; dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        ComPtr<ID3D11Texture2D> dtex;
+        ComPtr<ID3D11DepthStencilView> dsv;
+        if (FAILED(d->CreateTexture2D(&dd, nullptr, &dtex)) || FAILED(d->CreateDepthStencilView(dtex.Get(), nullptr, &dsv))) { check(false, "a depth texture of this format on this device"); continue; }
+        g.ctx->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH | (ft::hasStencil(c.kind) ? D3D11_CLEAR_STENCIL : 0u), c.depth, c.stencil);
+        ID3D11Texture2D* ds = nullptr;
+        D3D11_TEXTURE2D_DESC got{};
+        const char* w3 = "";
+        const bool q = ft::queueDepthCopy(d, g.ctx.Get(), dtex.Get(), &ds, &got, &w3);
+        check(q && ft::depthKind(got.Format) == c.kind, q ? "the depth copy keeps the depth format" : w3);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (q && SUCCEEDED(g.ctx->Map(ds, 0, D3D11_MAP_READ, 0, &m))) {
+            float mn[16], mx[16];
+            uint8_t sm[16];
+            ft::depthBlocks(static_cast<const uint8_t*>(m.pData), m.RowPitch, c.kind, 64, 64, 4, 4, mn, mx, sm);
+            g.ctx->Unmap(ds, 0);
+            const bool depthOk = mn[0] > c.depth - 0.001f && mx[15] < c.depth + 0.001f;
+            check(depthOk && (!ft::hasStencil(c.kind) || sm[5] == c.stencil), "the cleared depth and stencil come back out of the staging copy");
+        } else if (q) {
+            check(false, "the depth staging maps");
+        }
+        if (ds) ds->Release();
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // 4. Source pins
 
@@ -970,6 +1049,100 @@ void testV8(const std::string& root) {
     check(!rhs.empty() && has(rhs, "if (active || g_scan.load(std::memory_order_relaxed)) observe(ring, pass, camera, data, active);") && has(rhs, "g_latch.offer(c, frame)") &&
               has(rhs, "forward(ring, pass, camera, a4, a5, a6, a7, data);") && has(rhs, "t_cur.inCall = false;"),
           "every argument is forwarded unchanged, and the observation runs inside a capture or while the scanner is on show");
+}
+
+// ---- v10: the block dumps, the verdict, the suspect families, the schedule --------------------------------------------------------------------------------------------
+void testV10Pure() {
+    check(ft::kDumpFrames == 31 && ft::kBlockPx == 16 && ft::kBlockLevel == 4 && ft::kBlockSample == 4 && ft::kMaxBlocks == 128, "the dump runs arrival +0..+30 in 16 px blocks");
+    // the suspects are named by the first eight hex digits of the 64-bit hashes the census prints
+    check(ft::hi32(0x5DA53D8B0133341Eull) == 0x5DA53D8Bu && ft::suspectIndex(0x5DA53D8B0133341Eull, 0xE23C45251B7ECDFEull) == 0 && ft::suspectIndex(0x5DA53D8B0133341Eull, 0xBF0CE0DA543D491Full) == 1 &&
+              ft::suspectIndex(0x4A0748B600000000ull, 0x1E1E004B00000001ull) == 2 && ft::suspectIndex(0x4A0748B600000000ull, 0x4411D5EF00000000ull) == 3 &&
+              ft::suspectIndex(0x953C8123AD8DC13Bull, 0xA473A867BDDBC342ull) == -1 && ft::suspectIndex(0x5DA53D8B0133341Eull, 0xA473A867BDDBC342ull) == -1,
+          "the four suspect families are found by their shader prefixes, the composite and a mismatched pair are not");
+
+    // the schedule: flight aba75537's order within a frame (ring draws #176-#182, eye 0 composite #183, eye 1 composite #217)
+    ft::SnapSchedule sc;
+    uint32_t due1 = 99, due2 = 99, due3 = 99;
+    const bool c0 = sc.composite(0, 183);
+    due1 = sc.takeAfter();            // the draw #184: eye 0's "after" is due
+    const bool c0again = sc.composite(0, 190);
+    const bool c1 = sc.composite(1, 217);
+    due2 = sc.takeAfter();            // the draw #218
+    due3 = sc.takeAfter();
+    check(c0 && !c0again && c1 && due1 == 1u && due2 == 2u && due3 == 0u && sc.compositeSeq[0] == 183 && sc.compositeSeq[1] == 217, "the after-snapshot is due on the first draw after each eye's composite, once, and a second composite draw of an eye is ignored");
+    sc.newFrame();
+    check(sc.composite(0, 5) && sc.pendingAfter[0] && !sc.composite(2, 6), "a new frame starts clean; a composite that is the last draw stays pending for the boundary");
+
+    // brightness decode
+    bool known = false;
+    uint8_t half1[8] = {0x00, 0x3C, 0, 0, 0, 0, 0, 0};                    // 1.0, 0, 0 in R16G16B16A16_FLOAT
+    check(ft::texelPeak(10, half1, &known) == 1.0f && known, "R16G16B16A16_FLOAT decodes");
+    uint8_t half0[8] = {};
+    check(ft::texelPeak(10, half0, &known) == 0.0f && known, "black decodes to exactly zero");
+    const uint32_t r11 = 15u << 6;                                       // R = 1.0 in R11G11B10_FLOAT
+    uint8_t p11[4];
+    std::memcpy(p11, &r11, 4);
+    check(ft::texelPeak(26, p11, &known) == 1.0f && known, "R11G11B10_FLOAT decodes");
+    uint8_t p8[4] = {255, 0, 0, 255};
+    check(ft::texelPeak(28, p8, &known) == 1.0f && known && (ft::texelPeak(0, p8, &known), !known), "R8G8B8A8_UNORM decodes and an unknown format says so");
+    check(ft::peakClass(0.0f) == 0 && ft::peakClass(5e-4f) == 1 && ft::peakClass(0.5f) == 6 && ft::peakClass(2.0f) == 7 && ft::peakClass(100.0f) == 9, "brightness classes");
+    float peaks[4];
+    uint8_t px[2 * 2 * 4] = {255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 0, 10, 0, 0, 255};
+    ft::colorBlocks(px, 8, 28, 2, 2, peaks);
+    check(peaks[0] == 1.0f && peaks[1] == 0.0f && peaks[2] == 0.0f && peaks[3] > 0.0f && peaks[3] < 0.1f, "colorBlocks reads one texel a block, alpha ignored");
+
+    // depth and stencil blocks
+    std::vector<uint8_t> d32(32 * 32 * 4);
+    for (uint32_t i = 0; i < 32 * 32; ++i) { const float v = 0.5f; std::memcpy(&d32[i * 4], &v, 4); }
+    const float hi = 0.9f;
+    std::memcpy(&d32[(4 * 32 + 4) * 4], &hi, 4);                         // inside block (0,0), on a sample position
+    std::memcpy(&d32[(5 * 32 + 5) * 4], &hi, 4);                         // inside block (0,0), NOT a sample position
+    float dmin[4], dmax[4];
+    uint8_t smax[4];
+    ft::depthBlocks(d32.data(), 32 * 4, ft::DepthKind::D32, 32, 32, 2, 2, dmin, dmax, smax);
+    check(dmin[0] == 0.5f && dmax[0] > 0.89f && dmin[3] == 0.5f && dmax[3] == 0.5f && smax[0] == 0, "depth min and max a block, from every 4th texel");
+    std::vector<uint8_t> ds(16 * 16 * 8, 0);
+    for (uint32_t i = 0; i < 16 * 16; ++i) { const float v = 0.25f; std::memcpy(&ds[i * 8], &v, 4); ds[i * 8 + 4] = 7; }
+    ft::depthBlocks(ds.data(), 16 * 8, ft::DepthKind::D32S8, 16, 16, 1, 1, dmin, dmax, smax);
+    check(dmin[0] == 0.25f && smax[0] == 7 && ft::hasStencil(ft::DepthKind::D32S8) && !ft::hasStencil(ft::DepthKind::D32), "D32_FLOAT_S8X24 keeps the stencil in the second dword");
+    std::vector<uint8_t> d24(16 * 16 * 4, 0);
+    for (uint32_t i = 0; i < 16 * 16; ++i) { const uint32_t v = (3u << 24) | 0x800000u; std::memcpy(&d24[i * 4], &v, 4); }
+    ft::depthBlocks(d24.data(), 16 * 4, ft::DepthKind::D24S8, 16, 16, 1, 1, dmin, dmax, smax);
+    check(dmin[0] > 0.49f && dmin[0] < 0.51f && smax[0] == 3, "D24_UNORM_S8_UINT");
+    check(ft::depthKind(40) == ft::DepthKind::D32 && ft::depthKind(39) == ft::DepthKind::D32 && ft::depthKind(20) == ft::DepthKind::D32S8 && ft::depthKind(45) == ft::DepthKind::D24S8 &&
+              ft::depthKind(55) == ft::DepthKind::D16 && ft::depthKind(28) == ft::DepthKind::None, "depth formats");
+
+    // the verdict: six blocks, each with a different story (reversed Z; the composite is GREATER_EQUAL and writes only where the depth is at or below the quad's)
+    {
+        const float before[6] = {0, 0, 0, 0, 0.2f, 0}, after[6] = {0.5f, 0, 0, 0.4f, 0, 0}, fin[6] = {0.5f, 0, 0, 0, 0, 0.7f};
+        const float dminv[6] = {0.0f, 0.9f, 0.0f, 0.0f, 0.0f, 0.0f}, dmaxv[6] = {0.0f, 0.95f, 0.0f, 0.0f, 0.0f, 0.0f};
+        uint8_t kl[6];
+        const ft::Verdict v = ft::classifyBlocks(before, after, fin, dminv, dmaxv, true, 6, kl);
+        check(kl[0] == ft::kNotBlack && kl[1] == ft::kRejected && kl[2] == ft::kNeverCovered && kl[3] == ft::kOverwritten && kl[4] == ft::kWroteBlack && kl[5] == ft::kNotBlack,
+              "a black block is rejected by depth, overwritten after the composite, never covered, or written black, and a bright one is none of them");
+        check(v.blocks == 6 && v.black == 4 && v.wrote == 3 && v.qzSeen && v.qz == 0.0f && v.count[ft::kRejected] == 1 && v.count[ft::kOverwritten] == 1 && v.count[ft::kNeverCovered] == 1 &&
+                  v.count[ft::kWroteBlack] == 1,
+              "the counts");
+        uint8_t kl2[6];
+        const ft::Verdict v2 = ft::classifyBlocks(before, after, fin, dminv, dmaxv, false, 6, kl2);
+        check(kl2[1] == ft::kNoDepth && kl2[2] == ft::kNoDepth && kl2[3] == ft::kOverwritten && !v2.qzSeen, "without depth, an untouched black block is 'no depth to judge by' and the composite's own writes still classify");
+        char line[900];
+        ft::formatVerdict(line, sizeof(line), 23372, 0, 10, 40, 126, 126, v);
+        check(std::strstr(line, "verdict f=23372 eye0 composite target T10, depth T40, 126x126 blocks of 16 px: black at the end of the frame 4;") &&
+                  std::strstr(line, "rejected) 1, overwritten after the composite 1, never covered 1, written black by the composite 1, no depth to judge 0"),
+              "the verdict line");
+        // the asymmetry between the eyes
+        uint8_t other[6] = {0, 0, 1, 0, 0, 0};   // the other eye is black only at block 2
+        uint32_t a[ft::kClassCount];
+        ft::asymmetric(kl, other, 6, a);
+        check(a[ft::kRejected] == 1 && a[ft::kOverwritten] == 1 && a[ft::kNeverCovered] == 0 && a[ft::kWroteBlack] == 1, "blocks black here and not black in the other eye, by class");
+    }
+    char head[32];
+    check(ft::pgmHeader(head, sizeof(head), 126, 126) == 15 && std::strcmp(head, "P5\n126 126\n255\n") == 0, "the grey image header");
+    ft::DriverTally dt;
+    for (uint32_t h : {1u, 2u, 1u, 3u, 1u, 4u, 5u, 6u, 7u, 8u}) dt.add(h);
+    check(dt.distinct == 8 && dt.used == ft::DriverTally::kCap && dt.hash[0] == 1 && dt.n[0] == 3, "the binding-hash tally counts every distinct hash and keeps the first few");
+    check(ft::fnvStep(ft::kFnvBasis, 1) != ft::fnvStep(ft::kFnvBasis, 2), "the binding hash tells draws apart");
 }
 
 // ---- v9: the replay of flight f5c7ad89 (capture 4) through the decisions that missed three flights -----------------------------------------------------------
@@ -1133,7 +1306,7 @@ void testV9Replay(const std::string& root) {
           "every change of the offscreen target is logged and followed");
     check(has(cpp, "*e = State::RPEnt();   // the entries are reused every frame") && has(cpp, "g.drawSeq = g.ringSeqFirst = g.ringSeqLast = g.ringSeqN = 0;"),
           "the ring path's per-frame entries start clean, so draws= is a per-frame count");
-    check(has(cpp, "else if (g.ringTargetRef) compositorCheck(ctx, rtv, res, shape, instances, seq);") && has(cpp, "orderOf(c.firstSeq, g.ringSeqFirst, g.ringSeqLast, g.ringSeqN)") &&
+    check(has(cpp, "else if (g.ringTargetRef) {") && has(cpp, "compositorCheck(ctx, rtv, res, shape, instances, seq, &isComposite);") && has(cpp, "orderOf(c.firstSeq, g.ringSeqFirst, g.ringSeqLast, g.ringSeqN)") &&
               has(cpp, "fss tiles: compositor f=%u %s draw #%u..#%u") && has(cpp, "window %u compositors -- no draw outside the ring pass sampled the offscreen ring layer"),
           "the draws that sample the layer are found, ordered against camera 1's ring draws and said, nothing found included");
     check(has(cpp, "ringSnapshot(g.frame);") && has(cpp, "drainRingSnap(frameNo);") && has(cpp, "frame % kFillEvery != 0") && has(cpp, "if (g.snap.used && !g.snap.drained) return true;"),
@@ -1282,6 +1455,24 @@ void testSourcePins(const std::string& root) {
     check(has(cpp, "fss tiles: window %u gate closed at f=%u: %s.") && has(cpp, "The reveal capture ends with it, and any pending eye run is cancelled.") &&
               has(slurp(root + "/src/d3d11/fss_tiles_core.h"), "gate.step(in.frame, in.chromeAgo, in.focusKnown, in.focus)") && has(cpp, "o.refused & (1u << k)"),
           "leaving the scanner or losing FSS focus closes the window and ends the capture, and an eye run waits for the chrome");
+    // v10 source pins
+    {
+        const std::string c10 = slurp(root + "/src/d3d11/fss_tiles.cpp");
+        check(has(c10, "g.dumpTo = frameNo + kDumpFrames - 1;") && has(c10, "const bool dumping = g.dumpTo != 0 && g.frame <= g.dumpTo;") && has(c10, "const uint32_t due = g.sched.takeAfter();") &&
+                  has(c10, "if (eye < 2 && g.sched.composite(eye, seq) && dumping) snapBefore(ctx, res, eye, seq);") && has(c10, "finishFrameSnaps(g.frame);"),
+              "the dump window opens with the arrival, the composite is snapshotted before, the first draw after it takes the after-snapshot, the boundary the end-of-frame one");
+        check(has(c10, "compositorCheck(ctx, rtv, res, shape, instances, seq, &isComposite);") && has(c10, "*composite = shape != 0 && e->w >= 512 && e->h >= 512;") &&
+                  has(c10, "const int fam = suspectIndex(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));") && has(c10, "suspectRecord(ctx, rtv, res, fam, instances, seq);"),
+              "the composite is the eye-sized draw that samples the layer and the suspect families are recorded by shader prefix");
+        check(has(c10, "formatVerdict(line, sizeof(line), c.frame, c.eye, c.rtId, c.depthId, c.bw, c.bh, v);") && has(c10, "fss tiles: verdict f=%u pair -- black in eye0 and not in eye1") &&
+                  has(c10, "fss tiles: suspect f=%u %s family %u") && has(c10, "fss tiles: suspect cb f=%u draw #%u family %u") && has(c10, "window %u ring dump -- %u eye-frame(s) queued") &&
+                  has(c10, "window %u verdict asymmetry over %u frame(s) with both eyes") && has(c10, "v10_f%u_e%u_%S.pgm"),
+              "the verdict line per eye-frame, the pair line, the suspect lines, the constant-buffer samples, the dump summary and the grey images are written");
+        check(has(c10, "drainCaps(frameNo);") && has(c10, "drainCb(frameNo);") && has(c10, "D3D11_MAP_FLAG_DO_NOT_WAIT") && has(c10, "if (capsPending()) return true;"),
+              "the dump's read-backs never wait and keep the summary pending");
+        const std::string dh = slurp(root + "/src/d3d11/fss_tiles_d3d.h");
+        check(has(dh, "ctx->GenerateMips(srv);") && has(dh, "ctx->CopyResource(*stage, depth);") && has(dh, "D3D11_FORMAT_SUPPORT_MIP_AUTOGEN"), "the block reduction uses the mip chain and the depth is copied whole into a staging twin");
+    }
     check(has(cpp, "fss tiles: eye-dump key at f=%u") && has(cpp, "outside a capturing zoom window"), "the eye-dump key's reception is logged either way");
     check(has(cpp, "fss tiles: window %u opened") && has(cpp, "fss tiles: window %u closed") && has(cpp, "fss tiles: instrument armed"),
           "the instrument says it armed, opened and closed, so never-ran reads differently from zero");
@@ -1314,6 +1505,7 @@ int main(int argc, char** argv) {
     testGate();
     testV8(root);
     testV9Replay(root);
+    testV10Pure();
     testFakeRestore();
 
     const auto createDevice = edvr::systemD3D11CreateDevice();
@@ -1333,6 +1525,7 @@ int main(int argc, char** argv) {
             testStagingLike(g);
             testSampling(g);
             testReducedCapture(g);
+            testV10Gpu(g);
             ComPtr<ID3D11InfoQueue> q;
             if (SUCCEEDED(g.dev.As(&q))) {
                 const UINT64 cnt = q->GetNumStoredMessagesAllowedByRetrievalFilter();
