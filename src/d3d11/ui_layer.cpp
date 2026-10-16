@@ -25,7 +25,7 @@
 #include "ui_layer_seed.h"  // the Seeder: the game's depth-stencil at the layer's size
 #include "ui_layer_seed_census.h"
 #include "ui_layer_seed_timing.h"
-#include "shield_ripple_shaders.h"  // the shield ripple's door pass and the coverage instrument's marking pass
+#include "shield_ripple_shaders.h"  // the shield ripple's door pass
 #include "sharp_weapons.h"  // fix.sharp_weapons: the weapons layer's source pass, blend states and step bindings
 #include "temporal_shader_bytecode.h"
 #include "draw_state_describe.h"  // viewName, describeBlend/describeDs, shapeOf, dsStateOf
@@ -76,7 +76,6 @@ namespace edvr {
 namespace detail {
 bool g_uiLayerLive = false;
 bool g_uiQualityLive = false;
-bool g_uiShieldProbeWanted = false;   // an eye has displacement coverage this frame: the coverage instrument is offered the later in-scene draws
 bool g_uiLayerWatching = false;
 bool g_uiSeedDiagnostics = false;
 bool g_uiLayerRedirecting = false;
@@ -117,14 +116,13 @@ float g_target = 0.0f;     // 0 off, 1.0 (the file's 100), 1.25 (125)
 bool g_sharpWeapons = true;
 bool g_weaponsLive = false;
 bool g_weaponsStoodDown = false;  // the weapons path alone (a failure of its own); the HUD and the rest of the layer stay
-SharpBlend g_sharpBlend = SharpBlend::kMatched;  // advanced.sharp_weapons_blend (TEMPORARY)
-// advanced.shield_ripple (TEMPORARY A/B, shield_ripple.h): the shield-strike refraction after the upscale. Its own half of the layer: not governed by either other
-// key. g_rippleMode is the key, g_rippleLive the key with everything it needs (a temporal mode, not stood down, not the flat profile).
-ShieldRippleMode g_rippleMode = ShieldRippleMode::kSharp;
+SharpBlend g_sharpBlend = SharpBlend::kMatched;  // fix.sharp_weapons = on (matched) | plain
+// The shield-strike refraction after the upscale (shield_ripple.h) rides fix.sharp_weapons: g_rippleLive is that key with everything the ripple needs (a temporal
+// mode, not stood down, not the flat profile). It is a half of the layer of its own, so a ripple that stands itself down leaves the weapons fire running.
 bool g_rippleLive = false;
 bool g_rippleStoodDown = false;  // the ripple alone (a failed first-draw check, or a failure of its own); the rest of the layer stays
 bool g_rippleNoted = false;
-ShieldRippleMode g_rippleNotedMode = ShieldRippleMode::kSharp;
+bool g_rippleNotedOn = false;
 bool g_temporal = false;   // a temporal mode is on (the layer's door exists)
 constexpr bool g_jitterAsShipped = true;  // the eye jitter is always as shipped
 bool g_stoodDown = false;
@@ -150,7 +148,7 @@ void refreshLive() {
     const bool quality = uiLayerLiveFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);
     g_weaponsLive = uiLayerWeaponsLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_weaponsStoodDown,
                                           runtimeFlatProfile());
-    g_rippleLive = uiLayerRippleLiveFor(shieldRippleTakes(g_rippleMode), g_temporal, g_jitterAsShipped, g_stoodDown || g_rippleStoodDown, runtimeFlatProfile());
+    g_rippleLive = uiLayerRippleLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_rippleStoodDown, runtimeFlatProfile());
     detail::g_uiQualityLive = quality;
     detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive || g_rippleLive);
     detail::g_uiLayerCrispOn = detail::g_uiLayerLive && !g_crispStoodDown;
@@ -217,7 +215,7 @@ void weaponsStandDown(const char* why) {
 //
 // The game's 820E/6EAA draw is taken out of the scene and re-issued (viewport remap, jitter cancel, seeded depth) into the eye's R32G32_FLOAT layer D with blend
 // off and t0 swapped for a UV ramp, so D holds the game's own uv_jit + d; the door rewrites the picture over D's coverage (rippleDoor, below). One shared set of
-// pieces: the ramp, D's blend, the door's sampler, parameters and shader, the first-draw checks (R1) and the coverage instrument's states.
+// pieces: the ramp, D's blend, the door's sampler, parameters and shader, and the first-draw checks (R1).
 struct RippleShared {
     Ptr<ID3D11Texture2D> rampTex;
     Ptr<ID3D11ShaderResourceView> rampSrv;
@@ -234,20 +232,6 @@ struct RippleShared {
     float gainZ = 0.0f, gainY = 0.0f;
     uint64_t frame = 0;               // frames the layer has seen (the idle clock)
     uint64_t created = 0, released = 0, standDowns = 0;
-    // The coverage instrument (R2): stencil-marking pass, states, the pending queries.
-    ID3D11VertexShader* markVs = nullptr;
-    ID3D11PixelShader* markPs = nullptr;
-    bool markTried = false, probeFailed = false;
-    Ptr<ID3D11DepthStencilState> dsMark, dsEqual;
-    Ptr<ID3D11BlendState> bsNone;
-    struct Pend {
-        Ptr<ID3D11Query> q;
-        uint8_t pair = 0;
-        bool busy = false;
-        uint64_t frame = 0;
-    };
-    Pend pend[24];
-    std::map<std::string, Ptr<ID3D11RasterizerState>> rsClones;
 };
 RippleShared g_rip;
 
@@ -257,7 +241,7 @@ void rippleStandDown(const char* why) {
     ++g_rip.standDowns;
     refreshLive();
     Log::get().note("shield ripple: stands down for the rest of the session -- %s. The game's 820E draw stays in the scene as it always was (the rest of the "
-                    "layer is unaffected). Turning advanced.shield_ripple off and on re-arms it.",
+                    "layer is unaffected). Turning fix.sharp_weapons off and on re-arms it.",
                     why ? why : "a refusal");
 }
 
@@ -434,7 +418,7 @@ struct Eye {
     uint32_t wMissStreak = 0;        // consecutive content-frames no re-issue published
     uint32_t wOtherTargets = 0;      // this frame's weapons draws made into another HDR target than wTarget (the instrument below)
 
-    // advanced.shield_ripple's displacement layer D (R32G32_FLOAT, the HDR layers' size): the game's own uv_jit + d where the shield-strike refraction drew this
+    // The shield ripple's displacement layer D (R32G32_FLOAT, the HDR layers' size): the game's own uv_jit + d where the shield-strike refraction drew this
     // frame, cleared far outside [0, 1] elsewhere. Made at the first 820E draw, released after kShieldRippleIdleFrames frames without one. dJx/dJy: the jitter its
     // draws carried (render pixels), dRenderW/H the render's size: the door subtracts jitter / render size from D.
     Ptr<ID3D11Texture2D> dTex;
@@ -447,15 +431,11 @@ struct Eye {
     uint32_t dRenderW = 0, dRenderH = 0;
     uint64_t dBornFrame = 0, dLastFrame = 0;
     uint32_t dTotalDraws = 0, dTotalApplied = 0;
-    // the door's copy of the picture, and the coverage instrument's stencil (D's size, marked 1 where D covers)
+    // the door's copy of the picture
     Ptr<ID3D11Texture2D> rcTex;
     Ptr<ID3D11ShaderResourceView> rcSrv;
     uint32_t rcW = 0, rcH = 0;
     DXGI_FORMAT rcFmt = DXGI_FORMAT_UNKNOWN;
-    Ptr<ID3D11Texture2D> pcTex;
-    Ptr<ID3D11DepthStencilView> pcDsv;
-    uint32_t pcW = 0, pcH = 0;
-    uint64_t pcSeq = 0;
 
     // The door.
     UiLayerDoorState door;
@@ -511,7 +491,7 @@ struct Draw {
     bool hdr = false;      // the crisp-HUD half of fix.ui_quality: the draw goes to the HDR HUD layer, not the 8-bit one
     bool weapons = false;  // fix.sharp_weapons: with hdr, the draw goes to the eye's weapons layer instead of the HUD's
     uint64_t vsHash = 0;   // the decided draw's vertex shader (the weapons-fire pair table's key)
-    bool ripple = false;   // advanced.shield_ripple: with hdr, the draw goes into the eye's displacement layer D, blend off, t0 swapped for the UV ramp
+    bool ripple = false;   // the shield ripple: with hdr, the draw goes into the eye's displacement layer D, blend off, t0 swapped for the UV ramp
     ID3D11ShaderResourceView* rippleSrv0 = nullptr;  // the game's t0, held while the ramp is bound (put back at restore)
     bool rippleSwapped = false;                      // the ramp is bound in its place
     bool reissue = false;  // the VR world route's re-issue of the 2D screen (the game's own draw lands in its eye): not a take
@@ -664,12 +644,8 @@ struct Window {
     uint64_t weaponsTaken = 0, weaponsLost = 0, weaponsContentFrames = 0;
     uint64_t weaponsPair[kWeaponPairCount] = {};
     uint64_t weaponsEyeMatched = 0, weaponsEyePlain = 0, weaponsEyeFallback = 0;
-    // advanced.shield_ripple: eye-frames the door applied the ripple, ones it skipped (mode none), the door's declines (0 not EDVR's frame, 1 frame format, 2 pieces),
-    // and the coverage instrument: per later in-scene draw, draws seen over a bubble eye-frame, tested, answered, answers with samples, and the layer samples.
-    uint64_t rippleApplied = 0, rippleNone = 0, rippleDoorDeclined[3] = {};
-    uint64_t probeSeen[kShieldLaterCount] = {}, probeTested[kShieldLaterCount] = {}, probeAnswered[kShieldLaterCount] = {}, probeOver[kShieldLaterCount] = {},
-             probeSamples[kShieldLaterCount] = {};
-    uint64_t probeUntested = 0, probeDropped = 0;
+    // The shield ripple: eye-frames the door applied it, and its declines (0 not EDVR's frame, 1 frame format, 2 pieces).
+    uint64_t rippleApplied = 0, rippleDoorDeclined[3] = {};
     uint64_t hdrDeclined[static_cast<size_t>(CrispToneDecline::kCount)] = {};
     // The seed census's counts for the 30 s line (2026-10-13): every issued seed by reason, the same by reason for a layer's second or
     // later seed in its frame (a layer seeded again within one frame), and the passes the seeds planned.
@@ -1366,7 +1342,7 @@ bool releaseLayers() {
         g_sharpScratch = SharpScratch{};
     }
     for (Eye& e : g_eye) {
-        if (e.dTex || e.rcTex || e.pcTex) any = true;
+        if (e.dTex || e.rcTex) any = true;
         e.dTex.Reset();
         e.dRtv.Reset();
         e.dSrv.Reset();
@@ -1376,9 +1352,6 @@ bool releaseLayers() {
         e.rcTex.Reset();
         e.rcSrv.Reset();
         e.rcW = e.rcH = 0;
-        e.pcTex.Reset();
-        e.pcDsv.Reset();
-        e.pcSeq = 0;
     }
     if (g_rip.rampTex) {
         any = true;
@@ -1990,7 +1963,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     // fix.sharp_weapons: a weapons-fire draw (g_draw.weapons, always with g_draw.hdr) goes into the eye's OWN additive HDR layer, tested
     // against the same seeded depth-stencil as the HUD's (it only tests); it is never a multiply, so `which` is 0.
     const bool wl = g_draw.weapons && which == 0;
-    // advanced.shield_ripple: the 820E draw (g_draw.ripple, with g_draw.hdr) goes into the eye's displacement layer D, tested against the same seeded depth.
+    // The shield ripple: the 820E draw (g_draw.ripple, with g_draw.hdr) goes into the eye's displacement layer D, tested against the same seeded depth.
     const bool rp = g_draw.ripple && which == 0;
     ID3D11RenderTargetView* target =
         which ? e.mRtv.Get() : (rp ? e.dRtv.Get() : (wl ? e.wRtv.Get() : (g_draw.hdr ? e.hdrRtv.Get() : e.rtv.Get())));
@@ -2284,7 +2257,6 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
             ++e.dDraws;
             ++e.dTotalDraws;
             e.dLastFrame = g_rip.frame;
-            detail::g_uiShieldProbeWanted = true;
         } else if (g_draw.weapons) {
             ++e.wDraws;
             if (e.wTarget != g_draw.targetRes) ++e.wOtherTargets;
@@ -3512,7 +3484,7 @@ void uiLayerRememberHoloPs(ID3D11PixelShader* shader, uint64_t hash,
 bool crispTakeReady(ID3D11DeviceContext* ctx, int eye);
 // fix.sharp_weapons' counterpart: the weapons layer, the 8-bit layer and the blend states the re-issue needs (defined beside it).
 bool weaponsTakeReady(ID3D11DeviceContext* ctx, int eye);
-// advanced.shield_ripple's counterparts (defined beside it): D and the shared pieces for a take, and the first-draw checks.
+// The shield ripple's counterparts (defined beside it): D and the shared pieces for a take, and the first-draw checks.
 bool rippleTakeReady(ID3D11DeviceContext* ctx, int eye, uint32_t targetW, uint32_t targetH);
 bool rippleR1Allows(ID3D11DeviceContext* ctx);
 
@@ -3549,41 +3521,35 @@ void uiLayerConfigure(Config& cfg) {
         g_stoodDown = false;
         g_crispStoodDown = false;
     }
-    // fix.sharp_weapons (default on) and its TEMPORARY A/B, advanced.sharp_weapons_blend: independent of fix.ui_quality. A live change of the
-    // key re-arms a weapons path that stood itself down.
-    const bool sharp = cfg.getBool("fix.sharp_weapons", true);
-    bool blendKnown = true;
-    const std::string blendText = cfg.getString("advanced.sharp_weapons_blend", "matched");
-    const SharpBlend blend = sharpBlendParse(blendText.c_str(), &blendKnown);
+    // fix.sharp_weapons = on | plain | off (default on): independent of fix.ui_quality. on is the matched composite, plain the plain add, off stock. A live
+    // change of the key re-arms a weapons path (and a ripple) that stood itself down. The old advanced.sharp_weapons_blend is read by nobody.
+    bool sharpKnown = true;
+    const std::string sharpText = cfg.getString("fix.sharp_weapons", "on");
+    const SharpWeapons sharpMode = sharpWeaponsParse(sharpText.c_str(), &sharpKnown);
+    const bool sharp = sharpWeaponsTakes(sharpMode);
+    const SharpBlend blend = sharpWeaponsBlend(sharpMode);
     if (g_sharpNoted && sharp != g_sharpWeapons) g_weaponsStoodDown = false;
     g_sharpWeapons = sharp;
     g_sharpBlend = blend;
-    // advanced.shield_ripple (TEMPORARY A/B): sharp | none | stock. A live change re-arms a ripple that stood itself down, and asks the first-draw checks again.
-    bool rippleKnown = true;
-    const std::string rippleText = cfg.getString("advanced.shield_ripple", "sharp");
-    const ShieldRippleMode rippleMode = shieldRippleParse(rippleText.c_str(), &rippleKnown);
-    if (g_rippleNoted && rippleMode != g_rippleMode) {
+    // The shield-strike ripple follows the same key. A live change re-arms a ripple that stood itself down, and asks the first-draw checks again.
+    if (g_rippleNoted && sharp != g_rippleNotedOn) {
         g_rippleStoodDown = false;
         g_rip.check = 0;
     }
-    g_rippleMode = rippleMode;
     g_keyText = text;
     g_target = target;
     g_temporal = temporal;
     refreshLive();
-    if (!g_rippleNoted || rippleMode != g_rippleNotedMode) {
+    if (!g_rippleNoted || sharp != g_rippleNotedOn) {
         g_rippleNoted = true;
-        g_rippleNotedMode = rippleMode;
-        if (!rippleKnown && !runtimeFlatProfile()) Log::get().note("shield ripple: advanced.shield_ripple = '%s' is not sharp, none or stock -- sharp.", rippleText.c_str());
+        g_rippleNotedOn = sharp;
         if (runtimeFlatProfile()) {
             Log::get().note("shield ripple: not in the flat profile (VR only).");
-        } else if (rippleMode == ShieldRippleMode::kStock) {
-            Log::get().note("shield ripple: stock (advanced.shield_ripple) -- the game's 820E draw stays in the scene as it always was.");
+        } else if (!sharp) {
+            Log::get().note("shield ripple: off with fix.sharp_weapons -- the game's 820E draw stays in the scene as it always was.");
         } else {
-            Log::get().note("shield ripple: %s (advanced.shield_ripple) -- the game's 820E draw is taken out of the scene and re-issued into a displacement layer; %s%s",
-                            shieldRippleName(rippleMode),
-                            rippleMode == ShieldRippleMode::kSharp ? "the door rewrites the upscaled picture over the bubble from it, before the weapons/HUD composite"
-                                                                    : "the door applies nothing (diagnostic: the bubble shows no ripple at all)",
+            Log::get().note("shield ripple: on with fix.sharp_weapons -- the game's 820E draw is taken out of the scene and re-issued into a displacement layer; the door rewrites "
+                            "the upscaled picture over the bubble from it, before the weapons/HUD composite%s",
                             temporal ? "." : "; it waits: fix.temporal_aa is off, and the layer is composited at that pass's door.");
         }
     }
@@ -3596,8 +3562,8 @@ void uiLayerConfigure(Config& cfg) {
             g_sharpNotedBlend = blend;
             g_sharpNotedTemporal = temporal;
             g_sharpNotedQuality = target > 0.0f;
-            if (!blendKnown)
-                Log::get().note("sharp weapons: advanced.sharp_weapons_blend = '%s' is not matched or plain -- matched.", blendText.c_str());
+            if (!sharpKnown)
+                Log::get().note("sharp weapons: fix.sharp_weapons = '%s' is not on, plain or off -- on.", sharpText.c_str());
             if (!sharp) {
                 Log::get().note("sharp weapons: off (fix.sharp_weapons) -- the weapons fire is drawn in the scene as it always was; fix.ui_quality is %s "
                                 "and unaffected.",
@@ -3611,8 +3577,8 @@ void uiLayerConfigure(Config& cfg) {
                     "composited after the upscale, %s%s.",
                     target > 0.0f ? "on" : "off",
                     blend == SharpBlend::kMatched
-                        ? "by tonemap difference T(F_up + L) - T(F_up) through the game's own tonemap draw (blend matched)"
-                        : "as a plain add of the tonemapped light T(L) (blend plain)",
+                        ? "by tonemap difference T(F_up + L) - T(F_up) through the game's own tonemap draw (on)"
+                        : "as a plain add of the tonemapped light T(L) (plain)",
                     temporal ? "" : "; it waits: fix.temporal_aa is off, and the layer is composited at that pass's door");
             }
         }
@@ -3898,7 +3864,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     // other refusal applies to it exactly as to the LDR take. The list is
     // ui_layer_math.h's uiLayerFamilyTakesHdr, one place for this and the rigs' routing model.
     f.crispHdr = detail::g_uiLayerCrispOn && f.eyeTarget && !f.ldrView && uiLayerFamilyTakesHdr(family);
-    // advanced.shield_ripple's draw is not tonemapped and needs no re-issue path: it rides the HDR route on its own key, not on fix.ui_quality's.
+    // The shield ripple's draw is not tonemapped and needs no re-issue path: it rides the HDR route on fix.sharp_weapons's key, not on fix.ui_quality's.
     if (family == UiLayerFamily::kShieldRipple) f.crispHdr = g_rippleLive && f.eyeTarget && !f.ldrView;
     uint64_t seq = 0;
     float jx = 0.0f, jy = 0.0f;
@@ -4589,10 +4555,6 @@ bool rippleR1Allows(ID3D11DeviceContext* ctx) {
 void rippleDoor(Eye& e, uint32_t eye, uint64_t sequence, ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4], bool ownedFrame) {
     if (!g_rippleLive || !e.dTex || e.dSeq != sequence || !e.dDraws || e.dAppliedSeq == sequence) return;
     e.dAppliedSeq = sequence;
-    if (!shieldRippleApplies(g_rippleMode)) {
-        ++g_win.rippleNone;
-        return;
-    }
     const auto decline = [&](int reason) {
         ++g_win.rippleDoorDeclined[reason];
     };
@@ -4715,9 +4677,6 @@ void rippleIdleTick() {
             e.rcTex.Reset();
             e.rcSrv.Reset();
             e.rcW = e.rcH = 0;
-            e.pcTex.Reset();
-            e.pcDsv.Reset();
-            e.pcSeq = 0;
             ++g_rip.released;
         } else {
             any = true;
@@ -4730,253 +4689,16 @@ void rippleIdleTick() {
     }
 }
 
-// ---- the coverage instrument (R2): how many samples of the six draws that come after 820E and stay in the scene fall over the bubble.
-//
-// At the first such draw of an eye-frame with D coverage, a stencil target of D's size is marked 1 wherever D covers (a pass that discards elsewhere). Each such
-// draw is then replayed through the real entry point with no colour target, that stencil bound, the stencil test EQUAL 1, no writes and the draw's viewport mapped
-// through the layer's remap and jitter cancel, wrapped in an occlusion query; the answers are read on later frames without waiting (the blend probe's method).
-// Counted in layer samples per pair in the 30 s line. Changes nothing the game sees: every state is put back.
-bool rippleProbeReady(ID3D11DeviceContext* ctx, Eye& e) {
-    if (g_rip.probeFailed) return false;
-    Ptr<ID3D11Device> dev;
-    ctx->GetDevice(&dev);
-    if (!dev) return false;
-    if (!g_rip.markTried) {
-        g_rip.markTried = true;
-        g_rip.markVs = shaderSwapCreateVs(ctx, kShieldRippleMarkVsBytecode, sizeof(kShieldRippleMarkVsBytecode), "shield_ripple_mark_vs", "shield ripple");
-        g_rip.markPs = shaderSwapCreatePs(ctx, kShieldRippleMarkPsBytecode, sizeof(kShieldRippleMarkPsBytecode), "shield_ripple_mark_ps", "shield ripple");
-        D3D11_DEPTH_STENCIL_DESC d{};
-        d.DepthEnable = FALSE;
-        d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
-        d.StencilEnable = TRUE;
-        d.StencilReadMask = 0xFF;
-        d.StencilWriteMask = 0xFF;
-        d.FrontFace = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_REPLACE, D3D11_COMPARISON_ALWAYS};
-        d.BackFace = d.FrontFace;
-        const bool a = SUCCEEDED(dev->CreateDepthStencilState(&d, &g_rip.dsMark));
-        d.StencilWriteMask = 0;
-        d.FrontFace = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_COMPARISON_EQUAL};
-        d.BackFace = d.FrontFace;
-        const bool b = SUCCEEDED(dev->CreateDepthStencilState(&d, &g_rip.dsEqual));
-        D3D11_BLEND_DESC bd{};
-        bd.RenderTarget[0].RenderTargetWriteMask = 0;
-        bd.RenderTarget[0].SrcBlend = bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-        bd.RenderTarget[0].DestBlend = bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
-        bd.RenderTarget[0].BlendOp = bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-        const bool c = SUCCEEDED(dev->CreateBlendState(&bd, &g_rip.bsNone));
-        if (!g_rip.markVs || !g_rip.markPs || !a || !b || !c) {
-            g_rip.probeFailed = true;
-            Log::get().note("shield ripple: the coverage instrument could not be set up (marking shaders or states); it stays off. The ripple itself is unaffected.");
-            return false;
-        }
-    }
-    if (!e.pcTex || e.pcW != e.dW || e.pcH != e.dH) {
-        e.pcTex.Reset();
-        e.pcDsv.Reset();
-        e.pcSeq = 0;
-        D3D11_TEXTURE2D_DESC td{};
-        td.Width = e.dW;
-        td.Height = e.dH;
-        td.MipLevels = td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-        if (FAILED(dev->CreateTexture2D(&td, nullptr, &e.pcTex)) || FAILED(dev->CreateDepthStencilView(e.pcTex.Get(), nullptr, &e.pcDsv))) {
-            e.pcTex.Reset();
-            e.pcDsv.Reset();
-            g_rip.probeFailed = true;
-            Log::get().note("shield ripple: the coverage instrument's stencil target could not be created; it stays off.");
-            return false;
-        }
-        e.pcW = e.dW;
-        e.pcH = e.dH;
-    }
-    return true;
-}
-
-// Mark the stencil from D (once an eye-frame), on the deferred context so the game's state is untouched.
-bool rippleProbeMark(ID3D11DeviceContext* ctx, Eye& e, uint64_t seq) {
-    if (e.pcSeq == seq) return true;
-    if (!crispCoverageContextReady(ctx) || !g_crispDeferred) return false;
-    Ptr<ID3D11DeviceContext> dc = g_crispDeferred;
-    dc->ClearDepthStencilView(e.pcDsv.Get(), D3D11_CLEAR_STENCIL, 1.0f, 0);
-    dc->IASetInputLayout(nullptr);
-    dc->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    dc->VSSetShader(g_rip.markVs, nullptr, 0);
-    dc->PSSetShader(g_rip.markPs, nullptr, 0);
-    ID3D11ShaderResourceView* srv = e.dSrv.Get();
-    dc->PSSetShaderResources(0, 1, &srv);
-    dc->OMSetRenderTargets(0, nullptr, e.pcDsv.Get());
-    dc->OMSetBlendState(g_rip.bsNone.Get(), nullptr, 0xFFFFFFFFu);
-    dc->OMSetDepthStencilState(g_rip.dsMark.Get(), 1);
-    const D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(e.dW), static_cast<float>(e.dH), 0.0f, 1.0f};
-    dc->RSSetViewports(1, &vp);
-    dc->Draw(3, 0);
-    ID3D11ShaderResourceView* none = nullptr;
-    dc->PSSetShaderResources(0, 1, &none);
-    Ptr<ID3D11CommandList> list;
-    if (FAILED(dc->FinishCommandList(FALSE, &list)) || !list) return false;
-    vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
-    e.pcSeq = seq;
-    return true;
-}
-
-ID3D11RasterizerState* rippleProbeRaster(ID3D11DeviceContext* ctx, ID3D11RasterizerState* game) {
-    D3D11_RASTERIZER_DESC d{};
-    if (game) game->GetDesc(&d);
-    else {
-        d.FillMode = D3D11_FILL_SOLID;
-        d.CullMode = D3D11_CULL_BACK;
-        d.DepthClipEnable = TRUE;
-    }
-    d.ScissorEnable = FALSE;
-    const std::string key(reinterpret_cast<const char*>(&d), sizeof(d));
-    const auto it = g_rip.rsClones.find(key);
-    if (it != g_rip.rsClones.end()) return it->second.Get();
-    if (g_rip.rsClones.size() >= 8) return nullptr;
-    Ptr<ID3D11Device> dev;
-    ctx->GetDevice(&dev);
-    Ptr<ID3D11RasterizerState> out;
-    if (!dev || FAILED(dev->CreateRasterizerState(&d, &out))) return nullptr;
-    g_rip.rsClones[key] = out;
-    return out.Get();
-}
-
-void rippleProbeOffer(ID3D11DeviceContext* ctx, void (*replay)(void*), void* arg) {
-    if (!ctx || !replay || g_rip.probeFailed) return;
-    const int pair = shieldLaterIndex(bindingShaderHash(BindSlot::Vs));
-    if (pair < 0) return;
-    if (uiLayerTargetKind() != 1) return;
-    uint64_t seq = 0;
-    float jx = 0.0f, jy = 0.0f;
-    const int eye = uiDepthEyeOfTargetReadOnly(g_tc.info.resource);
-    if (eye < 0 || eye > 1 || !layerDrawJitter(static_cast<uint32_t>(eye), &seq, &jx, &jy, nullptr, nullptr)) return;
-    Eye& e = g_eye[eye];
-    if (!e.dTex || e.dSeq != seq || !e.dDraws) return;   // the bubble has not drawn in this eye-frame (yet)
-    ++g_win.probeSeen[pair];
-    if (!rippleProbeReady(ctx, e) || !rippleProbeMark(ctx, e, seq)) {
-        ++g_win.probeUntested;
-        return;
-    }
-    RippleShared::Pend* slot = nullptr;
-    for (RippleShared::Pend& p : g_rip.pend)
-        if (!p.busy) {
-            slot = &p;
-            break;
-        }
-    if (!slot) {
-        ++g_win.probeUntested;
-        return;
-    }
-    Ptr<ID3D11Device> dev;
-    ctx->GetDevice(&dev);
-    if (!slot->q) {
-        D3D11_QUERY_DESC qd{};
-        qd.Query = D3D11_QUERY_OCCLUSION;
-        if (!dev || FAILED(dev->CreateQuery(&qd, &slot->q))) {
-            ++g_win.probeUntested;
-            return;
-        }
-    }
-    // The game's state, held: targets, viewports, scissor, rasterizer, blend, depth-stencil.
-    ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
-    ID3D11DepthStencilView* dsv = nullptr;
-    ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, &dsv);
-    D3D11_VIEWPORT vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
-    UINT nVp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-    ctx->RSGetViewports(&nVp, vps);
-    D3D11_RECT sc[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
-    UINT nSc = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-    ctx->RSGetScissorRects(&nSc, sc);
-    ID3D11RasterizerState* rs = nullptr;
-    ctx->RSGetState(&rs);
-    ID3D11BlendState* bs = nullptr;
-    FLOAT bf[4] = {};
-    UINT bmask = 0xFFFFFFFFu;
-    ctx->OMGetBlendState(&bs, bf, &bmask);
-    ID3D11DepthStencilState* ds = nullptr;
-    UINT dref = 0;
-    ctx->OMGetDepthStencilState(&ds, &dref);
-    bool ok = nVp >= 1 && g_tc.info.a && g_tc.info.b;
-    ID3D11RasterizerState* rsC = ok ? rippleProbeRaster(ctx, rs) : nullptr;
-    if (ok && rsC) {
-        const UiLayerMap m = uiLayerMapFromRegion(0.0f, 0.0f, static_cast<float>(g_tc.info.a), static_cast<float>(g_tc.info.b), e.dW, e.dH);
-        float cx = 0.0f, cy = 0.0f;
-        uiLayerJitterCancel(jx, jy, m, &cx, &cy);
-        D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
-        for (UINT i = 0; i < nVp; ++i) {
-            UiViewport v;
-            v.x = vps[i].TopLeftX;
-            v.y = vps[i].TopLeftY;
-            v.w = vps[i].Width;
-            v.h = vps[i].Height;
-            v.minZ = vps[i].MinDepth;
-            v.maxZ = vps[i].MaxDepth;
-            const UiViewport o = uiLayerMapViewport(m, v, cx, cy);
-            vp[i] = {o.x, o.y, o.w, o.h, o.minZ, o.maxZ};
-        }
-        vScreenSetRenderTargetsRaw(ctx, 0, nullptr, e.pcDsv.Get());
-        vScreenRSSetViewportsRaw(ctx, nVp, vp);
-        ctx->RSSetState(rsC);
-        vScreenOMSetBlendStateRaw(ctx, g_rip.bsNone.Get(), bf, bmask);
-        ctx->OMSetDepthStencilState(g_rip.dsEqual.Get(), 1);
-        ctx->Begin(slot->q.Get());
-        replay(arg);
-        ctx->End(slot->q.Get());
-        slot->busy = true;
-        slot->pair = static_cast<uint8_t>(pair);
-        slot->frame = g_rip.frame;
-        ++g_win.probeTested[pair];
-    } else {
-        ++g_win.probeUntested;
-    }
-    UINT n = 0;
-    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
-        if (rtvs[i]) n = i + 1;
-    vScreenSetRenderTargetsRaw(ctx, n, rtvs, dsv);
-    vScreenRSSetViewportsRaw(ctx, nVp, vps);
-    ctx->RSSetScissorRects(nSc, sc);
-    ctx->RSSetState(rs);
-    vScreenOMSetBlendStateRaw(ctx, bs, bf, bmask);
-    ctx->OMSetDepthStencilState(ds, dref);
-    for (auto* r : rtvs)
-        if (r) r->Release();
-    if (dsv) dsv->Release();
-    if (rs) rs->Release();
-    if (bs) bs->Release();
-    if (ds) ds->Release();
-}
-
-// Frame boundary: collect the answers that are ready (never waits), drop the ones that are not after 90 frames.
-void rippleProbePoll(ID3D11DeviceContext* ctx) {
-    for (RippleShared::Pend& p : g_rip.pend) {
-        if (!p.busy || !p.q) continue;
-        UINT64 samples = 0;
-        const HRESULT hr = ctx->GetData(p.q.Get(), &samples, sizeof(samples), D3D11_ASYNC_GETDATA_DONOTFLUSH);
-        if (hr == S_OK) {
-            g_win.probeSamples[p.pair] += samples;
-            ++g_win.probeAnswered[p.pair];
-            if (samples) ++g_win.probeOver[p.pair];
-            p.busy = false;
-        } else if (g_rip.frame - p.frame > 90) {
-            ++g_win.probeDropped;
-            p.busy = false;
-        }
-    }
-}
-
-// The 30 s line: 820E draws taken, what was left in the scene and why, frames the door applied the ripple, the R1 state, stand-downs, D's lifetime and the six later
-// draws' samples over the bubble. Every part has a zero form; a window with no 820E draw says so.
+// The 30 s line: 820E draws taken, what was left in the scene and why, frames the door applied the ripple, the R1 state, stand-downs and D's lifetime. Every part
+// has a zero form; a window with no 820E draw says so.
 void logShieldRipple() {
     if (runtimeFlatProfile()) return;
-    const char* mode = shieldRippleName(g_rippleMode);
-    if (g_rippleMode == ShieldRippleMode::kStock) {
-        Log::get().note("shield ripple: mode stock -- the game's 820E draw stays in the scene; nothing is taken.");
+    if (!g_sharpWeapons) {
+        Log::get().note("shield ripple: off with fix.sharp_weapons -- the game's 820E draw stays in the scene; nothing is taken.");
         return;
     }
     if (!g_rippleLive) {
-        Log::get().note("shield ripple: not live this window (%s), mode %s.", !g_temporal ? "fix.temporal_aa is off" : "stood down for the session", mode);
+        Log::get().note("shield ripple: not live this window (%s).", !g_temporal ? "fix.temporal_aa is off" : "stood down for the session");
         return;
     }
     const double frames = g_win.frames ? static_cast<double>(g_win.frames) : 1.0;
@@ -4995,30 +4717,17 @@ void logShieldRipple() {
     _snprintf_s(life, _TRUNCATE, "D alive %s (%llu made, %llu released)", (g_eye[0].dTex || g_eye[1].dTex) ? "yes" : "no",
                 static_cast<unsigned long long>(g_rip.created), static_cast<unsigned long long>(g_rip.released));
     if (!taken && !leftTotal) {
-        Log::get().note("shield ripple: not exercised in this window (no 820E draw reached the layer's decision), mode %s, R1 %s, %llu stand-downs, %s.", mode, r1,
+        Log::get().note("shield ripple: not exercised in this window (no 820E draw reached the layer's decision), R1 %s, %llu stand-downs, %s.", r1,
                         static_cast<unsigned long long>(g_rip.standDowns), life);
         return;
     }
-    std::string later;
-    for (unsigned i = 0; i < kShieldLaterCount; ++i) {
-        if (!g_win.probeSeen[i]) {
-            appendf(later, "%s%s not exercised", later.empty() ? "" : "; ", kShieldLaterDraws[i].name);
-            continue;
-        }
-        appendf(later, "%s%s %llu draws seen, %llu answered, %llu with samples over the bubble, %llu layer samples", later.empty() ? "" : "; ",
-                kShieldLaterDraws[i].name, static_cast<unsigned long long>(g_win.probeSeen[i]), static_cast<unsigned long long>(g_win.probeAnswered[i]),
-                static_cast<unsigned long long>(g_win.probeOver[i]), static_cast<unsigned long long>(g_win.probeSamples[i]));
-    }
     Log::get().note(
-        "shield ripple: mode %s; %.3f 820E draws a frame taken (%llu), %llu left in the scene%s%s%s; the door applied the ripple on %llu eye-frames (%llu with mode none "
-        "applied nothing; declined: %llu not EDVR's frame, %llu frame format, %llu pieces); R1 %s (gain %.9g, s0 filter 0x%X); %llu stand-downs; %s; later draws over the "
-        "bubble (occlusion queries against D's stencil, %llu untested, %llu dropped): %s.",
-        mode, static_cast<double>(taken) / frames, static_cast<unsigned long long>(taken), static_cast<unsigned long long>(leftTotal), reasons.empty() ? "" : " (",
-        reasons.c_str(), reasons.empty() ? "" : ")", static_cast<unsigned long long>(g_win.rippleApplied), static_cast<unsigned long long>(g_win.rippleNone),
-        static_cast<unsigned long long>(g_win.rippleDoorDeclined[0]), static_cast<unsigned long long>(g_win.rippleDoorDeclined[1]),
-        static_cast<unsigned long long>(g_win.rippleDoorDeclined[2]), r1, static_cast<double>(g_rip.gainZ) * static_cast<double>(g_rip.gainY), g_rip.filter,
-        static_cast<unsigned long long>(g_rip.standDowns), life, static_cast<unsigned long long>(g_win.probeUntested), static_cast<unsigned long long>(g_win.probeDropped),
-        later.c_str());
+        "shield ripple: %.3f 820E draws a frame taken (%llu), %llu left in the scene%s%s%s; the door applied the ripple on %llu eye-frames (declined: %llu not EDVR's frame, "
+        "%llu frame format, %llu pieces); R1 %s (gain %.9g, s0 filter 0x%X); %llu stand-downs; %s.",
+        static_cast<double>(taken) / frames, static_cast<unsigned long long>(taken), static_cast<unsigned long long>(leftTotal), reasons.empty() ? "" : " (",
+        reasons.c_str(), reasons.empty() ? "" : ")", static_cast<unsigned long long>(g_win.rippleApplied), static_cast<unsigned long long>(g_win.rippleDoorDeclined[0]),
+        static_cast<unsigned long long>(g_win.rippleDoorDeclined[1]), static_cast<unsigned long long>(g_win.rippleDoorDeclined[2]), r1,
+        static_cast<double>(g_rip.gainZ) * static_cast<double>(g_rip.gainY), g_rip.filter, static_cast<unsigned long long>(g_rip.standDowns), life);
 }
 
 // First-seen lines, deduplicated per (reason, vs, ps) -- and, with reason
@@ -5592,7 +5301,7 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
         } else if (!matched && !fellBack && !engagedNoted[1]) {
             engagedNoted[1] = true;
             Log::get().note("sharp weapons: the %s eye's weapons light was composited by the plain add -- T(L) through the game's own tonemap "
-                            "draw (advanced.sharp_weapons_blend = plain).",
+                            "draw (fix.sharp_weapons = plain).",
                             eye == 0 ? "left" : "right");
         }
         if (fellBack && !fallbackNoted) {
@@ -5624,11 +5333,6 @@ UiLayerWorldStats uiLayerWorldStats() {
     s.lostDraws = g_win.worldLeftDraws;
     for (size_t r = 0; r < static_cast<size_t>(UiWorldRefuse::kCount); ++r) s.refused[r] = g_win.worldRefused[r];
     return s;
-}
-
-// advanced.shield_ripple's coverage instrument (ui_layer.h): offered one in-scene draw of an eye pass while a bubble has covered some of D this frame.
-void uiLayerShieldProbeOffer(ID3D11DeviceContext* ctx, void (*replay)(void*), void* arg) {
-    guarded("shieldRipple.probe", [&] { rippleProbeOffer(ctx, replay, arg); });
 }
 
 bool uiLayerWorldScreenHeld() { return g_screenHeld == 1; }
@@ -6131,7 +5835,7 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     if (eye > 1 || !frame || !region || !layerUv) return nullptr;
     g_seedCensus.door(eye, sequence);
     Eye& e = g_eye[eye];
-    // advanced.shield_ripple: the picture is rewritten over the bubble's coverage BEFORE the weapons/HUD composite below (the ripple must not touch them).
+    // The shield ripple: the picture is rewritten over the bubble's coverage BEFORE the weapons/HUD composite below (the ripple must not touch them).
     if (g_rippleLive) guarded("shieldRipple.door", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame); });
     if (!e.srv || !e.rtv || e.compositedSeq == sequence) return nullptr;
     const bool hasUi = e.seq == sequence && e.draws;
@@ -6217,10 +5921,8 @@ void settleIssueFence(ID3D11DeviceContext* ctx) {
 
 void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     settleIssueFence(ctx);
-    // advanced.shield_ripple: the idle clock (D released after kShieldRippleIdleFrames), the coverage instrument's answers, and the frame's "bubble drew" flag.
+    // The shield ripple's idle clock (D released after kShieldRippleIdleFrames).
     rippleIdleTick();
-    if (ctx) rippleProbePoll(ctx);
-    detail::g_uiShieldProbeWanted = false;
     // The flat profile's back-off (flatBackOff) lifts itself here.
     if (runtimeFlatProfile() && g_flatBackOffUntilMs && !detail::g_uiLayerIssueBlocked &&
         GetTickCount64() >= g_flatBackOffUntilMs) {

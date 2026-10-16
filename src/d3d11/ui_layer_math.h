@@ -46,7 +46,7 @@
 #include "holo_families.h"  // the crisp take's eight hologram VS hashes: kHoloGeneric's match list
 #include "supercruise_lines.h"  // the orbit lines' and the supercruise bars' shader pairs
 #include "weapons_fire.h"  // the weapons-fire pairs (fix.sharp_weapons)
-#include "shield_ripple.h"  // the shield refraction pair (advanced.shield_ripple)
+#include "shield_ripple.h"  // the shield refraction pair
 #include "holo_material.h"  // the cockpit holo panels' second vertex shader (Disable GUI effects)
 
 namespace edvr {
@@ -640,7 +640,7 @@ enum class UiLayerFamily : uint8_t {
                    // no older family's number moves.
     kShieldRipple,  // the shield-strike refraction (shield_ripple.h: vs 820E5C131B99361D with ps 6EAA86EFE135B2D4): the game's own draw, taken out of the scene and
                     // re-issued through the HDR layer route into the eye's R32G32_FLOAT displacement layer D (t0 swapped for a UV ramp), applied at the door after RCAS.
-                    // Governed by advanced.shield_ripple (TEMPORARY), not by either other key. Last in the enum.
+                    // Governed by fix.sharp_weapons, as a half of the layer of its own. Last in the enum.
     kCount
 };
 
@@ -680,7 +680,8 @@ inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
            f == UiLayerFamily::kShieldRipple;
 }
 
-// Which key governs a family: the weapons fire is fix.sharp_weapons's, every other family is fix.ui_quality's. The two keys are
+// Which key governs a family: the weapons fire is fix.sharp_weapons's, and so is the shield ripple (as a half of its own: `rippleOn` is the key with the ripple's own
+// stand-down), every other family is fix.ui_quality's. The two keys are
 // independent (the four combinations are the sharp_weapons_test rig's): fix.ui_quality off takes no interface, fix.sharp_weapons off
 // takes no weapons fire, whatever the other says. `qualityOn` and `sharpOn` are the keys' LIVE states (the layer not stood down).
 inline bool uiLayerFamilyEnabled(UiLayerFamily f, bool qualityOn, bool sharpOn, bool rippleOn = true) {
@@ -1391,7 +1392,7 @@ inline bool uiLayerWeaponsLiveFor(bool sharp, bool temporal, bool jitterAsShippe
     return sharp && temporal && jitterAsShipped && !stoodDown && !flat;
 }
 inline bool uiLayerMachineryLive(bool qualityLive, bool weaponsLive) { return qualityLive || weaponsLive; }
-// The shield ripple's half: advanced.shield_ripple is not stock, a temporal mode is on (the door composites over its output), the jitter as shipped, not stood
+// The shield ripple's half: fix.sharp_weapons is on, a temporal mode is on (the door composites over its output), the jitter as shipped, not stood
 // down (the layer's or the ripple's own), and not the flat profile (VR only). The machinery runs when it is live too (uiLayerMachineryLive of the union).
 inline bool uiLayerRippleLiveFor(bool taking, bool temporal, bool jitterAsShipped, bool stoodDown, bool flat) {
     return taking && temporal && jitterAsShipped && !stoodDown && !flat;

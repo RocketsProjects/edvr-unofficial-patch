@@ -77,7 +77,6 @@ class Config;
 namespace detail {
 extern bool g_uiLayerLive;
 extern bool g_uiQualityLive;
-extern bool g_uiShieldProbeWanted;
 extern bool g_uiLayerWatching;
 extern bool g_uiSeedDiagnostics;
 extern bool g_uiLayerRedirecting;
@@ -98,12 +97,6 @@ inline bool uiLayerLive() { return detail::g_uiLayerLive; }
 // fix.ui_quality off and fix.sharp_weapons on, uiLayerLive() is true and this is false: only the weapons fire is taken.
 inline bool uiLayerQualityLive() { return detail::g_uiQualityLive; }
 
-// advanced.shield_ripple's coverage instrument (shield_ripple.h; TEMPORARY): while a shield bubble has covered some of an eye's displacement layer this frame,
-// vscreen.cpp offers every eye draw to the layer (one relaxed load otherwise); the layer replays the six draws that come after 820E and stay in the scene against
-// D's coverage stencil, wrapped in occlusion queries read on later frames (never waited on), and counts their samples in its 30 s line. Changes nothing the
-// game sees. `replay` re-issues the draw through the real entry point (vscreen.cpp's pureDrawReissue).
-inline bool uiLayerShieldProbeWanted() { return detail::g_uiShieldProbeWanted; }
-void uiLayerShieldProbeOffer(ID3D11DeviceContext* ctx, void (*replay)(void*), void* arg);
 // A persistent driver restoration fault leaves stock shader state untrusted.
 // Owner-context issues stay suppressed, Begin's fallback included, for the rest
 // of the frame it happened in: uiLayerFrameBoundary then puts back whichever of

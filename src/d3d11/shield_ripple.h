@@ -30,26 +30,6 @@ inline bool shieldRefractPair(uint64_t vs, uint64_t ps) { return vs == kUiVsShie
 // vscreen.cpp reads the pixel shader's hash for this vertex shader (the pair is the key).
 inline bool shieldRefractVs(uint64_t vs) { return vs == kUiVsShieldRefract; }
 
-// advanced.shield_ripple (TEMPORARY A/B).
-//   sharp: the ripple is made after the upscale (the route above).
-//   none:  the draw is taken out of the scene and the door applies nothing: no ripple at all (diagnostic).
-//   stock: the game's draw stays in the scene, as it always was.
-enum class ShieldRippleMode : uint8_t { kSharp = 0, kNone, kStock };
-inline ShieldRippleMode shieldRippleParse(const char* text, bool* recognized) {
-    if (recognized) *recognized = true;
-    if (text && std::strcmp(text, "sharp") == 0) return ShieldRippleMode::kSharp;
-    if (text && std::strcmp(text, "none") == 0) return ShieldRippleMode::kNone;
-    if (text && std::strcmp(text, "stock") == 0) return ShieldRippleMode::kStock;
-    if (recognized) *recognized = false;
-    return ShieldRippleMode::kSharp;
-}
-inline const char* shieldRippleName(ShieldRippleMode m) {
-    return m == ShieldRippleMode::kNone ? "none" : m == ShieldRippleMode::kStock ? "stock" : "sharp";
-}
-// The route runs (draws taken, D made) in sharp and none; the door applies the ripple in sharp only.
-inline bool shieldRippleTakes(ShieldRippleMode m) { return m != ShieldRippleMode::kStock; }
-inline bool shieldRippleApplies(ShieldRippleMode m) { return m == ShieldRippleMode::kSharp; }
-
 // R1. The gain the pixel shader multiplies t0's sample by (cb1[90].z * cb1[90].y) must be 1 within 1e-6: with the ramp at t0, D holds uv_jit + d only then.
 inline bool shieldRippleGainOk(float z, float y) { return std::fabs(static_cast<double>(z) * static_cast<double>(y) - 1.0) <= 1e-6; }
 // R1. t0's sampler must filter linearly in min and mag (D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT 0x14, D3D11_FILTER_MIN_MAG_MIP_LINEAR 0x15): the ramp then reads
@@ -72,27 +52,6 @@ inline void shieldRippleJitterUv(float jx, float jy, float renderW, float render
 inline void shieldRippleSampleUv(const float d[2], const float jitterUv[2], float out[2]) {
     out[0] = d[0] - jitterUv[0];
     out[1] = d[1] - jitterUv[1];
-}
-
-// The six draws that come AFTER 820E in the same eye pass and stay in the scene (R2: they would be rippled post-DLSS where stock does not ripple them). The
-// instrument counts how many of their samples fall over the bubble's coverage. Vertex shader and pixel shader of each, from the 2026-10-16 census.
-struct ShieldLaterDraw {
-    uint64_t vs, ps;
-    const char* name;
-};
-constexpr ShieldLaterDraw kShieldLaterDraws[] = {
-    {0x8C091FFD08644E02ull, 0x4E4FF61E8A08FC7Eull, "canopy 8C091FFD"},
-    {0x71DD8B8B09060A81ull, 0x2D037A047171BF3Bull, "reticle 71DD8B8B"},
-    {0x381D80284FE236F8ull, 0x72BBDA3D4CD3E39Bull, "overlay 381D8028"},
-    {0x2CECEC3065EF0D4Aull, 0xA4D03619D631B186ull, "overlay 2CECEC30"},
-    {0x24214E7C45496BE0ull, 0x0C8FCDB6A3BECCE6ull, "overlay 24214E7C"},
-    {0xCC2BA2E2A927CBD3ull, 0x8A7FB2DB7A33279Eull, "overlay CC2BA2E2"},
-};
-constexpr unsigned kShieldLaterCount = sizeof(kShieldLaterDraws) / sizeof(kShieldLaterDraws[0]);
-inline int shieldLaterIndex(uint64_t vs) {
-    for (unsigned i = 0; i < kShieldLaterCount; ++i)
-        if (kShieldLaterDraws[i].vs == vs) return static_cast<int>(i);
-    return -1;
 }
 
 }  // namespace edvr

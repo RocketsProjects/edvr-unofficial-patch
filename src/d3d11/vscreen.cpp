@@ -3760,14 +3760,6 @@ void blendReplay(void* p) {
     const auto* a = static_cast<const BlendReplayArgs*>(p);
     pureDrawReissue(a->self, a->kind, a->count, a->instances, *a->args);
 }
-// advanced.shield_ripple's coverage instrument (ui_layer.h; TEMPORARY): the same replay, offered to the layer while a bubble has covered some of D this frame. The layer
-// decides whether the draw is one of the six it counts; NOINLINE so the draw path pays only the relaxed load of uiLayerShieldProbeWanted for any other frame.
-// The draw is on an eye target and a bubble has covered some of D this frame (the relaxed load comes last, so any other frame pays one pointer test).
-inline bool shieldProbeWantedNow() { return g_state->rtv0Eye && uiLayerShieldProbeWanted(); }
-__declspec(noinline) void shieldProbeOfferDraw(ID3D11DeviceContext* self, char kind, UINT count, UINT instances, const DrawArgs& args) {
-    BlendReplayArgs a{self, kind, count, instances, &args};
-    uiLayerShieldProbeOffer(self, &blendReplay, &a);
-}
 __declspec(noinline) void blendProbeOfferDraw(ID3D11DeviceContext* self, DrawVerdict v, char kind, UINT count, UINT instances,
                                               const DrawArgs& args, bool udOn, bool holoOn, UiLayerFamily family, bool uiTaken,
                                               uint32_t decisionsBefore) {
@@ -3921,7 +3913,7 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     // HDR draws need no extra hash read.
     if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust))
         f.ps = bindingShaderHash(BindSlot::Ps);
-    else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))  // fix.sharp_weapons / advanced.shield_ripple: the pair is the key too
+    else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))  // fix.sharp_weapons: the pair is the key too
         f.ps = bindingShaderHash(BindSlot::Ps);
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,
@@ -4171,8 +4163,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (blendProbing)
         blendProbeOfferDraw(self, v, kind, count, instances, args, uiDepthScope.on, uiDepthScope.holoOn, compositeFamily, uiLayer,
                             blendDecisionsBefore);
-    // TEMPORARY, advanced.shield_ripple's coverage instrument: the six draws after 820E that stay in the scene, counted over the bubble (ui_layer.h).
-    if (owner && !uiLayer && shieldProbeWantedNow()) shieldProbeOfferDraw(self, kind, count, instances, args);
     // The sub-draw probe, which also SWALLOWS the game's draw -- it re-issues
     // the surviving index ranges itself. Before the curve substitution
     // because both swallow, and two swallows would draw the quads twice.

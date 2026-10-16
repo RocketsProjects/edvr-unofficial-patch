@@ -449,6 +449,19 @@ bool sharpenRowDisabled() {
                              temporalModeEnabled(Config::get().requestedTemporalMode()));
 }
 
+// fix.sharp_weapons (the Sharp weapons row: On, On (plain blend), Off (stock)). The weapons fire and the shield-strike ripple are laid over the
+// temporal pass's output, so with anti-aliasing off the row stays on the page, dimmed, and stops responding. The same in VR and flat; the profile's own reading
+// of fix.temporal_aa decides, live, every time the page is drawn or a row is touched.
+bool isWeaponsRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "sharp_weapons") == 0;
+}
+
+bool weaponsRowDisabled() {
+    const bool flat = runtimeFlatProfile();
+    const Config& cfg = Config::get();
+    return weaponsRowDim(temporalModeEnabledFor(flat ? cfg.requestedTemporalMode() : cfg.getString("fix.temporal_aa", "off"), flat));
+}
+
 // The on-foot panel's width: "auto", or a width in pixels -- never a list, so
 // this is not a headset row despite living beside one in the ini. The height
 // is not a setting any more; it is derived from whichever width applies.
@@ -2065,8 +2078,10 @@ void buildContent(MenuContent& c) {
             const bool noteOnThis = hotkeyRow && s.noteDef == e.def && s.noteUntilMs > s.tickMs;
             const bool dlssRow = isDlssPresetRow(d);
             const bool sharpenRow = isSharpenRow(d);
+            const bool weaponsRow = isWeaponsRow(d);
             const bool dim = (dlssRow && dlssPresetDisabled()) ||
-                             (sharpenRow && sharpenRowDisabled());
+                             (sharpenRow && sharpenRowDisabled()) ||
+                             (weaponsRow && weaponsRowDisabled());
             l.dim = dim;
             strncpy(l.left, d.label, sizeof(l.left) - 1);
             if (dlssRow) {
@@ -2141,7 +2156,9 @@ void buildContent(MenuContent& c) {
                       : hi        ? kMenuRowHi
                       : dim       ? kMenuDim
                                   : kMenuRow;
-            if (hi && dim && runtimeFlatProfile())
+            if (hi && dim && weaponsRow)
+                snprintf(c.hint, sizeof(c.hint), "%s", "Needs temporal AA: turn anti-aliasing on to use it.");
+            else if (hi && dim && runtimeFlatProfile())
                 snprintf(c.hint, sizeof(c.hint), "%s",
                          sharpenRow ? "Turn anti-aliasing on to sharpen."
                                     : "Choose DLSS to change its model preset.");
@@ -2620,6 +2637,11 @@ void stepRow(int defIndex, int dir, int mult) {
         g_s.contentDirty = true;
         return;
     }
+    if (isWeaponsRow(d) && weaponsRowDisabled()) {
+        g_s.lastWrite = "Needs temporal AA: turn anti-aliasing on above first.";
+        g_s.contentDirty = true;
+        return;
+    }
     if (isOpenxrRenderScaleRow(d)) {
         // A width for the worn headset, stepped by 100 px on the grid of
         // round hundreds (steppedResolution); the generated row is Text,
@@ -2958,6 +2980,11 @@ void beginEdit(int entryIndex, int defIndex) {
     // neither (stepRow says why).
     if (isSharpenRow(kMenuRows[defIndex]) && sharpenRowDisabled()) {
         s.lastWrite = "Sharpening is inactive: turn anti-aliasing on above first.";
+        s.contentDirty = true;
+        return;
+    }
+    if (isWeaponsRow(kMenuRows[defIndex]) && weaponsRowDisabled()) {
+        s.lastWrite = "Needs temporal AA: turn anti-aliasing on above first.";
         s.contentDirty = true;
         return;
     }

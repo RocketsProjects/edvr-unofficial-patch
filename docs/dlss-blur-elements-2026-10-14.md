@@ -9,18 +9,17 @@
   OUT; the hull's 13% stale_slot is open hypothesis H-bias (a depth bias missing from the exported z). E2 (do puffs ride the ship) inconclusive.
   Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"). A count-and-tag probe
   (`claude/producer-434d120-probe`) confirmed FUN_14434D470 makes the shield (see the flight notes); the probe and the parked join are NOT on main.
-- **Shield refraction after the upscale (2026-10-16): BUILT, NOT FLOWN** (`claude/shield-ripple`, VR only; entry "Built, 2026-10-16: the
-  shield refraction"). 820E is skipped in the scene and its displacement applied after RCAS via a per-eye layer D. **Temporary keys:** `advanced.shield_ripple = sharp | none | stock`
-  (default sharp; dev tier only, no menu row; none = skip with no ripple, stock = the game's in-scene draw) and the six-pair coverage
-  instrument (30 s line). R1 (gain, filter) runs live on the first 820E draw and stands down to stock with a log line. At arc close ship the
-  winning mode and propose removing the key and the instrument, quoted.
+- **Shield refraction after the upscale (2026-10-16): BUILT, NOT FLOWN** (`claude/shield-ripple`, VR only; entry "Built, 2026-10-16: the shield
+  refraction"). 820E is skipped in the scene and its displacement applied after RCAS via a per-eye layer D. Sean approved shipping it: it rides
+  `fix.sharp_weapons`, no key of its own. `advanced.shield_ripple` (sharp | none | stock) and the six-pair coverage instrument are REMOVED. R1 (gain,
+  filter) runs live on the first 820E draw and stands down to stock with a log line; D is released after 300 idle frames.
 - **Weapons fire (2026-10-16): MERGED** (`claude/billboards-sharp-weapons`; flown OK in combat as `claude/combat-flight-1`; entries "Built" and
   "Combat flights"). 1F17, 939D and 5C1D go into the eye's own additive HDR layer, composited after the upscale by tonemap difference; 820E stays.
-  Sean: weapons and shields look much better, beams and tracers are sharp. Key `fix.sharp_weapons` (default on, independent of `fix.ui_quality`).
-  **Temporary key, KEPT by Sean's choice for long-session A/B:** `advanced.sharp_weapons_blend = matched | plain`, the FIRST row of the in-headset menu
-  ("Weapons blend", Performance page, live); he sees no difference between the two live (log edvr_gfx_20261016_095256). When the arc closes ship
-  matched and propose removing the key, quoted, with its generator exception (`MENU_ADVANCED_EXCEPTIONS` in tools\gen_settings_schema.py) and its
-  edvr.ini row. W3 SETTLED: all three pairs carry the eye's jitter (dump 100257), the cancel table says cancel for each. The 0.5 to 5 percent "layers'
+  Sean: weapons and shields look much better, beams and tracers are sharp. **ONE key, `fix.sharp_weapons = on | plain | off`** (default on, independent of
+  `fix.ui_quality`; menu: one "Sharp weapons" row, On / On (plain blend) / Off (stock), directly under UI quality, dimmed with temporal AA off). on = the
+  matched composite, plain = the plain add, off = all stock, shield ripple included. `advanced.sharp_weapons_blend` is MERGED INTO IT and removed (with its
+  menu row and its `MENU_ADVANCED_EXCEPTIONS` entry): an old line is read by nothing, and the old true/yes/1 and false/no/0 spellings of the key still work.
+  The blend A/B showed no difference live (log edvr_gfx_20261016_095256). W3 SETTLED: all three pairs carry the eye's jitter (dump 100257), the cancel table says cancel for each. The 0.5 to 5 percent "layers'
   content never reached a tonemap" was an accounting artifact (one false count per burst end), nothing was dropped; the corrected count
   ("The never-tonemapped frames: found") is merged but NOT yet flown.
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
@@ -457,6 +456,12 @@ copy, the order and a hole).
 
 
 ## Built, 2026-10-16: the shield refraction after the upscale (`claude/shield-ripple`, NOT FLOWN)
+
+**Shipped (Sean approved, same day).** The first build carried a TEMPORARY A/B key `advanced.shield_ripple = sharp | none | stock` and a coverage instrument;
+both are gone. The ripple is `sharp` under `fix.sharp_weapons` (on and plain take it, off leaves 820E in the scene), with the R1 stand-down, D's idle release
+and the rig kept; `advanced.sharp_weapons_blend` is merged into `fix.sharp_weapons = on | plain | off` (see Status). The text below describes the first
+build; read "mode" as the key's on/off, and skip the instrument paragraph and the two instrument rig cases (the rig is now 386 checks). The six later pairs
+(canopy, reticle and overlays) are rippled with the rest of the picture for now.
 
 **What runs** (VR, behind temporal AA; key `advanced.shield_ripple`, default `sharp`). The exact pair 820E5C131B99361D / 6EAA86EFE135B2D4 is a
 `UiLayerFamily::kShieldRipple` row on its own key (not fix.ui_quality's, not fix.sharp_weapons's). A taken draw is re-issued unchanged through the

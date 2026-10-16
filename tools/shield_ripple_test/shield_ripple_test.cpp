@@ -1,7 +1,7 @@
-// advanced.shield_ripple, in the build's gate (docs/dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: the shield refraction after the upscale").
+// The shield ripple under fix.sharp_weapons, in the build's gate (docs/dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: the shield refraction after the upscale").
 //
-//   THE RULE (pure). The exact pair 820E/6EAA is the family kShieldRipple on the HDR branch of the production uiLayerFamilyFor and nothing else is; the mode words;
-//   what each mode takes and applies; the first-draw checks (gain 1 within 1e-6, a linear s0); D's coverage test; the jitter arithmetic.
+//   THE RULE (pure). The exact pair 820E/6EAA is the family kShieldRipple on the HDR branch of the production uiLayerFamilyFor and nothing else is; the ripple's own half (live iff
+//   fix.sharp_weapons, a temporal mode, not stood down, not flat); the first-draw checks (gain 1 within 1e-6, a linear s0); D's coverage test; the jitter arithmetic.
 //   THE GAME'S SHADER (WARP). The real ps_6EAA (fixtures\ps_6EAA86EFE135B2D4.dxbc, from edvr_logs\shaders) drawn on the UV ramp writes the game's own uv_jit + d:
 //   compared with the analytic value for a 2016-wide ramp (the size the flights run) within 1e-6.
 //   THE ROUTE (WARP). The whole chain with the production pieces: the production remap and jitter cancel (ui_layer_math.h) for the draw into D, depth GEQUAL
@@ -10,10 +10,8 @@
 //   bubble, and is untouched outside it and under the occluder. Mutants, each caught by the same comparator that passes the real thing: the jitter not subtracted, the
 //   ramp's y flipped, d scaled by the layer/render ratio, no depth seed, an in-place read without the copy, the ripple after the weapons/HUD composite, and 820E
 //   skipped with D not admitted.
-//   THE INSTRUMENT (WARP). The coverage instrument's method with the production marking pass: a stencil marked from D, a later draw replayed against it with an
-//   occlusion query, counts exactly the samples that overlap the bubble.
 //   THE WIRING (source scans, each with a control). The ripple before the composite at the door, t0 swapped and put back, D cleared far outside [0, 1], the first-draw
-//   checks, the idle release, the vscreen hook, the eye-dump watch, the ini rows.
+//   checks, the idle release, the vscreen hook, the eye-dump watch, the ini text.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -73,31 +71,17 @@ static void ruleTests() {
     check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kShieldRipple), "shield ripple") == 0, "the family's name is the log's");
     check(shieldRefractVs(kUiVsShieldRefract) && !shieldRefractVs(0x1234ull), "the draw hook reads the pixel shader for the vertex shader");
 
-    // The modes.
-    bool known = true;
-    check(shieldRippleParse("sharp", &known) == ShieldRippleMode::kSharp && known, "sharp");
-    check(shieldRippleParse("none", &known) == ShieldRippleMode::kNone && known, "none");
-    check(shieldRippleParse("stock", &known) == ShieldRippleMode::kStock && known, "stock");
-    check(shieldRippleParse("Sharp", &known) == ShieldRippleMode::kSharp && !known, "anything else reads as sharp and says so");
-    check(shieldRippleParse(nullptr, &known) == ShieldRippleMode::kSharp && !known, "no value reads as sharp");
-    check(std::strcmp(shieldRippleName(ShieldRippleMode::kNone), "none") == 0 && std::strcmp(shieldRippleName(ShieldRippleMode::kStock), "stock") == 0 &&
-              std::strcmp(shieldRippleName(ShieldRippleMode::kSharp), "sharp") == 0,
-          "the words the log prints are the key's");
-    check(shieldRippleTakes(ShieldRippleMode::kSharp) && shieldRippleTakes(ShieldRippleMode::kNone) && !shieldRippleTakes(ShieldRippleMode::kStock),
-          "sharp and none take the draw out of the scene, stock leaves it");
-    check(shieldRippleApplies(ShieldRippleMode::kSharp) && !shieldRippleApplies(ShieldRippleMode::kNone) && !shieldRippleApplies(ShieldRippleMode::kStock),
-          "only sharp applies the ripple at the door");
-    // The family gate: the shield ripple follows its own key, whatever the other two say; the others ignore it.
+    // The family gate: the shield ripple follows its own half (fix.sharp_weapons's, with its own stand-down), whatever fix.ui_quality says; the others ignore it.
     for (int q = 0; q < 2; ++q)
         for (int s = 0; s < 2; ++s)
             for (int r = 0; r < 2; ++r) {
-                check(uiLayerFamilyEnabled(UiLayerFamily::kShieldRipple, q != 0, s != 0, r != 0) == (r != 0), "the shield ripple follows advanced.shield_ripple alone");
+                check(uiLayerFamilyEnabled(UiLayerFamily::kShieldRipple, q != 0, s != 0, r != 0) == (r != 0), "the shield ripple follows its own half alone");
                 check(uiLayerFamilyEnabled(UiLayerFamily::kWeaponsFire, q != 0, s != 0, r != 0) == (s != 0), "the weapons fire still follows fix.sharp_weapons alone");
                 check(uiLayerFamilyEnabled(UiLayerFamily::kFlightHud, q != 0, s != 0, r != 0) == (q != 0), "the interface still follows fix.ui_quality alone");
             }
     check(uiLayerRippleLiveFor(true, true, true, false, false) && !uiLayerRippleLiveFor(false, true, true, false, false) && !uiLayerRippleLiveFor(true, false, true, false, false) &&
               !uiLayerRippleLiveFor(true, true, true, true, false) && !uiLayerRippleLiveFor(true, true, true, false, true),
-          "the ripple is live for a taking mode, a temporal mode, not stood down, not flat");
+          "the ripple is live for fix.sharp_weapons on, a temporal mode, not stood down, not flat");
     check(uiLayerMachineryLive(false, true) && !uiLayerMachineryLive(false, false), "the machinery runs for the ripple as it does for the weapons (their union is passed)");
     check(static_cast<int>(UiLayerFamily::kShieldRipple) + 1 == static_cast<int>(UiLayerFamily::kCount), "the family is last in its enum");
     UiLayerDrawFacts d;
@@ -108,7 +92,7 @@ static void ruleTests() {
     d.armed = true;
     d.blend = UiBlendShape::kOver;
     d.familyEnabled = false;
-    check(uiLayerDecide(d) == UiLayerDecision::kFamilyOff, "a ripple whose mode is stock (or stood down) is refused for its key");
+    check(uiLayerDecide(d) == UiLayerDecision::kFamilyOff, "a ripple that is off (fix.sharp_weapons off, or stood down) is refused for its key");
     d.familyEnabled = true;
     check(uiLayerDecide(d) == UiLayerDecision::kRedirect, "the 820E facts (blend over, depth tested, no write) are redirected");
 
@@ -129,8 +113,6 @@ static void ruleTests() {
     shieldRippleSampleUv(d2, j, o);
     check(std::fabs(j[0] - 0.5f / 2016.0f) < 1e-9f && std::fabs(j[1] + 0.25f / 2016.0f) < 1e-9f && std::fabs(o[0] - (0.6f - j[0])) < 1e-9f && std::fabs(o[1] - (0.4f - j[1])) < 1e-9f,
           "the jitter in uv and the read position D minus jitter");
-    check(kShieldLaterCount == 6 && shieldLaterIndex(0x8C091FFD08644E02ull) == 0 && shieldLaterIndex(0xCC2BA2E2A927CBD3ull) == 5 && shieldLaterIndex(kUiVsShieldRefract) < 0,
-          "the six later in-scene draws, and 820E is not one of them");
     check(kShieldRippleIdleFrames == 300, "D is released after 300 idle frames");
 }
 
@@ -155,19 +137,18 @@ static bool wiredLayer(const std::string& t) {
         has(t, "if (converted && rp) layerBlend = g_rip.blend.Get();") && has(t, "ID3D11ShaderResourceView* ramp = g_rip.rampSrv.Get();\n        vScreenPSSetShaderResourcesRaw(ctx, 0, 1, &ramp);") &&
         has(t, "if (g_draw.rippleSwapped) {") && has(t, "g_draw.rippleSwapped = false;") &&
         // the ripple is its own half of the layer, with the jitter subtracted from D at the door
-        has(t, "g_rippleLive = uiLayerRippleLiveFor(shieldRippleTakes(g_rippleMode), g_temporal, g_jitterAsShipped, g_stoodDown || g_rippleStoodDown, runtimeFlatProfile());") &&
+        has(t, "g_rippleLive = uiLayerRippleLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_rippleStoodDown, runtimeFlatProfile());") &&
         has(t, "shieldRippleJitterUv(e.dJx, e.dJy, static_cast<float>(e.dRenderW), static_cast<float>(e.dRenderH), p.jitterUv);") &&
         has(t, "if (family == UiLayerFamily::kShieldRipple && f.familyEnabled) f.familyEnabled = rippleR1Allows(ctx);") &&
         // the first-draw checks
         has(t, "shieldRippleGainOk(row[2], row[1])") && has(t, "shieldRippleFilterOk(g_rip.filter)") && has(t, "rippleStandDown(why);") &&
         // the idle release
         has(t, "if (g_rip.frame - e.dLastFrame > kShieldRippleIdleFrames) {") &&
-        // the config key
-        has(t, "cfg.getString(\"advanced.shield_ripple\", \"sharp\")");
+        // no key of its own: the ripple follows fix.sharp_weapons, and a change of that key re-arms a stood-down ripple and asks the first-draw checks again
+        !has(t, "advanced.shield_ripple") && has(t, "if (g_rippleNoted && sharp != g_rippleNotedOn) {\n        g_rippleStoodDown = false;\n        g_rip.check = 0;");
 }
 static bool wiredHook(const std::string& v) {
-    return has(v, "if (owner && !uiLayer && shieldProbeWantedNow()) shieldProbeOfferDraw(self, kind, count, instances, args);") &&
-           has(v, "(weaponsFireVs(f.vs) || shieldRefractVs(f.vs))");
+    return has(v, "(weaponsFireVs(f.vs) || shieldRefractVs(f.vs))") && !has(v, "shieldProbe") && !has(v, "advanced.shield_ripple");
 }
 static void wiringTests() {
     const std::string layer = readFile("src/d3d11/ui_layer.cpp"), vscreen = readFile("src/d3d11/vscreen.cpp"), snap = readFile("src/d3d11/eye_draw_snapshot.h"), ini = readFile("edvr.ini");
@@ -186,13 +167,13 @@ static void wiringTests() {
     check(!wiredLayer(replaced(layer, "if (family == UiLayerFamily::kShieldRipple && f.familyEnabled) f.familyEnabled = rippleR1Allows(ctx);", "")), "control: no first-draw checks trip the pin");
     check(!wiredLayer(replaced(layer, "shieldRippleGainOk(row[2], row[1])", "true")), "control: a gain that is never checked trips the pin");
     check(!wiredLayer(replaced(layer, "if (g_rip.frame - e.dLastFrame > kShieldRippleIdleFrames) {", "if (false) {")), "control: a D that is never released trips the pin");
-    check(wiredHook(vscreen), "vscreen.cpp: the pixel shader is read for the 820E vertex shader and the coverage instrument is offered the later draws");
-    check(!wiredHook(replaced(vscreen, "&& shieldProbeWantedNow()) shieldProbeOfferDraw", "&& false) shieldProbeOfferDraw")), "control: no offer trips the pin");
+    check(wiredHook(vscreen), "vscreen.cpp: the pixel shader is read for the 820E vertex shader, and no instrument hook is left");
+    check(!wiredHook(vscreen + "\nshieldProbeOfferDraw(self, kind, count, instances, args);"), "control: a surviving instrument hook trips the pin");
     check(!wiredHook(replaced(vscreen, "(weaponsFireVs(f.vs) || shieldRefractVs(f.vs))", "weaponsFireVs(f.vs)")), "control: no pixel shader read for 820E trips the pin");
     check(has(snap, "case 0x820E5C131B99361Dull: // the shield's refracting bubble"), "eye_draw_snapshot.h: the next eye dump watches 820E (VS b0/b1/b2)");
     check(!has(replaced(snap, "case 0x820E5C131B99361Dull: // the shield's refracting bubble\n", ""), "case 0x820E5C131B99361Dull"), "control: an unwatched 820E trips the pin");
-    check(has(ini, "#shield_ripple = sharp") && has(ini, "# dev: choices sharp, none, stock\n#shield_ripple = sharp"), "edvr.ini: the temporary key is documented, off the menu's ui rows (developer tier only)");
-    check(!has(ini, "# ui: Shield ripple"), "...and has no ui: row");
+    // edvr.ini: no key of its own (sharp_weapons_test holds that fix.sharp_weapons says it covers the ripple).
+    check(!has(ini, "shield_ripple"), "edvr.ini: the temporary key is gone");
 }
 
 // ============================================================================================ WARP
@@ -321,8 +302,8 @@ struct Fx {
     ComPtr<ID3D11Device> dev;
     ComPtr<ID3D11DeviceContext> ctx;
     ComPtr<ID3D11InfoQueue> info;
-    ComPtr<ID3D11VertexShader> quadVs, triVs, markVs;
-    ComPtr<ID3D11PixelShader> realPs, tonePs, fillPs, markPs;
+    ComPtr<ID3D11VertexShader> quadVs, triVs;
+    ComPtr<ID3D11PixelShader> realPs, tonePs, fillPs;
     ComPtr<ID3D11ComputeShader> doorCs, inPlaceCs;
     ComPtr<ID3D11SamplerState> lin;
     ComPtr<ID3D11RasterizerState> rsNone;
@@ -393,8 +374,6 @@ struct Fx {
         hr(dev->CreateComputeShader(ip->GetBufferPointer(), ip->GetBufferSize(), nullptr, &inPlaceCs), "in-place cs");
         // the build's bytes
         hr(dev->CreateComputeShader(kShieldRippleDoorBytecode, sizeof(kShieldRippleDoorBytecode), nullptr, &doorCs), "the build's door pass");
-        hr(dev->CreateVertexShader(kShieldRippleMarkVsBytecode, sizeof(kShieldRippleMarkVsBytecode), nullptr, &markVs), "the build's marking VS");
-        hr(dev->CreatePixelShader(kShieldRippleMarkPsBytecode, sizeof(kShieldRippleMarkPsBytecode), nullptr, &markPs), "the build's marking PS");
         // the game's pixel shader, from the fixture
         const std::string bytes = readFile("tools/shield_ripple_test/fixtures/ps_6EAA86EFE135B2D4.dxbc");
         check(bytes.size() == 2004, "the pixel shader fixture is the 2004 bytes the flight dumped");
@@ -832,108 +811,6 @@ static void routeTests(Fx& f) {
     check(o.worstBubble <= 2 && o.worstOverlay == 0, "and at another render size and jitter");
 }
 
-// ---- the coverage instrument's method, with the production marking pass
-static void probeTests(Fx& f) {
-    const uint32_t L = 64;
-    auto dTex = f.tex(L, L, DXGI_FORMAT_R32G32_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, nullptr, 0);
-    auto dRtv = f.rtv(dTex.Get());
-    const float clear[4] = {kShieldRippleNoCover, kShieldRippleNoCover, 0, 0};
-    f.ctx->ClearRenderTargetView(dRtv.Get(), clear);
-    auto ramp = makeRamp(f, 64, 64, false);
-    auto rampSrv = f.srv(ramp.Get());
-    const D3D11_VIEWPORT vp{0, 0, static_cast<float>(L), static_cast<float>(L), 0, 1};
-    // the bubble: clip x in [-0.52, 0.48], y in [-0.46, 0.54] (edges between pixel centres)
-    const float bx0 = -0.52f, by0 = -0.46f, bx1 = 0.48f, by1 = 0.54f;
-    f.drawBubble(dRtv.Get(), nullptr, rampSrv.Get(), vp, f.quadConstants(bx0, by0, bx1, by1, 0, 0, 0.5f).Get());
-    // the stencil, marked from D by the production pass, the production state recipe
-    auto pc = f.tex(L, L, DXGI_FORMAT_D24_UNORM_S8_UINT, D3D11_BIND_DEPTH_STENCIL, nullptr, 0);
-    ComPtr<ID3D11DepthStencilView> pcDsv;
-    hr(f.dev->CreateDepthStencilView(pc.Get(), nullptr, &pcDsv), "stencil dsv");
-    D3D11_DEPTH_STENCIL_DESC d{};
-    d.DepthEnable = FALSE; d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO; d.StencilEnable = TRUE; d.StencilReadMask = 0xFF; d.StencilWriteMask = 0xFF;
-    d.FrontFace = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_REPLACE, D3D11_COMPARISON_ALWAYS};
-    d.BackFace = d.FrontFace;
-    ComPtr<ID3D11DepthStencilState> dsMark, dsEq;
-    hr(f.dev->CreateDepthStencilState(&d, &dsMark), "mark state");
-    d.StencilWriteMask = 0;
-    d.FrontFace = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_COMPARISON_EQUAL};
-    d.BackFace = d.FrontFace;
-    hr(f.dev->CreateDepthStencilState(&d, &dsEq), "equal state");
-    D3D11_BLEND_DESC bd{};
-    bd.RenderTarget[0].RenderTargetWriteMask = 0;
-    bd.RenderTarget[0].SrcBlend = bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-    bd.RenderTarget[0].DestBlend = bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
-    bd.RenderTarget[0].BlendOp = bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-    ComPtr<ID3D11BlendState> bsNone;
-    hr(f.dev->CreateBlendState(&bd, &bsNone), "no-write blend");
-    auto mark = [&] {
-        f.ctx->ClearDepthStencilView(pcDsv.Get(), D3D11_CLEAR_STENCIL, 1.0f, 0);
-        f.ctx->OMSetRenderTargets(0, nullptr, pcDsv.Get());
-        f.ctx->OMSetBlendState(bsNone.Get(), nullptr, 0xFFFFFFFFu);
-        f.ctx->OMSetDepthStencilState(dsMark.Get(), 1);
-        f.ctx->RSSetState(f.rsNone.Get());
-        f.ctx->IASetInputLayout(nullptr);
-        f.ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        f.ctx->VSSetShader(f.markVs.Get(), nullptr, 0);
-        f.ctx->PSSetShader(f.markPs.Get(), nullptr, 0);
-        ComPtr<ID3D11ShaderResourceView> keep = f.srv(dTex.Get());
-        ID3D11ShaderResourceView* s = keep.Get();
-        f.ctx->PSSetShaderResources(0, 1, &s);
-        f.ctx->RSSetViewports(1, &vp);
-        f.ctx->Draw(3, 0);
-        ID3D11ShaderResourceView* none = nullptr;
-        f.ctx->PSSetShaderResources(0, 1, &none);
-    };
-    auto count = [&](float x0, float y0, float x1, float y1) -> uint64_t {
-        ComPtr<ID3D11Query> q;
-        D3D11_QUERY_DESC qd{};
-        qd.Query = D3D11_QUERY_OCCLUSION;
-        hr(f.dev->CreateQuery(&qd, &q), "occlusion query");
-        f.ctx->OMSetRenderTargets(0, nullptr, pcDsv.Get());
-        f.ctx->OMSetBlendState(bsNone.Get(), nullptr, 0xFFFFFFFFu);
-        f.ctx->OMSetDepthStencilState(dsEq.Get(), 1);
-        f.ctx->RSSetState(f.rsNone.Get());
-        f.ctx->IASetInputLayout(nullptr);
-        f.ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        f.ctx->VSSetShader(f.quadVs.Get(), nullptr, 0);
-        auto quad = f.quadConstants(x0, y0, x1, y1, 0, 0, 0.5f);
-        ID3D11Buffer* qb = quad.Get();
-        f.ctx->VSSetConstantBuffers(0, 1, &qb);
-        f.ctx->PSSetShader(f.fillPs.Get(), nullptr, 0);
-        f.ctx->RSSetViewports(1, &vp);
-        f.ctx->Begin(q.Get());
-        f.ctx->Draw(6, 0);
-        f.ctx->End(q.Get());
-        UINT64 samples = 0;
-        while (f.ctx->GetData(q.Get(), &samples, sizeof(samples), 0) != S_OK) {}
-        return samples;
-    };
-    // pixel centres strictly inside both rectangles
-    auto expected = [&](float x0, float y0, float x1, float y1) {
-        uint64_t n = 0;
-        for (uint32_t y = 0; y < L; ++y)
-            for (uint32_t x = 0; x < L; ++x) {
-                const float gx = (x + 0.5f) / L * 2.0f - 1.0f, gy = 1.0f - (y + 0.5f) / L * 2.0f;
-                if (gx > bx0 && gx < bx1 && gy > by0 && gy < by1 && gx > x0 && gx < x1 && gy > y0 && gy < y1) ++n;
-            }
-        return n;
-    };
-    mark();
-    const float lx0 = 0.13f, ly0 = -0.77f, lx1 = 0.83f, ly1 = 0.17f;   // overlaps the bubble's lower right corner
-    const uint64_t overlap = count(lx0, ly0, lx1, ly1), want = expected(lx0, ly0, lx1, ly1);
-    const uint64_t outside = count(0.61f, -0.9f, 0.95f, -0.6f);        // beside the bubble
-    const uint64_t inside = count(-0.3f, -0.2f, 0.2f, 0.3f), wantInside = expected(-0.3f, -0.2f, 0.2f, 0.3f);
-    std::printf("coverage instrument: later draw overlapping the bubble's corner %llu samples (expected %llu), one wholly inside %llu (%llu), one beside it %llu\n",
-                static_cast<unsigned long long>(overlap), static_cast<unsigned long long>(want), static_cast<unsigned long long>(inside),
-                static_cast<unsigned long long>(wantInside), static_cast<unsigned long long>(outside));
-    check(want > 100 && overlap == want, "the occlusion query counts exactly the samples of a later draw that overlap the bubble's coverage");
-    check(inside == wantInside && wantInside > 200, "...all of a draw wholly inside it");
-    check(outside == 0, "...and none of a draw beside it");
-    // control: without the marking pass the same draw counts nothing (the stencil is 0 and the test is EQUAL 1)
-    f.ctx->ClearDepthStencilView(pcDsv.Get(), D3D11_CLEAR_STENCIL, 1.0f, 0);
-    check(count(lx0, ly0, lx1, ly1) == 0, "control: an unmarked stencil counts nothing");
-}
-
 static void infoCheck(Fx& f) {
     if (!f.info) {
         std::puts("shield_ripple_test: no debug layer on this machine (the passes ran without it)");
@@ -971,7 +848,6 @@ int main(int argc, char** argv) {
         Fx f(hardware);
         shaderTests(f, hardware);
         routeTests(f);
-        probeTests(f);
         infoCheck(f);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "shield_ripple_test: FAIL: %s (after %u checks)\n", e.what(), g_checks);

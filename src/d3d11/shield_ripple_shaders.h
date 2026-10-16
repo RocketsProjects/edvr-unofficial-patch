@@ -1,4 +1,4 @@
-// The shield ripple's door pass and the stencil-marking pass of its coverage instrument (src/d3d11/shield_ripple.h). Header-only HLSL text, no device: the build
+// The shield ripple's door pass (src/d3d11/shield_ripple.h). Header-only HLSL text, no device: the build
 // compiles it to fixed DXBC (tools/temporal_shader_build/fixed_shield_ripple_variants.h) and the rig runs those bytes.
 #pragma once
 
@@ -42,21 +42,6 @@ void main(uint3 id : SV_DispatchThreadID) {
     float2 uvS = d - jitterUv;
     float2 localS = (uvS - layerUv.xy) / (layerUv.zw - layerUv.xy);
     Frame[uint2(region.xy) + id.xy] = Copy.SampleLevel(Lin, localS, 0);
-}
-)HLSL";
-
-// The coverage instrument's stencil-marking pass: a fullscreen triangle whose pixel shader discards where D is uncovered; the stencil state writes 1 where it
-// does not. The later in-scene draws are then replayed against that stencil (EQUAL 1) and counted by an occlusion query.
-constexpr char kShieldRippleMarkVsHlsl[] = R"HLSL(
-float4 main(uint id : SV_VertexID) : SV_Position {
-    float2 p = id == 0 ? float2(-1, -1) : (id == 1 ? float2(-1, 3) : float2(3, -1));
-    return float4(p, 0, 1);
-}
-)HLSL";
-constexpr char kShieldRippleMarkPsHlsl[] = R"HLSL(
-Texture2D<float2> D : register(t0);
-void main(float4 p : SV_Position) {
-    if (D.Load(int3(int2(p.xy), 0)).x < -1000.0) discard;
 }
 )HLSL";
 

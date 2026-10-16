@@ -41,6 +41,7 @@
 #include <DirectXPackedVector.h>
 #include <wrl/client.h>
 
+#include "../../src/d3d11/menu_flat_rows.h"
 #include "../../src/d3d11/menu_schema.h"
 #include "../../src/d3d11/sharp_weapons.h"
 #include "../../src/d3d11/sharp_weapons_shaders.h"
@@ -95,7 +96,7 @@ static void ruleTests() {
         check(uiLayerFamilyFor(ldr) == UiLayerFamily::kNone, "no eye target, no family");
     }
     // The shield's refracting partner (820E/6EAA) is NOT a weapons-fire row and never goes into the weapons layer (it samples the pre-DLSS eye HDR copy at the
-    // screen UV); since the shield ripple arc it is the family kShieldRipple, taken into its own displacement layer under advanced.shield_ripple (shield_ripple_test).
+    // screen UV); since the shield ripple arc it is the family kShieldRipple, taken into its own displacement layer under fix.sharp_weapons (shield_ripple_test).
     check(uiLayerFamilyFor(hdrFacts(0x820E5C131B99361Dull, 0x6EAA86EFE135B2D4ull)) == UiLayerFamily::kShieldRipple,
           "the shield's refracting partner (820E/6EAA) is the shield-ripple family, not weapons fire");
     check(weaponPairIndex(0x820E5C131B99361Dull, 0x6EAA86EFE135B2D4ull) < 0, "...and not in the weapons-fire pair table");
@@ -142,15 +143,24 @@ static void ruleTests() {
               "an unjittered pair set false in the table takes no cancel and leaves the others alone");
     }
 
-    // The A/B key's words.
+    // The key's words: on | plain | off, the old spellings of on and off, and the mapping onto the composite and the route.
     bool known = true;
-    check(sharpBlendParse("matched", &known) == SharpBlend::kMatched && known, "matched");
-    check(sharpBlendParse("plain", &known) == SharpBlend::kPlain && known, "plain");
-    check(sharpBlendParse("Plain", &known) == SharpBlend::kMatched && !known, "anything else reads as matched, and says it was not recognised");
-    check(sharpBlendParse("", &known) == SharpBlend::kMatched && !known, "an empty value reads as matched");
-    check(sharpBlendParse(nullptr, &known) == SharpBlend::kMatched && !known, "no value reads as matched");
+    check(sharpWeaponsParse("on", &known) == SharpWeapons::kOn && known, "on");
+    check(sharpWeaponsParse("plain", &known) == SharpWeapons::kPlain && known, "plain");
+    check(sharpWeaponsParse("off", &known) == SharpWeapons::kOff && known, "off");
+    check(sharpWeaponsParse("true", &known) == SharpWeapons::kOn && known && sharpWeaponsParse("Yes", &known) == SharpWeapons::kOn && known && sharpWeaponsParse("1", &known) == SharpWeapons::kOn && known,
+          "the old spellings of on (true, yes, 1, any case) stay on, silently");
+    check(sharpWeaponsParse("false", &known) == SharpWeapons::kOff && known && sharpWeaponsParse("NO", &known) == SharpWeapons::kOff && known && sharpWeaponsParse("0", &known) == SharpWeapons::kOff && known,
+          "the old spellings of off (false, no, 0) stay off, silently");
+    check(sharpWeaponsParse("matched", &known) == SharpWeapons::kOn && !known, "anything else (the old blend word included) reads as on, and says it was not recognised");
+    check(sharpWeaponsParse("", &known) == SharpWeapons::kOn && !known, "an empty value reads as on");
+    check(sharpWeaponsParse(nullptr, &known) == SharpWeapons::kOn && !known, "no value reads as on");
+    check(sharpWeaponsTakes(SharpWeapons::kOn) && sharpWeaponsTakes(SharpWeapons::kPlain) && !sharpWeaponsTakes(SharpWeapons::kOff),
+          "on and plain take the weapons fire (and the ripple); off leaves all of it in the scene");
+    check(sharpWeaponsBlend(SharpWeapons::kOn) == SharpBlend::kMatched && sharpWeaponsBlend(SharpWeapons::kPlain) == SharpBlend::kPlain,
+          "on is the matched composite, plain the plain add");
     check(std::strcmp(sharpBlendName(SharpBlend::kMatched), "matched") == 0 && std::strcmp(sharpBlendName(SharpBlend::kPlain), "plain") == 0,
-          "the words the log prints are the key's");
+          "the words the log prints are the composite's");
 }
 
 // ============================================================================================ the two keys
@@ -605,7 +615,7 @@ static void censusTests(const char* path, unsigned weaponRows, unsigned partnerR
                     check((v.decision == UiLayerDecision::kRedirect) == (s != 0) && (v.decision == UiLayerDecision::kFamilyOff) == (s == 0),
                           "a weapons row is redirected iff fix.sharp_weapons is on, and refused for the key iff it is off");
                 } else if (v.family == UiLayerFamily::kShieldRipple) {
-                    check(v.decision == UiLayerDecision::kRedirect, "the shield-refraction rows follow advanced.shield_ripple alone (default on), whatever the two keys say");
+                    check(v.decision == UiLayerDecision::kRedirect, "the shield-refraction rows follow the ripple's own half (fix.sharp_weapons's, stood down alone), not fix.ui_quality's, whatever the two say here");
                 } else if (q) {
                     check(v.decision == base.decision, "with fix.ui_quality on every other row is decided as it was, whatever fix.sharp_weapons says");
                 } else {
@@ -629,8 +639,8 @@ static bool before(const std::string& t, const std::string& a, const std::string
 }
 
 static bool wiredKeys(const std::string& t) {
-    return has(t, "cfg.getBool(\"fix.sharp_weapons\", true)") && has(t, "cfg.getString(\"advanced.sharp_weapons_blend\", \"matched\")") &&
-           has(t, "const SharpBlend blend = sharpBlendParse(blendText.c_str(), &blendKnown);");
+    return has(t, "cfg.getString(\"fix.sharp_weapons\", \"on\")") && has(t, "const SharpWeapons sharpMode = sharpWeaponsParse(sharpText.c_str(), &sharpKnown);") &&
+           has(t, "const bool sharp = sharpWeaponsTakes(sharpMode);") && has(t, "const SharpBlend blend = sharpWeaponsBlend(sharpMode);") && !has(t, "advanced.sharp_weapons_blend\", ");
 }
 // The two halves are computed apart: fix.ui_quality's from its key alone, the weapons' from fix.sharp_weapons alone; the machinery is their union.
 static bool wiredLiveness(const std::string& t) {
@@ -679,7 +689,8 @@ static bool wiredSnapshot(const std::string& t) {
     return true;
 }
 static bool wiredIni(const std::string& t) {
-    return has(t, "\nsharp_weapons = on\n") && has(t, "# ui: Sharp weapons | choices on, off | live | menu performance") && has(t, "#sharp_weapons_blend = matched");
+    return has(t, "\nsharp_weapons = on\n") && has(t, "# ui: Sharp weapons | choices on=On, plain=On (plain blend), off=Off (stock) | live | menu performance") &&
+           !has(t, "sharp_weapons_blend = ") && !has(t, "shield_ripple");
 }
 
 static void lostPins(const std::string& layer);   // below, with the instrument it pins
@@ -688,10 +699,11 @@ static void wiringTests() {
                       ini = readFile("edvr.ini");
     check(layer.size() > 100000 && vscreen.size() > 100000 && snap.size() > 1000 && ini.size() > 10000, "the sources are readable from the repo root");
 
-    check(wiredKeys(layer), "ui_layer.cpp reads fix.sharp_weapons (default on) and advanced.sharp_weapons_blend (default matched)");
-    check(!wiredKeys(replaced(layer, "cfg.getBool(\"fix.sharp_weapons\", true)", "cfg.getBool(\"fix.sharp_weapons\", false)")), "control: a key that defaults off trips the pin");
-    check(!wiredKeys(replaced(layer, "cfg.getString(\"advanced.sharp_weapons_blend\", \"matched\")", "cfg.getString(\"advanced.sharp_weapons_blend\", \"plain\")")),
-          "control: a blend key that defaults to plain trips the pin");
+    check(wiredKeys(layer), "ui_layer.cpp reads fix.sharp_weapons as one word (default on), on = matched, plain = plain, off = stock, and no second key");
+    check(!wiredKeys(replaced(layer, "cfg.getString(\"fix.sharp_weapons\", \"on\")", "cfg.getString(\"fix.sharp_weapons\", \"off\")")), "control: a key that defaults off trips the pin");
+    check(!wiredKeys(replaced(layer, "const SharpBlend blend = sharpWeaponsBlend(sharpMode);", "const SharpBlend blend = SharpBlend::kMatched;")), "control: a plain that is never plain trips the pin");
+    check(!wiredKeys(replaced(layer, "const bool sharp = sharpWeaponsTakes(sharpMode);", "const bool sharp = true;")), "control: an off that is never off trips the pin");
+    check(!wiredKeys(layer + "\ncfg.getString(\"advanced.sharp_weapons_blend\", \"matched\");"), "control: a surviving second key trips the pin");
 
     check(wiredLiveness(layer), "ui_layer.cpp: fix.ui_quality's half and the weapons' half are computed apart and the machinery is their union");
     check(!wiredLiveness(replaced(layer, "const bool quality = uiLayerLiveFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);",
@@ -724,43 +736,60 @@ static void wiringTests() {
     check(!wiredSnapshot(replaced(snap, "case 0x939D01F28D1FEEA8ull: // multicannon rounds\n", "")), "control: an unwatched pair trips the pin");
 
     lostPins(layer);
-    check(has(ini, "# ui: Weapons blend | choices matched=Matched, plain=Plain | live | menu performance | top\n#sharp_weapons_blend = matched"),
-          "edvr.ini: the blend key's menu line says live, the Performance page and top");
-    check(!has(replaced(ini, "| menu performance | top\n#sharp_weapons_blend", "| menu performance\n#sharp_weapons_blend"), "| menu performance | top\n#sharp_weapons_blend"),
-          "control: a blend row without `top` is not the first row");
-    check(wiredIni(ini), "edvr.ini documents fix.sharp_weapons (on, with a menu row) and the temporary advanced.sharp_weapons_blend");
+    {
+        const size_t at = ini.find("\nsharp_weapons = on\n");
+        const size_t from = ini.rfind("# Draw the ships' weapons fire sharp.", at);
+        const std::string seg = (at != std::string::npos && from != std::string::npos) ? ini.substr(from, at - from) : std::string();
+        check(!seg.empty() && has(seg, "shield-strike ripple"), "edvr.ini: fix.sharp_weapons says it covers the shield-strike ripple");
+        check(has(seg, "plain shades the light alone") && has(seg, "off leaves all of it"), "...and says what on, plain and off do");
+    }
+    check(wiredIni(ini), "edvr.ini documents fix.sharp_weapons (on | plain | off, with one menu row), no second key and no ripple key");
     check(!wiredIni(replaced(ini, "\nsharp_weapons = on\n", "\nsharp_weapons = off\n")), "control: a key that ships off trips the pin");
 }
 
-// ============================================================================================ the menu row
-// advanced.sharp_weapons_blend is a row of the in-headset menu for everyone (Fix tier, the Performance page), the FIRST row of the table and so the first the
-// menu shows, live, with the two words as choices; and it is not also a developer-tier row. (The generator's own self-test holds the rule; this holds the
-// real table the build generated from the real edvr.ini.)
+// ============================================================================================ the menu rows
+// The one Sharp weapons row (On, On (plain blend), Off (stock)): Fix tier, the Performance page, live, directly under UI quality in the table the build generated
+// from the real edvr.ini; there is no Weapons blend row. Dimmed, and refusing steps and typing, with anti-aliasing off.
+static int rowIndex(const char* section, const char* key) {
+    const int count = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
+    for (int i = 0; i < count; ++i)
+        if (std::strcmp(kMenuRows[i].section, section) == 0 && std::strcmp(kMenuRows[i].key, key) == 0) return i;
+    return -1;
+}
+// menu.cpp's gating of the two rows: one function decides, the page draws them dimmed, a step and a typed value are refused, and the profile's own reading of
+// fix.temporal_aa is the one asked.
+static bool gatedMenu(const std::string& t) {
+    return has(t, "bool isWeaponsRow(const MenuRowDef& d) {") && has(t, "strcmp(d.key, \"sharp_weapons\") == 0") &&
+           has(t, "return weaponsRowDim(temporalModeEnabledFor(flat ? cfg.requestedTemporalMode() : cfg.getString(\"fix.temporal_aa\", \"off\"), flat));") &&
+           has(t, "(weaponsRow && weaponsRowDisabled())") && has(t, "if (isWeaponsRow(d) && weaponsRowDisabled()) {") &&
+           has(t, "if (isWeaponsRow(kMenuRows[defIndex]) && weaponsRowDisabled()) {") && has(t, "Needs temporal AA");
+}
 static void menuTests() {
     const int count = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
     check(count > 10, "the generated menu table is there");
-    const MenuRowDef& first = kMenuRows[0];
-    check(std::strcmp(first.section, "advanced") == 0 && std::strcmp(first.key, "sharp_weapons_blend") == 0, "the weapons blend is the first row of the table");
-    check(first.tier == MenuTier::Fix && std::strcmp(first.page, "performance") == 0, "...a Fix-tier row on the Performance page, the page the menu opens on");
-    check(first.kind == MenuKind::Choice && first.applies == 1 && std::strcmp(first.shipped, "matched") == 0, "...a live choice that ships matched");
-    check(std::strcmp(first.label, "Weapons blend") == 0, "...labelled plainly");
-    check(has(first.choices, "matched") && has(first.choices, "plain"), "...with matched and plain as its choices");
-    int rows = 0, dev = 0;
-    for (int i = 0; i < count; ++i)
-        if (std::strcmp(kMenuRows[i].key, "sharp_weapons_blend") == 0) {
-            ++rows;
-            if (kMenuRows[i].tier != MenuTier::Fix) ++dev;
-        }
-    check(rows == 1 && dev == 0, "the key is one row, not a second one in the developer tier");
-    // The Performance page lists Fix rows of page "performance" in table order: its first entry is this row, then Sharp weapons somewhere after.
-    int firstPerf = -1, sharp = -1;
-    for (int i = 0; i < count; ++i) {
-        if (kMenuRows[i].tier == MenuTier::Fix && std::strcmp(kMenuRows[i].page, "performance") == 0) {
-            if (firstPerf < 0) firstPerf = i;
-            if (std::strcmp(kMenuRows[i].key, "sharp_weapons") == 0) sharp = i;
-        }
+    const int quality = rowIndex("fix", "ui_quality"), sharp = rowIndex("fix", "sharp_weapons");
+    check(quality >= 0 && sharp >= 0, "UI quality and Sharp weapons are rows");
+    check(sharp == quality + 1, "Sharp weapons is directly under UI quality");
+    check(rowIndex("advanced", "sharp_weapons_blend") < 0, "there is no Weapons blend row (and so no second one in the developer tier)");
+    if (sharp >= 0) {
+        const MenuRowDef& r = kMenuRows[sharp];
+        check(r.tier == MenuTier::Fix && std::strcmp(r.page, "performance") == 0, "Sharp weapons is a Fix-tier row on the Performance page");
+        check(r.kind == MenuKind::Choice && r.applies == 1 && std::strcmp(r.shipped, "on") == 0, "...a live choice that ships on");
+        check(std::strcmp(r.label, "Sharp weapons") == 0, "...labelled plainly");
+        check(std::strcmp(r.choices, "on=On|plain=On (plain blend)|off=Off (stock)") == 0, "...with On, On (plain blend) and Off (stock) as its choices");
     }
-    check(firstPerf == 0 && sharp > 0, "the Performance page opens on the blend row, and the Sharp weapons switch is a row after it");
+
+    // The gate: with anti-aliasing off both rows are dimmed; on, neither. The same table in both profiles (the caller passes the profile's own reading).
+    check(weaponsRowDim(false) && !weaponsRowDim(true), "the weapons row dims exactly when anti-aliasing is off");
+    const std::string menu = readFile("src/d3d11/menu.cpp");
+    check(menu.size() > 100000, "menu.cpp is readable from the repo root");
+    check(gatedMenu(menu), "menu.cpp dims, refuses steps and refuses typing on the row, asking each profile's own reading of fix.temporal_aa");
+    check(!gatedMenu(replaced(menu, "(weaponsRow && weaponsRowDisabled())", "false")), "control: a row that never dims is caught");
+    check(!gatedMenu(replaced(menu, "if (isWeaponsRow(d) && weaponsRowDisabled()) {", "if (false) {")), "control: a dimmed row that still takes a step is caught");
+    check(!gatedMenu(replaced(menu, "if (isWeaponsRow(kMenuRows[defIndex]) && weaponsRowDisabled()) {", "if (false) {")), "control: a dimmed row that still takes typing is caught");
+    check(!gatedMenu(replaced(menu, "flat ? cfg.requestedTemporalMode() : cfg.getString(\"fix.temporal_aa\", \"off\"), flat)", "cfg.getString(\"fix.temporal_aa\", \"off\"), false)")),
+          "control: a flat profile read as the VR one (it would miss a requested mode the allow-list hides) is caught");
+    check(!gatedMenu(replaced(menu, "strcmp(d.key, \"sharp_weapons\") == 0", "false")), "control: the row left out of the gate is caught");
 }
 
 // ============================================================================================ the lost-layer instrument
