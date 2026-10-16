@@ -54,11 +54,11 @@
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
-- **Jitter phases (section 84, 2026-10-01):** the phase-count switch flew with
-  no visible change on the hills and is REMOVED (fixed eight phases, byte-
-  identical). ROOT CAUSE of the VR hills shimmer, ruled in: Elite's terrain
-  checkerboard rendering (halves distant terrain's horizontal samples; turning
-  it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
+- **10-16 BUILT, NOT FLOWN:** flat origin rebases (every ~5 km of travel) no longer reset TAA/DLSS; the 27217a7d guard note below
+  was relaxed with its inputs (branch claude/flat-origin-rebase). Open: engine-record scenePrev in the old anchor frame, unverified.
+- **Jitter phases (section 84, 2026-10-01):** the phase-count switch is REMOVED (fixed eight phases, byte-identical; no
+  visible change on the hills). ROOT CAUSE of the VR hills shimmer: Elite's terrain checkerboard rendering (halves distant
+  terrain's horizontal samples; turning it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
 
 ## Status detail (moved out of Status 2026-09-29)
 
@@ -2983,6 +2983,63 @@ component against a fixed 50-unit step; aggregate counters omit the exact frame
 and input delta. Current evidence cannot distinguish an earlier true camera
 jump, ordinary travel during a long frame, or coordinate rebasing. Do not relax
 the guard without the event's actual inputs.
+
+**2026-10-16: the guard relaxed, with the event's inputs in hand.** Flat flight
+log `edvr_gfx_20261016_023749.log` (Steam, DLSS 2496x1404 to 3840x2160) logged
+32 camera-cut reset events. Row 5 of the camera rows (cb1[275], the world-rebase
+origin, fss-panel.md) is Elite's floating origin; it re-anchors about every 5 km
+of travel, and the resolver's per-axis 50 m test read each re-anchor as a cut.
+
+- Periodic events, 02:39:38 to 02:42:49: frames 11766, 12719, 13672, 14621, ...
+  a re-anchor every 953 frames (10.6 s in the cockpit). Frame 11766: now
+  (14.39, 19.68, 0.47), previous (2529.29, 4289.83, -647.61), origin-delta
+  (-2514.9, -4270.1, 648.1); max-matrix-delta over rows 0-4 is 0.00076, and
+  0.00034-0.00076 across the series. "now" is 14-25 m from zero, "previous"
+  about 5 km out, and the delta's direction is constant.
+- Fast travel, 02:45:15 to 02:45:21: 60-100 m a frame on one axis (frame 42350
+  now (-479.0, -839.0, 3669.1) from (-469.1, -821.8, 3593.2)), rows unchanged
+  (max-matrix-delta 0.0010-0.0088), 50 cuts in 30 s. Frame 42525 is a re-anchor
+  inside that travel: now (-1.76, -8.64, 18.7), previous (-949.8, -1658.3,
+  7270.8), max-matrix-delta 0.056 on a 63 ms frame.
+- Real cuts are far above it: the first world camera (frame 4025, previous
+  zero) 2.07, and in other logs a hop between two viewpoints 1.9 (20261015_165224,
+  16:58:58, now (-608.8, 177.0, 660.2) from (16.4, -60.9, 8.2)), 1.84, 0.94, 3.23.
+- The 85 camera-cut events across the eight logs that have them all ran on
+  frames of 94 ms or less.
+
+The change (`flat_mono_resolve.cpp`, with `temporalOriginRebase` in
+`temporal_math.h`): a jump the old axis test would have cut is absorbed when the
+step is at least 50 m (Euclidean), the largest element change over rows 0-3 is
+under 0.02, and the frame took under 100 ms. An absorbed frame keeps its
+history, sends the backend no reset, and reprojects from the previous rows with
+their row 5 set to this frame's: zero camera translation that frame, as the VR
+gate does for the same jump (`temporal_math.h`, `temporal_pass.cpp:3397`). The
+0.02 sits between fast travel (0.0088) and the first real cut; the old axis
+test stays the precondition, so no frame that kept its history before loses its
+camera term. Rotated rows, or a frame of 100 ms or more, cut as before.
+
+The two earlier "camera cut" cases (the 460 m jump near line 6373 and the 216.9
+m cut near line 6944) record a distance and the neighbouring facts, not the
+rows, so their orientation is unknown: the 460 m jump was a 153 ms frame with
+469 MB created, a world load; the 216.9 m cut was one isolated jump in an
+8.8-minute route. If either was a same-orientation viewpoint change the rows
+test alone would absorb it. The 100 ms term is the only evidence-based
+protection for the first; nothing protects the second. The reset event line now
+carries `prev-step`, `rot-delta`, `now-len` and `prev-len`, and an absorbed
+rebase logs its own line (first eight) and a count on the 5 s renderer line
+(`origin-rebases-absorbed`, `last-rebase-m`), so the next flight answers both.
+
+Events at 0.023-0.058 (20261015_155732 at 16:00:11, 16:00:46, 16:02:18; this
+log at 02:43:07 and 02:45:21) look like re-anchors by their shape (now within 25
+m of zero, previous 270-4600 m out) but sit above 0.02, so they still cut. The
+logged maximum covers rows 0-4 and the new `rot-delta` covers rows 0-3, so the
+rows-0-3 figure may be lower; the next log says. Do not widen the tolerance
+without it.
+
+OPEN, unverified: the engine-record `scenePrev` snapshots (the object-motion
+path) may hold clip rows in the old anchor frame, so an absorbed frame could
+carry one frame of wrong object motion on pooled records. Look for it in the
+frame after an `origin rebase absorbed` line before calling the fix closed.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
