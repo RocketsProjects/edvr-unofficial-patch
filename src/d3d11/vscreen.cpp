@@ -3913,7 +3913,7 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     // HDR draws need no extra hash read.
     if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust))
         f.ps = bindingShaderHash(BindSlot::Ps);
-    else if (f.targetKind == 1 && weaponsFireVs(f.vs))  // fix.sharp_weapons: the weapons-fire pair is the key too
+    else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))  // fix.sharp_weapons: the pair is the key too
         f.ps = bindingShaderHash(BindSlot::Ps);
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,

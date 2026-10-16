@@ -80,6 +80,13 @@ inline bool flatSharpenRowDim(bool flatProfile, bool antiAliasingOn) {
     return flatProfile && !antiAliasingOn;
 }
 
+// Whether the Sharp weapons row is dimmed (and ignores steps and typing): it lays its layer over the temporal pass's
+// output, so with anti-aliasing off there is nothing for them to act on. The same in both profiles (the caller passes the profile's own reading of
+// fix.temporal_aa). One function so a rig can read the whole truth table; menu.cpp asks it and nothing else.
+inline bool weaponsRowDim(bool antiAliasingOn) {
+    return !antiAliasingOn;
+}
+
 // The first Allowlist row whose dotted key `allows` refuses, or null. `allows` is
 // runtimeProfileAllowsKey in the product and a deliberately broken copy in the rig
 // that proves this check can fail.

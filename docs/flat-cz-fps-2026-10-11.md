@@ -2,13 +2,13 @@
 
 ## Status
 
-State (2026-10-16, Steam flight build `claude/flat-settlement-cpu-7` = main + three branches, NOT FLOWN; each section has its rig numbers): COPIER claim check
-(`claude/copier-claim-check`, round 6): a copy whose range holds no claim and no patch skips the mutex; flight reads `Copier claim check` on the lock-free exits line and
-the copier lock line n near 0 in claim windows. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`): a repeat of the verified class-4 draw (shadow maps, small
-intermediates; 3,773 a frame) skips the draw scope's constructor; the 46-frame replay is identical (16,314 hits); flight reads the `offscreen fast path` token and
-family (expect 3.5-3.8k served a frame; saving 0.4-1.0 ms UNMEASURED). DEBUG tab (`claude/flat-debug-menu`): the CPU census (`flat cpu 5s` timing) is OFF by default; the
-flat F8 panel has Performance and Debug tabs: **CPU timing in the log** (`advanced.flat_cpu_timing`), **Motion source view** (`advanced.flat_refusal_view`); turn the
-timing on to see the family. Sections "round 6", "offscreen fast path", "debug tab".
+State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
+check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
+about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
+declined. Present p50 11.5-12.0 ms before claims and 11.4-12.4 after: no jump (it was 12.3-12.6 -> 12.8-13.1 with the clear/merge check alone, and 3-5 ms without
+any). DEBUG tab (`claude/flat-debug-menu`): the CPU census (`flat cpu 5s` timing) is OFF by default; the flat F8 panel has Performance and Debug tabs: **CPU timing in the
+log** (`advanced.flat_cpu_timing`), **Motion source view** (`advanced.flat_refusal_view`); turn the timing on to see the families. Sections "round 6", "offscreen fast
+path", "debug tab".
 State (2026-10-16, round 5 results): the claim check for clears and merges is FLOWN OK and ON MAIN (`claude/claim-precheck`): 1.43M clears and 4.1M merges in the first
 window, 0 declined, Present p50 12.3-12.6 -> 12.8-13.1 ms against a 3-5 ms jump without it (log `edvr_gfx_20261016_111653.log`); the remaining +0.5 ms is not attributed.
 State (2026-10-16, results): the observer fix is FLOWN, CONFIRMED and ON MAIN (1ae94885, `claude/engine-motion-observers`): render-thread
@@ -426,6 +426,10 @@ snapshot could clear it for ranges holding no claim, with its pool-patch conditi
 
 ## 2026-10-16, round 6: the pool copier's claim check
 
+FLOWN OK (2026-10-16, flight build `claude/flat-settlement-cpu-7`, `edvr_gfx_20261016_135436.log`): claims went live at about 14:06:30 and the copier check took 6.0M
+copies lock-free with 0 declined; with the clear and merge check, 3.0M merges and 8.6M clears lock-free with 2 declined; Present p50 11.5-12.0 ms before claims and 11.4-12.4
+after: no jump. ON MAIN.
+
 Branch `claude/copier-claim-check` (from main 34c100f5). BUILT, NOT FLOWN. Same idea as the clear/merge check, with the copier's own argument.
 
 ### Why the old lock-free exit did not cover the claim regime
@@ -501,6 +505,8 @@ the common locked case and a claims-only check would have left it.
 
 
 ## 2026-10-16: the offscreen fast path (class 4 of the draw class census)
+
+FLOWN OK (same flight): about 3,720 draws a frame served by the fast path, against 3,773 offscreen draws a frame in the census. The saving was not clocked (the census is off by default in that build). ON MAIN.
 
 Branch `claude/flat-offscreen-fastpath` (from main 34c100f5). BUILT, NOT FLOWN. The census (round 4, the diag branches) put offscreen draws at
 3,773 a frame, 27%, 98% of them the same as the previous draw on target, pair and all. The round 3 design said such a draw only extends its target's

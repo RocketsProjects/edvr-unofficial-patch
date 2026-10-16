@@ -69,18 +69,28 @@ inline bool weaponsLayerDropped(uint64_t contentSeq, uint32_t draws, uint64_t pu
     return contentSeq != 0 && draws != 0 && publishedSeq != contentSeq;
 }
 
-// advanced.sharp_weapons_blend (TEMPORARY, an A/B while the arc is open): how the layer's weapons light reaches the picture.
-//   matched: by tonemap difference, T(F_up + L) - T(F_up), added onto the upscaled picture: the light is tonemapped WITH the scene it
-//            lands on, so it is as bright as the game would have drawn it.
-//   plain:   T(L) added: exact over black space, too bright over a lit background (a planet, a star), where the tonemap compresses.
+// fix.sharp_weapons = on | plain | off. One key for the whole feature (the weapons fire, the shield strike's additive part and the shield ripple):
+//   on:    the layer's weapons light reaches the picture by tonemap difference, T(F_up + L) - T(F_up), added onto the upscaled picture: the light is
+//          tonemapped WITH the scene it lands on, so it is as bright as the game would have drawn it. The old spellings of on (true, yes, 1) read as on.
+//   plain: T(L) added: exact over black space, too bright over a lit background (a planet, a star), where the tonemap compresses.
+//   off:   stock, everything drawn in the scene as the game draws it (false, no, 0 read as off).
+// Anything else reads as on, and says so.
 enum class SharpBlend : uint8_t { kMatched = 0, kPlain };
-inline SharpBlend sharpBlendParse(const char* text, bool* recognized) {
+enum class SharpWeapons : uint8_t { kOn = 0, kPlain, kOff };
+inline SharpWeapons sharpWeaponsParse(const char* text, bool* recognized) {
     if (recognized) *recognized = true;
-    if (text && std::strcmp(text, "plain") == 0) return SharpBlend::kPlain;
-    if (text && std::strcmp(text, "matched") == 0) return SharpBlend::kMatched;
+    if (text) {
+        char low[16] = {};
+        for (size_t i = 0; i + 1 < sizeof(low) && text[i]; ++i) low[i] = static_cast<char>(text[i] >= 'A' && text[i] <= 'Z' ? text[i] - 'A' + 'a' : text[i]);
+        if (std::strcmp(low, "on") == 0 || std::strcmp(low, "true") == 0 || std::strcmp(low, "yes") == 0 || std::strcmp(low, "1") == 0) return SharpWeapons::kOn;
+        if (std::strcmp(low, "plain") == 0) return SharpWeapons::kPlain;
+        if (std::strcmp(low, "off") == 0 || std::strcmp(low, "false") == 0 || std::strcmp(low, "no") == 0 || std::strcmp(low, "0") == 0) return SharpWeapons::kOff;
+    }
     if (recognized) *recognized = false;
-    return SharpBlend::kMatched;
+    return SharpWeapons::kOn;
 }
+inline bool sharpWeaponsTakes(SharpWeapons m) { return m != SharpWeapons::kOff; }
+inline SharpBlend sharpWeaponsBlend(SharpWeapons m) { return m == SharpWeapons::kPlain ? SharpBlend::kPlain : SharpBlend::kMatched; }
 inline const char* sharpBlendName(SharpBlend b) { return b == SharpBlend::kPlain ? "plain" : "matched"; }
 
 // ----------------------------------------------------------------- the tonemap re-issues

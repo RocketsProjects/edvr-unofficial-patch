@@ -96,6 +96,7 @@ inline bool uiLayerLive() { return detail::g_uiLayerLive; }
 // take) -- the first half of uiLayerLive(), whose second half is fix.sharp_weapons (the weapons fire in its own HDR layer). With
 // fix.ui_quality off and fix.sharp_weapons on, uiLayerLive() is true and this is false: only the weapons fire is taken.
 inline bool uiLayerQualityLive() { return detail::g_uiQualityLive; }
+
 // A persistent driver restoration fault leaves stock shader state untrusted.
 // Owner-context issues stay suppressed, Begin's fallback included, for the rest
 // of the frame it happened in: uiLayerFrameBoundary then puts back whichever of

@@ -77,8 +77,7 @@ fallback eye (`explorer_cam_eye_up/_forward/_right`) stays `ui: hidden`: neither
 schema gets a row for it.
 
 THE FLAT PANEL'S DEBUG TAB (2026-10-16) is `menu debug`: the flat profile's F8 panel has two tabs, Performance (its settings) and Debug, and the
-Debug rows are the `menu debug` rows. Like `menu performance | top` on advanced.sharp_weapons_blend, a `menu debug` row may sit on an [advanced]
-key, but only one named in MENU_ADVANCED_EXCEPTIONS; any other [advanced] key with a menu token is still refused. VR's menu has no such page.
+Debug rows are the `menu debug` rows. A `menu debug` row may sit on an [advanced] key, but only one named in MENU_ADVANCED_EXCEPTIONS; any other [advanced] key with a menu token is still refused. VR's menu has no such page.
 
 The menu's restart flagging is derived here too, from the same prose the
 window reads: a menu row on the Fixes or Performance page that does not say
@@ -167,13 +166,10 @@ HOTKEY_PAGE = 'hotkeys'
 # would reach for while wearing the headset. Both are Fix tier: neither is a
 # developer instrument, and neither is hidden behind menu.developer.
 MENU_ROW_SECTIONS = ('fix', 'menu')
-# TEMPORARY exceptions (2026-10-16): [advanced] keys that carry a `menu <page>` token on their ui: line and are rows of the in-headset menu for
-# everyone (Fix tier), not developer-tier rows. advanced.sharp_weapons_blend is the A/B of fix.sharp_weapons' composite, kept on the menu so it can be
-# switched live through long sessions; it goes with the arc (docs/dlss-blur-elements-2026-10-14.md), and so does its entry here.
-MENU_ADVANCED_EXCEPTIONS = ('advanced.sharp_weapons_blend',
-                            # The flat profile's Debug tab (2026-10-16): two toggles every flat user may reach, labelled debug. Flat-only keys, so VR's
-                            # developer tier loses nothing by their having no row of their own there. Their page is `debug`, which only the flat panel builds.
-                            'advanced.flat_cpu_timing', 'advanced.flat_refusal_view')
+# The flat profile's Debug tab (2026-10-16): [advanced] keys that carry `menu debug` on their ui: line and are rows of the flat F8 panel for everyone (Fix
+# tier), not developer-tier rows. Two flat-only toggles, so VR's developer tier loses nothing by their having no row of their own there. Their page is
+# `debug`, which only the flat panel builds. Any other [advanced] key with a menu token is refused.
+MENU_ADVANCED_EXCEPTIONS = ('advanced.flat_cpu_timing', 'advanced.flat_refusal_view')
 # Settings that were taken off every menu on purpose, and must stay off.
 #
 # The three field-of-view trims were [fix] rows on the Performance page until
@@ -337,8 +333,6 @@ class Setting(object):
         # sits on (None = desktop-only), and the dev: annotation's answers
         # for the developer tier.
         self.menuPage = None
-        # `top` on a ui: line: the row is placed before the rest of its page (the page's first row), whatever its line in the file.
-        self.menuTop = False
         self.devAnnotated = False
         self.devChoices = []
         self.devHidden = False
@@ -573,8 +567,6 @@ def apply_annotation(setting, text):
             setting.zero = part.split(None, 1)[1].strip()
         elif lower == 'signed':
             setting.signed = True
-        elif lower == 'top':
-            setting.menuTop = True
         elif lower == 'menu' or lower.startswith('menu '):
             # The in-headset menu's page: bare `menu` is the Fixes page,
             # `menu performance` the Performance page.
@@ -1141,8 +1133,7 @@ def run(root, out, check):
         return 0
 
     menuOut = []
-    # A `top` row goes first on its page (a stable sort: every other row keeps the ini's order).
-    for s, page, tier in sorted(menuRows, key=lambda r: not r[0].menuTop):
+    for s, page, tier in menuRows:
         dotted = '%s.%s' % (s.section, s.key)
         kind, default, lo, hi, precision = code[dotted]
         lo, hi = row_bounds(s, lo, hi)
@@ -1731,32 +1722,6 @@ def self_test():
     wrote = case(name, hotkey_ini.replace('# dev: label Census key | hotkey', '# dev: hidden'),
                  hotkey_reads, 0)
     expect_not_in(name, wrote, 'census')
-
-    # The TEMPORARY menu row of an [advanced] key (2026-10-16, advanced.sharp_weapons_blend): a Fix-tier row for everyone on the Performance page,
-    # placed first by `top`, and not a second row in the developer tier. Any other [advanced] key with a menu token is still refused.
-    blend_ini = ('[fix]\n# A switch. Live.\n# ui: Alpha | choices on, off | live | menu performance\nalpha = on\n\n'
-                 '[advanced]\n# How the light is laid on. Live.\n'
-                 '# ui: Weapons blend | choices matched=Matched, plain=Plain | live | menu performance | top\n#sharp_weapons_blend = matched\n')
-    blend_reads = {'a.cpp': ('bool a = cfg.getBool("fix.alpha", true);\n'
-                             'std::string b = cfg.getString("advanced.sharp_weapons_blend", "matched");\n')}
-    name = 'advanced-menu-exception-top'
-    wrote = case(name, blend_ini, blend_reads, 0)
-    expect_in(name, wrote, 'MenuTier::Fix, "performance"')
-    if wrote.count('"sharp_weapons_blend"') != 1:
-        failures.append('%s: expected one row for the key, found %d' % (name, wrote.count('"sharp_weapons_blend"')))
-    if wrote.count('MenuTier::Advanced') != 0:
-        failures.append('%s: the key must not also be a developer-tier row' % name)
-    if not (0 <= wrote.find('"sharp_weapons_blend"') < wrote.rfind('"alpha"')):
-        failures.append('%s: the `top` row is not first' % name)
-    name = 'advanced-menu-exception-without-top'
-    wrote = case(name, blend_ini.replace(' | top', ''), blend_reads, 0)
-    if not (0 <= wrote.rfind('"alpha"') < wrote.find('"sharp_weapons_blend"')):
-        failures.append('%s: without `top` the ini order stands' % name)
-    name = 'advanced-menu-token-refused-elsewhere'
-    said = case(name, blend_ini.replace('sharp_weapons_blend', 'other_blend'),
-                {'a.cpp': ('bool a = cfg.getBool("fix.alpha", true);\n'
-                           'std::string b = cfg.getString("advanced.other_blend", "matched");\n')}, 1)
-    expect_in(name, said, 'advanced.other_blend')
 
     # The flat panel's Debug tab (2026-10-16): `menu debug` on the two [advanced] flat toggles is a Fix-tier row on the page `debug`, each exactly once
     # (no second row in the developer tier), and the same token on any other [advanced] key is refused.
