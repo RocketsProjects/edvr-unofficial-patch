@@ -2,20 +2,19 @@
 
 ## Status
 
-State (2026-10-16, round 2): LEG A FLOWN, THE OBSERVER FIX WORKS: render-thread engine motion 427 -> 77 ns a call (about 0.8 ms a
-frame), job merge and clear down 92%, 100% of calls lock-free, 0 contention. It is on `claude/engine-motion-observers` (the seven
-commits only), pushed for Sean's merge. Round 2 is `claude/flat-settlement-cpu-2` (H1-H4 kept, main merged in): binding thunks
-timed (a), the constructor's remaining bulk in five blocks (b), and the designs for the guarded eager runs (d) and the census's own
-cost (e), section "2026-10-16, round 2". BUILT, NOT FLOWN. Still unattributed after leg A: about 2.4 ms a frame (binding thunks
-are the prime suspect) and about 2.1 ms in the constructor body after the predicates. The guarded eager runs (BBE/DB3E) are 895-974
-runs a frame, 13 D3D calls each, about 0.75 ms: 77% of engine-motion run time. Ruled out by leg A: g_mutex contention
-(0 contended); the observers are recovered (about 0.8 ms), not the rest of the 5.8 ms.
-Earlier state (2026-10-16): the observer reduction below is PORTED onto current main as `claude/flat-settlement-cpu` (7 commits, clean
-cherry-pick, no ADS work), with four more instruments for the settlement CPU cost (H1-H4, section "2026-10-16", the flight plan is
-there). BUILT, NOT FLOWN, NOT MERGED. Question for the flight: which of the 5.8 ms a frame (0.52 in the cockpit; draws 360 -> 10.5k)
-is the thunk's remainder, the constructor's lookup or predicate block, the destructor, g_mutex contention, or the wrapper's guarded
-eager runs. Flight log: `edvr_gfx_20261016_023749.log` (flat, Steam, 2026-10-16) is the diagnosis; no flight on this build yet.
-Ruled out so far: nothing new (the 2026-10-16 log only ranked the families); the 2026-10-11 notes below stand.
+State (2026-10-16, results): the observer fix is FLOWN, CONFIRMED and ON MAIN (1ae94885, `claude/engine-motion-observers`): render-thread
+engine motion 427 -> 77 ns a call (about 0.8 ms a frame), job merge and clear down 92%, 100% of calls lock-free, 0 contention. The
+instruments (H1-H4, round 2) are on `claude/flat-settlement-cpu-2`, NOT on main. Round 2 flown (DLSS, 14.6k draws a frame): EDVR render
+thread 5.17 ms floor-net (353 ns a draw), Present p50 14.91, GPU span p50 12.52, 63.6 fps. AA-off A/B: ~145-150 fps against ~150 with EDVR
+suspended; the whole gap is the AA path. Section "2026-10-16, results" has the numbers. The arc is NOT closed: ~5 ms of per-draw CPU is
+spread thin (about 20 pieces, none above 0.6 ms); the open question is structural (a per-pipeline-state "nothing to do" fast path).
+Ruled out (2026-10-16, round 2): the unscoped binding thunks as the 2.4 ms unexplained (about 7.3k bind calls a frame at about 30 ns net
+is 0.12-0.24 ms); a single hot block in the draw constructor (its 5 blocks hold about 0.85 ms net); g_mutex contention (0 contended).
+Next candidates, unbuilt: the overlay guard reading t3 from the shadow (0.2-0.4 ms); the ctor lookup memo (~0.2); the per-draw UI-layer
+ask memo (0.1-0.2); the census "pool-family draws" GPU timing to price ~1.0 ms; the structural fast path. Designs (d) guarded runs and
+(e) census cost: section "2026-10-16, round 2".
+Earlier state (2026-10-16): the observer reduction was ported onto main as `claude/flat-settlement-cpu` with H1-H4; the 5.8 ms a frame
+(0.52 in the cockpit; draws 360 -> 10.5k) in `edvr_gfx_20261016_023749.log` was the diagnosis.
 Earlier state: BUILT on `claude/fps-drops-onfoot-czs-577f5a` (observers, copier, lock lines, flat cpu by part, then the review's fixes), NOT
 FLOWN. A bounded experiment on one of three suspects, plus instruments that say whether it was the right one. NOT the fix: the
 expected gain is about 4-5 ms of a 13-25 ms gap at most, and the per-draw render-thread work (about 8-9 ms a frame) is untouched.
@@ -299,3 +298,38 @@ a load and a compare), and `clocksWanted()` is on under Windows and off under Wi
  C. Keep the families but drop the per-bind and per-block scopes from the shipped build (compile flag), leaving them for flights.
 Recommendation for later: C for this round's high-count scopes once a flight has named the hot block, then A. B only if A is not
 enough. The always-on part that remains is the gate load and compare per scope (about 1 ns), which is not what the 0.46 ms is.
+
+
+## 2026-10-16, results: round 2 flown, and the AA-off A/B
+
+Recorded from the coordinator's analysis of the two flat flights below; the logs are the evidence (check each with
+`python tools\edvr_log.py --target steam --expect-build HEAD` before reading counters off it).
+
+### Round 2 (`edvr_gfx_20261016_060143.log`, DLSS, 14.6k draws a frame)
+- EDVR render-thread CPU, floor-net: 5.17 ms a frame, 353 ns a draw. Present p50 14.91 ms, GPU span p50 12.52 ms, 63.6 fps. The census's
+  own cost: 0.67 ms a frame on average (design (e) above).
+- Ruled out: the unscoped binding thunks as the 2.4 ms unexplained, because about 7.3k bind calls a frame at about 30 ns net is only
+  0.12-0.24 ms.
+- Ruled out: a single hot block in the draw constructor, because its five blocks hold about 0.85 ms net. The roughly 2.2 ms of "other",
+  net, is spread over about 20 pieces, none above 0.6 ms: the shell residual 0.55, the tail 0.2-0.37 (with the per-draw UI-layer ask),
+  the lookup block 0.33, the destructor 0.35, the reducer and nominate blocks about 0.2 each.
+
+### AA-off A/B (`edvr_gfx_20261016_061811.log`, AA set off at the menu before loading, the same spot)
+- 135-144 fps in the log and about 145-150 on Sean's counter, against about 150 with EDVR suspended. GPU span p50 4.4 ms.
+- The always-on EDVR work is negligible (about 0.0005 ms a frame). The WHOLE gap, about 7.35 ms against the 14.25 ms production DLSS
+  frame, is the AA path:
+  - EDVR render-thread CPU 5.17 ms (about 70%);
+  - timed GPU 1.18 ms (DLSS evaluate 0.94, the census spans 0.24);
+  - about 1.0 ms untimed: the substituted pool-family draws' GPU cost (the census prints "pool-family draws -") plus driver-side state
+    calls.
+- With DLSS the frame is CPU-bound but co-limited: the CPU chain explains about 10.3 ms of the 12.5 ms GPU span, so CPU cuts pay about
+  2.2 ms before the GPU chain binds.
+
+### Next candidates (none built)
+- The overlay guard (design (d) above), reading t3 from the binding shadow and skipping the verification Gets: 0.2-0.4 ms.
+- The constructor's lookup memo: about 0.2 ms.
+- A memo for the per-draw UI-layer ask: 0.1-0.2 ms.
+- Turn on the census's "pool-family draws" GPU timing to price the roughly 1.0 ms untimed.
+- STRUCTURAL: how much of the per-draw flat work is needed for draws that need nothing? A memoised per-pipeline-state "nothing to do"
+  fast path would remove cost across the 20 small pieces that no single block change reaches. The question to answer first is what share
+  of the 14.6k draws a frame are such draws, and what decides it (shader pair, targets, depth, camera rows).
