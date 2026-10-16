@@ -13,6 +13,7 @@
 //   F5 feed present, off axis: only the basis-dependent outputs differ; the quad faces the viewer (offsets perpendicular to the
 //      face axis, the original's are not: the fail-before), with the original's size, and level (no roll) for a rolled camera
 //   F6 a particle directly above the viewer (the degenerate cross) stays finite
+//   F8 b2: a transcription whose original has no b2 never reads one (garbage bound there changes nothing); where b2 is read it does
 //   F7 source pins from the repo root
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -410,6 +411,7 @@ struct Case {
     const char* hash;
     const char* source;
     std::vector<Dependent> dependent;
+    bool noCb2 = false;   // the original has no b2 at all: the transcription must never read one
 };
 
 static std::string rootDir;
@@ -611,6 +613,36 @@ static void runCase(Rig& rig, const Case& cs, const std::vector<std::vector<uint
         for (float f : b) finite &= std::isfinite(f);
         check(finite, tag + "F6-the-degenerate-cross-stays-finite");
     }
+
+    // F8: b2. A shader whose original declares no b2 must never read one: a b2 bound with garbage changes NOTHING (every
+    // output of every vertex, bit for bit). Where the original does read b2 the same garbage does change the outputs, so the
+    // test can fail (the fail-before: it is run on the ORIGINAL and on the shaders that read it).
+    {
+        Constants a = scene({0.5f, -0.3f, 0.2f}, 0.7f, {0.15f, -0.1f, 1.0f});
+        Constants g = a;
+        const float garbage[4] = {1.0e30f, -3.5f, 0.0f, 77.0f};
+        for (int r = 0; r < 3; ++r)
+            for (int k = 0; k < 4; ++k) g.cb2[r][k] = garbage[(r + k) & 3];
+        a.cb2[0][1] = 0.0f;   a.cb2[1][3] = 2.0f;   a.cb2[2][0] = 0.3f;
+        Vertices v;
+        for (int mode = 0; mode < 8; ++mode) {
+            ParticleSpec s;
+            s.mode = mode; s.pos = {3, 1, 5 + static_cast<float>(mode)}; s.spin = 0.4f * static_cast<float>(mode);
+            addParticle(v, so, s);
+        }
+        const auto ma = run(rig, pm, layout.Get(), inStride, v, a), mg = run(rig, pm, layout.Get(), inStride, v, g);
+        const auto oa = run(rig, po, layout.Get(), inStride, v, a), og = run(rig, po, layout.Get(), inStride, v, g);
+        const bool mineSame = compare(pm, ma, pm, mg, {}).equal && ma.size() == mg.size() &&
+                              std::memcmp(ma.data(), mg.data(), ma.size() * sizeof(float)) == 0;
+        const bool origSame = compare(po, oa, po, og, {}).equal;
+        if (cs.noCb2) {
+            check(mineSame, tag + "F8-the-transcription-never-reads-b2-garbage-changes-nothing");
+            check(origSame, tag + "F8-and-neither-does-the-original");
+        } else {
+            check(!mineSame, tag + "F8-FAIL-BEFORE-where-the-original-reads-b2-the-same-garbage-does-change-the-outputs-(mine)");
+            check(!origSame, tag + "F8-FAIL-BEFORE-...-(the-original)");
+        }
+    }
     check(rig.problems() == 0, tag + "debug-layer-clean");
 }
 
@@ -628,7 +660,7 @@ int main(int argc, char** argv) {
     if (argc < 2) return 2;
     const std::string mode = argv[1];
     if (mode == "--dry-run") {
-        std::puts("billboard_facing_test: F1-F7, WARP with the debug layer; reads the fixtures, writes nothing");
+        std::puts("billboard_facing_test: F1-F8, WARP with the debug layer; reads the fixtures, writes nothing");
         return 0;
     }
     if (mode != "--self-test" || argc < 3) return 2;
@@ -636,13 +668,17 @@ int main(int argc, char** argv) {
     Rig rig;
     std::printf("billboard_facing_test: debug layer %s\n", rig.debugLayer ? "ON" : "not installed (messages not checked)");
 
-    const char* names[3] = {"9F4BBCFCD3B68BC9", "BBAD1CA808E1E292", "9AEC596A2B036EA6"};
+    // The five, with the twins side by side: 9F4B / AFBC (12 in, the same outputs; AFBC has no b2 and no fade) and BBAD / 4BDE
+    // (10 in, the same outputs; 4BDE has b2[1] and no fade), and 9AEC, which resembles AFBC more than AFBC's own twin does.
+    const char* names[5] = {"9F4BBCFCD3B68BC9", "BBAD1CA808E1E292", "9AEC596A2B036EA6", "AFBCD3ADB9092F78", "4BDE4DBF88C2BA27"};
     std::vector<std::vector<uint8_t>> originals;
     for (const char* n : names) originals.push_back(readFile(rootDir + "\\tools\\billboard_facing_test\\fixtures\\vs_" + n + ".dxbc"));
-    const Case cases[3] = {
-        {names[0], edvr::kFacing9F4BWorldVS, {{"TEXCOORD", 9, 0}, {"SV_POSITION", 0, -1}}},                // o2.x the corner depth, and the position
-        {names[1], edvr::kFacingBBADWorldVS, {{"TEXCOORD", 3, 0}, {"TEXCOORD", 3, 2}, {"SV_POSITION", 0, -1}}},   // o0.x clip w, o0.z the soft term, and the position
-        {names[2], edvr::kFacing9AECWorldVS, {{"TEXCOORD", 6, 0}, {"SV_POSITION", 0, -1}}},                // o1.x the corner depth, and the position
+    const Case cases[5] = {
+        {names[0], edvr::kFacing9F4BWorldVS, {{"TEXCOORD", 9, 0}, {"SV_POSITION", 0, -1}}, false},                // o2.x the corner depth, and the position
+        {names[1], edvr::kFacingBBADWorldVS, {{"TEXCOORD", 3, 0}, {"TEXCOORD", 3, 2}, {"SV_POSITION", 0, -1}}, false},   // o0.x clip w, o0.z the soft term, and the position
+        {names[2], edvr::kFacing9AECWorldVS, {{"TEXCOORD", 6, 0}, {"SV_POSITION", 0, -1}}, true},                 // o1.x the corner depth, and the position
+        {names[3], edvr::kFacingAFBCWorldVS, {{"TEXCOORD", 9, 0}, {"SV_POSITION", 0, -1}}, true},                 // o2.x the corner depth, and the position
+        {names[4], edvr::kFacing4BDEWorldVS, {{"TEXCOORD", 3, 0}, {"TEXCOORD", 3, 2}, {"SV_POSITION", 0, -1}}, false},   // o0.x clip w, o0.z the soft term, and the position
     };
     for (const Case& c : cases) runCase(rig, c, originals, names);
 
@@ -651,13 +687,17 @@ int main(int argc, char** argv) {
         const std::string pf = slurp(rootDir + "\\src\\d3d11\\particle_fix.cpp");
         const std::string gen = slurp(rootDir + "\\tools\\temporal_shader_build\\fixed_facing_shader_variants.h");
         check(!pf.empty() && !gen.empty(), "F7.sources-readable");
-        for (const char* sym : {"kFacing9F4BWorldBytecode", "kFacingBBADWorldBytecode", "kFacing9AECWorldBytecode"}) {
+        for (const char* sym : {"kFacing9F4BWorldBytecode", "kFacingBBADWorldBytecode", "kFacing9AECWorldBytecode", "kFacingAFBCWorldBytecode",
+                                "kFacing4BDEWorldBytecode"}) {
             check(countOf(pf, sym) >= 1, std::string("F7.table-uses-") + sym);
             check(countOf(gen, sym) == 1, std::string("F7.generator-builds-") + sym);
         }
+        // The fireball puffs left the roll-free list: each hash is written once in particle_fix.cpp, as its own variant's.
+        check(countOf(pf, "0xAFBCD3ADB9092F78ull") == 1 && countOf(pf, "0x4BDE4DBF88C2BA27ull") == 1,
+              "F7.the-fireball-twins-are-transcribed-and-no-longer-in-the-roll-free-list");
         check(countOf(pf, "kWitchspaceStarsVs && g_hideWitchspaceStars") == 1, "F7.starfield-stays-gated-by-fix.witchspace_stars");
     }
     if (failures) { std::printf("billboard_facing_test: %d FAILED of %u\n", failures, checks); return 1; }
-    std::printf("billboard_facing_test: PASS F1-F7 (%u checks)\n", checks);
+    std::printf("billboard_facing_test: PASS F1-F8 (%u checks)\n", checks);
     return 0;
 }

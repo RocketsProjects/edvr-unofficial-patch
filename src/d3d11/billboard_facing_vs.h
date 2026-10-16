@@ -6,6 +6,10 @@
 // the quad plane follows head PITCH and the explosion flexes. Facing is per particle, so only a vertex shader can do it:
 // the same fix the plume (particle_vs.h) and the flare (flare_vs.h) have.
 //
+// The eye dump of the next flight (2026-10-16, edvr_gfx_20261016_063230.log) then showed the FIREBALL PUFFS are drawn by
+// AFBCD3ADB9092F78 (PS 2BAE3742FEB916D9), 9F4B's no-near-fade twin, and 4BDE4DBF88C2BA27 (PS E54F2A902E5631F6) is BBAD's
+// no-fade twin; both had only the roll-free rebind and still flexed. They are transcribed below as well, five in all.
+//
 // THESE ARE TRANSCRIPTIONS, NOT REWRITES, AND EACH IS GRANTED TO ONE EXACT HASH. The 0.12.3 regression (memory note
 // edvr-geyser-workstream.md) shipped the flare's replacement on a shader whose body looked the same and whose OUTPUTS
 // were not, and made the witchspace starfield vanish. So:
@@ -326,6 +330,139 @@ VSOut main(VSIn i) {
     o.o2.w = i.v9.w;
     o.o3.xyz = float3(1.0, 1.0, 1.0);
     o.o3.w = i.v3.y * 255.0;
+    return o;
+}
+)HLSL";
+
+// ---- AFBCD3ADB9092F78: 12 in, 5+position out (9F4B's signature); b0[12], b1[280], NO b2 ----
+// The fireball puffs (eye dump 2026-10-16: AFBC + PS 2BAE3742FEB916D9). 9F4B's twin without the near fade: no cb2, no
+// fade ramp, no corner collapse, and o3.w = v11.w. Written from AFBC's own bytecode; it resembles 9AEC (body similarity
+// 0.864) more than its true twin 9F4B (0.727), which is exactly why nothing here is granted on a likeness.
+constexpr const char kFacingAFBCWorldVS[] = EDVR_FACING_COMMON_HLSL R"HLSL(
+struct VSIn {
+    float4 v0  : POSITION0;
+    float4 v1  : DIRECTION0;
+    float3 v2  : DIMENSIONS0;
+    float4 v3  : ALIGNBLENDBRIGHT0;
+    float  v4  : BRIGHTNESS0;
+    float4 v5  : AXIS0;
+    float2 v6  : VERTEXALPHA0;
+    float4 v7  : UVSCURRENTDIFFUSE0;
+    float4 v8  : UVSNEXTDIFFUSE0;
+    float  v9  : TEXBLENDDIFFUSE0;
+    float  v10 : ATLASINDICESDIFFUSE0;
+    float4 v11 : COLOUR0;
+};
+
+struct VSOut {
+    float4 o0 : TEXCOORD1;
+    float4 o1 : TEXCOORD5;
+    float2 o2 : TEXCOORD9;
+    float4 o3 : TEXCOORD11;
+    float4 o4 : TEXCOORD12;
+    float4 o5 : SV_POSITION;
+};
+
+VSOut main(VSIn i) {
+    VSOut o = (VSOut)0;
+    float3 r0 = i.v0.xyz * cb1[222].z;
+    float2 size = i.v2.xy * cb1[222].z;
+    o.o2.y = max(abs(size.y), abs(size.x));
+
+    uint packed = asuint(i.v10);
+    o.o0.y = (float)(packed & 0x0000ffffu);
+    o.o0.z = (float)(packed >> 16);
+    o.o1.xy = i.v6.xy * i.v7.yw + i.v7.xz;
+
+    float4 pos4 = float4(r0, 1.0);
+    float3 p = float3(dot(cb0[9], pos4), dot(cb0[10], pos4), dot(cb0[11], pos4));
+
+    float3 right, up;
+    spriteBasis(i.v0.w, i.v1.xyz, i.v3.x, i.v5.xyz, p, right, up);
+
+    float3 corner = right * size.x + p;
+    corner = up * size.y + corner;
+
+    float4 clip = corner.y * cb1[271];
+    clip = corner.x * cb1[270] + clip;
+    clip = corner.z * cb1[272] + clip;
+    o.o5 = clip + cb1[273];
+
+    o.o3.xyz = i.v4.xxx * i.v11.xyz;
+    o.o2.x = dot(corner, cb1[279].xyz);
+    o.o1.zw = i.v6.xy * i.v8.yw + i.v8.xz;
+    o.o0.x = i.v5.w;
+    o.o0.w = i.v9;
+    o.o3.w = i.v11.w;
+    o.o4.xyz = float3(1.0, 1.0, 1.0);
+    o.o4.w = i.v3.y * 255.0;
+    return o;
+}
+)HLSL";
+
+// ---- 4BDE4DBF88C2BA27: 10 in, 3 out (BBAD's interface); b0[12], b1[280], b2[1] ----
+// BBAD's no-fade twin (PS E54F2A902E5631F6): the same soft-depth term on cb2[0].y, but no near fade, no collapse and no
+// fade multiplied into the outputs. Its own bytecode reshuffles the registers and the mode branches; the maths is the
+// sprite family's, which the rig checks output by output.
+constexpr const char kFacing4BDEWorldVS[] = EDVR_FACING_COMMON_HLSL R"HLSL(
+cbuffer CB2 : register(b2) { float4 cb2[1]; };
+
+struct VSIn {
+    float4 v0 : POSITION0;
+    float4 v1 : DIRECTION0;
+    float3 v2 : DIMENSIONS0;
+    float4 v3 : ALIGNBLENDBRIGHT0;
+    float  v4 : BRIGHTNESS0;
+    float4 v5 : AXIS0;
+    float2 v6 : VERTEXALPHA0;
+    float4 v7 : UVSCURRENTDIFFUSE0;
+    float  v8 : ATLASINDICESDIFFUSE0;
+    float4 v9 : COLOUR0;
+};
+
+struct VSOut {
+    float3 o0 : TEXCOORD3;
+    float4 o1 : TEXCOORD5;
+    float4 o2 : SV_POSITION;
+};
+
+VSOut main(VSIn i) {
+    VSOut o = (VSOut)0;
+    float3 r0 = i.v0.xyz * cb1[222].z;
+    float2 size = i.v2.xy * cb1[222].z;
+
+    uint packed = asuint(i.v8);
+    float atlasLo = (float)(packed & 0x0000ffffu);
+    o.o1.xy = i.v6.xy * i.v7.yw + i.v7.xz;
+
+    float4 pos4 = float4(r0, 1.0);
+    float3 p = float3(dot(cb0[9], pos4), dot(cb0[10], pos4), dot(cb0[11], pos4));
+
+    float3 right, up;
+    spriteBasis(i.v0.w, i.v1.xyz, i.v3.x, i.v5.xyz, p, right, up);
+
+    float3 corner = right * size.x + p;
+    corner = up * size.y + corner;
+
+    float4 clip = corner.y * cb1[271];
+    clip = corner.x * cb1[270] + clip;
+    clip = corner.z * cb1[272] + clip;
+    clip = clip + cb1[273];
+
+    float soft;
+    [branch] if (cb2[0].y == 0.0) {
+        soft = rsqrt(max(clip.w, 0.0));
+    } else {
+        float s = max(abs(size.y), abs(size.x));
+        float w = max(clip.w, 0.0);
+        s = s * s;
+        w = w * w;
+        soft = (s * cb2[0].y) / (w * 1.944738 + s);
+    }
+    o.o1.z = i.v9.w;
+    o.o1.w = i.v4.x;
+    o.o2 = clip;
+    o.o0 = float3(clip.w, atlasLo, soft);
     return o;
 }
 )HLSL";

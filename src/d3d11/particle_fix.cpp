@@ -127,7 +127,14 @@ struct BillboardVariant {
 constexpr uint64_t kExplosionAVs = 0x9F4BBCFCD3B68BC9ull;
 constexpr uint64_t kExplosionBVs = 0xBBAD1CA808E1E292ull;
 
-constexpr int kVariantCount = 5;
+// The fireball puffs (eye dump 2026-10-16): AFBCD3ADB9092F78 is 9F4B's no-near-fade twin (PS 2BAE3742FEB916D9) and
+// 4BDE4DBF88C2BA27 is BBAD's no-fade twin (PS E54F2A902E5631F6). Each has its OWN transcription, written from its own
+// bytecode; AFBC resembles 9AEC more (0.864) than its true twin 9F4B (0.727), so hashes are matched exactly and nothing
+// else.
+constexpr uint64_t kFireballAVs = 0xAFBCD3ADB9092F78ull;
+constexpr uint64_t kFireballBVs = 0x4BDE4DBF88C2BA27ull;
+
+constexpr int kVariantCount = 7;
 constexpr int kFirstFacingVariant = 2;   // 0 plume and 1 flare claim the draw (kParticle); 2.. stay in the ladder
 const BillboardVariant kVariants[kVariantCount] = {
     {kPlumeVs, kParticleWorldBytecode, sizeof(kParticleWorldBytecode),
@@ -137,6 +144,8 @@ const BillboardVariant kVariants[kVariantCount] = {
     {kExplosionAVs, kFacing9F4BWorldBytecode, sizeof(kFacing9F4BWorldBytecode), "facing_9F4B_vs"},
     {kExplosionBVs, kFacingBBADWorldBytecode, sizeof(kFacingBBADWorldBytecode), "facing_BBAD_vs"},
     {kWitchspaceStarsVs, kFacing9AECWorldBytecode, sizeof(kFacing9AECWorldBytecode), "facing_9AEC_vs"},
+    {kFireballAVs, kFacingAFBCWorldBytecode, sizeof(kFacingAFBCWorldBytecode), "facing_AFBC_vs"},
+    {kFireballBVs, kFacing4BDEWorldBytecode, sizeof(kFacing4BDEWorldBytecode), "facing_4BDE_vs"},
 };
 // The draw path's inline prefilter (particleOnDrawMayMatch, particle_fix.h)
 // compares against its own copy of these hashes; a variant added here and
@@ -154,6 +163,8 @@ const char* variantLabel(int v) {
     case 2: return "explosion (9F4B)";
     case 3: return "explosion (BBAD)";
     case 4: return "explosion sprite / starfield (9AEC)";
+    case 5: return "fireball puff (AFBC)";
+    case 6: return "fireball puff (4BDE)";
     default: return "smoke plume";
     }
 }
@@ -210,11 +221,12 @@ uint64_t boundVsHashFast(ID3D11DeviceContext* ctx) {
 // axis when it has one (1FBA99C4911D7ACF, DB113566B6A59C5B: movc axis, cb3[1], cb1[278]). None uses either row
 // for a lighting or view-space vector. cb1[279] and everything else are left as the game wrote them.
 //
-// Three of the original sixteen (9F4BBCFCD3B68BC9, BBAD1CA808E1E292, 9AEC596A2B036EA6, the explosion) moved to
-// kVariants on 2026-10-16: a roll-free basis kept the camera's forward, so the explosion flexed with head pitch.
-constexpr int kRollFreeCount = 13;
+// Five of the original sixteen moved to kVariants on 2026-10-16: 9F4BBCFCD3B68BC9, BBAD1CA808E1E292 and 9AEC596A2B036EA6
+// (the explosion), then AFBCD3ADB9092F78 and 4BDE4DBF88C2BA27 (the fireball puffs, found by the eye dump): a roll-free
+// basis kept the camera's forward, so the explosion flexed with head pitch.
+constexpr int kRollFreeCount = 11;
 constexpr uint64_t kRollFreeVs[kRollFreeCount] = {
-    0xAFBCD3ADB9092F78ull, 0x1B285CBC9F185D4Dull, 0x4BDE4DBF88C2BA27ull,
+    0x1B285CBC9F185D4Dull,
     0x78F5F08D02EE38CCull,   // drew around the explosion
     0x1FBA99C4911D7ACFull, 0x2BF557356A28AA0Dull, 0xDB113566B6A59C5Bull,
     0x68DDDEF04D9894AFull,   // the stretched sky billboard (direct span)

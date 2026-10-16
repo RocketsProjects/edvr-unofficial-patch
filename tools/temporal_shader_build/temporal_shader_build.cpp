@@ -582,8 +582,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 66 && coreLegacy.size() + 19 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite and the explosion billboards' three facing transcriptions are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 68 && coreLegacy.size() + 21 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite and the explosion billboards' five facing transcriptions are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -863,13 +863,15 @@ static void selfTest() {
     // original has one, and ours at b3: the viewer position and world up, two float4s). The bytes are the ones tools/billboard_facing_test runs against the
     // game's own bytecode, compiled the same way (entry main, vs_5_0, flags 0).
     {
-        struct Facing { const char* symbol; const char* sourceName; const char* source; bool hasB2; };
-        const Facing facing[3] = {
-            {"kFacing9F4BWorldBytecode", "facing_9F4B_vs", edvr::kFacing9F4BWorldVS, true},
-            {"kFacingBBADWorldBytecode", "facing_BBAD_vs", edvr::kFacingBBADWorldVS, true},
-            {"kFacing9AECWorldBytecode", "facing_9AEC_vs", edvr::kFacing9AECWorldVS, false},
+        struct Facing { const char* symbol; const char* sourceName; const char* source; UINT b2Rows; };   // b2Rows: the original's CB2[n], 0 for none
+        const Facing facing[5] = {
+            {"kFacing9F4BWorldBytecode", "facing_9F4B_vs", edvr::kFacing9F4BWorldVS, 3},
+            {"kFacingBBADWorldBytecode", "facing_BBAD_vs", edvr::kFacingBBADWorldVS, 3},
+            {"kFacing9AECWorldBytecode", "facing_9AEC_vs", edvr::kFacing9AECWorldVS, 0},
+            {"kFacingAFBCWorldBytecode", "facing_AFBC_vs", edvr::kFacingAFBCWorldVS, 0},
+            {"kFacing4BDEWorldBytecode", "facing_4BDE_vs", edvr::kFacing4BDEWorldVS, 1},
         };
-        for (size_t i = 0; i < 3; ++i) {
+        for (size_t i = 0; i < 5; ++i) {
             auto& shader = coreFixed[coreLegacy.size() + 16 + i];
             check(!std::strcmp(shader.symbol, facing[i].symbol) && !std::strcmp(shader.sourceName, facing[i].sourceName) &&
                   !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "vs_5_0") && shader.alternate == facing[i].source &&
@@ -886,11 +888,11 @@ static void selfTest() {
                       D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_VERTEX_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5,
                       "each facing transcription reflects as a Shader Model 5 vertex shader");
                 struct Buffer { const char* name; UINT slot; UINT size; };
-                const Buffer buffers[] = {{"CB0", 0, 12 * 16}, {"CB1", 1, 280 * 16}, {"CB2", 2, 3 * 16}, {"CBP", 3, 2 * 16}};
+                const Buffer buffers[] = {{"CB0", 0, 12 * 16}, {"CB1", 1, 280 * 16}, {"CB2", 2, facing[i].b2Rows * 16}, {"CBP", 3, 2 * 16}};
                 bool ok = reflection != nullptr;
                 UINT expected = 0;
                 for (const Buffer& b : buffers) {
-                    if (b.slot == 2 && !facing[i].hasB2) continue;
+                    if (b.slot == 2 && !facing[i].b2Rows) continue;
                     ++expected;
                     D3D11_SHADER_INPUT_BIND_DESC bind{};
                     D3D11_SHADER_BUFFER_DESC bufferDesc{};
@@ -899,7 +901,7 @@ static void selfTest() {
                          bind.BindPoint == b.slot && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == b.size;
                 }
                 check(ok && desc.BoundResources == expected,
-                      "each facing transcription keeps the game's b0[12], b1[280] (and b2[3] where the original has one) and ours at b3[2], and binds nothing else");
+                      "each facing transcription keeps the game's b0[12], b1[280] (and b2[3] or b2[1] where the original has one) and ours at b3[2], and binds nothing else");
             }
         }
     }
