@@ -46,6 +46,7 @@
 #include "holo_families.h"  // the crisp take's eight hologram VS hashes: kHoloGeneric's match list
 #include "supercruise_lines.h"  // the orbit lines' and the supercruise bars' shader pairs
 #include "weapons_fire.h"  // the weapons-fire pairs (fix.sharp_weapons)
+#include "shield_ripple.h"  // the shield refraction pair (advanced.shield_ripple)
 #include "holo_material.h"  // the cockpit holo panels' second vertex shader (Disable GUI effects)
 
 namespace edvr {
@@ -637,6 +638,9 @@ enum class UiLayerFamily : uint8_t {
                    // the HUD's over-blend one, and added onto the upscaled picture after the tonemap. Governed by fix.sharp_weapons,
                    // NOT fix.ui_quality (uiLayerFamilyEnabled). Not a scene LINE: exempt from the density rule. Last in the enum so
                    // no older family's number moves.
+    kShieldRipple,  // the shield-strike refraction (shield_ripple.h: vs 820E5C131B99361D with ps 6EAA86EFE135B2D4): the game's own draw, taken out of the scene and
+                    // re-issued through the HDR layer route into the eye's R32G32_FLOAT displacement layer D (t0 swapped for a UV ramp), applied at the door after RCAS.
+                    // Governed by advanced.shield_ripple (TEMPORARY), not by either other key. Last in the enum.
     kCount
 };
 
@@ -658,6 +662,7 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
         case UiLayerFamily::kMapCanvas: return "map canvas";
         case UiLayerFamily::kMapSprite: return "map sprite";
         case UiLayerFamily::kWeaponsFire: return "weapons fire";
+        case UiLayerFamily::kShieldRipple: return "shield ripple";
         default: return "none";
     }
 }
@@ -671,14 +676,15 @@ inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
     return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite ||
            f == UiLayerFamily::kHoloGeneric || f == UiLayerFamily::kOrbitLines ||
            f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust ||
-           f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kWeaponsFire;
+           f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kWeaponsFire ||
+           f == UiLayerFamily::kShieldRipple;
 }
 
 // Which key governs a family: the weapons fire is fix.sharp_weapons's, every other family is fix.ui_quality's. The two keys are
 // independent (the four combinations are the sharp_weapons_test rig's): fix.ui_quality off takes no interface, fix.sharp_weapons off
 // takes no weapons fire, whatever the other says. `qualityOn` and `sharpOn` are the keys' LIVE states (the layer not stood down).
-inline bool uiLayerFamilyEnabled(UiLayerFamily f, bool qualityOn, bool sharpOn) {
-    return f == UiLayerFamily::kWeaponsFire ? sharpOn : qualityOn;
+inline bool uiLayerFamilyEnabled(UiLayerFamily f, bool qualityOn, bool sharpOn, bool rippleOn = true) {
+    return f == UiLayerFamily::kWeaponsFire ? sharpOn : f == UiLayerFamily::kShieldRipple ? rippleOn : qualityOn;
 }
 
 // The two families that are scene geometry rather than interface: the layer takes them for DENSITY alone (their lines
@@ -904,6 +910,7 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
               : (f.vs == kUiVsSupercruiseBars && f.ps == kUiPsSupercruiseBars) ? UiLayerFamily::kSupercruiseBars
               : (f.vs == kUiVsSpaceDust && f.ps == kUiPsSpaceDust) ? UiLayerFamily::kSpaceDust
               : weaponPairIndex(f.vs, f.ps) >= 0 ? UiLayerFamily::kWeaponsFire
+              : shieldRefractPair(f.vs, f.ps) ? UiLayerFamily::kShieldRipple
               : (uiHoloGenericHash(f.vs) ||
                  (f.vs == kHoloTargetSphere &&
                   (f.ps == 0xEA02FAC2BD6C643Cull || f.ps == 0xE95634B0F61D218Full)))
@@ -1384,6 +1391,11 @@ inline bool uiLayerWeaponsLiveFor(bool sharp, bool temporal, bool jitterAsShippe
     return sharp && temporal && jitterAsShipped && !stoodDown && !flat;
 }
 inline bool uiLayerMachineryLive(bool qualityLive, bool weaponsLive) { return qualityLive || weaponsLive; }
+// The shield ripple's half: advanced.shield_ripple is not stock, a temporal mode is on (the door composites over its output), the jitter as shipped, not stood
+// down (the layer's or the ripple's own), and not the flat profile (VR only). The machinery runs when it is live too (uiLayerMachineryLive of the union).
+inline bool uiLayerRippleLiveFor(bool taking, bool temporal, bool jitterAsShipped, bool stoodDown, bool flat) {
+    return taking && temporal && jitterAsShipped && !stoodDown && !flat;
+}
 inline const char* uiLayerNotLiveReasonFor(float target, bool temporal, bool jitterAsShipped, bool stoodDown) {
     if (!(target > 0.0f)) return "fix.ui_quality is off";
     if (!temporal) return "no temporal mode is on (fix.temporal_aa is off)";

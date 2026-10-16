@@ -94,8 +94,11 @@ static void ruleTests() {
         ldr.targetKind = 0;
         check(uiLayerFamilyFor(ldr) == UiLayerFamily::kNone, "no eye target, no family");
     }
-    check(uiLayerFamilyFor(hdrFacts(0x820E5C131B99361Dull, 0x6EAA86EFE135B2D4ull)) == UiLayerFamily::kNone,
-          "the shield's refracting partner (820E/6EAA) stays in the scene: ruled out for the layer");
+    // The shield's refracting partner (820E/6EAA) is NOT a weapons-fire row and never goes into the weapons layer (it samples the pre-DLSS eye HDR copy at the
+    // screen UV); since the shield ripple arc it is the family kShieldRipple, taken into its own displacement layer under advanced.shield_ripple (shield_ripple_test).
+    check(uiLayerFamilyFor(hdrFacts(0x820E5C131B99361Dull, 0x6EAA86EFE135B2D4ull)) == UiLayerFamily::kShieldRipple,
+          "the shield's refracting partner (820E/6EAA) is the shield-ripple family, not weapons fire");
+    check(weaponPairIndex(0x820E5C131B99361Dull, 0x6EAA86EFE135B2D4ull) < 0, "...and not in the weapons-fire pair table");
     check(uiLayerFamilyTakesHdr(UiLayerFamily::kWeaponsFire), "the weapons fire is taken into the HDR layer");
     check(!uiLayerFamilyIsSceneLines(UiLayerFamily::kWeaponsFire), "...and is exempt from the density rule");
     check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kWeaponsFire), "weapons fire") == 0, "the family's name is the log's");
@@ -115,8 +118,9 @@ static void ruleTests() {
     check(uiLayerDecide(lines) == UiLayerDecision::kNoDensityGain, "control: the same facts decline a scene line");
     // Last in the enums: no older number moved.
     check(static_cast<int>(UiLayerFamily::kWeaponsFire) == static_cast<int>(UiLayerFamily::kMapSprite) + 1 &&
-              static_cast<int>(UiLayerFamily::kWeaponsFire) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "the family is last in its enum");
+              static_cast<int>(UiLayerFamily::kShieldRipple) == static_cast<int>(UiLayerFamily::kWeaponsFire) + 1 &&
+              static_cast<int>(UiLayerFamily::kShieldRipple) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "the family is last but one in its enum, the shield ripple last (no older number moved)");
     check(static_cast<int>(UiLayerDecision::kFamilyOff) == static_cast<int>(UiLayerDecision::kLayerFailed) + 1 &&
               static_cast<int>(UiLayerDecision::kFamilyOff) + 1 == static_cast<int>(UiLayerDecision::kCount) && static_cast<int>(UiLayerDecision::kCount) <= 24,
           "the new decision is last in its enum and the 24-wide tables hold it");
@@ -157,7 +161,7 @@ static void keyTests() {
             for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f) {
                 const UiLayerFamily fam = static_cast<UiLayerFamily>(f);
                 const bool on = uiLayerFamilyEnabled(fam, q != 0, s != 0);
-                check(on == (fam == UiLayerFamily::kWeaponsFire ? s != 0 : q != 0), "a family is enabled by its own key and by no other");
+                check(on == (fam == UiLayerFamily::kWeaponsFire ? s != 0 : fam == UiLayerFamily::kShieldRipple ? true : q != 0), "a family is enabled by its own key and by no other (the ripple, asked without its key, defaults on)");
                 UiLayerDrawFacts d;
                 d.family = fam;
                 d.familyEnabled = on;
@@ -534,16 +538,21 @@ static void censusTests(const char* path, unsigned weaponRows, unsigned partnerR
             check(was.family == UiLayerFamily::kNone && was.decision == UiLayerDecision::kNotUi, "a weapons row was not UI before this arc");
             check(now.family == UiLayerFamily::kWeaponsFire && now.decision == UiLayerDecision::kRedirect, "a weapons row is the family and is redirected into the HDR layer");
             ++changed;
+        } else if (r.vs == 0x820E5C131B99361Dull && r.ps == 0x6EAA86EFE135B2D4ull) {
+            // the shield's refraction: not UI before, the shield-ripple family since; redirected (blend over, depth GEQUAL no write, no stencil)
+            ++partners;
+            check(was.family == UiLayerFamily::kNone && was.decision == UiLayerDecision::kNotUi, "a shield-refraction row was not UI before the shield ripple arc");
+            check(now.family == UiLayerFamily::kShieldRipple && now.decision == UiLayerDecision::kRedirect, "...and is the shield-ripple family, redirected");
+            ++changed;
         } else {
-            if (r.vs == 0x820E5C131B99361Dull) ++partners;
             check(now.family == was.family && now.decision == was.decision, "every other row is decided exactly as before");
             ++same;
             if (now.decision == UiLayerDecision::kRedirect) ++otherTaken[now.family];
         }
     }
     check(weapons == weaponRows, "the census frame holds the weapons rows the log counted");
-    check(partners == partnerRows, "...and the shield's refracting partner rows");
-    check(changed == weapons && same + changed == c.rows.size(), "exactly the weapons rows change decision");
+    check(partners == partnerRows, "...and the shield's refraction rows");
+    check(changed == weapons + partners && same + changed == c.rows.size(), "exactly the weapons rows and the shield-refraction rows change decision");
 
     // One-token mutants of the first weapons row: each is refused for the right reason, or is no longer the family.
     const Row* w = nullptr;
@@ -595,6 +604,8 @@ static void censusTests(const char* path, unsigned weaponRows, unsigned partnerR
                 } else if (v.family == UiLayerFamily::kWeaponsFire) {
                     check((v.decision == UiLayerDecision::kRedirect) == (s != 0) && (v.decision == UiLayerDecision::kFamilyOff) == (s == 0),
                           "a weapons row is redirected iff fix.sharp_weapons is on, and refused for the key iff it is off");
+                } else if (v.family == UiLayerFamily::kShieldRipple) {
+                    check(v.decision == UiLayerDecision::kRedirect, "the shield-refraction rows follow advanced.shield_ripple alone (default on), whatever the two keys say");
                 } else if (q) {
                     check(v.decision == base.decision, "with fix.ui_quality on every other row is decided as it was, whatever fix.sharp_weapons says");
                 } else {
@@ -625,11 +636,11 @@ static bool wiredKeys(const std::string& t) {
 static bool wiredLiveness(const std::string& t) {
     return has(t, "const bool quality = uiLayerLiveFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);") &&
            has(t, "g_weaponsLive = uiLayerWeaponsLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_weaponsStoodDown,") &&
-           has(t, "detail::g_uiQualityLive = quality;") && has(t, "detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive);") &&
+           has(t, "detail::g_uiQualityLive = quality;") && has(t, "detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive || g_rippleLive);") &&
            before(t, "const bool quality = uiLayerLiveFor(", "detail::g_uiLayerLive = uiLayerMachineryLive(");
 }
 static bool wiredDecision(const std::string& t) {
-    return has(t, "f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive);") &&
+    return has(t, "f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive);") &&
            has(t, "family == UiLayerFamily::kWeaponsFire\n                    ? weaponsTakeReady(ctx, f.eye)") &&
            has(t, "const bool cancel = !g_draw.weapons || weaponsFireJitterCancel(g_draw.vsHash);") &&
            has(t, "g_draw.jx = cancel ? jx : 0.0f;") && has(t, "g_draw.weapons = family == UiLayerFamily::kWeaponsFire;") &&
@@ -648,7 +659,7 @@ static bool wiredVscreen(const std::string& t) {
     if (fn == std::string::npos) return false;
     const size_t skip = t.find("if (f.targetKind == 2 && !uiLayerQualityLive()) return UiLayerFamily::kNone;", fn);
     const size_t vs = t.find("f.vs = bindingShaderHash(BindSlot::Vs);", fn);
-    const size_t ps = t.find("else if (f.targetKind == 1 && weaponsFireVs(f.vs))", fn);
+    const size_t ps = t.find("else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))", fn);
     if (skip == std::string::npos || vs == std::string::npos || ps == std::string::npos || !(skip < vs) || !(vs < ps)) return false;
     // the steps loop: after the game's tonemap draw is re-issued once, before the layer's End
     const size_t loop = t.find("while (uiLayerCrispToneNext(self)) pureDrawReissue(self, kind, count, instances, args);");
@@ -686,14 +697,14 @@ static void wiringTests() {
     check(!wiredLiveness(replaced(layer, "const bool quality = uiLayerLiveFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);",
                                   "const bool quality = uiLayerLiveFor(g_sharpWeapons ? 1.0f : g_target, g_temporal, g_jitterAsShipped, g_stoodDown);")),
           "control: a ui_quality half that follows the weapons' key trips the pin");
-    check(!wiredLiveness(replaced(layer, "detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive);", "detail::g_uiLayerLive = quality;")),
+    check(!wiredLiveness(replaced(layer, "detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive || g_rippleLive);", "detail::g_uiLayerLive = quality;")),
           "control: a machinery that ignores the weapons' half trips the pin");
     check(!wiredLiveness(replaced(layer, "detail::g_uiQualityLive = quality;", "detail::g_uiQualityLive = detail::g_uiLayerLive;")),
           "control: a quality flag that is the union trips the pin");
 
     check(wiredDecision(layer), "ui_layer.cpp: the decision gates each family by its own key, takes the weapons through their own readiness and cancels by the table");
-    check(!wiredDecision(replaced(layer, "f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive);", "f.familyEnabled = true;")), "control: no key gate trips the pin");
-    check(!wiredDecision(replaced(layer, "uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive)", "uiLayerFamilyEnabled(family, detail::g_uiLayerLive, g_weaponsLive)")),
+    check(!wiredDecision(replaced(layer, "f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive);", "f.familyEnabled = true;")), "control: no key gate trips the pin");
+    check(!wiredDecision(replaced(layer, "uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive)", "uiLayerFamilyEnabled(family, detail::g_uiLayerLive, g_weaponsLive, g_rippleLive)")),
           "control: a ui_quality gate that reads the union trips the pin");
     check(!wiredDecision(replaced(layer, "g_draw.jx = cancel ? jx : 0.0f;", "g_draw.jx = jx;")), "control: a cancel that ignores the table trips the pin");
     check(!wiredDecision(replaced(layer, "weaponsFireJitterCancel(g_draw.vsHash)", "true")), "control: a table that is never read trips the pin");
@@ -705,7 +716,7 @@ static void wiringTests() {
           "control: an after-UI take that runs for the weapons trips the pin");
 
     check(wiredVscreen(vscreen), "vscreen.cpp: the pixel shader is read for the weapons' vertex shaders, the post-tonemap rules wait for fix.ui_quality, the steps are issued");
-    check(!wiredVscreen(replaced(vscreen, "else if (f.targetKind == 1 && weaponsFireVs(f.vs))", "else if (f.targetKind == 1 && false)")), "control: no pixel shader read for the pairs trips the pin");
+    check(!wiredVscreen(replaced(vscreen, "else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))", "else if (f.targetKind == 1 && false)")), "control: no pixel shader read for the pairs trips the pin");
     check(!wiredVscreen(replaced(vscreen, "if (f.targetKind == 2 && !uiLayerQualityLive()) return UiLayerFamily::kNone;", "")), "control: post-tonemap rules that run for the weapons trip the pin");
     check(!wiredVscreen(replaced(vscreen, "while (uiLayerCrispToneNext(self)) pureDrawReissue(self, kind, count, instances, args);", "")), "control: no loop over the steps trips the pin");
 

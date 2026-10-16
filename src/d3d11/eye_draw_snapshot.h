@@ -172,6 +172,9 @@ public:
         case 0x1F17BF54DB6EE407ull: // beams and bolts
         case 0x939D01F28D1FEEA8ull: // multicannon rounds
         case 0x5C1D8EF529324A22ull: // the shield strike's additive part
+        // The shield-strike refraction (shield_ripple.h; advanced.shield_ripple, R1): VS b0/b1/b2 here; the pixel shader's b1 row 90 (the gain) and s0's filter are
+        // read at run time on the first draw and logged. PS b1 is the same buffer as VS b1 when the log's first-draw line says so.
+        case 0x820E5C131B99361Dull: // the shield's refracting bubble
         case 0xA47A3315FFF5E2E4ull: // the supercruise bars' line list (supercruise_lines.h); identity is evidence, proved by the aux vertex capture
         case 0x9BFC7FD232328391ull: // the supercruise space dust's 300 ribbon quads (supercruise_lines.h): its b0/b1/b2 here, its vertices in the aux capture
             return true;

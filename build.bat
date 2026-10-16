@@ -3957,6 +3957,24 @@ if errorlevel 1 ( echo [edvr] ERROR: sharp weapons test build failed & exit /b 1
 "%OBJ%\sharpweapons\sharp_weapons_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_shield_ripple_test
+echo [edvr] === shield_ripple_test.exe ===
+REM advanced.shield_ripple (docs\dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: the shield refraction after the upscale"): the pair's family rule, the modes, the
+REM first-draw checks' arithmetic; on WARP with the debug layer, the game's own ps_6EAA (tools\shield_ripple_test\fixtures, from edvr_logs\shaders) drawn on the UV ramp
+REM against the analytic uv + d within 1e-6; the whole route with the production remap, jitter cancel and door pass (the build's bytecode) against the stock path
+REM within 2/255, with seven mutants caught; the coverage instrument's method with the production marking pass; and the source scans of the wiring, each with a control.
+REM Built outside build\ so its device is System32's; runs at the repo root (the scans read sources).
+if not exist "%OBJ%\shieldripple" mkdir "%OBJ%\shieldripple"
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\shieldripple\\" /Fe"%OBJ%\shieldripple\shield_ripple_test.exe" ^
+    "tools\shield_ripple_test\shield_ripple_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: shield ripple test build failed & exit /b 1 )
+"%OBJ%\shieldripple\shield_ripple_test.exe" --dry-run || exit /b 1
+"%OBJ%\shieldripple\shield_ripple_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_menu_pad_test
 echo [edvr] === menu_pad_test.exe ===
 if not exist "%OBJ%\menupad" mkdir "%OBJ%\menupad"

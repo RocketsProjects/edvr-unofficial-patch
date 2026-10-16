@@ -107,6 +107,7 @@ struct LegacyContract {
 #include "fixed_extra_shader_variants.h"
 #include "fixed_facing_shader_variants.h"
 #include "fixed_sharp_weapons_variants.h"
+#include "fixed_shield_ripple_variants.h"
 
 static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = false) {
     v.bytes.clear();
@@ -324,6 +325,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), facing.begin(), facing.end());
     const auto sharpWeapons = sharpWeaponsVariants();
     variants.insert(variants.end(), sharpWeapons.begin(), sharpWeapons.end());
+    const auto shieldRipple = shieldRippleVariants();
+    variants.insert(variants.end(), shieldRipple.begin(), shieldRipple.end());
     return variants;
 }
 
@@ -585,8 +588,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 70 && coreLegacy.size() + 23 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions and the sharp weapons' two source-pass shaders are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 73 && coreLegacy.size() + 26 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders and the shield ripple's door pass and two marking shaders are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);

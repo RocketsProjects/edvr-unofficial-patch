@@ -9,6 +9,11 @@
   OUT; the hull's 13% stale_slot is open hypothesis H-bias (a depth bias missing from the exported z). E2 (do puffs ride the ship) inconclusive.
   Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"). A count-and-tag probe
   (`claude/producer-434d120-probe`) confirmed FUN_14434D470 makes the shield (see the flight notes); the probe and the parked join are NOT on main.
+- **Shield refraction after the upscale (2026-10-16): BUILT, NOT FLOWN** (`claude/shield-ripple`, VR only; entry "Built, 2026-10-16: the
+  shield refraction"). 820E is skipped in the scene and its displacement applied after RCAS via a per-eye layer D. **Temporary keys:** `advanced.shield_ripple = sharp | none | stock`
+  (default sharp; dev tier only, no menu row; none = skip with no ripple, stock = the game's in-scene draw) and the six-pair coverage
+  instrument (30 s line). R1 (gain, filter) runs live on the first 820E draw and stands down to stock with a log line. At arc close ship the
+  winning mode and propose removing the key and the instrument, quoted.
 - **Weapons fire (2026-10-16): MERGED** (`claude/billboards-sharp-weapons`; flown OK in combat as `claude/combat-flight-1`; entries "Built" and
   "Combat flights"). 1F17, 939D and 5C1D go into the eye's own additive HDR layer, composited after the upscale by tonemap difference; 820E stays.
   Sean: weapons and shields look much better, beams and tracers are sharp. Key `fix.sharp_weapons` (default on, independent of `fix.ui_quality`).
@@ -425,7 +430,7 @@ burst: the lone draw is carried by its own frame's re-issue, the production rule
 apart: production 0, frozen 49. A real drop (content, no re-issue in its frame) counts 1, and so does a re-issue that ran in the content's frame without
 carrying it, which the frozen rule could not see (0). A continuous burst counts 0 by both. Pins with controls: the production test is
 `weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)`, the stamp sits inside `if (hadWeapons)`.
-## Design, 2026-10-16: the shield refraction after the upscale (820E5C13/6EAA86EF), DESIGN ONLY
+## Design, 2026-10-16: the shield refraction after the upscale (820E5C13/6EAA86EF), BUILT (entry below), NOT FLOWN
 
 **What 6EAA computes** (disassembled from edvr_logs\shaders). It sums n = (0,0,1) plus, for each of `cb2[7].w` hits, the t1 normal (x2-1,
 faded by `saturate(0.5*x1.x)`, weighted by `saturate(dot(normalize(hitpos), v1))`), and samples `t0` at `uv_jit + normalize(n).xy*cb2[0].x`,
@@ -449,3 +454,44 @@ A/B: ripple after the upscale, none, stock.
 after 820E that overlap the bubble (070301, 100257). R3: 820E draws per eye-frame. Rig: `tools\shield_ripple_test` (the game's ps_6EAA on a
 ramp against the analytic uv+d; stock against post-path within 2/255; mutants for the jitter, the y flip, the d scale, the depth seed, the
 copy, the order and a hole).
+
+
+## Built, 2026-10-16: the shield refraction after the upscale (`claude/shield-ripple`, NOT FLOWN)
+
+**What runs** (VR, behind temporal AA; key `advanced.shield_ripple`, default `sharp`). The exact pair 820E5C131B99361D / 6EAA86EFE135B2D4 is a
+`UiLayerFamily::kShieldRipple` row on its own key (not fix.ui_quality's, not fix.sharp_weapons's). A taken draw is re-issued unchanged through the
+HDR layer route (viewport remap, jitter cancel, seeded GEQUAL depth) into the eye's cleared R32G32_FLOAT layer D (cleared to -10000, so "no
+bubble" is far outside [0, 1]), with blend disabled and t0 swapped for a shared render-size UV ramp (texel i holds (i + 0.5) / W). The game's own
+shader then writes `uv_jit + d` into D. D is allocated on the first 820E draw and released after 300 idle frames. At the door, after RCAS and
+BEFORE the weapons/HUD composite: on frames with D coverage the RCAS output is copied, and `out = copy.Sample(D.uv - jitter_uv)` is written over
+D's coverage (linear, clamp). `none` skips 820E with no ripple; `stock` leaves the game's in-scene draw. A taken draw is never taken-then-dropped:
+`rippleTakeReady` and the R1 gate run before the decision.
+
+**R1 at runtime** (first 820E draw, then once more per re-arm): the PS b1 row 90 is read through an async staging copy (no stall; the draw stays
+in the scene until it has been read) and the gain `cb1[90].z * cb1[90].y` must be 1 within 1e-6; s0's filter must be linear (0x14 or 0x15). A
+failure logs `shield ripple: stands down for the rest of the session -- <reason>` and leaves stock; turning the key off and on re-arms. Log
+lines: `shield ripple: first 820E draw -- PS b1 ..., s0 filter ...`, `PS b1 row 90 reads (...)`, the D lifetime lines, and a 30 s line with 820E
+draws a frame, ripple frames, stand-downs and "not exercised" forms of each. eye_draw_snapshot now watches 820E (VS b0/b1/b2) for the next dump.
+
+**The coverage instrument** (R2/R3 amendment: no do-not-ripple mask; the reticle and overlays stay rippled for now). On eye-frames with D coverage,
+the six later in-scene pairs (8C091FFD canopy, 71DD8B8B reticle, 381D8028, 2CECEC30, 24214E7C, CC2BA2E2) are replayed once through the blend-probe
+method (writes masked) with an occlusion query against a stencil that marks D's coverage; results are polled on a later frame (`DONOTFLUSH`, no
+stall) and the covered samples per pair go in the 30 s line. The answer tells which later draws the ripple would have wrongly displaced.
+
+**Rig** `tools\shield_ripple_test` (WARP, debug layer, in the build gate; 422 checks), with the game's real ps_6EAA bytecode as a fixture:
+- The shader's arithmetic, t0 point-sampled on a 2016 ramp: max |D - nearest texel centre of (uv_jit + d)| = 1.04e-08 (a texel is 4.96e-04).
+- **Not met as specified:** the ramp read back through the LINEAR sampler is within 2.4e-5 of uv + d (0.05 of a render texel), not 1e-6. WARP's
+  fractional filter weights are coarse, and the machine's own adapter (`--hardware-self-test`, not a gate) gave the same 2.4e-5, so the 1e-6
+  hardware figure in the design was wrong on this rig. The rig bounds it at 0.1 texel on WARP. Size: under 0.05 render px, far below the
+  2/255 the route test needs; cause beyond "the texture unit's weights" not isolated.
+- Route (stock T(6EAA over F) against the door path's displaced read of T(F)): max 2/255 over the bubble and the rest (8 of 4140 bubble samples
+  off by 2, none by more), 0 on the overlay; second configuration (render 80, other jitter) 2.
+- Mutants, each far above the catch threshold of 3: jitter not subtracted 6, ramp y flipped 50, d scaled by the layer/render ratio 4, no depth
+  seed 5, in-place read without the copy 8, ripple after the weapons/HUD composite 112 (overlay 143), 820E skipped with D not admitted 5.
+- Coverage instrument: a later draw overlapping the bubble's corner counts 220 samples (expected 220), one wholly inside 256 (256), one beside it 0.
+- Source pins with controls (door before the early-out, t0 restored, D cleared outside [0, 1], R1 checks, idle release, key, vscreen hook,
+  snapshot watch, the ini row with no `# ui:` line); the debug layer reports nothing.
+
+**Not verified until a flight:** R1's gain is INFERRED as 1 from 100257 and is checked live; the real refraction offsets, the idle release in a
+long session and the instrument's counts have never run in the game. Read the log with `python tools\edvr_log.py --target steam --expect-build HEAD`,
+then grep `shield ripple`. Compare `sharp` against `stock` and `none` on the same strike.
