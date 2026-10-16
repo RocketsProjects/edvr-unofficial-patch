@@ -105,6 +105,7 @@ struct LegacyContract {
 };
 #include "fixed_core_shader_variants.h"
 #include "fixed_extra_shader_variants.h"
+#include "fixed_facing_shader_variants.h"
 
 static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = false) {
     v.bytes.clear();
@@ -318,6 +319,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), skyRing.begin(), skyRing.end());
     const auto composite = compositeInPlaceVariants();
     variants.insert(variants.end(), composite.begin(), composite.end());
+    const auto facing = billboardFacingVariants();
+    variants.insert(variants.end(), facing.begin(), facing.end());
     return variants;
 }
 
@@ -579,8 +582,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 63 && coreLegacy.size() + 16 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader and the UI layer's in-place composite are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 66 && coreLegacy.size() + 19 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite and the explosion billboards' three facing transcriptions are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -852,6 +855,52 @@ static void selfTest() {
             }
             check(bound && desc.BoundResources == 4,
                   "the in-place composite reads the frame only as the typed UAV at u0, the layer at t1, the multiply at t2 and the parameters at b0");
+        }
+    }
+
+    // The explosion billboards' facing transcriptions (src/d3d11/billboard_facing_vs.h): new, held to their own contract -- the symbol, source name, entry,
+    // profile and flags, the text each compiles, the vertex stage and the constant buffers the DXBC reflects (the game's b0[12] and b1[280], b2[3] where the
+    // original has one, and ours at b3: the viewer position and world up, two float4s). The bytes are the ones tools/billboard_facing_test runs against the
+    // game's own bytecode, compiled the same way (entry main, vs_5_0, flags 0).
+    {
+        struct Facing { const char* symbol; const char* sourceName; const char* source; bool hasB2; };
+        const Facing facing[3] = {
+            {"kFacing9F4BWorldBytecode", "facing_9F4B_vs", edvr::kFacing9F4BWorldVS, true},
+            {"kFacingBBADWorldBytecode", "facing_BBAD_vs", edvr::kFacingBBADWorldVS, true},
+            {"kFacing9AECWorldBytecode", "facing_9AEC_vs", edvr::kFacing9AECWorldVS, false},
+        };
+        for (size_t i = 0; i < 3; ++i) {
+            auto& shader = coreFixed[coreLegacy.size() + 16 + i];
+            check(!std::strcmp(shader.symbol, facing[i].symbol) && !std::strcmp(shader.sourceName, facing[i].sourceName) &&
+                  !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "vs_5_0") && shader.alternate == facing[i].source &&
+                  shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+                  "each facing transcription has its distinct symbol and exact source/stage contract");
+            check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+                  "each facing transcription compiles to fixed DXBC");
+            if (reflect && !shader.bytes.empty()) {
+                ComPtr<ID3D11ShaderReflection> reflection;
+                D3D11_SHADER_DESC desc{};
+                const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection),
+                                           reinterpret_cast<void**>(reflection.GetAddressOf()));
+                check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                      D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_VERTEX_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5,
+                      "each facing transcription reflects as a Shader Model 5 vertex shader");
+                struct Buffer { const char* name; UINT slot; UINT size; };
+                const Buffer buffers[] = {{"CB0", 0, 12 * 16}, {"CB1", 1, 280 * 16}, {"CB2", 2, 3 * 16}, {"CBP", 3, 2 * 16}};
+                bool ok = reflection != nullptr;
+                UINT expected = 0;
+                for (const Buffer& b : buffers) {
+                    if (b.slot == 2 && !facing[i].hasB2) continue;
+                    ++expected;
+                    D3D11_SHADER_INPUT_BIND_DESC bind{};
+                    D3D11_SHADER_BUFFER_DESC bufferDesc{};
+                    ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName(b.name) : nullptr;
+                    ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName(b.name, &bind)) && bind.Type == D3D_SIT_CBUFFER &&
+                         bind.BindPoint == b.slot && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == b.size;
+                }
+                check(ok && desc.BoundResources == expected,
+                      "each facing transcription keeps the game's b0[12], b1[280] (and b2[3] where the original has one) and ours at b3[2], and binds nothing else");
+            }
         }
     }
 

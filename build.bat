@@ -3602,6 +3602,23 @@ if errorlevel 1 ( echo [edvr] ERROR: billboard rollfree test build failed & exit
 "%OBJ%\billboardrollfree\billboard_rollfree_test.exe" --self-test "%ROOT%" || exit /b 1
 exit /b 0
 
+:rig_billboard_facing_test
+echo [edvr] === billboard_facing_test.exe ===
+REM The explosion billboards' facing transcriptions (src\d3d11\billboard_facing_vs.h; docs\particle-billboards.md, 2026-10-16 "facing") against the game's own
+REM bytecode (tools\billboard_facing_test\fixtures, held to their hash names) on a WARP device with the D3D debug layer: signature blocks and every dcl line
+REM equal column for column (ours the one added b3), then the original and the transcription run on the same vertices through stream output and every
+REM output register is compared -- identical with the viewer feed absent, identical in the aligned modes, identical on axis with zero roll, and off axis
+REM only the basis-dependent outputs differ while each quad faces the viewer and the original's does not. Output under obj\ and System32's d3d11.
+if not exist "%OBJ%\billboardfacing" mkdir "%OBJ%\billboardfacing"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\billboardfacing\\" /Fe"%OBJ%\billboardfacing\billboard_facing_test.exe" ^
+    "tools\billboard_facing_test\billboard_facing_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: billboard facing test build failed & exit /b 1 )
+"%OBJ%\billboardfacing\billboard_facing_test.exe" --dry-run || exit /b 1
+"%OBJ%\billboardfacing\billboard_facing_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
 :rig_panel_curve_test
 echo [edvr] === panel_curve_test.exe ===
 REM The curved screen's strip (src\d3d11\panel_curve.cpp; fix.panel_curvature) compiled for real with the real Config, Log and fault
