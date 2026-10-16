@@ -3,6 +3,7 @@
 #include "kinematic_eval_probe.h"
 #include "engine_velocity_emit.h"
 #include "engine_motion_cpu.h"   // the CPU instrument: EDVR's own work in every relay below is clocked per call
+#include "producer_probe.h"      // the count-and-tag probe on FUN_14434D120 (temporary; docs/dlss-blur-elements-2026-10-14.md)
 #include "../common/code_hook.h"
 #include <windows.h>
 #include <intrin.h>
@@ -260,6 +261,10 @@ __declspec(noinline) void __fastcall poolCopyObserved(uintptr_t) noexcept;
 __declspec(noinline) void __fastcall poolMergeObserved(uintptr_t,uintptr_t) noexcept;
 __declspec(noinline) void __fastcall poolClearObserved(uintptr_t,uintptr_t) noexcept;
 __declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t,uintptr_t,uintptr_t) noexcept;
+// FUN_14434D120 (bucket, model key, &record, node key): four register params; six are declared and forwarded so a stack parameter the
+// decompile missed would still reach the original (the two extra reads are the caller's own frame).
+__declspec(noinline) uintptr_t __fastcall producerObserved(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
+                                                           uintptr_t,uintptr_t) noexcept;
 #define EDVR_DIRECT_PROTO(i) \
     __declspec(noinline) uintptr_t __fastcall directBuild##i(uintptr_t,uintptr_t,uintptr_t,uintptr_t) noexcept;
 EDVR_DIRECT_PROTO(0) EDVR_DIRECT_PROTO(1)
@@ -298,6 +303,14 @@ HookEntry g_directEntries[KinematicEvalProbe::kDirectProducerCount]={
     {"kinematic-build-14369c9c0",KinematicEvalProbe::kDirectBuildRvas[1],
      reinterpret_cast<void*>(&directBuild1)},
 };
+
+// The producer probe's relay gate: its own cell, open while engine motion is wanted AND the probe's hook is verified ours (recomputeGateLocked).
+alignas(8) std::atomic<uintptr_t> producerGate{0};
+static_assert(decltype(producerGate)::is_always_lock_free,
+              "The x64 relay reads the aligned atomic cell directly.");
+std::atomic<uintptr_t> g_producerBase{0};   // the exe base, set once the probe's patch is verified (the callback converts return addresses to RVAs)
+HookEntry g_producerEntry{"engine-producer-434d120-probe",producer_probe::kRva,
+                          reinterpret_cast<void*>(&producerObserved),&producerGate};
 
 // --- The builder's per-part test (FUN_1442B3FC0), the gate probe's third site
 // decomp_42B3FC0.txt: f(param_1 = the builder's six-pointer block at its
@@ -626,11 +639,14 @@ __declspec(noinline) uintptr_t __fastcall bucketBuildObserved(uintptr_t a,uintpt
     if(n) {
         uint64_t items=0;
         uint32_t neg=0;
+        const bool probing=producer_probe::enabled();
+        const uint32_t tid=probing?GetCurrentThreadId():0u;
         __try {
             for(uint32_t k=0;k<n;++k) {
                 int32_t end=0;
                 std::memcpy(&end,reinterpret_cast<const void*>(snaps[k].bucket+0x2A4),4);
                 const int64_t delta=static_cast<int64_t>(end)-static_cast<int64_t>(snaps[k].start);
+                if(delta>0 && probing)producer_probe::noteRigid(producer_probe::kBuilder,tid,snaps[k].bucket);   // the producer probe's overlap set
                 if(delta>0)items+=static_cast<uint64_t>(delta);
                 else if(delta<0)++neg; // drained mid-call: the residue is unknowable
             }
@@ -777,6 +793,41 @@ __declspec(noinline) uintptr_t __fastcall partTestObserved(uintptr_t items,uintp
     return result;
 }
 
+// --- The producer probe: FUN_14434D120 (bucket rcx, model key rdx, &record r8, node key r9) -------------------------------------
+// COUNT AND TAG ONLY. The call is forwarded first and untouched; the record (the caller's stack copy, still live) is read after it.
+// Reached only through its own relay (producerGate: engine motion wanted and the patch verified ours). Nothing is written to the game.
+// A record read that faults is counted as "unreadable", never a crash. No allocation, no lock: producer_probe.h's tables are atomics.
+bool readProducerRecord(uintptr_t record,uint8_t (&out)[producer_probe::kRecordBytes]) noexcept {
+    __try {
+        std::memcpy(out,reinterpret_cast<const void*>(record),producer_probe::kRecordBytes);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+}
+
+__declspec(noinline) uintptr_t __fastcall producerObserved(uintptr_t bucket,uintptr_t modelKey,uintptr_t record,
+                                                           uintptr_t nodeKey,uintptr_t e,uintptr_t f) noexcept {
+    const auto forward=reinterpret_cast<BucketFn>(g_producerEntry.forward.load(std::memory_order_acquire));
+    if(!forward)return 0;   // stood down at install; the relay is unreachable then
+    // Not clocked into engine_motion_cpu.h: the probe is temporary, and a new Part would move the CPU accounting this arc is not about.
+    // The relay JUMPS here, so the slot holds the native caller's return address.
+    const uintptr_t base=g_producerBase.load(std::memory_order_relaxed);
+    const uintptr_t from=reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const uintptr_t result=forward(bucket,modelKey,record,nodeKey,e,f);
+    uint8_t local[producer_probe::kRecordBytes];
+    producer_probe::RecordKind kind=producer_probe::kUnreadable;
+    if(readProducerRecord(record,local)) {
+        kind=producer_probe::kModelBlockZero;
+        for(unsigned i=0;i<producer_probe::kModelBlockBytes;++i)
+            if(local[producer_probe::kModelBlockOffset+i]){kind=producer_probe::kModelBlockSet;break;}
+    }
+    const uint32_t tid=GetCurrentThreadId();
+    const uint64_t retRva=base && from>=base?uint64_t(from-base):uint64_t(from);
+    producer_probe::noteCall(tid,emcpu::g_renderThreadId.load(std::memory_order_relaxed),bucket,retRva,kind);
+    if(producer_probe::captureOn() && kind!=producer_probe::kUnreadable)
+        producer_probe::noteCapture(tid,bucket,modelKey,nodeKey,retRva,local);
+    return result;
+}
+
 // --- Direct-producer brackets (bucket = param_2) -----------------------------
 // Same counter-delta discipline as the 42B4420 bracket without the entry
 // walk: param_2 IS the bucket (decomp_4312E00 line 250, decomp_369C9C0 line
@@ -819,6 +870,9 @@ uintptr_t __fastcall directBracket(uint32_t producer,uintptr_t a,uintptr_t b,
         } __except(EXCEPTION_EXECUTE_HANDLER) {items=0;neg=0;fault=true;}
     }
     kinematicEvalProbe.noteDirectBuild(producer,items,neg,fault);
+    // The producer probe's overlap set: the bucket (param_2) this rigid producer just appended to, and the thread it did it on.
+    if(items>0 && !fault && producer_probe::enabled())
+        producer_probe::noteRigid(producer==0?producer_probe::kDirect0:producer_probe::kDirect1,GetCurrentThreadId(),b);
     // Engine-record velocity: FUN_144312E00 (producer 0) only, after the
     // forward, while the records it appended are still this job's alone.
     if(producer==0 && !fault) {
@@ -1123,6 +1177,49 @@ void ensurePartTest(uintptr_t base) noexcept {
                        std::memory_order_release);
 }
 
+// The producer probe's install (once, under g_installMutex, like every ensure* here). Stands down alone: producer_probe::status() says why, and
+// the 30 s line prints that text in place of counts. The PE identity and the 20-byte prologue are checked BEFORE any patch; after CodeHook has
+// patched, the entry must read as our E9 to the relay plus the stock tail, or the probe stands down ("the patch did not verify").
+void ensureProducerProbe(uintptr_t base) noexcept {
+    uint8_t got[producer_probe::kPrologueBytes]{};
+    uint32_t timestamp=0,imageSize=0;
+    bool readable=false;
+    __try {
+        uint32_t peOff=0;
+        std::memcpy(&peOff,reinterpret_cast<const void*>(base+0x3C),4);
+        if(peOff<=0x1000) {
+            std::memcpy(&timestamp,reinterpret_cast<const void*>(base+peOff+8),4);
+            std::memcpy(&imageSize,reinterpret_cast<const void*>(base+peOff+0x50),4);
+            std::memcpy(got,reinterpret_cast<const void*>(base+producer_probe::kRva),sizeof(got));
+            readable=true;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {readable=false;}
+    const bool installed=g_producerEntry.ready.load(std::memory_order_acquire) && g_producerEntry.relay;
+    const intptr_t jump=installed
+        ?reinterpret_cast<intptr_t>(g_producerEntry.relay)-intptr_t(base+producer_probe::kRva+5):0;
+    const char* why=readable
+        ?producer_probe::signatureVerdict(timestamp,imageSize,KinematicEvalProbe::kExpectedTimestamp,
+                                          KinematicEvalProbe::kExpectedImageSize,got,installed,jump)
+        :"unreadable executable image";
+    if(why||installed){producer_probe::applyVerdict(why);return;}
+    g_producerBase.store(base,std::memory_order_release);
+    if(!installOne(g_producerEntry,base)) {
+        producer_probe::applyVerdict("CodeHook refused the probe (its engine-producer-434d120-probe line says why)");
+        return;
+    }
+    // Re-read: the patch must be ours, five bytes of E9 and the stock tail.
+    const intptr_t ours=reinterpret_cast<intptr_t>(g_producerEntry.relay)-intptr_t(base+producer_probe::kRva+5);
+    uint8_t after[producer_probe::kPrologueBytes]{};
+    bool read=false;
+    __try {std::memcpy(after,reinterpret_cast<const void*>(base+producer_probe::kRva),sizeof(after));read=true;}
+    __except(EXCEPTION_EXECUTE_HANDLER){read=false;}
+    producer_probe::applyVerdict(read
+        ?(producer_probe::signatureVerdict(timestamp,imageSize,KinematicEvalProbe::kExpectedTimestamp,
+                                           KinematicEvalProbe::kExpectedImageSize,after,true,ours)
+              ?"the patch did not verify after install":nullptr)
+        :"unreadable executable image");
+}
+
 } // namespace
 
 void recomputeGateLocked() noexcept;
@@ -1233,6 +1330,10 @@ void recomputeGateLocked() noexcept {
                     directVetoWanted.load(std::memory_order_acquire) ||
                     rigVetoWanted.load(std::memory_order_acquire);
     evalGate.store(open?uintptr_t(1):uintptr_t(0),std::memory_order_release);
+    // The producer probe's relay: engine motion wanted, and the probe's own patch verified ours (status "hooked").
+    producerGate.store(emitWanted.load(std::memory_order_acquire) &&
+        g_producerEntry.ready.load(std::memory_order_acquire) &&
+        std::strcmp(producer_probe::status(),"hooked")==0 ? uintptr_t(1):uintptr_t(0),std::memory_order_release);
     primaryGate.store(emitWanted.load(std::memory_order_acquire) &&
         g_primaryEntry.ready.load(std::memory_order_acquire) &&
         g_poolCopyEntry.ready.load(std::memory_order_acquire) &&
@@ -1302,6 +1403,7 @@ const char* kinematicEvalEmitAttach() noexcept {
         ensurePoolCopy(base);
         ensurePoolMerge(base);
         ensurePoolClear(base);
+        ensureProducerProbe(base);   // temporary count-and-tag probe; stands down alone and says why in its 30 s line
         emitWanted.store(true,std::memory_order_release);
         recomputeGateLocked();
         return "installed";

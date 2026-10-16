@@ -27,6 +27,7 @@
 #include "gui_draw_snapshot.h"
 #include "cull_gate_probe.h"
 #include "kinematic_eval_hook.h"
+#include "producer_probe.h"   // the eye run's capture of FUN_14434D120's appended records (temporary)
 #include "exposure_fix.h"   // lookupShaderHash: the compute dispatch's shader, for the skin ledger
 #include "gpu_census.h"     // gpuCensusNoteEyeRun: the census window an eye run falls in says so
 #include "skin_ledger.h"
@@ -1003,6 +1004,25 @@ void writeLedger(ID3D11DeviceContext* ctx) {
             }
         }
     }
+    {   // The FUN_14434D120 probe's capture (producer_probe.h): a 40-byte header, then 376-byte entries. Always written when armed, even with 0 records.
+        const producer_probe::CaptureView view = producer_probe::stopCapture();
+        wchar_t producerPath[MAX_PATH];
+        _snwprintf_s(producerPath, MAX_PATH, _TRUNCATE, L"%s\\producer434d120_%s.bin", dir.c_str(), g_ledgerStamp);
+        bool ok = false;
+        HANDLE ph = CreateFileW(producerPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (ph != INVALID_HANDLE_VALUE) {
+            DWORD w = 0;
+            ok = WriteFile(ph, &view.header, sizeof(view.header), &w, nullptr) != 0;
+            if (ok && view.header.count && view.entries) {
+                ok = WriteFile(ph, view.entries, static_cast<DWORD>(view.header.count * sizeof(producer_probe::CaptureEntry)), &w, nullptr) != 0;
+            }
+            CloseHandle(ph);
+        }
+        Log::get().note("producer probe: %u records of FUN_14434D120 (%u dropped past the %u-entry buffer) for frames %u..%u in %ls (status \"%s\")%s. "
+                        "tools/eye_run_ledger.py <dir> %ls matches them to the pool slots; zero records with status hooked means the producer did not run in the window.",
+                        view.header.count, view.header.dropped, producer_probe::kCaptureCap, view.header.frame0, view.header.frame1, producerPath,
+                        producer_probe::status(), ok ? "" : " (the file FAILED to write)", g_ledgerStamp);
+    }
     struct Header {
         char     magic[8];
         uint32_t version;
@@ -1569,6 +1589,7 @@ void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     // the draws submitted from now on belong to (ledgerNoteDraw's g_frame+1),
     // and lets go of the relays one frame after its window.
     cullGateProbe.setFrame(g_frame + 1);
+    producer_probe::setFrame(g_frame + 1);   // the same numbering: the frame the draws submitted from now on belong to
     if (cullGateProbe.armed() && g_frame + 1 > cullGateProbe.lastFrame() + 1) closeGateProbe();
     g_checksLeft = (g_pool && !dueMs(g_checkMs, kRecheckMs)) ? 0 : kChecksPerFrame;
     if (!ctx) return;
@@ -1622,6 +1643,15 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     g_ledgerSkipped = 0;
     ledgerRelease();
     detail::g_objectProbeLedgerOn = true;
+    {   // The FUN_14434D120 probe's capture rides the run: the appended records of frames f0-2 .. fLast+1 (the job threads run ahead of the
+        // render frame), written beside the ledger at its close. Nothing is captured when the probe is not hooked; the line says which.
+        const bool armed = producer_probe::armCapture(g_ledgerFrame0 > 2 ? g_ledgerFrame0 - 2 : 0, g_ledgerLastFrame + 1);
+        Log::get().note("producer probe: eye run %ls %s the capture of FUN_14434D120's appended records (frames %u..%u, status \"%s\"%s); "
+                        "producer434d120_%ls.bin follows the ledger write, and tools/eye_run_ledger.py matches it to the pool slots. Log and dump only.",
+                        g_ledgerStamp, armed ? "armed" : "COULD NOT ARM", g_ledgerFrame0 > 2 ? g_ledgerFrame0 - 2 : 0u, g_ledgerLastFrame + 1,
+                        producer_probe::status(), producer_probe::enabled() ? "" : ": the hook is not running, so the file will hold 0 records",
+                        g_ledgerStamp);
+    }
     // The F2 instrument rides this key and no other: no config, nothing on screen, nothing unarmed. The line below
     // is the first of three that prove a run (armed, the per-frame lines with their RESULT, and the ledger write).
     g_skin.arm(g_ledgerFrame0);
