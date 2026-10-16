@@ -26,7 +26,9 @@ constexpr uint64_t kUiPsShieldStrike = 0xC49F999F7D3C801Dull;
 
 // One weapons-fire pair, and whether its draw is made through the jitter cancel (the viewport offset that takes the eye's sub-pixel jitter
 // out of the layer): valid only where the draw's vertex shader carries the jittered scene camera. The table's default is "cancel", as for
-// the space dust; a pair whose constants the next eye dump shows to be unjittered (docs "W3") is set false HERE and nowhere else.
+// the space dust. SETTLED (2026-10-16, eye dump 100257, docs "W3"): all three pairs' matrices carry the eye's jitter -- 1F17's cb1[41..43] and 5C1D's
+// and 939D's CB0 rows 4-7 equal the jittered scene cb1[270..272] bit for bit apart from translation -- so every entry is true. A pair a later
+// build finds unjittered is set false HERE and nowhere else.
 struct WeaponPair {
     uint64_t vs, ps;
     const char* name;

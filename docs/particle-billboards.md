@@ -2,7 +2,7 @@
 
 ## Status
 
-*Updated 2026-10-16 (after the Frontier flight). Update this block whenever the doc changes.*
+*Updated 2026-10-16 (facing transcriptions merged). Update this block whenever the doc changes.*
 
 - **State:** the steady fix is shipped and flown (the sections below). Two arcs rode `claude/billboard-roll-free`,
   flown 2026-10-16 and approved for main: the shadow's CPU cost (entry "2026-10-16", cut from a whole-block read
@@ -15,12 +15,14 @@
   the old whole-block copy was worth about 0.9-1.7 ms a frame there before the 160-byte cut.
 - **Hypothesis "native AMD reads are slow":** now generalised; mapped dynamic constant buffers are write-combined
   on NVIDIA as well. Still unmeasured on AMD; the `unmap readers` and `mapped read probe` lines stay, they are cheap.
-- **Open (2026-10-16, on `claude/billboard-facing`, NOT merged, NOT FLOWN):** explosions still flexed after the first facing build
+- **MERGED (2026-10-16, `claude/billboards-sharp-weapons`; `claude/billboard-facing`, flown):** explosions still flexed after the first facing build
   (`695ce3b1`, flown). The eye dump (`edvr_gfx_20261016_063230.log`, `eyes\eye_063553_*`) showed the FIREBALL PUFFS are drawn by
   `AFBCD3ADB9092F78` (PS `2BAE3742FEB916D9`), the no-near-fade twin of `9F4B`, and `4BDE4DBF88C2BA27` (PS `E54F2A902E5631F6`),
   `BBAD`'s no-fade twin; both had only the roll-free rebind. All five explosion-family shaders (`9F4B`, `BBAD`, `9AEC`, `AFBC`, `4BDE`)
   now have their OWN facing transcription, each granted to its exact hash and proven against the game's own bytecode by
-  `tools\billboard_facing_test`; 11 shaders stay roll-free. `9AEC` stays gated by `fix.witchspace_stars`.
+  `tools\billboard_facing_test`; 11 shaders stay roll-free. `9AEC` stays gated by `fix.witchspace_stars`. Flown (builds of 2026-10-16, eye runs 100331,
+  100415, 100454): every billboard draw went through a facing transcription (100 percent swapped), no untranscribed billboard drew, explosions are drawn by
+  the five transcriptions only. Not on main with it: the shield producer probe and the parked join (`claude/producer-434d120-probe`).
 - **Temporary keys:** none added. `fix.particle_billboard` is hot-reloadable (edvr.ini, polled once a second).
 - **Ruled out:** nothing yet.
 - **Next flight:** Frontier VR, `steady`: fly an explosion with the head pitched and rolled. The `billboard roll-free` line now

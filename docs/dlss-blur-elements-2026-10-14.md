@@ -7,16 +7,17 @@
   See "Design, 2026-10-16: engine motion for the shield strike". Evidence E1-E3 done offline (run 070301): option (b) CLEARED
   with one amendment, the shield records must also be joined (they share the hull's pose but carry no previous pose). H-clobber RULED
   OUT; the hull's 13% stale_slot is open hypothesis H-bias (a depth bias missing from the exported z). E2 (do puffs ride the ship) inconclusive.
-  Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"); count-and-tag hook next.
-- **Weapons fire (2026-10-16): FLOWN OK in combat** (`claude/sharp-weapons`, flown as `claude/combat-flight-1`; entries "Built" and "Combat flights").
-  1F17, 939D and 5C1D go into the eye's own additive HDR layer, composited after the upscale by tonemap difference; 820E stays. Sean: weapons and
-  shields look much better, beams and tracers are sharp. Key `fix.sharp_weapons` (default on, independent of `fix.ui_quality`). **Temporary key:**
-  `advanced.sharp_weapons_blend = matched | plain`, now the FIRST row of the in-headset menu ("Weapons blend", live): Sean sees no difference between
-  the two live (log edvr_gfx_20261016_095256) and keeps the A/B for long sessions. When the arc closes ship matched and propose removing the key,
-  quoted, with its generator exception (`MENU_ADVANCED_EXCEPTIONS` in tools\gen_settings_schema.py) and its edvr.ini row. W3: 939D's cancel is
-  RIGHT (CB0 rows 4-7 equal the jittered cb1[270..273] bit for bit apart from translation); 1F17 and 5C1D still uncaptured. FOUND: the 0.5 to 5
-  percent "layers' content never reached a tonemap" was an accounting artifact (one false count per burst end), nothing was dropped; fixed on
-  `claude/combat-flight-3`, see "The never-tonemapped frames: found".
+  Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"). A count-and-tag probe
+  (`claude/producer-434d120-probe`) confirmed FUN_14434D470 makes the shield (see the flight notes); the probe and the parked join are NOT on main.
+- **Weapons fire (2026-10-16): MERGED** (`claude/billboards-sharp-weapons`; flown OK in combat as `claude/combat-flight-1`; entries "Built" and
+  "Combat flights"). 1F17, 939D and 5C1D go into the eye's own additive HDR layer, composited after the upscale by tonemap difference; 820E stays.
+  Sean: weapons and shields look much better, beams and tracers are sharp. Key `fix.sharp_weapons` (default on, independent of `fix.ui_quality`).
+  **Temporary key, KEPT by Sean's choice for long-session A/B:** `advanced.sharp_weapons_blend = matched | plain`, the FIRST row of the in-headset menu
+  ("Weapons blend", Performance page, live); he sees no difference between the two live (log edvr_gfx_20261016_095256). When the arc closes ship
+  matched and propose removing the key, quoted, with its generator exception (`MENU_ADVANCED_EXCEPTIONS` in tools\gen_settings_schema.py) and its
+  edvr.ini row. W3 SETTLED: all three pairs carry the eye's jitter (dump 100257), the cancel table says cancel for each. The 0.5 to 5 percent "layers'
+  content never reached a tonemap" was an accounting artifact (one false count per burst end), nothing was dropped; the corrected count
+  ("The never-tonemapped frames: found") is merged but NOT yet flown.
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
   path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
   docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
@@ -312,7 +313,7 @@ billboard draw went through a facing transcription (100% swapped); no untranscri
 not a billboard. Sharp weapons: 1.4-4.7% of weapon eye-frames' layers never reach a tonemap (the HUD layer lost none); the flown build
 cannot locate it. Sean A/B'd plain against matched at 09:54-09:57 and saw no difference; the key stays for long-session A/B.
 
-## Built, 2026-10-16: weapons fire in its own HDR layer (`claude/sharp-weapons`, BUILT, NOT FLOWN)
+## Built, 2026-10-16: weapons fire in its own HDR layer (`claude/sharp-weapons`, MERGED, flown OK in combat)
 
 The design above, built. Key `fix.sharp_weapons = on | off` (default on, F8 Performance page "Sharp weapons"), VR only, needs temporal AA on. A
 temporary A/B, `advanced.sharp_weapons_blend = matched | plain` (default matched, hidden), is listed in the Status block and goes when the arc closes.
@@ -369,7 +370,7 @@ line at 2 or more a frame while firing with 0 left in the scene, no trails, beam
 star as bright as stock (A/B: `advanced.sharp_weapons_blend = plain` is brighter there), the dump's tonemap input without the beams. Repeat with
 `fix.ui_quality = off`, and with `fix.sharp_weapons = off` for the control. Then Sean judges the halo (no bloom in this tier, W2).
 
-## Combat flights, 2026-10-16, and what followed (`claude/combat-flight-2`, BUILT, NOT FLOWN)
+## Combat flights, 2026-10-16, and what followed (`claude/combat-flight-2`, MERGED)
 
 **Flown** (build fdb42b63, logs edvr_gfx_20261016_094708 and 095256). Sean: weapons and shields look much better, beams and tracers are sharp. He switched
 `advanced.sharp_weapons_blend` between plain and matched live (the 30 s line shows both kinds of eye-frame in 095256) and sees no difference; he keeps the
@@ -397,7 +398,7 @@ shows as a tonemap entry one frame off the content's, (b) as no entry for the ey
 first-draw target. The fix follows the signature (a: the tonemap uses the eye's own frame; b: composite the leftover content at the door; c: match by
 the layer's own target set), with a rig case that fails first.
 
-### The never-tonemapped frames: found (`claude/combat-flight-3`, BUILT, NOT FLOWN)
+### The never-tonemapped frames: found (`claude/combat-flight-3`, MERGED, accounting fix NOT FLOWN)
 
 **Cause.** Flight edvr_gfx_20261016_103639 (build a5709ce1), ten `lost layer` lines. Every one has the same shape: a weapons layer holding ONE draw (frame 5675,
 1 draw, first into the eye's own target, 0 into another), the next weapons draw ~200 frames later (frame 5879), and between them the tonemap-shaped draws of

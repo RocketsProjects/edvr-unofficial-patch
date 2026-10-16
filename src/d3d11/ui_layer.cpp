@@ -938,14 +938,14 @@ void noteFamily(UiLayerFamily f, UiLayerDecision d, const char* detail) {
 }
 
 // fix.sharp_weapons: once per weapons-fire pair, the first time the layer decides one of its draws -- which pair, what was decided and the
-// jitter-cancel choice the table gave it (weapons_fire.h; the next eye dump's CB capture settles W3, docs/dlss-blur-elements-2026-10-14.md).
+// jitter-cancel choice the table gave it (weapons_fire.h; W3 is settled: all three pairs carry the eye's jitter, docs/dlss-blur-elements-2026-10-14.md).
 bool g_weaponPairSeen[kWeaponPairCount] = {};
 void noteWeaponPair(uint64_t vs, uint64_t ps, UiLayerDecision d) {
     const int i = weaponPairIndex(vs, ps);
     if (i < 0 || g_weaponPairSeen[i]) return;
     g_weaponPairSeen[i] = true;
-    Log::get().note("sharp weapons: first %s draw seen (vs %016llX ps %016llX): %s; jitter cancel %s (the table's choice, default cancel: the "
-                    "constant buffers of the next eye dump say whether this pair's matrices carry the eye's jitter).",
+    Log::get().note("sharp weapons: first %s draw seen (vs %016llX ps %016llX): %s; jitter cancel %s (the table's choice; the eye dump of "
+                    "2026-10-16 showed this pair's matrices carry the eye's jitter, so cancel is right).",
                     kWeaponPairs[i].name, static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps),
                     uiLayerDecisionName(d), kWeaponPairs[i].cancelJitter ? "yes" : "NO");
 }
