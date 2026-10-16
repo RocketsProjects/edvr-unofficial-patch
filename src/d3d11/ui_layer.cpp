@@ -370,6 +370,7 @@ struct Eye {
     const void* wTarget = nullptr;   // the HDR target those draws left (identity)
     uint64_t wToneSeq = 0;           // the frame the tonemap re-issue ran for
     uint32_t wMissStreak = 0;        // consecutive content-frames no re-issue published
+    uint32_t wOtherTargets = 0;      // this frame's weapons draws made into another HDR target than wTarget (the instrument below)
 
     // The door.
     UiLayerDoorState door;
@@ -946,6 +947,54 @@ void noteWeaponPair(uint64_t vs, uint64_t ps, UiLayerDecision d) {
                     "constant buffers of the next eye dump say whether this pair's matrices carry the eye's jitter).",
                     kWeaponPairs[i].name, static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps),
                     uiLayerDecisionName(d), kWeaponPairs[i].cancelJitter ? "yes" : "NO");
+}
+
+// fix.sharp_weapons, the "layers' content never reached a tonemap" instrument (2026-10-16: 0.5 to 5 percent of the weapon eye-frames of the
+// combat flights, with the HUD layer losing none). The cause is not yet known; the candidates and what settles each:
+//   (a) the tonemap-shaped draw of the eye ran but read a different frame number than the weapons draws carried: the sightings below name the frame
+//       the tonemap saw against the content's;
+//   (b) no tonemap-shaped draw ran for that eye at all in the frame: the sightings hold no entry for it;
+//   (c) the weapons were drawn into a second HDR target the tonemap does not read: wOtherTargets counts them, the sighting names the resource it read;
+//   (d) the tonemap was seen and refused (an outcome other than 'admitted').
+// Every tonemap-shaped draw the admission sees is recorded (a handful a frame); a lost layer prints the last few, newest first, with the eye's state.
+struct ToneSight {
+    uint64_t seq = 0;
+    const void* res = nullptr;  // the first 2D texture the draw samples (the HDR source it was admitted on, or what it read instead)
+    int8_t eye = -1;            // the eye whose content it matched, or -1
+    uint8_t outcome = 0;        // 0 admitted, 1 no eye's content matched it, 2 the 8-bit layer was busy, 3 a second tonemap for the eye
+};
+ToneSight g_toneSights[6];
+uint32_t g_toneSightCount = 0;
+void noteToneSight(uint64_t seq, const void* res, int eye, uint8_t outcome) {
+    ToneSight& t = g_toneSights[g_toneSightCount++ % 6];
+    t.seq = seq;
+    t.res = res;
+    t.eye = static_cast<int8_t>(eye);
+    t.outcome = outcome;
+}
+uint32_t g_lostLines = 0;
+void noteWeaponsLost(int eye, const Eye& e, uint64_t nextSeq) {
+    if (g_lostLines >= 24) return;
+    ++g_lostLines;
+    static const char* const kOutcome[] = {"admitted", "no eye's content matched", "the 8-bit layer was busy", "a second tonemap for the eye"};
+    char sights[900];
+    sights[0] = 0;
+    size_t used = 0;
+    const uint32_t n = g_toneSightCount < 6 ? g_toneSightCount : 6;
+    for (uint32_t i = 0; i < n; ++i) {
+        const ToneSight& t = g_toneSights[(g_toneSightCount - 1 - i) % 6];
+        const int w = _snprintf_s(sights + used, sizeof(sights) - used, _TRUNCATE, "%s[frame %llu, read %p, eye %d, %s]", i ? " " : "",
+                                  static_cast<unsigned long long>(t.seq), t.res, static_cast<int>(t.eye), kOutcome[t.outcome < 4 ? t.outcome : 0]);
+        if (w < 0) break;
+        used += static_cast<size_t>(w);
+    }
+    Log::get().note(
+        "sharp weapons: lost layer %u (of the first 24 lines): the %s eye's weapons content is frame %llu (%u draws, first into %p, %u of them into another "
+        "target) and no tonemap published it; its HUD layer holds frame %llu (%u draws, tonemapped for frame %llu); the next weapons draw is frame %llu; "
+        "the last tonemap-shaped draws seen, newest first: %s.",
+        g_lostLines, eye == 0 ? "left" : "right", static_cast<unsigned long long>(e.wSeq), e.wDraws, e.wTarget, e.wOtherTargets,
+        static_cast<unsigned long long>(e.hdrSeq), e.hdrDraws, static_cast<unsigned long long>(e.hdrToneSeq),
+        static_cast<unsigned long long>(nextSeq), n ? sights : "none yet");
 }
 
 // ------------------------------------------------------------ the layer
@@ -1858,6 +1907,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     if (wl && e.wSeq != g_draw.seq) {
         if (e.wSeq && e.wDraws && e.wToneSeq != e.wSeq) {
             ++g_win.weaponsLost;
+            noteWeaponsLost(g_draw.eye, e, g_draw.seq);
             // The missing-consumer deadline, as the HUD layer's: content no tonemap re-issue published for a streak of frames says
             // the consumer is not coming; the weapons fire goes back to the scene (their own stand-down: the HUD is unaffected).
             if (++e.wMissStreak >= kCrispHdrMissFrames) {
@@ -1873,6 +1923,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         routeEnd(ctx, timer);
         e.wSeq = g_draw.seq;
         e.wDraws = 0;
+        e.wOtherTargets = 0;
         e.wTarget = g_draw.targetRes;
         ++g_win.clears;
     }
@@ -2083,6 +2134,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ++g_frameTakenDraws;
         if (g_draw.weapons) {
             ++e.wDraws;
+            if (e.wTarget != g_draw.targetRes) ++e.wOtherTargets;
             ++g_win.weaponsTaken;
             const int pair = weaponPairIndexByVs(g_draw.vsHash);
             if (pair >= 0) ++g_win.weaponsPair[pair];
@@ -4263,6 +4315,7 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
     // The frame's sequence (the per-eye jitter is not read here).
     if (!layerDrawJitter(0, &seq, &jx, &jy, &jw, &jh)) return false;
     bool content = false;
+    const void* seenRes = nullptr;  // the first 2D texture this draw samples (for the lost-layer instrument)
     for (UINT s = 0; s < 4 && eye < 0; ++s) {
         Ptr<ID3D11ShaderResourceView> srv;
         ctx->PSGetShaderResources(s, 1, &srv);
@@ -4273,6 +4326,7 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
         Ptr<ID3D11Resource> r;
         srv->GetResource(&r);
         if (!r) continue;
+        if (!seenRes) seenRes = r.Get();
         for (int cand = 0; cand < 2; ++cand) {
             const Eye& c = g_eye[cand];
             const bool hudFresh = c.hdrSeq == seq && c.hdrDraws && c.hdrSrv;
@@ -4289,6 +4343,7 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
         }
     }
     if (eye < 0) {
+        noteToneSight(seq, seenRes, -1, 1);
         // Outstanding HUD content this frame, but this draw reads no eye's
         // HUD source. Only the eye's OWN tonemap failing to read it is a
         // failed consumer (review R1): the draw must BE the tonemap -- the
@@ -4327,13 +4382,16 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
     Eye& e = g_eye[eye];
     // The ordering guards.
     if (e.seq == seq && e.draws) {
+        noteToneSight(seq, seenRes, eye, 2);
         crispToneDecline(CrispToneDecline::kLayerBusy, vs, ps);
         return false;
     }
     if (e.hdrToneSeq == seq) {
+        noteToneSight(seq, seenRes, eye, 3);
         crispToneDecline(CrispToneDecline::kSecondTonemap, vs, ps);
         return false;
     }
+    noteToneSight(seq, seenRes, eye, 0);
     crispArm(eye, seq, hdrSlot, ta.rtvRes, hdrRes, vs, ps);
     return true;
 }
