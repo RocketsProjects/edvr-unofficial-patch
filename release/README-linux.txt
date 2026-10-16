@@ -9,21 +9,23 @@ Run Elite once from Steam, then close it. If you change Elite's Proton version
 in Steam, launch Elite once again before using this wrapper. On Steam Deck, use
 Desktop Mode. Run as your normal user, without sudo:
 
-    python3 edvr-installer-linux.py
+    ./edvr_installer.sh
 
 This opens the Windows installer GUI with the Odyssey product folder selected.
 For a flat install with a current installer build:
 
-    python3 edvr-installer-linux.py --install --scope flat
+    ./edvr_installer.sh --install --scope flat
 
 To see the Windows install plan without changing game files:
 
-    python3 edvr-installer-linux.py --preview --scope flat
+    ./edvr_installer.sh --preview --scope flat
 
 Preview starts Steam's Proton and runtime. It may update prefix bookkeeping,
 but the Windows installer's --dry-run makes no game file changes. The wrapper's
 own --dry-run instead resolves and prints the exact paths and command without
-starting a process or writing files.
+starting a process or writing files. The shell launcher works from any
+directory and forwards every option to the Python wrapper. You can also run
+python3 edvr-installer-linux.py directly.
 
 The wrapper also accepts --repair, --uninstall, and --collect-logs. Use
 --game-dir '/path/to/product' for a different product folder inside the
