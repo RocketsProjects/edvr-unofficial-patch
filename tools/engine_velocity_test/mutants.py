@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mutation proof for the remember-cap line (src\\d3d11\\engine_velocity.cpp, tools\\engine_velocity_test\\remember_cap_tests.h)
 for the overlay guard's remembered verification (GuardVerified, cases G1-G3 in flat_lazy_tests.h: every such check's text starts
-"guard G<n>") and for the claim check of the primary-copy clear and merge (src\\d3d11\\engine_velocity_primary_copy.h, cases C1-C7 in
+"guard G<n>") and for the claim check of the primary-copy clear, merge and pool copier (src\\d3d11\\engine_velocity_primary_copy.h, cases C1-C12 in
 claim_check_tests.h: every such check's text starts "claim check C<n>"). The claim-check mutations edit that header, so the rig and
 engine_velocity.cpp are compiled from a throwaway copy of the trees they include (still outside the repo), and the rig runs with
 --claim-check, which runs only claim_check_tests, so the first failing check is the one that names the case.
@@ -98,6 +98,33 @@ HEADER_MUTATIONS = [
     ("claim-view-unsorted", "while(at && next.address[at-1]>e.first)", "while(at && next.address[at-1]<e.first)", "claim check C1"),
     ("claim-view-omits-plans", "ClaimViewState next;next.plans=!g_mergePlans.empty();", "ClaimViewState next;next.plans=false;", "claim check C6"),
     ("claim-view-read-not-rechecked", "return g_claimView.seq.load(std::memory_order_relaxed)==before;", "return true;", "claim check C7"),
+    # The pool copier's claim check (round 6; cases C8-C12): each removes one reason to fall back, one input of the decision or one counter.
+    # The rig runs C8, C10, C11, C9, C12 and stops at the first failing check, so a mutant is labelled with the first case that fails it; the four
+    # labelled C8 (hits ignored, range one short, bound never raised, bound lost) are also killed by C9 alone (checked with C9 moved first).
+    ("copier-claim-ignores-plans", "if(plans || claims>kClaimViewMax || leases>kMaxPools)return declined();",
+     "if(claims>kClaimViewMax || leases>kMaxPools)return declined();", "claim check C10"),
+    ("copier-claim-ignores-the-limit", "if(plans || claims>kClaimViewMax || leases>kMaxPools)return declined();",
+     "if(plans || leases>kMaxPools)return declined();", "claim check C10"),
+    ("copier-claim-ignores-hits", "if(claimed[i]>=source && offset%kBytes==0 && offset/kBytes<count)return false;", "if(false)return false;", "claim check C8"),
+    ("copier-claim-range-one-short", "offset/kBytes<count)return false;", "offset/kBytes+1<count)return false;", "claim check C8"),
+    ("copier-claim-ignores-ambiguity", "if(matches>1)return false;   // (a) ambiguous", "", "claim check C9"),
+    ("copier-claim-ignores-fit", "if(stride!=kBytes || firstSlot>slots || count>slots-firstSlot)return false;   // (b) does not fit",
+     "if(stride!=kBytes)return false;", "claim check C9"),
+    ("copier-claim-ignores-stride", "if(stride!=kBytes || firstSlot>slots || count>slots-firstSlot)return false;   // (b) does not fit",
+     "if(firstSlot>slots || count>slots-firstSlot)return false;", "claim check C9"),
+    ("copier-claim-ignores-patches",
+     "if(patchLo<=patchHi && uint64_t(patchLo)<uint64_t(firstSlot)+count && patchHi>=firstSlot)return false;   // (c) a patch to erase", "", "claim check C9"),
+    ("copier-claim-patch-bound-high-one-short", "patchHi>=firstSlot)return false;   // (c)", "patchHi>firstSlot)return false;   // (c)", "claim check C9"),
+    ("copier-claim-patch-bound-low-one-short", "uint64_t(patchLo)<uint64_t(firstSlot)+count", "uint64_t(patchLo)+1<uint64_t(firstSlot)+count", "claim check C9"),
+    ("copier-claim-window-not-rechecked", "if(g_publishSeq.load(std::memory_order_relaxed)!=before)return declined();", "", "claim check C11"),
+    ("publish-window-never-opens", "if(open)return;\n        open=true;", "return;\n        open=true;", "claim check C11"),
+    ("copier-claim-counts-nothing", "g_copierPrechecked.fetch_add(1,std::memory_order_relaxed);\n    if(!matches)", "if(!matches)", "claim check C8"),
+    ("copier-claim-no-lease-uncounted", "if(!matches)g_copierPrecheckedNoLease.fetch_add(1,std::memory_order_relaxed);", "", "claim check C8"),
+    ("copier-claim-declines-uncounted", "g_copierPrecheckDeclined.fetch_add(1,std::memory_order_relaxed);return false;", "return false;", "claim check C10"),
+    ("pool-patch-bound-never-raised", "notePatch(*pool,patch.slot);", "", "claim check C8"),
+    ("pool-view-bound-lost", "lo[count]=held?(entry.second.patchLo<=entry.second.patchHi?entry.second.patchLo:0u):~0u;", "lo[count]=~0u;", "claim check C8"),
+    ("pool-view-compare-ignores-bounds",
+     "lo[i]==g_poolView.patchLo[i].load(std::memory_order_relaxed) && hi[i]==g_poolView.patchHi[i].load(std::memory_order_relaxed);", "true;", "claim check C9"),
 ]
 CL_FLAGS = ["/nologo", "/O2", "/MT", "/std:c++17", "/EHsc", "/W4", "/DWIN32_LEAN_AND_MEAN", "/DNOMINMAX",
             "/D_CRT_SECURE_NO_WARNINGS", "/DUNICODE", "/D_UNICODE", "/utf-8", "/DEDVR_ENGINE_VELOCITY_RIG",

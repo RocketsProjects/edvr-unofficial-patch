@@ -2,15 +2,15 @@
 
 ## Status
 
-State (2026-10-16, round 5 results): the claim regime was MEASURED (log `edvr_gfx_20261016_102211.log`, f4e167db, meter on a diag branch) and the
-claim check is FLOWN OK (diag build `claude/flat-settlement-cpu-6`, log `edvr_gfx_20261016_111653.log`), merged to main on Sean's approval from
-`claude/claim-precheck`: clears and merges that find claims live but none in their native list are handed back from a lock-free snapshot of the live
-claim addresses. The regime (from 10:29:32): claim set live 13-21% of a window, 1.00 emissions a frame, set size ALWAYS 1, 99.98% of 5.3M merges and
-1.9M clears a window touched nothing, Present p50 13.2-14.2 -> 16.4-18.8 ms. Flown (claims live from about 11:36): first window 1.43M clears and 4.1M
-merges took the lock-free check, 0 declined; Present p50 12.3-12.6 -> 12.8-13.1 ms, against a 3-5 ms jump without it. Rig: zero-hit calls 0 mutex
-acquisitions and 0 allocations (old code 2000 and 10000 per 1000+1000 calls); 15 mutants killed. NOT done: the pool copier still takes the mutex whenever
-a claim is live (~3.7M acquisitions a window, render thread, hold 0.1 us); the same snapshot could clear it, with its own argument. Remaining Present
-+0.5 ms against the quiet baseline is not attributed. Section "round 5 results".
+State (2026-10-16, round 6): the POOL COPIER's claim check is BUILT on `claude/copier-claim-check`, NOT FLOWN: a copy whose range holds no claim and no
+patch is handed back without the mutex while claims are live or a pool holds a patch (the old exit needed neither). It reads one consistent pair of
+published tables (claim snapshot + lease table with a per-lease patch-slot bound) inside a new publish window. Rig: 0 acquisitions and 0 allocations for
+2000 copies under 1-4 claims and a patch (old code: 2000 acquisitions), 23 shapes against the frozen locked copier, 18 new mutants killed. The flight
+reads `Copier claim check` on the lock-free exits line, the copier lock line n near 0 in claim windows, and Present p50 against the ~0.5 ms left. Section "round 6".
+State (2026-10-16, round 5 results): the claim regime was MEASURED (log `edvr_gfx_20261016_102211.log`) and the claim check for clears and merges is
+FLOWN OK and MERGED to main (`claude/claim-precheck`): claim set live 13-21% of a window, size ALWAYS 1, 99.98% of 5.3M merges and 1.9M clears a window
+touched nothing; Present p50 12.3-12.6 -> 12.8-13.1 ms with the check (log `edvr_gfx_20261016_111653.log`), against a 3-5 ms jump without it. The remaining
++0.5 ms against the quiet baseline is not attributed; the copier (~3.7M acquisitions a window, hold 0.1 us) is the named candidate. Section "round 5 results".
 State (2026-10-16, results): the observer fix is FLOWN, CONFIRMED and ON MAIN (1ae94885, `claude/engine-motion-observers`): render-thread
 engine motion 427 -> 77 ns a call (about 0.8 ms a frame), job merge and clear down 92%, 100% of calls lock-free, 0 contention. The
 instruments (H1-H4, round 2) are on `claude/flat-settlement-cpu-2`, NOT on main. Round 2 flown (DLSS, 14.6k draws a frame): EDVR render
@@ -423,3 +423,79 @@ windows (the hits, once a frame, remain); contention near 0; `flat cpu` engine h
 `declined` is large, read which reason: only plan in flight, more than four claims and a torn read are counted. NOT done (adjacent, not folded in):
 the pool copier takes the mutex on every call while a claim is live (about 3.7M acquisitions a window on the render thread, hold 0.1 us): the
 snapshot could clear it for ranges holding no claim, with its pool-patch conditions; it needs its own argument.
+
+## 2026-10-16, round 6: the pool copier's claim check
+
+Branch `claude/copier-claim-check` (from main 34c100f5). BUILT, NOT FLOWN. Same idea as the clear/merge check, with the copier's own argument.
+
+### Why the old lock-free exit did not cover the claim regime
+`copierLockFree` hands a copy back only when `g_emissionsLive` is false AND no pool holds a patch (a global flag). At a settlement a claim is live 13-21% of
+a window, and the join that consumes it leaves a patch in the pool until that pool's next DISCARD map, so a copy took `g_mutex` both while a claim was
+live and for most of the frame after it. A check that only looked at claims would have left the patch half of that locked ("Limits" in the Status
+block said the same), so the new check also reads where a pool's patches are.
+
+### What the locked copier does (step by step), and when it changes anything
+For 0 < count <= kMaxPatches and a source that does not wrap: (1) ++copies; (2) find the pools with an ACTIVE lease at `base` (two or more: clear their
+patches and mark them invalid; none: ++copierNoLease); (3) one lease: a range that does not fit, or a stride that is not 336, clears its patches and marks it
+invalid, a range that fits ERASES the pool's patches in [firstSlot, firstSlot+count); (4) for each i < count, look up the claim `source + i*336`: found is
+consumed (erased even when the copy is refused) and, when the lease is valid, current and the bytes match, becomes a patch (the join); not found is nothing.
+So the call changes shared state only through (a) a lease count other than 1, (b) a range that does not fit or a stride that is not 336, (c) a patch
+in the range, (d) a claim in the range. A call with none of the four is the counter bump of step 1, and of step 2 when there is no lease. A pool with no
+active lease at `base` is not touched at all, so its patches do not matter (the old exit ignored that and refused on them).
+
+### The check (engine_velocity_primary_copy.h, `copierClaimCheck`)
+It is tried after `copierLockFree` declines, and takes the mutex (the locked path, from scratch, unchanged) unless all of these hold:
+- (d) none of the at most 4 claim addresses in `g_claimView` equals `source + i*336` for an i < count (the locked loop's own test); more than 4 claims, or a
+  merge plan in flight, decline. The copier never reads `g_mergePlans`, so the plan condition is not needed for correctness; it is kept because the plan
+  fallback was asked for and costs nothing (a plan exists only while a locked merge is between begin and end).
+- (a)(b) the lease table has exactly one lease at `base` with stride 336 and the range inside its size, or none at all.
+- (c) the lease's patch bound `[patchLo, patchHi]` does not meet the range. The bound is kept on `Pool`: `notePatch` raises it before the one insert (the join),
+  `clearPatches` resets it at every `patches.clear()`, an erase leaves it wide. It is a superset of the slots, so it can only cause a lock, never a skip; a
+  held map with a bound nobody raised publishes as "whole range". It is published per lease in `g_poolView` and compared on every republish.
+- the read is one state: see below.
+Success bumps `g_copierPrechecked` (and `g_copierPrecheckedNoLease` when it found no lease); `stats()` folds them into `copies`, `copierNoLease` and the lock-free
+figures exactly as the other exits do, so every counter keeps its meaning. The exit line gains `Copier claim check (claims live or patches held, none in the
+range): N copies of those, M copies declined it.` Declined means a plan, more than 4 claims, a leases-unknown table or a moved window; a claim, a patch or a
+lease shape that needs the lock is a hit, not a decline.
+
+### Linearization
+The two tables (claim snapshot, lease table) are separate seqlocks, each written at the end of a critical section, one after the other. A reader of both could
+see one section's claims with the previous section's pools, a pair no instant of the mutex's order ever held (a copy that neither consumed a claim nor erased
+the patch that either order of the two sections would have). So `ClaimLock::publish` now opens a `PublishWindow` (`g_publishSeq`, odd while open) around every
+write to either table, lazily, only when a table changes; the check reads `g_publishSeq` (acquire), both tables, then re-reads it, and keeps the read only if it
+was even and unchanged. A kept read is the state exactly one completed critical section left. The call is ordered at that read: it is a call that took the mutex
+when the state was that snapshot, found no claim in its range, one fitting lease (or none), no patch in the range, and changed only counters. A claim published
+after the read is ordered after the call (the mutex allowed that order for a producer that had not yet taken it). A claim published before the call began is in
+the snapshot: the producer's unlock published it and happens-before the call through Elite's own hand-off (the source is handed to the copier after
+`recordEmission` returned), so the range test finds it and the call takes the mutex. A change in flight (odd, or moved) is not read: mutex, from scratch. The check
+dereferences nothing; every address is compared as an integer. x86 hides a weakened memory order from the rig, as for the other seqlocks.
+
+### Rig (tools\engine_velocity_test\claim_check_tests.h, C8-C12; primary_copy_observer_tests.h updated)
+- C8: 1000 copies of an untouched range plus 1000 with no lease, under 1, 2, 3 and 4 live claims and a patch held: 0 mutex acquisitions, 0 heap allocations,
+  claim-check counters 2000 and 0 declined, the no-lease split exact. The same copies with the check off (`g_claimPrecheck=false`): 2000 acquisitions each
+  time, so the first checks FAIL on the old code.
+- C9: 23 shapes (a claim in the first or last record of the range, one before, one after, no lease, two leases, a range past the lease, stride 320, a patch at
+  the first or last slot of the range, one below, one past, a span over two patches, 4 claims, 5 claims, 4 with one in range, a plan in flight) run against
+  the frozen locked copier (`referenceCopier`): same counters, claims, patches, lease state and epoch, and the expected lock-free or locked outcome.
+- C10: five claims and a plan in flight take the mutex and are counted as declined; four claims and the plan's end make the same copy lock-free again.
+- C11: a claim for the copy's own range published inside the read tears it (declined, locked, joined); a lease that ends inside the read tears it (declined,
+  locked, no lease found); a claim published after the check is ordered after the copy (lock-free, claim left alone) and the next copy takes it.
+- C12: four threads, 3000 rounds (producer, a caller re-mapping its pool every round behind a release/acquire hand-off, a claim churn between 2 and 6 claims, a
+  lease churn on a second pool): 0 claims lost, 0 wrong, 3000 joins, 3.4e5-6.6e5 copies handed back, 6e3-4e4 declined.
+- Changes to the existing observer rig, all consequences of the new exit: cases that were "locked" because the old exit was global now expect lock-free
+  ("a patch outside the range", "a patch in a lease that ended", "a claim elsewhere"); the frozen `referenceCopier` calls `notePatch` at its one insert
+  (the bound is part of the state it leaves); the "view moved between the reads" case runs with the claim check off (it is the old exit's own re-check);
+  `viewExact` also requires each lease's bound to cover its patches and to say "none" exactly when it holds none; the "who waits" cases use copies that do
+  hold a claim or meet a patch; 17 new equivalence cases sit beside the old ones.
+- Mutants (`mutants.py --run`, 18 new, all killed; the rig stops at the first failing check, so the label is the first case that fails): plans ignored,
+  limit ignored (C10); hits ignored, range one short, bound never raised, bound lost (C8; each also killed by C9 alone); ambiguity ignored, fit ignored,
+  stride ignored, patches ignored, bound off by one at either end, bound change not republished (C9); window not re-checked, window never opened (C11);
+  nothing counted, no-lease not counted (C8); declines not counted (C10).
+
+### What the flight reads
+`Copier claim check ... N copies` in the millions in claim-live windows (the 3.7M a window) and `declined` near 0; the render copier lock line n near 0 in
+those windows (the join once a frame, and copies over a patch, remain); Present p50 in claim-live windows against the ~0.5 ms left after the clear/merge check.
+If copies still take the mutex, the bound is the first suspect: a pool whose patches span the whole lease (a span over two patches locks the range between).
+Not attributed: whether this is the remaining 0.5 ms; a flight decides. Ruled out while designing: gating on `g_claimsLive` alone, because the patch half is
+the common locked case and a claims-only check would have left it.
+
