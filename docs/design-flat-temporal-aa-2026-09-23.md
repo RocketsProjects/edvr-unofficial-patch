@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-16 F1 instrumentation, BUILT, NOT FLOWN:** raw game-pose cohorts and independent depth scores bracket large origin steps.
-  The inward/re-anchor rule is unchanged and F1 remains OPEN. See "F1 one-flight instrumentation" for the route and log command; no new key.
-  Also open: engine-record anchor semantics and VR's dropped 50 m+ translation. The new probes run only in flat D3D11.
+- **10-16 F1 instrumentation, FLOWN, INCONCLUSIVE:** Steam `172537`, build `3c0516e3`: three large camera cuts; no admitted travel/re-anchor event.
+  Raw poses support rotated coordinate re-expression at frame 43788; all depth scores were refused. F1 OPEN; see "F1 first probe flight" below.
+  Next: straight supercruise out-and-back legs. No new key. Engine-record anchor semantics and VR's dropped 50 m+ translation remain open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -3114,7 +3114,7 @@ New counters/lines: `fast-travel-steps-kept` on the 5 s renderer line and a
 capped `flat resolve fast-travel step kept:` line (same fields as the rebase
 line); `origin-rebases-absorbed` now counts re-anchors only.
 
-**2026-10-16: F1 one-flight instrumentation (full gate passed, not flown).** The
+**2026-10-16: F1 one-flight instrumentation (full gate passed; flight below).** The
 camera rows alone cannot tell inward travel from a coordinate change. Two
 passive probes now record independent evidence without changing the camera
 classifier, motion vectors or history decisions. There is no new setting.
@@ -3204,6 +3204,68 @@ final pixels against the probe-disabled run. It also covers actual bound
 foreground refusal, an unchanged-scale foreground-to-world transition,
 missing adjacent depth and tied scores. No scoring threshold was relaxed
 for the fixture. Log: `build/rc3-review/f1-origin-instrumentation-full-build.log`.
+
+**2026-10-16: F1 first probe flight, inconclusive.** Steam log
+`edvr_gfx_20261016_172537.log` matches the installed clean build
+`v0.20.0-rc.2-97-g3c0516e3` (`6AD2B128`). Flat `/novr`, DLSS, render and
+output both 3840x2160. The file was checked again after analysis: 28,871
+lines, unchanged. All flight evidence was read through `tools/edvr_log.py`.
+
+| Time / resolver frame | Camera step | Independent evidence |
+|---|---|---|
+| 17:27:33 / 43788 | 1265 m, toward a 2 m origin length | 103 matched poses, all quaternion-changed; raw positions fit a rigid coordinate transform. |
+| 17:28:36 / 58918 | 1601 m, outward | Two near-camera pre-event records, neither survives at the event. |
+| 17:28:49 / 62138 | 3845 m, toward a 2.4 m origin length | No pre-event pose cohort. |
+
+All three have matching resolver/engine clocks and `planned-reset=1`,
+`planned-kept=0`, `reanchor-rule=0`. The corresponding reset lines identify
+`camera-cut=1`, with rotation-row deltas 2.80, 3.29 and 2.05. Requested reset,
+lost history, frame gap, invalid previous camera, format change and SDK depth
+transition are all zero on those lines. Adjacent previous depth exists, but
+the optical reset guard refuses every event with
+`unavailable=reset-or-prior-domain-unverified`. There are no optical input or
+score lines, so EN/EB stamps were not captured. The renderer's final recorded
+counters are `origin-rebases-absorbed=0` and `fast-travel-steps-kept=0`.
+
+At 43788, a rotation plus translation fitted to three distinct-owner far
+records predicts five held-out records within 0.18 mm. The same transform
+maps the previous camera to (1.148733, 0.278931, -2.161917), versus the logged
+current (1.029589, 1.331104, -1.118170), a 1.487 m residual. This strongly
+supports common coordinate re-expression among the sampled records, with
+additional camera/view motion possible. Distance and owner diversity do not
+prove static-world ownership. This is a rotated reset, not the small-rotation
+inward F1 case. The translation-only witness correctly declines a label when
+all matching quaternions change; its zero world edge is not a measured zero
+world displacement.
+
+Ruled out: this flight demonstrated the F1 inward-travel distinction, because
+none of its three large steps reached the keep-versus-reanchor rule, no short
+inward candidate was retained, and no optical comparison ran. F1 remains
+open; no classifier or rendering behavior changed from this flight.
+
+Diagnostic limitations to retain for the next instrument edit: the record
+line names six positions but formats only five, omitting +2; an absent world
+edge can print a default zero `camera-minus-world`; and the optical heartbeat
+uses its twelve-line cap before the first event, so the event lines are the
+available accounting. These did not hide a retained short inward candidate:
+the CPU drop counters remain zero. Scoring camera-cut-only frames would need
+an explicit ownership/adjacent-depth contract; do not relax that guard merely
+to obtain a result from this flight.
+
+The next flight should add sustained straight translation. Restart Steam
+flat with the same temporal-AA settings for fresh probe quotas. In normal
+space, fly straight for at least 10 km, with static geometry visible where
+practical, to seek the periodic re-anchor control. Then enter supercruise
+near a planet, set minimum throttle and let the transition settle for five
+seconds. Keep the cockpit view fixed and fly straight for 20 seconds; turn
+180 degrees, settle on the new heading for three seconds, then fly straight
+for 30 seconds. Repeat the reversal and straight leg twice. Keep a planet
+limb visible where practical; avoid a hyperspace jump, SCO, maps or view
+switches during these measured legs. Wait five seconds after the final leg
+before exiting. Supercruise is intended to supply the missing large travel
+steps; the hidden origin means this route cannot guarantee an exact inward
+crossing. Check for actual admitted travel, inward candidates and usable
+independent witnesses before treating another flight as F1 validation.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
