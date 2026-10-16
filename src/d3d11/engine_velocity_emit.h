@@ -410,6 +410,8 @@ inline bool readItemPose(uintptr_t item, Pose& pose) noexcept {
 struct PrimaryIdentity { uintptr_t record = 0, node = 0, context = 0; };
 using EmissionSink = bool (*)(uintptr_t item, const Pose& now, const Pose& previous,
                              uint32_t marker, uint32_t frame) noexcept;
+using CurrentPoseObserver = void (*)(uintptr_t record, uintptr_t node, uintptr_t owner,
+                                     const Pose& now, uint32_t frame, bool proven, bool primary) noexcept;
 inline bool primaryIdentity(uintptr_t context, uintptr_t lod, PrimaryIdentity& out) noexcept {
     out = {};
     if (!context || lod < 0x210) return false;
@@ -425,7 +427,8 @@ inline bool primaryIdentity(uintptr_t context, uintptr_t lod, PrimaryIdentity& o
 // be null (no census this run).
 inline void observe(uintptr_t record, uintptr_t owner, int32_t before, int32_t after, uint32_t frame,
                     LookupFn lookup, Table& table, Stats& s, Census* census = nullptr,
-                    uintptr_t ownedKey = 0, bool primary = false, EmissionSink sink = nullptr) noexcept {
+                    uintptr_t ownedKey = 0, bool primary = false, EmissionSink sink = nullptr,
+                    CurrentPoseObserver currentObserver = nullptr) noexcept {
     bump(s.calls);
     if (after < before) { bump(s.drained); return; }
     const int32_t k = after - before;
@@ -484,6 +487,9 @@ inline void observe(uintptr_t record, uintptr_t owner, int32_t before, int32_t a
     }
     const bool proven = valid == k;
     if (!proven) bump(s.callsUnproven);
+    // Raw game-owned current position/quaternion, before EDVR's history table
+    // supplies a previous pose. A diagnostic callback cannot certify a draw.
+    if (currentObserver) currentObserver(record,node,owner,pose,frame,proven,primary);
     Pose prev;
     uint32_t gapAge = 0;
     const Table::Result result = table.resolve(record, node, frame, pose, proven, prev, s, &gapAge);
@@ -511,7 +517,8 @@ inline void observe(uintptr_t record, uintptr_t owner, int32_t before, int32_t a
 
 inline void observePrimary(const PrimaryIdentity& identity, uintptr_t owner, uintptr_t key,
                            uintptr_t position, uintptr_t quaternion, int32_t before, int32_t after,
-                           uint32_t frame, LookupFn lookup, Table& table, Stats& s, EmissionSink sink) noexcept {
+                           uint32_t frame, LookupFn lookup, Table& table, Stats& s, EmissionSink sink,
+                           CurrentPoseObserver currentObserver = nullptr) noexcept {
     PrimaryIdentity current;
     uint32_t pos[3]{}, contextPos[3]{}, quat[4]{}, contextQuat[4]{};
     Pose canonical;
@@ -530,7 +537,7 @@ inline void observePrimary(const PrimaryIdentity& identity, uintptr_t owner, uin
     // Same canonical record+0x170/+0x17C pose as the secondary rig producer:
     // share its table and all continuity/ambiguity rules, but use the actual
     // primary model key rather than the secondary record+0x250 key.
-    observe(identity.record, owner, before, after, frame, lookup, table, s, nullptr, key, true, sink);
+    observe(identity.record, owner, before, after, frame, lookup, table, s, nullptr, key, true, sink,currentObserver);
 }
 
 } // namespace engine_velocity_emit

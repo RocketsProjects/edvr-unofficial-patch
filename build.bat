@@ -3163,6 +3163,20 @@ if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b
 python "tools\engine_velocity_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_flat_origin_witness_test
+echo [edvr] === flat_origin_witness_test.exe ===
+REM CPU-only six-frame raw-pose witness: event alignment, coherent/unchanged
+REM patterns, identity gaps, owner diversity, pending completion and budgets.
+if not exist "%OBJ%\flatoriginwitness" mkdir "%OBJ%\flatoriginwitness"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\flatoriginwitness\\" /Fe"%OBJ%\flatoriginwitness\flat_origin_witness_test.exe" ^
+    "tools\flat_origin_witness_test\flat_origin_witness_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: flat origin witness test build failed & exit /b 1 )
+"%OBJ%\flatoriginwitness\flat_origin_witness_test.exe" --dry-run || exit /b 1
+"%OBJ%\flatoriginwitness\flat_origin_witness_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_engine_motion_cpu_test
 echo [edvr] === engine_motion_cpu_test.exe ===
 REM Build gate for engine motion's CPU instrument (src\d3d11\engine_motion_cpu.h,

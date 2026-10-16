@@ -26,6 +26,7 @@
 #include "gpu_timing.h"
 #include "dxbc_engine_velocity.h"
 #include "engine_velocity_emit.h"
+#include "flat_origin_witness.h"
 #include "engine_velocity_primary_copy.h"
 #include "engine_velocity_families.h"
 #include "engine_velocity_unkeyed.h"
@@ -616,6 +617,11 @@ const char* verifyEngine(uintptr_t base) noexcept {
 const char* verifyEngine(uintptr_t) noexcept { return nullptr; }
 #endif
 
+void observeRawCurrentPose(uintptr_t record, uintptr_t node, uintptr_t owner,const emit::Pose& now,
+                           uint32_t frame,bool proven,bool primary) noexcept {
+    flatOriginWitnessObserve(record,node,owner,now.w,frame,proven,primary);
+}
+
 void observeEmit(uintptr_t record, uintptr_t owner, int32_t before, int32_t after) noexcept {
     if (!live.load(std::memory_order_acquire) || !g_table) return;
     const uint64_t n = g_emit.calls.load(std::memory_order_relaxed);
@@ -624,7 +630,8 @@ void observeEmit(uintptr_t record, uintptr_t owner, int32_t before, int32_t afte
     // The census (a hash, a pose read and a lock even on zero-item calls) is
     // a diagnostic: off unless engine motion's diagnostics want it.
     emit::observe(record, owner, before, after, frameNow(), g_lookup.load(std::memory_order_acquire), *g_table, g_emit,
-                  g_diagnosticsWanted.load(std::memory_order_relaxed) ? g_census.get() : nullptr);
+                  g_diagnosticsWanted.load(std::memory_order_relaxed) ? g_census.get() : nullptr,
+                  0,false,nullptr,runtimeFlatProfile()?&observeRawCurrentPose:nullptr);
     if (sample) {
         g_emitSampled.fetch_add(1, std::memory_order_relaxed);
         g_emitSampledTicks.fetch_add(static_cast<uint64_t>(qpcNow() - t0), std::memory_order_relaxed);
@@ -649,7 +656,8 @@ void observePrimaryEmit(const emit::PrimaryIdentity& identity, uintptr_t owner, 
         else primaryCopy::invalidateEmission(0);
     } else primaryCopy::invalidateEmission(0); // ownership/fault: no stale CPU claim may survive
     emit::observePrimary(identity,owner,key,position,quaternion,before,after,frameNow(),
-                         g_lookup.load(std::memory_order_acquire),*g_table,g_primaryEmit,sink);
+                         g_lookup.load(std::memory_order_acquire),*g_table,g_primaryEmit,sink,
+                         runtimeFlatProfile()?&observeRawCurrentPose:nullptr);
 }
 
 // The engine's pool copier (game job threads, once per copy-list entry). No
@@ -2656,6 +2664,7 @@ void engineVelocityDiagnostics(bool on) { g_diagnosticsWanted.store(on, std::mem
 void engineVelocityShutdown() {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     const bool was = live.exchange(false, std::memory_order_acq_rel);
+    flatOriginWitnessShutdown();
     guardForget();
     kinematicEvalSetEmitObserver(nullptr);
     kinematicEvalSetPrimaryEmitObserver(nullptr);
@@ -3190,6 +3199,7 @@ void psShadowProbe(ID3D11DeviceContext* ctx) {
 
 void engineVelocityNotePresentFrame(uint32_t presentFrame) noexcept {
     g_frame.store(presentFrame, std::memory_order_release);
+    flatOriginWitnessFrameBoundary(presentFrame,runtimeFlatProfile(),g_emitLive.load(std::memory_order_acquire));
 }
 
 void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {

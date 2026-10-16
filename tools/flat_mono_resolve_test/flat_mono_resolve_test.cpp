@@ -53,6 +53,7 @@ std::vector<int> backendSlots;
 std::vector<std::string> firstPersonLines;
 std::vector<std::string> weaponFootprintLines;
 std::vector<std::string> rebaseLines,travelLines;   // "flat resolve origin rebase absorbed:" (the floating origin moved, history kept)
+std::vector<std::string> opticalLines;
 std::vector<std::string> resolveInputLines;
 uint32_t observedInW=0,observedInH=0,observedOutW=0,observedOutH=0;
 // What the stub backends were handed on the HDR route (section 81): the flag and the formats of the textures it names.
@@ -90,6 +91,7 @@ const ShardUnit kUnits[]={
     {"upscalerSlotGpuTests",2},{"firstPersonGpuTests",1},{"firstPersonPhaseGpuTests",1},
     {"refusalGpuTests",2},{"skinGpuTests",5},{"copyRefusalViewGpuTests",2},{"copyForegroundGpuTests",2},
     {"steadyDepthGpuTests",4},{"taaHistoryDepthGpuTests",5},{"contextIsolationGpuTests",2},
+    {"originOpticalGpuTests",4},
     {"flatCelestialGpuTests",5},
 };
 int shardIndex=0,shardCount=0;   // 0/0: no --shard, everything runs
@@ -206,6 +208,7 @@ void Log::note(const char* fmt,...) {
     else if(std::strncmp(line,isolationPrefix,sizeof(isolationPrefix)-1)==0)isolationLines.emplace_back(line);
     else if(std::strncmp(line,"flat resolve origin rebase absorbed:",36)==0)rebaseLines.emplace_back(line);
     else if(std::strncmp(line,"flat resolve fast-travel step kept:",35)==0)travelLines.emplace_back(line);
+    else if(std::strncmp(line,"flat origin optical",19)==0)opticalLines.emplace_back(line);
     else if(std::strncmp(line,"flat weapon footprint:",22)==0)weaponFootprintLines.emplace_back(line);
     else if(std::strncmp(line,"flat resolve inputs:",20)==0)resolveInputLines.emplace_back(line);
 }
@@ -278,6 +281,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_copy_refusal_view_gpu_tests.h"
 #include "flat_copy_foreground_gpu_tests.h"
 #include "flat_celestial_gpu_tests.h"   // planet patch motion in the prep: the tangents, and the shipped prep with a planet record bound and not (2026-10-15)
+#include "flat_origin_optical_gpu_tests.h"
 int main(int argc,char** argv) {
     const bool printGoldens=argc==2 && !std::strcmp(argv[1],"--print-goldens"); // --self-test plus the recorded key-off hashes, for re-recording
     const char* usage="usage: flat_mono_resolve_test --self-test [--shard I/N|--only UNIT,UNIT]|--list-shards N|--dry-run|--print-goldens";
@@ -350,6 +354,7 @@ int main(int argc,char** argv) {
         // The depth-validated steady detail (the same section, the key's second form): the prep's depth check, its tolerance and its previous depth,
         // through the DLSS and FSR stubs and EDVR's own TAA, and the same scenario against the prep with one rule flipped at a time.
         if(shardRuns("steadyDepthGpuTests"))timedSuite("steadyDepthGpuTests",[&]{return steadyDepthGpuTests(device.Get(),context.Get());});
+        if(shardRuns("originOpticalGpuTests"))timedSuite("originOpticalGpuTests",[&]{return originOpticalGpuTests(device.Get(),context.Get());});
         // EDVR's own TAA's history depth check (section 104): the best of four texels, shared with the check above. A jittered silhouette keeps its
         // history, a true disocclusion still resets, and both tests against the kernel with the old single-texel rule (and others) in: they must fail.
         if(shardRuns("taaHistoryDepthGpuTests"))timedSuite("taaHistoryDepthGpuTests",[&]{return taaHistoryDepthGpuTests(device.Get(),context.Get());});

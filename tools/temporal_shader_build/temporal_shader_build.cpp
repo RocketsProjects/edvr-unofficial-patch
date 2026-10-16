@@ -15,6 +15,7 @@
 #include <vector>
 #include "../../src/d3d11/temporal_shader_source.h"
 #include "../../src/d3d11/flat_mono_shader_source.h"
+#include "../../src/d3d11/flat_origin_optical_shader.h"
 #include "../../src/d3d11/engine_velocity_primary_copy_shader.h"
 #include "../../src/d3d11/xess_copy_shader.h"
 #include "../../src/d3d11/skin_join_shader.h"
@@ -432,6 +433,7 @@ static int generateTemporal(const Options& o) {
         {"kTemporalAaBytecode", "temporal_aa_cs", "main", diagnostic, {}},
         {"kTemporalAaFastBytecode", "temporal_aa_fast_cs", "main", fast, {}},
         {"kFlatMonoPrepBytecode", "flat_mono_prep_cs", "prep", nullptr, {}, true},
+        {"kFlatOriginOpticalBytecode", "flat_origin_optical_cs", "main", nullptr, {}, false, edvr::kFlatOriginOpticalCsHlsl},
         {"kFlatMonoTaaBytecode", "flat_mono_taa_cs", "taa", nullptr, {}, true},
         {"kFlatMonoFinishBytecode", "flat_mono_finish_cs", "finish", nullptr, {}, true},
         {"kFlatMonoSpatialBytecode", "flat_mono_spatial_cs", "spatial", nullptr, {}, true},

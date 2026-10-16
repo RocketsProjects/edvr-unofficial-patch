@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-16 BUILT, NOT FLOWN:** flat origin re-anchors (~5 km) and fast travel no longer reset TAA/DLSS; a re-anchor drops its camera
-  translation, outward travel keeps it (review F1). OPEN: inward travel can be mistaken for a re-anchor; see the F1 review entry.
-  Also open: engine-record scenePrev in the old anchor frame; VR drops all 50 m+ translation.
+- **10-16 F1 instrumentation, BUILT, NOT FLOWN:** raw game-pose cohorts and independent depth scores bracket large origin steps.
+  The inward/re-anchor rule is unchanged and F1 remains OPEN. See "F1 one-flight instrumentation" for the route and log command; no new key.
+  Also open: engine-record anchor semantics and VR's dropped 50 m+ translation. The new probes run only in flat D3D11.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -3113,6 +3113,97 @@ re-anchor test). Reported, not changed here.
 New counters/lines: `fast-travel-steps-kept` on the 5 s renderer line and a
 capped `flat resolve fast-travel step kept:` line (same fields as the rebase
 line); `origin-rebases-absorbed` now counts re-anchors only.
+
+**2026-10-16: F1 one-flight instrumentation (full gate passed, not flown).** The
+camera rows alone cannot tell inward travel from a coordinate change. Two
+passive probes now record independent evidence without changing the camera
+classifier, motion vectors or history decisions. There is no new setting.
+This is flat D3D11 instrumentation; it does not depend on a headset or VR
+runtime. The reference flight used DLSS, 2496x1404 to 3840x2160. The probes
+also run with the other flat temporal backends. The selected test target is
+Steam; its existing flat settings select DLSS model M. The install retains
+its `both` scope, which selects flat for a non-VR launch, and preserves the
+live settings. Frontier is not the target for this flight.
+
+| Hypothesis | Discriminating evidence |
+|---|---|
+| Real inward travel | Known static game records keep their positions while camera row 5 moves; previous depth favors the raw translation. |
+| Coordinate re-anchor | Several independently identified static records move by a common vector while their separations stay fixed; depth favors zero translation. |
+| Re-anchor plus real travel | The common record shift removes most of the camera step, leaving a nonzero `camera-minus-world` residual. Neither optical extreme need fit perfectly. |
+| Different source camera or producer phase | Resolver/engine clocks, EN/EB origins or stamps disagree, or a neighboring pose edge carries the shift. The six-frame record window exposes the offset. |
+| Missing or ambiguous evidence | Absent emits, sparse identities, moving records, masked domains, missing prior depth, tied scores, ring pressure or exhausted quotas are reported explicitly. |
+
+The CPU witness observes the game's current native rig position and packed
+quaternion before EDVR writes its synthesized previous pose. It keeps an
+eight-frame, 256-slot ring with deterministic 1-in-4 identity sampling and
+bounded pending reports. Each candidate carries raw camera origins, both
+frame clocks, six pose samples from -3 through +2, five adjacent-edge
+medians, owner diversity, stability and loss counts. `pose-pattern` labels
+describe record observations, not proof that those records are static world
+geometry. A cockpit or a group of moving ships is not a static witness just
+because several records agree. The injected previous pose is explicitly
+excluded as an independent origin signal.
+
+The optical witness samples a fixed 32x18 grid on a finite camera-origin
+step of at least 50 m. It compares the unmodified camera translation and
+zero translation against the same eligible previous-depth samples, then
+reads 160 bytes asynchronously. It logs support, exclusions, fit counts,
+residual histograms, raw resolver/EN/EB origins and source stamps. Its
+`raw-travel-depth-favored` and `zero-translation-depth-favored` labels are
+comparisons, not classifications: planar depth, moving objects and sparse
+coverage can leave the result inconclusive. Reset/gap frames and an
+unverified previous foreground or mixed-camera domain have no score. No
+additional full-size image history or pool readback is made.
+
+Both probes reserve short inward candidates separately from long re-anchor
+controls. Repeated 5 km events cannot exhaust the short-step quota. Arming,
+heartbeat, no-event, missing-witness, suppression and pending/cancellation
+lines distinguish an unexercised probe from a successful measurement.
+The planned keep/reset fields are recorded before backend evaluation; they
+do not claim that the backend accepted the frame.
+
+One session should contain the following controls and maneuver:
+
+1. Keep flat temporal AA active. Start with a few seconds of a recognizable,
+   textured static scene. A station or nearby terrain gives stronger depth
+   evidence than empty space or a distant flat surface.
+2. Capture a known re-anchor control. The docked on-foot/cockpit transition
+   has independent common-shift evidence in the optimized-station arc, but
+   sealing can suppress emits there. An unsealed natural 5 km re-anchor with
+   static geometry in view is the better optical control. Retain both if
+   practical in the same session.
+3. Repeat the fast-travel maneuver that produced 50-100 m steps in the
+   earlier flight, then reverse and retrace the route toward its anchor.
+   The needed case is a real inward step near the origin, not just another
+   near-zero jump. Keep static geometry in view where practical and allow
+   several frames around the turn and crossing. Leave the session running
+   for a few seconds afterward so both pending probes can finish.
+
+Read the entire bounded probe output with the sanctioned reader, checking
+the build before interpreting any measurements:
+
+```text
+python tools\edvr_log.py --target steam --expect-build HEAD --grep "flat origin (witness|optical)|optimized station: the coordinate origin shifted"
+```
+
+Require matching clocks/stamps, actual record rows and an inward maneuver
+alongside the re-anchor control. If only re-anchors occurred, the static
+cohort is absent or the optical score is unavailable/tied, the flight has
+not settled F1. Preserve the raw evidence and its stated limitations; do
+not treat the current classifier's label as ground truth. These probes are
+temporary investigation code to review for retirement once F1 is resolved.
+
+Validation: main `c9e7f175` was merged before the full absolute-path
+`build.bat --wait-lock`, which passed in 242.2 s (167 pooled jobs, six quiet
+jobs, production DLLs, installer and receipt). The CPU rig includes real
+Windows headers and tests the SDK `near` macro integration, timing offsets,
+identity reuse, moving outliers, missing/far cohorts, quota preservation and
+log truncation bounds. WARP distinguishes identical 80-to-20 m camera rows
+with inward versus re-anchor depth histories and checks motion, masks and
+final pixels against the probe-disabled run. It also covers actual bound
+foreground refusal, an unchanged-scale foreground-to-world transition,
+missing adjacent depth and tied scores. No scoring threshold was relaxed
+for the fixture. Log: `build/rc3-review/f1-origin-instrumentation-full-build.log`.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
