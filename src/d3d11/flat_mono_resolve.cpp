@@ -139,7 +139,7 @@ constexpr uint32_t kResetEventLogCap=32;
 // has, so a frame this slow keeps the cut.
 constexpr float kFlatOriginRebaseMaxFrameMs=100.f;
 constexpr uint32_t kOriginRebaseLogCap=8;
-uint32_t originRebaseLogged=0;
+uint32_t originRebaseLogged=0,travelStepLogged=0;
 double lastCameraStepM=0;   // the preceding frame's row-5 step, for the reset event line
 // The first-person inputs' two log lines (FlatMonoResolveFrame::firstPersonMotion): each said once a session, like the
 // budgets above. The refusal's reason is also kept in stats.firstPersonRefusal, so a later, different one is not lost.
@@ -939,14 +939,16 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(!requestedReset && !lostHistory && !frameGap && !invalidPreviousCamera && !formatChange) {
         bool axisJump=false;   // the long-standing test: any axis of row 5 moved more than 50 m
         for(unsigned i=0;i<3;++i)if(std::abs(f.camera[5][i]-f.previousCamera[5][i])>50)axisJump=true;
-        // A jump with the rows unmoved is the origin moving, not the camera: history stays, and the frame's camera translation is zero
-        // (below), as the VR gate does for the same jump. Only a jump the axis test would have cut can be absorbed, so no frame that
-        // kept its history before loses its camera term now. Rotated rows, or a hitch frame, still cut.
+        // A jump with the rows unmoved keeps its history: the camera did not turn, and the step is either the origin moving or fast travel.
+        // Only a jump the axis test would have cut is handled here, so no frame that kept its history before changes. Rotated rows, or a
+        // hitch frame, still cut. Which of the two it is decides the camera translation (below): a re-anchor's is a coordinate change and
+        // is dropped, as the VR gate drops any jump's; travel's is the camera's real motion and the shader needs it.
         originRebase=axisJump && temporalOriginRebase(stepM,rotDelta) && f.deltaMs<kFlatOriginRebaseMaxFrameMs;
         cameraCut=axisJump && !originRebase;
     }
     const bool reset=requestedReset || lostHistory || frameGap || invalidPreviousCamera || formatChange || cameraCut || coverageTransition;
-    const bool rebaseAbsorbed=originRebase && !reset;
+    const bool jumpKept=originRebase && !reset;
+    const bool rebaseAbsorbed=jumpKept && temporalOriginReanchor(stepM,nowLen,prevLen);   // the origin was re-anchored: zero translation
     stats.lastReset=reset;
     const bool engine=f.engine.slots && f.engine.pool && f.engine.sceneNow && f.engine.scenePrev;
     if(!reset && !engine)return fail(reason,"flat-resolve-engine-source-views-unavailable");
@@ -1028,8 +1030,9 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // Not on a reset: there is no previous frame to move from.
     const bool celestialBound=f.celestialRecords!=nullptr && !reset;
     Constants constants{};std::memcpy(constants.camera,f.camera,sizeof(f.camera));
-    // An absorbed re-anchor reprojects from the previous rows with their origin moved to this frame's: zero camera translation, orientation
-    // change only (the VR gate's temporalOriginJump handling).
+    // A re-anchor (jumpKept, and the origin landed near the camera: temporalOriginReanchor) reprojects from the previous rows with their
+    // origin moved to this frame's: zero camera translation, orientation change only. Fast travel (a kept jump that is not a re-anchor)
+    // keeps now[5]-old[5], the camera's real motion: 80 m lateral past a surface 1 km away is 99.84 px at 2496 wide, not zero.
     float previousRows[6][4];std::memcpy(previousRows,f.previousCamera,sizeof(previousRows));
     if(rebaseAbsorbed)std::memcpy(previousRows[5],f.camera[5],sizeof(previousRows[5]));
     std::memcpy(constants.previous,reset?f.camera:previousRows,sizeof(previousRows));
@@ -1217,6 +1220,14 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
             if(originRebaseLogged<kOriginRebaseLogCap) {
                 ++originRebaseLogged;
                 Log::get().note("flat resolve origin rebase absorbed: step=%.9g rot-delta=%.9g now-len=%.9g prev-len=%.9g",
+                    stepM,rotDelta,nowLen,prevLen);
+            }
+        } else if(jumpKept) {
+            // Fast travel: history kept, the real translation stays in the camera term.
+            ++stats.travelSteps;
+            if(travelStepLogged<kOriginRebaseLogCap) {
+                ++travelStepLogged;
+                Log::get().note("flat resolve fast-travel step kept: step=%.9g rot-delta=%.9g now-len=%.9g prev-len=%.9g",
                     stepM,rotDelta,nowLen,prevLen);
             }
         }
