@@ -51,6 +51,7 @@
 #include "shader_swap.h"
 #include "gpu_timing.h"
 #include "gpu_census.h"   // issue #38: the per-feature GPU cost census
+#include "perf_baseline.h"   // the baseline probe (2026-10-15): F3, the trained output's copy-through; measurement only
 #include "binding_shadow.h"   // the render target a camera write is drawn into (bindingGet, bindingResolve)
 #include "sky_ring.h"   // I-2: the sky ring (diag.sky_ring, TEMPORARY; docs/sky-flicker-2026-10-13.md)
 #include "../common/camera_nearest.h"       // the nearest write: a veto on the legacy pick (fix.camera_nearest, TEMPORARY A/B)
@@ -195,6 +196,7 @@ struct EyeState {
     bool                      screenHistory = false;
     uint32_t                   dlW = 0, dlH = 0;
     uint32_t                   dlOutW = 0, dlOutH = 0;
+    uint32_t                   dlSubmitFormat = 0;   // the format dlSubmit was actually made in (sd.Format at creation), for the baseline probe (F3)
     // LAST frame's depth copy -- the twin of dlDepth, swapped with it after
     // every frame that wrote one, so no copy is ever made -- and the bias
     // mask NVIDIA is handed (R8_UNORM). zPrevValid says the swap happened
@@ -4039,6 +4041,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         e.dlH = h;
                         e.dlOutW = oW;
                         e.dlOutH = oH;
+                        e.dlSubmitFormat = static_cast<uint32_t>(sd.Format);
                         if (haveDepth) ensureDepthPair(dev, e, w, h);
                     } else {
                         releaseDl(e);
@@ -4447,7 +4450,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         gpuCensusBegin(ctx, GpuCensusSection::DoorUiResolve);
                         const bool uiResolvedHere = applyUiResolve(e.dlOutSrv);
                         gpuCensusEnd(ctx, GpuCensusSection::DoorUiResolve);
-                        if (!uiResolvedHere) ctx->CopyResource(e.dlSubmit, e.dlOut);
+                        if (!uiResolvedHere) {
+                            GpuCensusScope copyThroughTimed(ctx, GpuCensusSection::FrameProbeVrCopyThrough);   // F3: this copy alone
+                            ctx->CopyResource(e.dlSubmit, e.dlOut);
+                        }
+                        // F3 (perf_baseline.h): dlOut is always the typed UNORM texture made above; dlSubmit is made in the game's own format (e.dlSubmitFormat, noted when it was made).
+                        perfbase::noteTrainedEye(static_cast<uint32_t>(eye), uiResolvedHere, DXGI_FORMAT_R8G8B8A8_UNORM, e.dlSubmitFormat, oW, oH);
                     }
                     // luma probe stage 1, dlss_out: e.dlSubmit already holds it
                     // here on every usedDlaa path, UI-resolved or copied

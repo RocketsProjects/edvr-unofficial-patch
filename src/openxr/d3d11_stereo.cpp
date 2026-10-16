@@ -353,9 +353,14 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     }
     drawContext->OMSetRenderTargets(0,nullptr,nullptr);
     if(ownedImmediateScene_) {
+      SubmissionWallScope submitted(times?&times->submit[i]:nullptr);   // F6: this eye's hand-off, nested inside draw
       if(observer)observer->endGpuWork(2u+i,drawContext);
       drawContext->Flush();
-    } else { r=submitCommands(observer,2u+i);if(r!=XR_SUCCESS)return failed(r); }
+    } else {
+      { SubmissionWallScope submitted(times?&times->submit[i]:nullptr);   // F6
+        r=submitCommands(observer,2u+i); }
+      if(r!=XR_SUCCESS)return failed(r);
+    }
     }
     if(FAILED(device_->GetDeviceRemovedReason()))return failed(XR_ERROR_GRAPHICS_DEVICE_INVALID);
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};

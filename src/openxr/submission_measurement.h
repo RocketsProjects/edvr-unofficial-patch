@@ -23,5 +23,8 @@ struct TransferWallTimes {
 };
 struct StereoWallTimes {
   double acquire=0, wait=0, draw=0, release=0;
+  // Inside draw (nested, never added to it): each eye's hand-off of its recorded work, the immediate context's Flush (an owned immediate scene) or
+  // submitCommands (FinishCommandList, the render-thread invoke when there is an executor, ExecuteCommandList and Flush). The baseline probe's F6.
+  double submit[2]={0,0};
 };
 } // namespace edvr::openxr

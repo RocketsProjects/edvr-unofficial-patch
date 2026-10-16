@@ -2411,14 +2411,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     phase("xr_wait",&SubmissionStats::Sample::xrWaitMs);
     phase("xr_draw_submit",&SubmissionStats::Sample::xrDrawMs);
     phase("xr_release",&SubmissionStats::Sample::xrReleaseMs);
+    phase("xr_submit_eye0",&SubmissionStats::Sample::xrSubmitEye0Ms);   // nested in xr_draw_submit: the left eye's flush / submitCommands
+    phase("xr_submit_eye1",&SubmissionStats::Sample::xrSubmitEye1Ms);   // nested in xr_draw_submit: the right eye's
     phase("xr_end_frame",&SubmissionStats::Sample::endFrameMs);
     phase("wait_frame",&SubmissionStats::Sample::waitFrameMs);
     phase("pacer_block",&SubmissionStats::Sample::pacerBlockMs);
-    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,trim_stage=%u,trim_factors=%.5f/%.5f,pacing=%u,separate=%u%s,percentiles=50/95/99/max,units=wall_ms,nested=1,gpu=0,frame_end_overlap=%u\n",
+    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,trim_stage=%u,trim_factors=%.5f/%.5f,pacing=%u,separate=%u,owned_immediate=%u,render_executor=%u%s,percentiles=50/95/99/max,units=wall_ms,nested=1,gpu=0,frame_end_overlap=%u\n",
       (unsigned long long)submitStats.window(),(unsigned long long)first.sequence,(unsigned long long)last.sequence,
       last.outputWidth[0],last.outputHeight[0],last.outputWidth[1],last.outputHeight[1],last.treatments[0],last.treatments[1],
       (unsigned long long)last.featureEpoch,unsigned(fovTrim.stage()),fovTrim.factorWidth(),fovTrim.factorHeight(),
-      unsigned(last.deferred),unsigned(separateGraphics()),phases,
+      unsigned(last.deferred),unsigned(separateGraphics()),unsigned(stereo.ownedImmediateScene()),unsigned(stereo.usesImmediateExecutor()),phases,
       // last.deferred==0 is FramePacing::Runtime, the only pacing this
       // window's last sample could have taken the overlapped path under.
       unsigned(frameEndOverlapEnabled&&separateGraphics()&&last.deferred==0));
@@ -2439,6 +2441,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade);
     submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
     submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
+    submitSample.xrSubmitEye0Ms=wall.submit[0];submitSample.xrSubmitEye1Ms=wall.submit[1];
     const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
     if(composeClock&&composeClockEnd) timingFrame.composeMs=elapsedMs(composeBegan,composeEnded);
     if(r==XR_SUCCESS)++composedPairs;

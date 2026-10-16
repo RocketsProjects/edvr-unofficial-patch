@@ -17,6 +17,8 @@ class SubmissionStats final {
     double producerDispatchMs=0, producerAcquireMs=0, producerFlushMs=0;
     double consumerAcquireMs=0, consumerFlushMs=0, receiveMs=0;
     double xrAcquireMs=0, xrWaitMs=0, xrDrawMs=0, xrReleaseMs=0, endFrameMs=0;
+    // Inside xrDrawMs (nested): each eye's flush / submitCommands hand-off, and the rest of the draw block (recording the eye's commands).
+    double xrSubmitEye0Ms=0, xrSubmitEye1Ms=0;
     // Turbo pacing: how long waitAndBegin blocked (0 for a synthesized
     // frame), how long finish()/clear() blocked taking the pacer's real
     // result, and whether this frame was paced Deferred at all.
@@ -45,7 +47,7 @@ class SubmissionStats final {
     for(double value:{sample.producerDispatchMs,sample.producerAcquireMs,sample.producerFlushMs,
         sample.consumerAcquireMs,sample.consumerFlushMs,sample.receiveMs,sample.xrAcquireMs,
         sample.xrWaitMs,sample.xrDrawMs,sample.xrReleaseMs,sample.endFrameMs,
-        sample.waitFrameMs,sample.pacerBlockMs})
+        sample.waitFrameMs,sample.pacerBlockMs,sample.xrSubmitEye0Ms,sample.xrSubmitEye1Ms})
       if(!std::isfinite(value)||value<0) return false;
     const bool gap=lastSequence_&&sample.sequence!=lastSequence_+1;
     lastSequence_ = sample.sequence;

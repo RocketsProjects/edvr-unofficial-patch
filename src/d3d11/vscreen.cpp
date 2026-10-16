@@ -38,6 +38,7 @@
 #include "draw_census.h"
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "draw_fast_path.h"   // the AA-off draw path's decisions (2026-10-13)
+#include "perf_baseline.h"   // the baseline probe (2026-10-15): F5, the VR draw hooks' counts and sampled self-time; measurement only
 #include "../common/temporal_mode.h"  // temporalModeEnabledFor: the AA-off fast path's switch
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
@@ -4667,14 +4668,22 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
 thread_local uint32_t t_drawClockOrdinal = 0;
 
 struct DrawClock {
-    bool    on;
+    bool    on;           // the real call is clocked: the monitor's sample, or the baseline probe's (F5)
+    bool    monitorOn;    // the monitor's own sample: unchanged by the probe, so the overlay's draw ticks read as they always did
+    bool    probeOn = false;
     int64_t t0;
     int64_t real = 0;
     bool forwarded = false;
-    DrawClock()
-        : on(perfMonitorSampleDraws() &&
-             (++t_drawClockOrdinal % kPerfMonitorDrawTimeStride) == 0),
-          t0(on ? qpcNow() : 0) {}
+    perfbase::DrawKind kind;
+    // `owner`: this draw is on the owner context. The probe counts and clocks those only (plain counters; another thread's would race).
+    DrawClock(perfbase::DrawKind k, bool owner)
+        : monitorOn(perfMonitorSampleDraws() &&
+                    (++t_drawClockOrdinal % kPerfMonitorDrawTimeStride) == 0),
+          kind(k) {
+        probeOn = perfbase::noteDraw(k, owner);
+        on = monitorOn || probeOn;
+        t0 = on ? qpcNow() : 0;
+    }
     void realCall(int64_t start) {
         // Only the first call forwards the game's draw. Coverage reissues
         // are EDVR work; subtracting every call hid their CPU/driver cost.
@@ -4682,7 +4691,10 @@ struct DrawClock {
         forwarded=true;
     }
     ~DrawClock() {
-        if (on) perfMonitorDrawTicks(qpcNow() - t0, real);
+        if (!on) return;
+        const int64_t total = qpcNow() - t0;
+        if (probeOn) perfbase::noteHookSelf(kind, total - real);   // the thunk's time less the game's own forwarded draw
+        if (monitorOn) perfMonitorDrawTicks(total, real);
     }
 };
 
@@ -4725,7 +4737,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (g_vrWorldInternal) { g_state->realDraw(self, count, start); return; }   // the world route's own draw (vr_world_route.h)
     gpuFrameCommandIfLive(self);
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }   // tags the camera write before it / counts a mini-render's draws
-    DrawClock clock;
+    DrawClock clock(perfbase::DrawKind::D, self == g_state->ownerCtx);
     ++g_state->thunkHits[kHitDraw];
     noteStaleForward(kSlotDraw, reinterpret_cast<const void*>(g_state->realDraw),
                      "Draw");
@@ -4734,6 +4746,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     args.base = static_cast<int32_t>(start);
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
     const bool fast = drawPathFast(v);   // AA off, unclaimed, no subscriber: no verdict scope, no engine velocity (draw_fast_path.h)
+    if (fast) perfbase::noteFast(perfbase::DrawKind::D, self == g_state->ownerCtx);
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);   // the VR world route's detector; at the tone, its resolve
@@ -4799,7 +4812,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     if (g_vrWorldInternal) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); return; }
     gpuFrameCommandIfLive(self);
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
-    DrawClock clock;
+    DrawClock clock(perfbase::DrawKind::I, self == g_state->ownerCtx);
     ++g_state->thunkHits[kHitDrawIndexed];
     noteStaleForward(kSlotDrawIndexed,
                      reinterpret_cast<const void*>(g_state->realDrawIndexed),
@@ -4809,6 +4822,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     args.base = baseVertex;
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
     const bool fast = drawPathFast(v);   // draw_fast_path.h
+    if (fast) perfbase::noteFast(perfbase::DrawKind::I, self == g_state->ownerCtx);
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
@@ -4874,7 +4888,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
                      "DrawInstanced");
-    DrawClock clock;
+    DrawClock clock(perfbase::DrawKind::N, self == g_state->ownerCtx);
     // See hookedDraw: the start vertex, before the call that reads it.
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(startVertex);
     DrawArgs args;
@@ -4882,6 +4896,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
     const bool fast = drawPathFast(v);   // draw_fast_path.h
+    if (fast) perfbase::noteFast(perfbase::DrawKind::N, self == g_state->ownerCtx);
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
@@ -4944,7 +4959,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
                      "DrawIndexedInstanced");
-    DrawClock clock;
+    DrawClock clock(perfbase::DrawKind::X, self == g_state->ownerCtx);
     // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
     // before the call.
@@ -4963,6 +4978,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.base = baseVertex;
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
+    if (self == g_state->ownerCtx) {   // F5: would the D/I/N shortcut take this draw? Reads the inputs drawPathFast reads; decides nothing.
+        perfbase::noteXReason(perfbase::classifyDrawFast(perfbase::DrawFastInputs{
+            g_aaOffDraw.load(std::memory_order_relaxed), drawGateWanted(), engineVelocityLiveNow(), g_vrWorldWants, v != DrawVerdict::kNone}));
+    }
     // Engine-record velocity (with fix.temporal_aa): four generation
     // compares; the pool families' substituted shaders and MRT6 are bound
     // only when the game has rebound something since the last look. After the

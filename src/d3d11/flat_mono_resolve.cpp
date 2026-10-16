@@ -20,6 +20,7 @@
 #include "flat_pixel_capture.h"
 #include "flat_resolve_input_capture.h"
 #include "flat_projection_math.h"
+#include "perf_baseline.h"   // the baseline probe (2026-10-15): the input copy's counters and GPU interval; measurement only
 
 namespace edvr {
 namespace {
@@ -208,6 +209,21 @@ bool fail(const char** reason, const char* text) {
     stats.currentContinueRun=0;
     if(reason)*reason=text;
     return false;
+}
+// The baseline probe's F1 note (perf_baseline.h): the input copy at the resolve and at the spatial fallback, and whether a direct-input
+// path could have taken the source as it is. MEASUREMENT ONLY: it reads what the copy already validated and changes nothing.
+// "Aliased" is as far as the resolver can see: the source is a texture it owns or the same image as the depth or clean input.
+void probeInputCopy(perfbase::CopySite site,const FlatMonoResolveFrame& f,ID3D11Texture2D* color,ID3D11Texture2D* depth,ID3D11Texture2D* clean,
+                    DXGI_FORMAT viewFormat,bool overlay) {
+    perfbase::DirectInputFacts facts;
+    facts.hdr=f.hdr;facts.overlay=overlay;
+    facts.aliased=color==g.color.texture.Get() || color==g.output[0].texture.Get() || color==g.output[1].texture.Get() ||
+        (depth && color==depth) || (clean && color==clean);
+    facts.viewFormat=static_cast<uint32_t>(viewFormat);
+    uint32_t w=f.renderWidth,h=f.renderHeight;
+    if(color) {D3D11_TEXTURE2D_DESC td{};color->GetDesc(&td);facts.resourceFormat=static_cast<uint32_t>(td.Format);}
+    perfbase::noteFlatInputCopy(site,f.slot,facts,reinterpret_cast<uintptr_t>(color),f.frame,w,h,
+                                static_cast<uint64_t>(w)*h*4u*(overlay?2u:1u));
 }
 bool cameraValid(const float (&c)[6][4]) {
     for(const auto& row:c)for(float v:row)if(!std::isfinite(v))return false;
@@ -1016,8 +1032,12 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         static_cast<unsigned>(colorDesc.Format),f.renderWidth,f.renderHeight);
     SpanGuard span(context);   // the GPU census's timestamp pair: this call's own dispatches and the backend
     context->UpdateSubresource(g.constants.Get(),0,nullptr,&constants,0,0);
-    context->CopyResource(g.color.texture.Get(),overlay?cleanColor.Get():color.Get());
-    if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());
+    {
+        perfbase::GpuProbeScope copyProbe(context,perfbase::GpuProbe::FlatInputCopy);   // the copy alone, apart from preparation and the backend (F1)
+        context->CopyResource(g.color.texture.Get(),overlay?cleanColor.Get():color.Get());
+        if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());
+    }
+    probeInputCopy(perfbase::CopySite::Resolve,f,color.Get(),depth.Get(),cleanColor.Get(),colorDesc.Format,overlay);
     if(hdr)++stats.hdrCopied;
     copyStep.close();
     HdrCrumbSpan prepStep(g_crumbOn,"prep","groups=%ux%u",(f.renderWidth+7)/8,(f.renderHeight+7)/8);
@@ -1306,7 +1326,11 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
     {
         HdrCrumbSpan copyStep(g_crumbOn,"copy-h","fmt=%s(%u) size=%ux%u",hdrCrumbFormat(static_cast<uint32_t>(colorDesc.Format)),
             static_cast<unsigned>(colorDesc.Format),f.renderWidth,f.renderHeight);
-        context->CopyResource(g.color.texture.Get(),color.Get());
+        {
+            perfbase::GpuProbeScope copyProbe(context,perfbase::GpuProbe::FlatInputCopy);   // F1, the spatial fallback's copy
+            context->CopyResource(g.color.texture.Get(),color.Get());
+        }
+        probeInputCopy(perfbase::CopySite::Spatial,f,color.Get(),nullptr,nullptr,colorDesc.Format,false);
         if(hdr)++stats.hdrCopied;
     }
     if(hdr) {

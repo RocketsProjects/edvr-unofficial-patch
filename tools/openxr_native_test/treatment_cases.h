@@ -226,5 +226,13 @@ template<class Check> void runSubmissionStatsCases(Check check) {
   check(changed.count()==1,"second fixture has a sample");
   ++sample.sequence;sample.width[0]=101;check(!changed.add(sample)&&changed.count()==0,"size change restarts warmup instead of mixing resolutions");
   sample.sequence=0;check(!changed.add(sample)&&changed.count()==0,"invalid sequence excluded");
+  // F6 (the baseline probe): each eye's flush / submitCommands hand-off is a phase of its own; a negative or non-finite one voids the sample like any phase.
+  SubmissionStats eyes;SubmissionStats::Sample e{};
+  e.width[0]=e.width[1]=100;e.height[0]=e.height[1]=120;e.callbacks=2;e.dispatchMs=2;e.treatmentMs=1;
+  for(unsigned n=1;n<=SubmissionStats::warmup+2;++n){e.sequence=n;e.xrDrawMs=1.0;e.xrSubmitEye0Ms=0.25;e.xrSubmitEye1Ms=0.5;eyes.add(e);}
+  const auto s0=eyes.distribution(&SubmissionStats::Sample::xrSubmitEye0Ms),s1=eyes.distribution(&SubmissionStats::Sample::xrSubmitEye1Ms);
+  check(eyes.count()==2&&s0.p50==0.25&&s1.p50==0.5,"F6: the per-eye submit phases have their own distributions");
+  ++e.sequence;e.xrSubmitEye1Ms=-1.0;check(!eyes.add(e)&&eyes.count()==2,"F6: a negative per-eye submit time is refused like any phase");
+  ++e.sequence;e.xrSubmitEye1Ms=0.5;e.xrSubmitEye0Ms=HUGE_VAL;check(!eyes.add(e)&&eyes.count()==2,"F6: a non-finite per-eye submit time is refused");
 }
 } // namespace edvr::openxr::test

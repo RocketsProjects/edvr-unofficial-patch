@@ -3,6 +3,7 @@
 #include "gpu_frame_gap.h"
 #include "gpu_frame_timing.h"
 #include "frame_span_tile.h"   // kFrameSpanSlots: the overlay's frame GPU span (2026-10-14)
+#include "perf_baseline.h"   // the baseline probe's counters, formatters and GPU hooks (2026-10-15)
 #include "gpu_pass_profile.h"   // TEMPORARY pass profiler: an EDVR section's begin and end are pass boundaries
 #include "../common/log.h"
 #include <windows.h>
@@ -91,10 +92,15 @@ constexpr size_t kSkinSections = static_cast<size_t>(GpuCensusSection::FrameSkin
 constexpr const char* kSkinNames[] = {
     "source target 7 clear", "eye target 7 clear", "join 3-table clear pass", "join dispatch (clear pass not included)", "pose table"
 };
-static_assert(kAlteredFirst == kDoorSections + kFrameSections + kSkinSections, "one name for each in-frame section, and the altered sections follow them");
-static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kFssFirst && kFssFirst + 1 == kSkinFirst && kSkinFirst + kSkinSections == kAlteredFirst &&
-                  kWorldSections == 3 && kSkinSections == 5 && sizeof(kSkinNames) / sizeof(kSkinNames[0]) == kSkinSections,
-              "the seed is followed by the three world-route sections, the FSS reveal's one and the second skin's five, which are the last in-frame ones");
+// The baseline probe's two sections (gpu_census.h, FrameProbeFlatInputCopy and FrameProbeVrCopyThrough) follow the skin's. Nested inside other work, in no
+// total, printed on the "perf baseline" lines (perf_baseline.h); like the world route's they have no turn until called this window.
+constexpr size_t kProbeFirst = static_cast<size_t>(GpuCensusSection::FrameProbeFlatInputCopy);
+constexpr size_t kProbeSections = static_cast<size_t>(GpuCensusSection::FrameProbeVrCopyThrough) - kProbeFirst + 1;
+static_assert(kAlteredFirst == kDoorSections + kFrameSections + kSkinSections + kProbeSections, "one name for each in-frame section, and the altered sections follow them");
+static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kFssFirst && kFssFirst + 1 == kSkinFirst && kSkinFirst + kSkinSections == kProbeFirst &&
+                  kProbeFirst + kProbeSections == kAlteredFirst && kWorldSections == 3 && kSkinSections == 5 && kProbeSections == 2 &&
+                  sizeof(kSkinNames) / sizeof(kSkinNames[0]) == kSkinSections,
+              "the seed is followed by the three world-route sections, the FSS reveal's one, the second skin's five and the baseline probe's two, which are the last in-frame ones");
 static_assert(kAlteredFixFirst + kAlteredFixCount == kSections, "the fix sections are the last ones");
 
 struct SectionState {
@@ -223,7 +229,8 @@ uint64_t turnOccurrences(GpuCensusSection owner) noexcept {
 }
 // A world-route, FSS reveal or second-skin section has no turn until it has been called this window (its first call counts whether or not it is on turn).
 bool hasNoTurnYet(size_t i) noexcept {
-    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections)) && g_section[i].occurrences == 0;
+    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) ||
+            (i >= kProbeFirst && i < kProbeFirst + kProbeSections)) && g_section[i].occurrences == 0;
 }
 // The next section to hold a turn: the fix sections after the first are not turns of their own, and a world-route, FSS reveal or second-skin
 // section has none until it has been called this window.
@@ -496,6 +503,31 @@ void logAndResetWindow(uint64_t now) {
             Log::get().note("%s", skinDetail);
         }
     }
+    // The performance baseline probe (perf_baseline.h): one line per item (F1-F5) per window, "not exercised" in words when a path never ran. F6 (the OpenXR
+    // runtime's native_submit_phases) and F7 (xess: slot=... bridge timing) print from their own modules. Nested work, in no total above.
+    {
+        const auto figure = [&](const Snapshot& snap) {
+            perfbase::GpuFigure f;
+            f.occurred = snap.occurred;
+            f.samples = snap.samples;
+            f.msPerFrame = snap.msPerFrame;
+            f.msPerCall = (snap.samples > 0 && snap.perFrame > 0.0) ? snap.msPerFrame / snap.perFrame : 0.0;
+            return f;
+        };
+        perfbase::State& pb = perfbase::state();
+        char line[perfbase::kLineMax];
+        perfbase::formatF1(line, sizeof(line), pb.f1, figure(snapshotOf(g_section[kProbeFirst], frames)), frames);
+        Log::get().note("%s", line);
+        perfbase::formatF2(line, sizeof(line), pb.f2, figure(snapshotOf(g_section[static_cast<size_t>(GpuCensusSection::DoorUiLayerComposite)], frames)), frames);
+        Log::get().note("%s", line);
+        perfbase::formatF3(line, sizeof(line), pb.f3, figure(snapshotOf(g_section[kProbeFirst + 1], frames)), frames);
+        Log::get().note("%s", line);
+        perfbase::formatF4(line, sizeof(line), pb.f4, frames);
+        Log::get().note("%s", line);
+        perfbase::formatF5(line, sizeof(line), pb.f5, frames);
+        Log::get().note("%s", line);
+        perfbase::resetWindow();
+    }
     // Elite's own draws that EDVR alters: what the AA path's GPU cost looks like from
     // outside, inside draws the census would otherwise count as the game's. Each is the
     // game's draw timed whole, so the figures INCLUDE the game's own work in those draws.
@@ -649,7 +681,17 @@ void frameSpanPoll(ID3D11DeviceContext* ctx) {
     g_frameSpanCompleted += got;
 }
 
+// The baseline probe's GPU hooks (perf_baseline.h): flat_mono_resolve.cpp links no census, so it opens its input copy's interval through these.
+void probeGpuBegin(void* context, perfbase::GpuProbe which) noexcept {
+    if (which == perfbase::GpuProbe::FlatInputCopy) gpuCensusBegin(static_cast<ID3D11DeviceContext*>(context), GpuCensusSection::FrameProbeFlatInputCopy);
+}
+void probeGpuEnd(void* context, perfbase::GpuProbe which) noexcept {
+    if (which == perfbase::GpuProbe::FlatInputCopy) gpuCensusEnd(static_cast<ID3D11DeviceContext*>(context), GpuCensusSection::FrameProbeFlatInputCopy);
+}
+
 void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept {
+    if (!perfbase::g_gpuBegin) perfbase::setGpuHooks(&probeGpuBegin, &probeGpuEnd);
+    perfbase::frameBoundary();   // F4: folds the frame's UI timing figures and decides whether the next frame is clocked
     const bool appClockOn = gpuFrameClockLive();
     if (!appClockOn) frameSpanEnd(ctx);   // before the census closes its scope: the pair lies in that scope
     gpuTimingCensusScopeEnd(ctx, GetTickCount64());   // the frame's spans are all issued; closing lets their result be read

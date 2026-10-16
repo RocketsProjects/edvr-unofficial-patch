@@ -33,6 +33,7 @@
 #include "device_hook.h"   // deviceHookHmdQuality, for the configure line
 #include "gpu_timing.h"
 #include "gpu_census.h"    // issue #38: the per-feature GPU cost census
+#include "perf_baseline.h" // the baseline probe (2026-10-15): F2 (the composite) and F4 (the route timing machinery); measurement only
 #include "graphics_runtime.h"
 #include "journal_watch.h" // the on-foot gate's reading: Status.json's Flags2 bit 0, GuiFocus
 #include "screen_motion.h" // screenMotionLive: the maps gate decides by screen motion's naming only while it runs
@@ -730,6 +731,8 @@ void routeMovedMissing(int eye, uint64_t seq) {
 // are then dropped rather than reported short.
 int routeBegin(ID3D11DeviceContext* ctx, UiRouteStage stage, int eye, uint64_t seq) {
     if (!ctx || eye < 0 || eye > 1 || !seq) return -1;
+    perfbase::SelfScope selfClock(perfbase::SelfKind::Begin);   // F4: this machinery's own CPU time, on the clocked frames only
+    perfbase::noteRoutePending(g_routeHead - g_routeTail);
     const size_t si = static_cast<size_t>(stage);
     RouteSlot& s = g_route[g_routeHead % kRouteRing];
     bool ok = false;
@@ -739,6 +742,7 @@ int routeBegin(ID3D11DeviceContext* ctx, UiRouteStage stage, int eye, uint64_t s
         ok = dev && (gpuTimingAccepts(ctx) || gpuTimingBind(dev.Get(), ctx)) &&
              s.timer.begin(dev.Get(), ctx);
     }
+    perfbase::noteRouteBegin(ok);
     if (!ok) {
         ++g_win.routeUntimed[si];
         uiRouteLost(g_stageSum[si][eye], seq);
@@ -764,6 +768,8 @@ int routeBegin(ID3D11DeviceContext* ctx, UiRouteStage stage, int eye, uint64_t s
 
 void routeEnd(ID3D11DeviceContext* ctx, int idx) {
     if (idx < 0 || idx >= static_cast<int>(kRouteRing) || !ctx) return;
+    perfbase::SelfScope selfClock(perfbase::SelfKind::End);   // F4
+    perfbase::noteRouteEnd();
     // Closes the moved HDR draw's census item opened by routeBegin (the same slot, the same stage).
     if (g_route[idx].stage == UiRouteStage::kHdrMovedDraw) gpuCensusEnd(ctx, GpuCensusSection::AlteredHdrHud);
     g_route[idx].timer.end(ctx);  // a failed end reads back as not measured
@@ -782,6 +788,9 @@ void routeAbort(ID3D11DeviceContext* ctx, int idx) {
 // and a later frame has begun.
 void routePoll(ID3D11DeviceContext* ctx) {
     if (!ctx || !gpuTimingOwns(ctx)) return;
+    perfbase::SelfScope selfClock(perfbase::SelfKind::Poll);   // F4
+    const uint32_t pendingAtEntry = g_routeHead - g_routeTail;
+    uint64_t probeRead = 0;
     double closed = 0.0;
     while (g_routeTail != g_routeHead) {
         RouteSlot& s = g_route[g_routeTail % kRouteRing];
@@ -804,7 +813,9 @@ void routePoll(ID3D11DeviceContext* ctx) {
         if (s.coverage.combined) --g_routeCombinedArmedPending;
         if (s.stage == UiRouteStage::kHdrMovedDraw) --g_routeHdrMovedPending;
         ++g_routeTail;
+        ++probeRead;
     }
+    perfbase::noteRoutePoll(probeRead, g_routeHead - g_routeTail, pendingAtEntry);   // F4: the pending scan below walks what is left
     uint64_t before[2] = {g_routeLatestSeq, g_routeLatestSeq};
     for (uint32_t i = g_routeTail; i != g_routeHead; ++i) {
         const RouteSlot& s = g_route[i % kRouteRing];
@@ -2043,6 +2054,22 @@ bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt, DXGI
     return true;
 }
 
+// The baseline probe's F2 side-effect-free answer to "does this GPU load typed UAVs of the view's format": the in-place path asks the same question
+// only when the caller owns the frame, so a flat frame never reaches its cache. Its own cache, per format family, keyed on the device; the question
+// is asked once per format per device.
+bool probeTypedLoad(ID3D11Device* dev, int fi, DXGI_FORMAT view) {
+    static ID3D11Device* keyDevice = nullptr;   // identity only, never dereferenced
+    static bool checked[2] = {}, ok[2] = {};
+    if (keyDevice != dev) { keyDevice = dev; checked[0] = checked[1] = ok[0] = ok[1] = false; }
+    if (!checked[fi]) {
+        checked[fi] = true;
+        D3D11_FEATURE_DATA_FORMAT_SUPPORT2 fs{view, 0};
+        ok[fi] = SUCCEEDED(dev->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT2, &fs, sizeof(fs))) &&
+                 (fs.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0;
+    }
+    return ok[fi];
+}
+
 // The UAV over `frame` for the in-place composite, or null with the reason said once: the caller did not
 // say the frame is EDVR's to rewrite, the region is not the whole of it, it was not made UAV-bindable, the GPU
 // does not load typed UAVs of its view, the in-place shader is missing, or the view could not be made.
@@ -2301,6 +2328,16 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     if (savedCb) savedCb->Release();
 
     ++g_win.composites;
+    {
+        // F2 (perf_baseline.h): this composite's way, and what would have let it run in place. Reads, notes, changes nothing.
+        perfbase::InPlaceFacts pf;
+        pf.shaderLoaded = g_csInPlace != nullptr;
+        pf.wholeRegion = region[0] == 0 && region[1] == 0 && region[2] == fd.Width && region[3] == fd.Height;
+        pf.uavBindable = (fd.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
+        pf.typedLoadOk = probeTypedLoad(dev.Get(), fi, view);
+        perfbase::noteComposite(runtimeFlatProfile(), ownedFrame, inPlaceUav != nullptr, viaCopy, perfbase::classifyInPlace(pf),
+                                static_cast<uint64_t>(rw) * rh * 4u);
+    }
     if (inPlaceUav) {
         ++g_win.compositesInPlace;
         if (!g_inPlaceNoted) {

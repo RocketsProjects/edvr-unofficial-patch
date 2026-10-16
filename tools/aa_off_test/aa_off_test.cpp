@@ -14,6 +14,7 @@
 #include "../../src/d3d11/frame_span_tile.h"
 #include "../../src/d3d11/gpu_frame_timing.h"
 #include "../../src/d3d11/map_wait.h"
+#include "../../src/d3d11/perf_baseline.h"
 
 // The frame span holds at most kFrameSpanSlots pairs of two timestamps each (gpu_census.cpp); every one must fit the
 // clock's per-record lease budget (kLeases, 512), or a pair would be refused rather than held.
@@ -302,6 +303,35 @@ void testOverlayLine() {
     check(std::strcmp(field, "frame work span: completed 5400, skipped 3, invalid 2, last 4.257 ms") == 0, "census field: counts and the last pair in ms");
 }
 
+// The baseline probe's F5 (perf_baseline.h): the X thunk (hookedDrawIndexedInstanced) has no fast path; the probe counts the draws a D/I/N-style
+// shortcut WOULD take. A model of a run of X draws with the same inputs the thunk reads: AA-off unclaimed draws are counted as eligible, and each
+// refusal is counted under its first reason. The counts must agree with drawFastPathTaken, draw by draw.
+void testIndexedInstancedProbe() {
+    using namespace edvr::perfbase;
+    State& st = state();
+    st = State{};
+    unsigned fastByPredicate = 0;
+    for (unsigned i = 0; i < 1000; ++i) {
+        const bool aaOff = i >= 200;                 // the first 200 draws have AA on
+        const bool claimed = (i % 10) == 3;          // a tenth are claimed by a fix
+        const bool gate = i >= 900;                  // the last hundred see an open subscriber gate
+        noteDraw(DrawKind::X, true);
+        noteXReason(classifyDrawFast(DrawFastInputs{aaOff, gate, false, false, claimed}));
+        if (edvr::drawFastPathTaken(edvr::DrawPathInputs{aaOff, gate, false, false, claimed})) ++fastByPredicate;
+    }
+    check(st.f5.draws[3] == 1000, "F5 model: every owner X draw is counted");
+    check(st.f5.xReason[static_cast<size_t>(DrawFast::Fast)] == fastByPredicate, "F5 model: the eligible count equals what drawFastPathTaken takes");
+    check(st.f5.xReason[static_cast<size_t>(DrawFast::AaOn)] == 200, "F5 model: the AA-on draws are counted as AA on, claimed or not");
+    check(st.f5.xReason[static_cast<size_t>(DrawFast::Claimed)] == 80, "F5 model: of the 800 AA-off draws, the claimed tenth refuses as claimed (the claimed ones in the gate's range included)");
+    check(st.f5.xReason[static_cast<size_t>(DrawFast::GateWanted)] == 90 && fastByPredicate == 630, "F5 model: the open-gate draws that no fix claimed refuse as the gate, and the rest are eligible");
+    uint64_t sum = 0;
+    for (auto n : st.f5.xReason) sum += n;
+    check(sum == 1000, "F5 model: every X draw is counted under exactly one reason");
+    // A draw on another context counts nowhere.
+    check(!noteDraw(DrawKind::X, false) && st.f5.draws[3] == 1000, "F5 model: another context's draw is not counted");
+    st = State{};
+}
+
 void usage() {
     std::puts("usage: aa_off_test --self-test | --dry-run");
 }
@@ -327,6 +357,7 @@ int main(int argc, char** argv) {
     testGpuTimeTile();
     testFrameWorkSlack();
     testOverlayLine();
+    testIndexedInstancedProbe();
     std::printf("aa_off_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

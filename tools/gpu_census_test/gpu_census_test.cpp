@@ -30,6 +30,7 @@
 #include "../../src/common/gpu_disjoint_clock.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/log.h"
+#include "../../src/d3d11/draw_fast_path.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -57,6 +58,9 @@ void Log::note(const char* fmt, ...) {
 }
 } // namespace edvr
 
+// The baseline probe's clock (perf_baseline.h) is faked here so F4's self-time scopes read exact numbers.
+static long long g_probeClock = 0;
+#define EDVR_PERFBASE_NOW() (g_probeClock)
 #include "../../src/d3d11/gpu_census.cpp"
 
 // gpu_census.cpp calls the GPU pass profiler's two entry points (gpu_pass_profile.cpp is not linked into this rig,
@@ -788,7 +792,7 @@ void alteredFixCases() {
         ++cycle;
         onlyOwners = onlyOwners && turnOwnerOf(static_cast<GpuCensusSection>(at)) == static_cast<GpuCensusSection>(at);
     } while (at != 0 && cycle < 200);
-    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - 1 /* the FSS reveal's */ - static_cast<unsigned>(kSkinSections) && cycle == 24,
+    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - 1 /* the FSS reveal's */ - static_cast<unsigned>(kSkinSections) - static_cast<unsigned>(kProbeSections) && cycle == 24,
           "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route, FSS reveal and second-skin ones (24: the 20 there were after the terrain's two sections went, 2026-10-01, plus the three hologram sub-sections and the moved HDR HUD draw, 2026-10-13, and the sky ring's door section, 2026-10-13, less the FSS heal's door section, removed 2026-10-15; the key off changes nothing)");
     // The same cycle once the VR world route's three sections have been called this window: they take turns, 27.
     for (size_t i = kWorldFirst; i < kWorldFirst + kWorldSections; ++i) g_section[i].occurrences = 1;
@@ -1771,6 +1775,334 @@ void fssRevealCases() {
     for (auto& s : g_section) s = SectionState{};
 }
 
+// ---- the performance baseline probe (perf_baseline.h, 2026-10-15): F1-F5's pure predicates, their summary lines, and the call sites --------
+const std::string* probeLine(const char* prefix) {
+    for (const auto& l : g_lines)
+        if (l.compare(0, std::strlen(prefix), prefix) == 0) return &l;
+    return nullptr;
+}
+void probePredicateCases() {
+    using namespace perfbase;
+    // F1: the direct-input predicate. One positive, then each refusal reason on its own.
+    DirectInputFacts f;
+    f.viewFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    f.resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    f.stable = true;
+    check(classifyDirectInput(f) == DirectInput::Eligible, "F1: a validated LDR UNORM source, stable, unaliased, no overlay is eligible");
+    f.resourceFormat = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    check(classifyDirectInput(f) == DirectInput::Eligible, "F1: a typeless resource viewed as UNORM is eligible");
+    DirectInputFacts g = f; g.hdr = true;
+    check(classifyDirectInput(g) == DirectInput::Hdr, "F1: the HDR route refuses (H is written back)");
+    g = f; g.overlay = true;
+    check(classifyDirectInput(g) == DirectInput::Overlay, "F1: an overlay frame refuses (clean and raw snapshots)");
+    g = f; g.aliased = true;
+    check(classifyDirectInput(g) == DirectInput::Aliased, "F1: a read/write alias refuses");
+    g = f; g.stable = false;
+    check(classifyDirectInput(g) == DirectInput::Unstable, "F1: an unstable lifetime refuses");
+    g = f; g.viewFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    check(classifyDirectInput(g) == DirectInput::SrgbViewTypeless, "F1: an sRGB view over a typeless resource refuses, named as recoverable with a UNORM view");
+    g.resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    check(classifyDirectInput(g) == DirectInput::SrgbViewTyped, "F1: an sRGB view over a typed sRGB resource refuses, named as not recoverable");
+    g = f; g.viewFormat = DXGI_FORMAT_B8G8R8A8_UNORM; g.resourceFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+    check(classifyDirectInput(g) == DirectInput::Format, "F1: a BGRA source is not the compatible format");
+    g = f; g.resourceFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    check(classifyDirectInput(g) == DirectInput::Format, "F1: an incompatible resource format refuses");
+    // priority: HDR is named before anything else is looked at
+    g = f; g.hdr = true; g.overlay = true; g.aliased = true; g.stable = false;
+    check(classifyDirectInput(g) == DirectInput::Hdr, "F1: the first reason wins (HDR over overlay, alias and lifetime)");
+    // stability: same resource, same size, the very next frame
+    StabilityTracker t;
+    check(!t.observe(0x1000, 10, 64, 64), "F1 stability: the first sight is not stable");
+    check(t.observe(0x1000, 11, 64, 64), "F1 stability: the same resource and size on the next frame is stable");
+    check(!t.observe(0x1000, 13, 64, 64), "F1 stability: a skipped frame is not stable");
+    check(!t.observe(0x2000, 14, 64, 64), "F1 stability: another resource is not stable");
+    check(!t.observe(0x2000, 15, 128, 64), "F1 stability: a resized resource is not stable");
+    check(!t.observe(0, 16, 128, 64) && !t.observe(0, 17, 128, 64), "F1 stability: a null resource is never stable");
+
+    // F2: the in-place predicate names the first failing hardware or shape condition, ownership excluded.
+    InPlaceFacts p;
+    p.shaderLoaded = p.wholeRegion = p.uavBindable = p.typedLoadOk = true;
+    check(classifyInPlace(p) == InPlaceBlocker::None, "F2: everything present has no blocker");
+    InPlaceFacts q = p; q.shaderLoaded = false;
+    check(classifyInPlace(q) == InPlaceBlocker::NoShader, "F2: a missing in-place shader blocks");
+    q = p; q.wholeRegion = false;
+    check(classifyInPlace(q) == InPlaceBlocker::PartialRegion, "F2: a partial region blocks");
+    q = p; q.uavBindable = false;
+    check(classifyInPlace(q) == InPlaceBlocker::NoUavBind, "F2: a frame not made UAV-bindable blocks");
+    q = p; q.typedLoadOk = false;
+    check(classifyInPlace(q) == InPlaceBlocker::NoTypedLoad, "F2: a GPU without typed UAV loads blocks");
+    q = p; q.uavBindable = q.typedLoadOk = false;
+    check(classifyInPlace(q) == InPlaceBlocker::NoUavBind, "F2: the first of two blockers is named");
+
+    // F3: copy-through returnability by actual format.
+    check(copyThroughReturnable(DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, false), "F3: typed UNORM to typed UNORM with no UI resolve is returnable");
+    check(!copyThroughReturnable(DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, true), "F3: a UI resolve that wrote the frame is not a copy-through");
+    check(!copyThroughReturnable(DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS, false), "F3: a typeless dlSubmit keeps the game-format texture");
+    check(!copyThroughReturnable(DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, false), "F3: an sRGB dlSubmit keeps the game-format texture");
+    check(!copyThroughReturnable(DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, false), "F3: differing formats are not returnable");
+    check(formatClassOf(DXGI_FORMAT_R8G8B8A8_TYPELESS) == FormatClass::Typeless && formatClassOf(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) == FormatClass::Srgb &&
+              formatClassOf(DXGI_FORMAT_R16G16B16A16_FLOAT) == FormatClass::Other && formatClassOf(DXGI_FORMAT_R8G8B8A8_UNORM) == FormatClass::Unorm,
+          "F3: the format classes");
+
+    // F5: the draw classifier agrees with draw_fast_path.h's drawFastPathTaken on all 32 input combinations, and names the first reason.
+    bool agree = true;
+    for (unsigned bits = 0; bits < 32; ++bits) {
+        DrawFastInputs in;
+        in.aaOff = bits & 1; in.gateWanted = bits & 2; in.engineVelocityLive = bits & 4; in.vrWorld = bits & 8; in.claimed = bits & 16;
+        const bool taken = drawFastPathTaken(DrawPathInputs{in.aaOff, in.gateWanted, in.engineVelocityLive, in.vrWorld, in.claimed});
+        agree = agree && (classifyDrawFast(in) == DrawFast::Fast) == taken;
+    }
+    check(agree, "F5: classifyDrawFast is Fast exactly when drawFastPathTaken is");
+    check(classifyDrawFast(DrawFastInputs{false, false, false, false, false}) == DrawFast::AaOn, "F5: AA on is named first");
+    check(classifyDrawFast(DrawFastInputs{true, false, false, false, true}) == DrawFast::Claimed, "F5: a claimed draw is named");
+    check(classifyDrawFast(DrawFastInputs{true, true, false, false, false}) == DrawFast::GateWanted, "F5: an open subscriber gate is named");
+    check(classifyDrawFast(DrawFastInputs{true, false, true, false, false}) == DrawFast::EngineVelocity, "F5: open engine velocity is named");
+    check(classifyDrawFast(DrawFastInputs{true, false, false, true, false}) == DrawFast::VrWorld, "F5: the VR world route is named");
+    check(classifyDrawFast(DrawFastInputs{true, false, false, false, false}) == DrawFast::Fast, "F5: AA off and nothing claiming is Fast");
+}
+
+void probeLineCases() {
+    using namespace perfbase;
+    const uint64_t start = GetTickCount64() - 30000;
+    // A window in which nothing ran: every item says so in words, and none prints a number that could be read as a measurement.
+    freshWindow(start);
+    resetWindow();
+    logAndResetWindow(start + 30000);
+    const char* names[] = {"perf baseline F1", "perf baseline F2", "perf baseline F3", "perf baseline F4", "perf baseline F5"};
+    for (const char* n : names) {
+        const std::string* l = probeLine(n);
+        check(l != nullptr, "probe lines: each of F1-F5 is written every window");
+        check(l && l->find("not exercised") != std::string::npos, "probe lines: a path that never ran says 'not exercised'");
+        check(l && l->find(" 0 ") == std::string::npos, "probe lines: a not-exercised line carries no zero that could pass for a measurement");
+    }
+
+    // F1: a flat window. 3 resolve copies (two HDR, one eligible LDR) and 1 spatial copy.
+    freshWindow(start);
+    resetWindow();
+    DirectInputFacts ok; ok.viewFormat = DXGI_FORMAT_R8G8B8A8_UNORM; ok.resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    DirectInputFacts hdr; hdr.hdr = true; hdr.viewFormat = DXGI_FORMAT_R11G11B10_FLOAT; hdr.resourceFormat = DXGI_FORMAT_R11G11B10_FLOAT;
+    noteFlatInputCopy(CopySite::Resolve, 0, ok, 0x10, 100, 1920, 1080, 1920ull * 1080 * 4);
+    noteFlatInputCopy(CopySite::Resolve, 0, ok, 0x10, 101, 1920, 1080, 1920ull * 1080 * 4);   // stable now
+    noteFlatInputCopy(CopySite::Resolve, 2, hdr, 0x20, 102, 1920, 1080, 1920ull * 1080 * 4);
+    noteFlatInputCopy(CopySite::Spatial, 0, ok, 0x10, 103, 1920, 1080, 1920ull * 1080 * 4);
+    g_section[kProbeFirst].occurrences = 4;
+    g_section[kProbeFirst].sampler.totals.ms = 0.4;
+    g_section[kProbeFirst].sampler.totals.samples = 2;
+    g_windowFrames = 100;
+    logAndResetWindow(start + 30000);
+    const std::string* f1 = probeLine("perf baseline F1");
+    check(f1 && f1->find("4 copies (resolve 3, spatial fallback 1; slot 0 3, other slots 1)") != std::string::npos, "F1 line: the copies by site and by route");
+    check(f1 && f1->find("direct-input eligible 1 (25.0%)") != std::string::npos, "F1 line: one of four is eligible (the first sight and the HDR copy are refused, the repeat is stable, the spatial copy is a new site)");
+    check(f1 && f1->find("hdr 1") != std::string::npos && f1->find("unstable lifetime 2") != std::string::npos, "F1 line: refusals by reason");
+    check(f1 && f1->find("gpu 0.200 ms per copy (2 timed)") != std::string::npos, "F1 line: the copy's GPU time apart from preparation and backend");
+    check(probeLine("perf baseline F2") && probeLine("perf baseline F2")->find("not exercised") != std::string::npos,
+          "F1 window: the other items still say not exercised");
+    // the counters were reset with the window
+    check(perfbase::state().f1.calls[0] == 0 && perfbase::state().f1.calls[1] == 0, "F1: the window resets its counters");
+    // a copy site that entered the GPU section but timed nothing says so
+    freshWindow(start);
+    resetWindow();
+    noteFlatInputCopy(CopySite::Resolve, 0, ok, 0x10, 5, 64, 64, 64 * 64 * 4);
+    g_section[kProbeFirst].occurrences = 1;
+    logAndResetWindow(start + 30000);
+    f1 = probeLine("perf baseline F1");
+    check(f1 && f1->find("gpu entered but no copy was timed this window") != std::string::npos, "F1 line: an entered section with no timed sample says so");
+
+    // F2: flat and VR, with the flat adapter's evidence.
+    freshWindow(start);
+    resetWindow();
+    noteComposite(true, false, false, false, InPlaceBlocker::None, 1920ull * 1080 * 4);
+    noteComposite(true, false, false, false, InPlaceBlocker::NoTypedLoad, 1920ull * 1080 * 4);
+    noteComposite(false, true, true, false, InPlaceBlocker::None, 0);
+    noteFlatPicture(true, true, true);
+    noteFlatPicture(false, false, true);
+    g_windowFrames = 50;
+    logAndResetWindow(start + 30000);
+    const std::string* f2 = probeLine("perf baseline F2");
+    check(f2 && f2->find("flat 2 composites (in place 0, out of place 2, via copy 0; owned-frame calls 0; would run in place if owned 1; blocked by shader 0 / region 0 / uav-bind 0 / typed-load 1") != std::string::npos,
+          "F2 line: flat composites, the ownership-gated candidate and the blocker");
+    check(f2 && f2->find("vr 1 composites (in place 1, out of place 0") != std::string::npos && f2->find("owned-frame calls 1") != std::string::npos, "F2 line: the VR side, taken in place by an owned frame");
+    check(f2 && f2->find("flat picture: treated 1, untreated 1, uav-bindable 1, whole region 2") != std::string::npos, "F2 line: the flat adapter's evidence");
+    check(f2 && f2->find("out-of-place wrote 8.3 MB per composite") != std::string::npos, "F2 line: bytes written by the out-of-place composite");
+    check(f2 && f2->find("gpu not entered this window") != std::string::npos, "F2 line: the composite's GPU section was not entered");
+
+    // F3: both eyes, by actual format; one eye idle.
+    freshWindow(start);
+    resetWindow();
+    noteTrainedEye(0, false, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, 2000, 2000);
+    noteTrainedEye(0, false, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS, 2000, 2000);
+    noteTrainedEye(0, true, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS, 2000, 2000);
+    noteTrainedEye(7, false, 0, 0, 1, 1);   // an eye that does not exist is dropped
+    logAndResetWindow(start + 30000);
+    const std::string* f3 = probeLine("perf baseline F3");
+    check(f3 && f3->find("left 3 eye-frames at 2000x2000") != std::string::npos && f3->find("ui resolve wrote 1, copy-through 2 [UNORM 1, TYPELESS 1, SRGB 0, other 0], returnable as dlOut 1, 16.0 MB per copy") != std::string::npos,
+          "F3 line: copy-throughs by dlSubmit's actual format, the returnable one counted");
+    check(f3 && f3->find("right none") != std::string::npos, "F3 line: an idle eye is named, not zeroed");
+
+    // F4: the fake clock makes the self-time exact.
+    freshWindow(start);
+    resetWindow();
+    state().f4.ordinal = 0;
+    state().f4.gate = false;
+    frameBoundary();   // frame ordinal 1: not clocked
+    check(!state().f4.gate, "F4: the first frame is not clocked");
+    for (unsigned i = 1; i < kSelfFramePeriod - 1; ++i) frameBoundary();
+    frameBoundary();   // ordinal kSelfFramePeriod: the NEXT frame is clocked
+    check(state().f4.gate, "F4: one frame in kSelfFramePeriod is clocked");
+    g_probeClock = 1000;
+    {
+        SelfScope b(SelfKind::Begin);
+        g_probeClock = 1500;
+    }
+    noteRouteBegin(true);
+    noteRouteBegin(false);
+    {
+        SelfScope e(SelfKind::End);
+        g_probeClock = 1700;
+    }
+    noteRouteEnd();
+    {
+        SelfScope pl(SelfKind::Poll);
+        g_probeClock = 2300;
+    }
+    noteRoutePoll(1, 40, 41);
+    check(state().f4.selfTicks[0] == 500 && state().f4.selfTicks[1] == 200 && state().f4.selfTicks[2] == 600, "F4: the scopes sum each kind's ticks on a clocked frame");
+    frameBoundary();   // folds the clocked frame
+    check(state().f4.sampledFrames == 1 && state().f4.frameUs.n == 1, "F4: the clocked frame lands in the percentile reservoir");
+    check(!state().f4.gate, "F4: the frame after it is not clocked");
+    g_probeClock = 5000;
+    { SelfScope b(SelfKind::Begin); g_probeClock = 9000; }
+    check(state().f4.selfTicks[0] == 500, "F4: a frame that is not clocked adds no self-time");
+    g_windowFrames = 100;
+    logAndResetWindow(start + 30000);
+    const std::string* f4 = probeLine("perf baseline F4");
+    check(f4 && f4->find("timer pairs begun 1 ") != std::string::npos && f4->find("untimed 1") != std::string::npos && f4->find("ended 1") != std::string::npos &&
+              f4->find("polls 1 ") != std::string::npos && f4->find("read 1 timers") != std::string::npos && f4->find("scanned 40") != std::string::npos &&
+              f4->find("pending peak 41") != std::string::npos,
+          "F4 line: pairs, untimed, polls, entries scanned and the pending peak");
+    check(f4 && f4->find("over 1 clocked frames (1 in 8)") != std::string::npos, "F4 line: the self-time says how many frames it was clocked on");
+    // a machinery that never ran says so
+    freshWindow(start);
+    resetWindow();
+    logAndResetWindow(start + 30000);
+    check(probeLine("perf baseline F4") && probeLine("perf baseline F4")->find("not exercised") != std::string::npos, "F4 line: idle machinery is 'not exercised'");
+
+    // F5: owner draws counted, others not; every 64th clocked.
+    freshWindow(start);
+    resetWindow();
+    unsigned clocked = 0;
+    for (unsigned i = 0; i < 128; ++i) clocked += noteDraw(DrawKind::X, true) ? 1u : 0u;
+    check(clocked == 2, "F5: one draw in 64 is clocked");
+    check(!noteDraw(DrawKind::D, false) && state().f5.draws[0] == 0, "F5: a draw on another context is not counted and not clocked");
+    noteDraw(DrawKind::D, true);
+    noteFast(DrawKind::D, true);
+    noteFast(DrawKind::D, false);
+    check(state().f5.fast[0] == 1, "F5: the fast count follows the owner only");
+    for (unsigned i = 0; i < 100; ++i) noteXReason(DrawFast::Fast);
+    for (unsigned i = 0; i < 28; ++i) noteXReason(DrawFast::AaOn);
+    noteHookSelf(DrawKind::X, 10);
+    g_windowFrames = 10;
+    logAndResetWindow(start + 30000);
+    const std::string* f5 = probeLine("perf baseline F5");
+    check(f5 && f5->find("X 128 draws") != std::string::npos && f5->find("would take) 100 of 128 (78.1%)") != std::string::npos && f5->find("aa on 28") != std::string::npos,
+          "F5 line: X draws, the AA-off unclaimed count against the total, the refusal by reason");
+    check(f5 && f5->find("D 1 draws") != std::string::npos && f5->find("fast path 1") != std::string::npos && f5->find("(1 clocked)") != std::string::npos,
+          "F5 line: D counted with its fast-path count, and the clocked samples of X");
+
+    // The worst case: every counter large. Every probe line must fit the log's line.
+    freshWindow(start);
+    resetWindow();
+    State& st = state();
+    for (auto& c : st.f1.calls) c = 99999999999ull;
+    for (auto& r : st.f1.verdict) for (auto& v : r) v = 99999999999ull;
+    st.f1.bytes = 99999999999999ull;
+    for (auto& sd : st.f2.side) {
+        sd.composites = sd.inPlace = sd.outOfPlace = sd.viaCopy = sd.ownedCalls = sd.wouldBeInPlaceIfOwned = 99999999999ull;
+        for (auto& b : sd.blocker) b = 99999999999ull;
+        sd.outBytes = 99999999999999ull;
+    }
+    st.f2.flatTreated = st.f2.flatUntreated = st.f2.flatPictureUav = st.f2.flatRegionWhole = 99999999999ull;
+    for (auto& e : st.f3) {
+        e.frames = e.uiResolved = e.copyThrough = e.returnable = e.bytes = 99999999999ull;
+        for (auto& b : e.byFormat) b = 99999999999ull;
+        e.outFormat = e.submitFormat = 4294967295u; e.width = e.height = 4294967295u;
+    }
+    st.f4.begun = st.f4.untimed = st.f4.ended = st.f4.polls = st.f4.readTimers = st.f4.pendingScanned = 99999999999ull;
+    st.f4.maxBegunPerFrame = st.f4.maxPollsPerFrame = st.f4.pendingPeak = 4294967295u;
+    st.f4.sampledFrames = 1000;
+    st.f4.frameUs.add(99999.0f);
+    for (auto& t : st.f4.selfTicks) t = 99999999999ull;
+    for (auto& d : st.f5.draws) d = 99999999999ull;
+    for (auto& d : st.f5.fast) d = 99999999999ull;
+    for (auto& d : st.f5.xReason) d = 99999999999ull;
+    for (auto& h : st.f5.hookUs) h.add(99999.0f);
+    g_section[kProbeFirst].occurrences = 999999;
+    g_section[kProbeFirst].sampler.totals.ms = 1.0;
+    g_section[kProbeFirst].sampler.totals.samples = 1;
+    g_windowFrames = 100;
+    logAndResetWindow(start + 30000);
+    size_t longest = 0;
+    for (const char* n : names) {
+        const std::string* l = probeLine(n);
+        check(l != nullptr, "probe lines: every item wrote a line at the worst case");
+        if (l) longest = std::max(longest, l->size());
+        check(l && l->size() < 1000, "probe lines: every item's line at its worst fits the log's line");
+    }
+    std::printf("gpu_census_test: the longest perf baseline line at its worst is %zu characters\n", longest);
+    resetWindow();
+    for (auto& sc : g_section) sc = SectionState{};
+}
+
+// The probe's sections take no turn until called, the GPU hook is installed by the first census frame, and the call sites are where the lines say.
+void probeWiringCases() {
+    for (auto& sc : g_section) sc = SectionState{};
+    check(hasNoTurnYet(kProbeFirst) && hasNoTurnYet(kProbeFirst + 1), "probe sections: no turn in the rotation until called this window");
+    g_section[kProbeFirst].occurrences = 1;
+    check(!hasNoTurnYet(kProbeFirst) && hasNoTurnYet(kProbeFirst + 1), "probe sections: a called section takes its turn, the other still has none");
+    for (auto& sc : g_section) sc = SectionState{};
+
+    const auto slurp = [](const char* path, std::string& out) {
+        std::ifstream in(path, std::ios::binary);
+        out.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        return bool(in);
+    };
+    const auto count = [](const std::string& text, const char* needle) {
+        size_t n = 0, at = 0;
+        const std::string s(needle);
+        while ((at = text.find(s, at)) != std::string::npos) { ++n; at += s.size(); }
+        return n;
+    };
+    std::string mono, temporal, ui, flatUi, vscreen, census;
+    check(slurp("src/d3d11/flat_mono_resolve.cpp", mono) && slurp("src/d3d11/temporal_pass.cpp", temporal) && slurp("src/d3d11/ui_layer.cpp", ui) &&
+              slurp("src/d3d11/flat_ui_layer.cpp", flatUi) && slurp("src/d3d11/vscreen.cpp", vscreen) && slurp("src/d3d11/gpu_census.cpp", census),
+          "probe wiring: the probed sources open (this rig runs from the repository root, as build.bat does)");
+    check(count(mono, "perfbase::GpuProbeScope copyProbe(context,perfbase::GpuProbe::FlatInputCopy);") == 2 &&
+              count(mono, "probeInputCopy(perfbase::CopySite::Resolve,") == 1 && count(mono, "probeInputCopy(perfbase::CopySite::Spatial,") == 1,
+          "probe wiring F1: the resolve's and the spatial fallback's input copies are each timed and noted exactly once");
+    check(count(temporal, "GpuCensusScope copyThroughTimed(ctx, GpuCensusSection::FrameProbeVrCopyThrough);") == 1 &&
+              count(temporal, "perfbase::noteTrainedEye(") == 1,
+          "probe wiring F3: the copy-through is timed and the eye-frame noted exactly once");
+    check(count(ui, "perfbase::noteComposite(") == 1 && count(ui, "perfbase::SelfScope selfClock(perfbase::SelfKind::Begin);") == 1 &&
+              count(ui, "perfbase::SelfScope selfClock(perfbase::SelfKind::End);") == 1 && count(ui, "perfbase::SelfScope selfClock(perfbase::SelfKind::Poll);") == 1 &&
+              count(ui, "perfbase::noteRoutePoll(") == 1 && count(ui, "perfbase::noteRouteBegin(ok);") == 1 && count(ui, "perfbase::noteRouteEnd();") == 1,
+          "probe wiring F2/F4: the composite is noted once and the route's begin, end and poll are each clocked and counted once");
+    check(count(flatUi, "perfbase::noteFlatPicture(") == 1, "probe wiring F2: the flat adapter notes the picture once");
+    check(count(vscreen, "DrawClock clock(perfbase::DrawKind::D, ") == 1 && count(vscreen, "DrawClock clock(perfbase::DrawKind::I, ") == 1 &&
+              count(vscreen, "DrawClock clock(perfbase::DrawKind::N, ") == 1 && count(vscreen, "DrawClock clock(perfbase::DrawKind::X, ") == 1 &&
+              count(vscreen, "perfbase::noteXReason(") == 1 && count(vscreen, "perfbase::noteFast(") == 3,
+          "probe wiring F5: each draw kind builds its clock once and the X thunk classifies once");
+    check(count(census, "perfbase::formatF1(") == 1 && count(census, "perfbase::formatF2(") == 1 && count(census, "perfbase::formatF3(") == 1 &&
+              count(census, "perfbase::formatF4(") == 1 && count(census, "perfbase::formatF5(") == 1 && count(census, "perfbase::resetWindow();") == 1 &&
+              count(census, "perfbase::frameBoundary();") == 1 && count(census, "perfbase::setGpuHooks(") == 1,
+          "probe wiring: the census writes each item's line once a window, resets the probe, and installs the hooks and frame fold");
+    // the hook maps the F1 probe onto its census section
+    for (auto& sc : g_section) sc = SectionState{};
+    g_activeSection = 0;   // not this section's turn: the begin counts and returns before it would touch the (null) context
+    probeGpuBegin(nullptr, perfbase::GpuProbe::FlatInputCopy);
+    check(g_section[kProbeFirst].occurrences == 1, "probe wiring F1: the GPU hook counts an occurrence on the input copy's census section");
+    for (auto& sc : g_section) sc = SectionState{};
+}
+
 void run() {
     instrumentCases();
     estimatorMathCases();
@@ -1789,6 +2121,9 @@ void run() {
     skinTurnCases();
     fssRevealCases();
     skinWiringCases();
+    probePredicateCases();
+    probeLineCases();
+    probeWiringCases();
     lineLengths();
     failureRateCases();
     Runtime runtime;

@@ -84,6 +84,11 @@ enum class GpuCensusSection : uint8_t {
     FrameSkinJoinClear,       // the join's 3-table clear pass (F17: 64 groups of 256 threads over all 65,536 rows of the three tables), issued right before the join
     FrameSkinJoin,            // the join dispatch (one 256-thread group; since F17 without the clear), the plan upload and the job-table copy
     FrameSkinPose,            // the pose table build: instance copy, the six dispatches (clear, mark, scatter, scatter-rest, verify, finish)
+    // The performance baseline probe's GPU intervals (perf_baseline.h, 2026-10-15; docs/performance.md "Baseline probe"). Each times a copy that is
+    // ALREADY INSIDE another section's span or the game's own frame, so none is added to a total; they are reported on the "perf baseline" lines and, like
+    // the skin's, have no turn in the rotation until called this window. Measurement only.
+    FrameProbeFlatInputCopy,  // F1: the flat resolver's input copy into its private colour image (flat_mono_resolve.cpp, resolve and spatial fallback)
+    FrameProbeVrCopyThrough,  // F3: the VR trained output's copy of dlOut into dlSubmit when the UI resolve did not write it (temporal_pass.cpp)
     // Elite's OWN draws that EDVR alters (see AlteredDrawClass below): the game's
     // draw timed whole, so each figure holds the game's own work in it plus what
     // EDVR adds by binding its target or swapping its shader. NOT EDVR's cost,

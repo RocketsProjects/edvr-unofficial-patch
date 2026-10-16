@@ -98,6 +98,10 @@ class D3D11Stereo final {
   // unavailable admission leaves resources alive for an explicit retry.
   XrResult drain();
   bool needsGpuDrain() const { return gpuPending_; }
+  // Which submission shape the last setup chose (the baseline probe's F6 note on native_submit_phases): the scene is drawn on the caller's immediate
+  // context, or recorded on a deferred one and executed through submitCommands, with or without a render-thread executor.
+  bool ownedImmediateScene() const { return ownedImmediateScene_; }
+  bool usesImmediateExecutor() const { return immediateExecutor_ != nullptr; }
   // Must finish before the host destroys the session/device/executor. A host
   // using an executor drains on its render caller before closing admission.
   // Destroying this object with uncompleted GPU work is a contract violation.

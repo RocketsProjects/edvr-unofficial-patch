@@ -268,6 +268,7 @@ void capturedSelfTest(bool owned=false) {
         StereoWallTimes times{};
         check(f.renderer.renderCaptured(f.views,space,capture,layer,&observer,&times)==XR_SUCCESS,"captured shader path");
         check(times.acquire>=0&&times.wait>=0&&times.draw>0&&times.release>=0,"draw submission wall brackets available");
+        check(times.submit[0]>=0&&times.submit[1]>=0&&times.submit[0]+times.submit[1]<=times.draw,"F6: each eye's submit hand-off is measured inside the draw bracket, never beside it");
         check(observer.events.size()==4&&observer.events[0].begin&&!observer.events[1].begin&&
           observer.events[2].begin&&!observer.events[3].begin&&observer.events[0].phase==2&&
           observer.events[1].phase==2&&observer.events[2].phase==3&&observer.events[3].phase==3&&

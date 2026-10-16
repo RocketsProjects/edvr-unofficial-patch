@@ -8,6 +8,7 @@
 #include "flat_ui_layer_math.h"
 #include "exposure_fix.h"         // lookupShaderHash: compare the physical shaders with the draw's cached pair
 #include "tonemap_admit.h"        // read-only structural description of the actual game's tone-shaped draw
+#include "perf_baseline.h"        // the baseline probe (2026-10-15): F2's evidence about the picture the composite lands on
 #include "ui_layer.h"
 
 #include "../common/log.h"
@@ -605,6 +606,7 @@ void flatUiLayerAtCopy(ID3D11DeviceContext* ctx, uint64_t frame, bool treated, u
         ++g_w.compositeNone;
         return;
     }
+    perfbase::noteFlatPicture(treated, (td.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0, true);   // F2: evidence about the picture, not an ownership proof
     D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
     now->GetDesc(&vd);
     if (!g_view || g_viewTex != out || g_viewFmt != vd.Format) {

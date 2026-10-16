@@ -7,6 +7,7 @@
 #include "../../src/d3d11/engine_velocity_emit.h"
 #include "../../src/d3d11/flat_hdr_crumbs.h"
 #include "../../src/d3d11/flat_isolation_mode.h"
+#include "../../src/d3d11/perf_baseline.h"
 #include "../../src/d3d11/flat_context_state.h"
 #include "../hdr_crumb_trail.h"
 #include <d3d11_1.h>
@@ -490,6 +491,9 @@ int main(int argc,char** argv) {
           recovered && restored() && pixel(recovered.Get())==0xff0000ff &&
           edvr::flatMonoResolveStats().allocations==preflightAllocations,
           "preflighted spatial fallback restores state and displays current jittered frame after SDK refusal without allocation");
+    check(edvr::perfbase::state().f1.calls[static_cast<size_t>(edvr::perfbase::CopySite::Resolve)]>0 &&
+          edvr::perfbase::state().f1.calls[static_cast<size_t>(edvr::perfbase::CopySite::Spatial)]>0,
+          "F1 probe: the resolve's and the spatial fallback's input copies each noted themselves (perf_baseline.h)");
     ++f.frame;run(true);check(backendReset,"backend failure and fallback invalidate history");
     stats=edvr::flatMonoResolveStats();check(stats.backendFailures==1 && stats.currentContinueRun==0,
         "backend failure and following accepted reset are visible in cumulative statistics");
