@@ -3568,6 +3568,24 @@ if errorlevel 1 ( echo [edvr] ERROR: particle capture test build failed & exit /
 "%OBJ%\particlecapture\particle_capture_test.exe" --self-test "%ROOT%" || exit /b 1
 exit /b 0
 
+:rig_billboard_rollfree_test
+echo [edvr] === billboard_rollfree_test.exe ===
+REM The roll-free scene block for the camera-facing billboards (src\d3d11\billboard_rollfree.h; docs\billboard-root-cause-2026-10-16.md) on a WARP
+REM device with the D3D debug layer: the basis for any roll (levelled right, the game's lengths and handedness, refused near straight up), the copy
+REM route (CopyResource, a 32-byte UpdateSubresource of a patch buffer, a partial CopySubresourceRegion into the constant-buffer copy) clean under
+REM the debug layer, every byte but rows 277/278 the game's, a real draw whose vertex stage reads the roll-free rows while the pixel stage still reads
+REM the game's block, the unchanged path (the old code) showing the roll, state restored, one copy per write however many draws follow, stock doing
+REM nothing, several blocks, and the source pins from the repo root. Output under obj\ and System32's d3d11 (no d3d11.dll beside the exe).
+if not exist "%OBJ%\billboardrollfree" mkdir "%OBJ%\billboardrollfree"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\billboardrollfree\\" /Fe"%OBJ%\billboardrollfree\billboard_rollfree_test.exe" ^
+    "tools\billboard_rollfree_test\billboard_rollfree_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: billboard rollfree test build failed & exit /b 1 )
+"%OBJ%\billboardrollfree\billboard_rollfree_test.exe" --dry-run || exit /b 1
+"%OBJ%\billboardrollfree\billboard_rollfree_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
 :rig_panel_curve_test
 echo [edvr] === panel_curve_test.exe ===
 REM The curved screen's strip (src\d3d11\panel_curve.cpp; fix.panel_curvature) compiled for real with the real Config, Log and fault

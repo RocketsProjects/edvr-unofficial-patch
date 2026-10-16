@@ -414,11 +414,11 @@ static void p6Pins(const std::string& root) {
     const std::string pf = slurp(root + "\\src\\d3d11\\particle_fix.cpp");
     const std::string vs = slurp(root + "\\src\\d3d11\\vscreen.cpp");
     check(!pf.empty() && !vs.empty(), "P6.sources-readable");
-    check(countOf(pf, "particlecap::capture(g_sh") == 1, "P6.particle-capture-goes-through-the-core");
+    check(countOf(pf, "g_blocks.capture(res") == 1, "P6.particle-capture-goes-through-the-core");
     check(pf.find("memcpy(g_shadow") == std::string::npos, "P6.no-whole-block-memcpy-left");
     check(countOf(pf, "g_track.noteMatch();") == 1, "P6.a-matched-draw-tells-the-tracker");
     check(countOf(pf, "g_track.noteLearned()") == 1, "P6.a-learn-tells-the-tracker");
-    check(countOf(pf, "g_track.frameBoundary(g_target != nullptr)") == 1, "P6.the-boundary-asks-the-tracker");
+    check(countOf(pf, "g_track.frameBoundary(anyBlockWatched())") == 1, "P6.the-boundary-asks-the-tracker");
     check(countOf(vs, "particleFrameBoundary();") == 1, "P6.vscreen-calls-the-boundary-once");
     check(countOf(vs, "unmapprobe::frameTick(") == 1, "P6.vscreen-prints-the-line-once");
     for (const char* r : {"kPanel", "kCamGlitch", "kCamSunglare", "kCamTemporal", "kCamRowsBurst", "kSceneCb", "kParticle", "kBillboard"})

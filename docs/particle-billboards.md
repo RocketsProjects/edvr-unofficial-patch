@@ -15,6 +15,8 @@
   (and a flag of "write-combined"). **Refutes it:** the particle reader costs under ~50 us a frame on the AMD
   rig, or A/B `steady` vs `stock` shows no fps difference with the fix in.
 - **Also riding the flight:** the `cb1 rows burst:` lines (section "The cb1 rows burst"): per-write rows 275..279 for 4 frames twice, to see whether 277..279 differ per eye on canted displays and how many 5376-byte writes a frame the game makes.
+- **Roll-free for the other billboards (explosions above all):** built on `claude/billboard-roll-free`, not merged, not
+  flown, under the same `steady` key; see `billboard-root-cause-2026-10-16.md`, "E1 narrowed".
 - **Temporary keys:** none added. `fix.particle_billboard` is hot-reloadable (edvr.ini, polled once a second).
 - **Ruled out:** nothing yet.
 - **Next flight:** Frontier VR install of the branch, RX 9070 XT user's setup if possible; A/B

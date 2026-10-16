@@ -1857,6 +1857,9 @@ inline bool drawPathFast(DrawVerdict v) {
 DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                                UINT instances, const DrawArgs& args) {
     State* s = g_state;
+    // The roll-free billboard block's pending rebind belongs to ONE draw: forwardWithVerdict consumes it, and a draw that
+    // never gets there (the AA-off fast path, a foreign context) must not leave it for the next (particle_fix.h).
+    particleRollFreeClear();
     // A draw on somebody else's context is not our panel and not an eye draw.
     // This one early return covers all four draw thunks, and it covers them
     // where the counting actually happens rather than four times over.
@@ -3402,7 +3405,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     }
     // The particle billboards' constants, same discipline again: the
     // basis vectors cannot be read at the draw, so the write is watched.
-    if (mapSub0 && res == particleTarget()) {
+    if (mapSub0 && particleBlockWatched(res)) {
         s->partResource = res;
         s->partData = mapped->pData;
         s->partBytes = 0;
@@ -3535,7 +3538,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         unmapprobe::g_probe.noteParticleCapture(camBlockReadThisUnmap);
         guardedBudget(g_particleCaptureBudget, [&] {
             unmapprobe::g_probe.timed(unmapprobe::kParticle, [&]() -> uint64_t {
-                return particleCapture(s->partData, s->partBytes);
+                return particleCapture(res, s->partData, s->partBytes);
             });
         });
         s->partResource = nullptr;
@@ -4027,6 +4030,15 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             // nothing armed to clean up.
         }
     } uiDepthScope(self);
+    // The roll-free billboard block (particle_fix.h, billboard_rollfree.h): a camera-facing billboard whose vertex shader is
+    // not transcribed gets a copy of the scene block with the roll taken out of rows 277/278 at VERTEX slot 1 for this draw
+    // and every re-issue of it below; put back on every way out. Owner context only. Never a verdict of its own: the draw
+    // goes through the whole ladder as the game made it.
+    struct RollFreeScope {
+        ID3D11DeviceContext* ctx;
+        ~RollFreeScope() { if (detail::g_rollFreeEngaged) particleRollFreeEnd(ctx); }
+    } rollFreeScope{self};
+    if (owner && v != DrawVerdict::kSkip && detail::g_rollFreePending) particleRollFreeBegin(self);
     if (v == DrawVerdict::kSkip) {
         // A skipped draw is not drawn at all, so there is nothing to replace.
         // Clearing here rather than trusting the next draw to do it keeps the
