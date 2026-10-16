@@ -56,6 +56,15 @@ MUTATIONS = [
     ("guard-ignores-rtv-generation", "g_guardVerified.rtvGen == bindingGeneration(BindSlot::Rtv0) &&", "true &&", "guard G2"),
     ("guard-ignores-dsv-generation", "g_guardVerified.dsvGen == bindingGeneration(BindSlot::Dsv0);", "true;", "guard G2"),
     ("guard-never-trusts", "return !g_guardTrustOff && g_guardVerified.valid", "return false && g_guardVerified.valid", "guard G2"),
+    # The lazy guard (round 4): the private t3 stays bound across the group's draws. G1: a kept t3 must be the game's after a game set of t3 or a
+    # non-guarded draw; G5: and it must cost what it saves (the second draw of a group binds nothing).
+    ("lazy-guard-kept-ignores-t3-generation",
+     "const bool keptBound = g_bound.guardSrv3.Get() == privateSrv && bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen;",
+     "const bool keptBound = g_bound.guardSrv3.Get() == privateSrv;", "guard G1"),
+    ("lazy-guard-nonguard-draw-keeps-t3", "if (!guardOverlay && g_bound.guardSrv3) guardRestoreT3(ctx);", "", "flat lazy"),
+    ("lazy-guard-flushes-at-every-overlay-draw", " && !(e.overlayGroup && e.overlayBaseSrv)) {\n        ++g_draw.flatFlushBy",
+     ") {\n        ++g_draw.flatFlushBy", "guard G5"),
+    ("lazy-guard-ends-eager", "const bool eager = !g_flatLazy;", "const bool eager = !g_flatLazy || g_bound.guardSrv3;", "guard G5"),
 ]
 CL_FLAGS = ["/nologo", "/O2", "/MT", "/std:c++17", "/EHsc", "/W4", "/DWIN32_LEAN_AND_MEAN", "/DNOMINMAX",
             "/D_CRT_SECURE_NO_WARNINGS", "/DUNICODE", "/D_UNICODE", "/utf-8", "/DEDVR_ENGINE_VELOCITY_RIG",
@@ -158,7 +167,7 @@ def run(only, jobs):
         failures = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
             for name, case, result in pool.map(one, selected):
-                labels = re.findall(r"^FAIL: ((?:cap R|guard G)\d+):", result.stderr, re.M)
+                labels = re.findall(r"^FAIL: ((?:cap R|guard G)\d+|flat lazy):", result.stderr, re.M)
                 if result.returncode != 1 or case not in labels:
                     failures.append(name + ": survived or failed the wrong check (exit " + str(result.returncode) + ", wanted " + case
                                     + ")\n" + result.stdout + result.stderr)
