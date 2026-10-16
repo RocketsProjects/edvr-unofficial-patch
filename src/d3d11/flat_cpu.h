@@ -56,6 +56,7 @@
 #include <cstring>
 
 #include "engine_motion_cpu.h"
+#include "flat_offscreen_counts.h"   // what the offscreen fast path did, by reason
 #include "flat_query_cut.h"   // the counts of the questions answered from what the runtime tracks
 
 #ifndef EDVR_FLATCPU_NOW
@@ -108,6 +109,7 @@ enum Family : unsigned {
     kHdrRoute,      // the HDR route's trigger detector (flat_hdr_route.h) on every draw, observe-only with the key off
     kForegroundCapture, // foreground identity/certificate and original-VS stream-output capture
     kInject,        // the camera inject callback (refreshPre / refreshPost): game threads
+    kOffscreenFast, // the offscreen fast path's own time (flat_offscreen_fast.h): the draws that skipped the draw scope's constructor, calls = those draws
     kFamilies
 };
 struct FamilyInfo {
@@ -133,6 +135,7 @@ inline constexpr FamilyInfo kInfo[kFamilies] = {
     {"hdr route", false},
     {"foreground capture", false},
     {"camera inject", true},
+    {"offscreen fast path", false},
 };
 constexpr unsigned kCal = kFamilies;   // the calibration cell, never reported
 constexpr unsigned kCells = kFamilies + 1;
@@ -421,6 +424,8 @@ struct WindowReport {
     // The engine-motion draw wrapper's D3D immediate-context calls in the window (state gets and
     // sets, clears and copies), and the draws it substituted, which they belong to.
     uint64_t stateCalls = 0, substitutedDraws = 0;
+    // The offscreen fast path's counts in the window (flat_offscreen_fast.h): counters, no clock, so they print whether or not the timing is on.
+    FlatOffscreenCounts offscreen;
     // The questions the flat path answered from what the runtime already tracks instead of asking the D3D
     // context (flat_query_cut.h): how many, how many were also put to the context and compared, how many of
     // those comparisons were wrong, and which states ask the context again.
@@ -533,6 +538,8 @@ public:
     void noteGpuResolve(double ms) noexcept { if (gpuResolve_ < kMaxSamples) gpuResolveMs_[gpuResolve_++] = static_cast<float>(ms); }
     void noteGpuSkipped() noexcept { ++gpuSkipped_; }
     void noteGpuInvalid() noexcept { ++gpuInvalid_; }
+    // The offscreen fast path's counts for the frame that just ended, drained with the wrapper's.
+    void noteOffscreen(const FlatOffscreenCounts& c) noexcept { offscreen_.add(c); }
     // Engine motion's draw wrapper, drained once a frame: the D3D calls it issued and the draws
     // it substituted (engine_velocity.h, engineVelocityTakeWrapperCounts).
     void noteWrapper(uint64_t stateCalls, uint64_t substitutedDraws) noexcept {
@@ -598,6 +605,7 @@ public:
         }
         out.stateCalls = stateCalls_;
         out.substitutedDraws = substitutedDraws_;
+        out.offscreen = offscreen_;
         out.queries = queries_;
         percentiles(interval_, (std::min)(frames_, kMaxSamples), &out.presentP50Ms, &out.presentP95Ms);
         out.gpuFrameSamples = gpuFrame_;
@@ -645,6 +653,7 @@ private:
         std::memset(emOtherTicks_, 0, sizeof(emOtherTicks_));
         std::memset(emOtherCalls_, 0, sizeof(emOtherCalls_));
         stateCalls_ = substitutedDraws_ = 0;
+        offscreen_ = FlatOffscreenCounts{};
         queries_ = FlatQueryCounts{};
         gpuFrame_ = gpuResolve_ = 0;
         gpuSkipped_ = gpuInvalid_ = 0;
@@ -663,6 +672,7 @@ private:
     uint64_t emRenderTicks_[emcpu::kParts] = {}, emRenderCalls_[emcpu::kParts] = {};
     uint64_t emOtherTicks_[emcpu::kParts] = {}, emOtherCalls_[emcpu::kParts] = {};
     uint64_t stateCalls_ = 0, substitutedDraws_ = 0, gpuSkipped_ = 0, gpuInvalid_ = 0;
+    FlatOffscreenCounts offscreen_;
     FlatQueryCounts queries_;
     float interval_[kMaxSamples];
     float gpuFrameMs_[kMaxSamples];
@@ -886,6 +896,12 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
             tk.add(i ? ", " : "; ", "%s%s %.3f ms (calls %s)", i ? "" : "engine motion hooks by part (render thread, per clocked frame): ",
                    kEmNames[i].name + (sizeof("engine ") - 1), r.emRenderMs[p] / clocked, calls);
         }
+    // The offscreen fast path (flat_offscreen_fast.h): a counter, so it prints with the timing off too. Last, so the lines above keep their layout.
+    {
+        char offscreenText[320];
+        flatOffscreenFormat(offscreenText, sizeof(offscreenText), r.offscreen, frames);
+        tk.add("; ", "%s", offscreenText);
+    }
     packLines(tk, out);
 }
 
