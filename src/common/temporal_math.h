@@ -357,6 +357,16 @@ inline bool temporalOriginRebase(double moveM, double rowsDelta) {
     return temporalOriginJump(moveM) && rowsDelta < kTemporalRebaseRowsTol;
 }
 
+// Of such a jump (rows unmoved, history kept), the ones that are the origin being re-anchored, whose translation is a coordinate change
+// and not the camera's motion: the origin landed near the camera, closer to it than it was and closer than the step it took. Fast
+// travel keeps moving away from where the origin is (the origin trails the camera, so |now| grows with every step), and its step IS the
+// camera's motion. Every re-anchor in the 2026-10-16 flat logs lands 15.9-27.4 m out from 184-5042 m (step 196-5021 m); the travel
+// steps beside them have |now| above |prev| (81.8 from 20.0, 2870 from 2812). Flat only: the VR gate (temporalCameraGateStep) keeps
+// dropping the translation of every jump of 50 m or more.
+inline bool temporalOriginReanchor(double stepM, double nowLenM, double prevLenM) {
+    return nowLenM < prevLenM && nowLenM < stepM;
+}
+
 // The world path's gate on that delta, per frame (the plausibility test of
 // src/d3d11/temporal_pass.cpp, here so tools/temporal_test can walk it).
 // The rows' delta is the head's plus the ship's turn, and no ship turns 270

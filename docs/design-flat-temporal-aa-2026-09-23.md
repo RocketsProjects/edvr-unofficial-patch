@@ -54,8 +54,8 @@
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
-- **10-16 BUILT, NOT FLOWN:** flat origin rebases (every ~5 km of travel) no longer reset TAA/DLSS; the 27217a7d guard note below
-  was relaxed with its inputs (branch claude/flat-origin-rebase). Open: engine-record scenePrev in the old anchor frame, unverified.
+- **10-16 BUILT, NOT FLOWN:** flat origin re-anchors (~5 km) and fast travel no longer reset TAA/DLSS; a re-anchor drops its camera
+  translation, travel keeps it (review F1). Open: engine-record scenePrev in the old anchor frame; VR drops all 50 m+ translation.
 - **Jitter phases (section 84, 2026-10-01):** the phase-count switch is REMOVED (fixed eight phases, byte-identical; no
   visible change on the hills). ROOT CAUSE of the VR hills shimmer: Elite's terrain checkerboard rendering (halves distant
   terrain's horizontal samples; turning it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
@@ -3008,15 +3008,14 @@ of travel, and the resolver's per-axis 50 m test read each re-anchor as a cut.
   frames of 94 ms or less.
 
 The change (`flat_mono_resolve.cpp`, with `temporalOriginRebase` in
-`temporal_math.h`): a jump the old axis test would have cut is absorbed when the
-step is at least 50 m (Euclidean), the largest element change over rows 0-3 is
-under 0.02, and the frame took under 100 ms. An absorbed frame keeps its
-history, sends the backend no reset, and reprojects from the previous rows with
-their row 5 set to this frame's: zero camera translation that frame, as the VR
-gate does for the same jump (`temporal_math.h`, `temporal_pass.cpp:3397`). The
-0.02 sits between fast travel (0.0088) and the first real cut; the old axis
-test stays the precondition, so no frame that kept its history before loses its
-camera term. Rotated rows, or a frame of 100 ms or more, cut as before.
+`temporal_math.h`): a jump the old axis test would have cut keeps its history
+(no backend reset) when the step is at least 50 m (Euclidean), the largest
+element change over rows 0-3 is under 0.02, and the frame took under 100 ms.
+The 0.02 sits between fast travel (0.0088) and the first real cut; the old axis
+test stays the precondition, so no frame that kept its history before changes.
+Rotated rows, or a frame of 100 ms or more, cut as before. (The first build
+also zeroed the camera translation of EVERY such jump; the review of main
+49f28838, F1, showed that is wrong for fast travel -- see the entry below.)
 
 The two earlier "camera cut" cases (the 460 m jump near line 6373 and the 216.9
 m cut near line 6944) record a distance and the neighbouring facts, not the
@@ -3040,6 +3039,61 @@ OPEN, unverified: the engine-record `scenePrev` snapshots (the object-motion
 path) may hold clip rows in the old anchor frame, so an absorbed frame could
 carry one frame of wrong object motion on pooled records. Look for it in the
 frame after an `origin rebase absorbed` line before calling the fix closed.
+
+**2026-10-16, review F1: zero the translation for a re-anchor only.** The first
+build gave every kept jump zero camera translation (previous row 5 := current).
+That is right for a coordinate re-anchor and wrong for real fast travel, where
+the shader's `now[5]-old[5]` (flat_mono_shader_source.h, cameraBefore) IS the
+camera's motion: 80 m lateral past a static surface 1,000 m away is 99.84 px at
+2496 wide (.64 px on the rig's 16-wide fixture), and zero left the camera-derived
+pixels reading history from the wrong place. Now a kept jump is a RE-ANCHOR,
+and only then loses its translation, iff `|now[5]| < |prev[5]|` and
+`|now[5]| < step` (`temporalOriginReanchor`): the origin landed near the camera,
+closer than it was and closer than the step it took. Travel keeps moving away
+from the origin it trails, so its |now| exceeds |prev|. Checked against every
+logged line (the absorbed lines of 20261016_033508 and _045608, which cap at
+eight each, and the pre-fix cut events of _023749, computed from their now/previous; the rig table holds them):
+
+| source | step | now | prev | rule | is |
+|---|---|---|---|---|---|
+| 033508 03:37:42 | 196.5 | 15.9 | 184.2 | re-anchor | re-anchor |
+| 033508 03:37:59 to 03:38:42 (5 lines) | 4996-5021 | 20.0-27.4 | 5017-5040 | re-anchor | re-anchor |
+| 033508 03:38:42.186 | 62.3 | 81.8 | 20.0 | travel | travel (right after a re-anchor) |
+| 033508 03:38:48 | 58.4 | 2870 | 2812 | travel | travel |
+| 045608 04:59:14-15 (8 lines) | 51-83 | 2486-5926 | 2435-5864 | travel | travel |
+| 023749, 21 periodic events | 4995-5000 | 19-24 | 4990-5023 | re-anchor | re-anchor |
+| 023749 02:43:07, 02:45:21 | 3089, 7498 | 18.3, 20.7 | 3106, 7518 | re-anchor | re-anchor |
+| 023749 02:45:18-20 (fast travel, 8 events) | 54-104 | 3191-7414 | 3087-7360 | travel | travel |
+| 023749 02:45:21.194 | 77.8 | 98.1 | 20.7 | travel | travel |
+
+Every re-anchor lands 12-27 m out; every travel step has |now| above |prev|.
+The rule's known hole: travel INWARD through the origin (a 80 m step ending
+within 80 m of it, with |now| < |prev|) reads as a re-anchor and loses one
+frame of translation, which is what the first build did to every frame. A
+re-anchor frame also still ignores the camera's real step that frame (a
+cruising ship moves ~8 m, fast travel 50-100 m): carrying the previous frame's
+step as the translation would close it, and the engine-record route (below)
+already has the real step. Not done; no flight evidence on it.
+
+Engine-record pixels: the route reprojects through the game's own `sceneNow`
+and `scenePrev` (EN/EB) with the record's two pose blocks, all in the engine's
+frames, and never reads the resolver's previous rows, so it is untouched by
+the substitution above. On a re-anchor frame the two routes can therefore
+differ by the camera's real step that frame (the camera route now drops it,
+the engine route keeps whatever the records carry across the re-anchor).
+Whether the records' previous-pose block is in the old anchor frame is the
+open question above and is NOT answered; the arithmetic cannot be made
+consistent from the resolver side without it. Travel frames are consistent: both
+routes carry the real step.
+
+VR: `temporalCameraGateStep` drops the translation of ANY jump of 50 m or more
+(`temporalOriginJump`), so VR has the same fast-travel problem (80 m/frame
+translation dropped; the rows gate is 3 degrees, not 0.02, and there is no
+re-anchor test). Reported, not changed here.
+
+New counters/lines: `fast-travel-steps-kept` on the 5 s renderer line and a
+capped `flat resolve fast-travel step kept:` line (same fields as the rebase
+line); `origin-rebases-absorbed` now counts re-anchors only.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
