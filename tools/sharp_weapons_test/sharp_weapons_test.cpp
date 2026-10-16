@@ -41,10 +41,15 @@
 #include <DirectXPackedVector.h>
 #include <wrl/client.h>
 
+#include "../../src/d3d11/menu_schema.h"
 #include "../../src/d3d11/sharp_weapons.h"
 #include "../../src/d3d11/sharp_weapons_shaders.h"
 #include "../../src/d3d11/ui_layer_math.h"
 #include "temporal_shader_bytecode.h"
+
+namespace edvr {
+#include "menu_schema.inc"   // the rows the build generated from edvr.ini (build\gen)
+}
 
 using namespace edvr;
 using Microsoft::WRL::ComPtr;
@@ -666,6 +671,7 @@ static bool wiredIni(const std::string& t) {
     return has(t, "\nsharp_weapons = on\n") && has(t, "# ui: Sharp weapons | choices on, off | live | menu performance") && has(t, "#sharp_weapons_blend = matched");
 }
 
+static void lostPins(const std::string& layer);   // below, with the instrument it pins
 static void wiringTests() {
     const std::string layer = readFile("src/d3d11/ui_layer.cpp"), vscreen = readFile("src/d3d11/vscreen.cpp"), snap = readFile("src/d3d11/eye_draw_snapshot.h"),
                       ini = readFile("edvr.ini");
@@ -706,8 +712,66 @@ static void wiringTests() {
     check(wiredSnapshot(snap), "eye_draw_snapshot.h: the next eye dump watches the three weapons-fire vertex shaders (their constant buffers settle W3)");
     check(!wiredSnapshot(replaced(snap, "case 0x939D01F28D1FEEA8ull: // multicannon rounds\n", "")), "control: an unwatched pair trips the pin");
 
+    lostPins(layer);
+    check(has(ini, "# ui: Weapons blend | choices matched=Matched, plain=Plain | live | menu performance | top\n#sharp_weapons_blend = matched"),
+          "edvr.ini: the blend key's menu line says live, the Performance page and top");
+    check(!has(replaced(ini, "| menu performance | top\n#sharp_weapons_blend", "| menu performance\n#sharp_weapons_blend"), "| menu performance | top\n#sharp_weapons_blend"),
+          "control: a blend row without `top` is not the first row");
     check(wiredIni(ini), "edvr.ini documents fix.sharp_weapons (on, with a menu row) and the temporary advanced.sharp_weapons_blend");
     check(!wiredIni(replaced(ini, "\nsharp_weapons = on\n", "\nsharp_weapons = off\n")), "control: a key that ships off trips the pin");
+}
+
+// ============================================================================================ the menu row
+// advanced.sharp_weapons_blend is a row of the in-headset menu for everyone (Fix tier, the Performance page), the FIRST row of the table and so the first the
+// menu shows, live, with the two words as choices; and it is not also a developer-tier row. (The generator's own self-test holds the rule; this holds the
+// real table the build generated from the real edvr.ini.)
+static void menuTests() {
+    const int count = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
+    check(count > 10, "the generated menu table is there");
+    const MenuRowDef& first = kMenuRows[0];
+    check(std::strcmp(first.section, "advanced") == 0 && std::strcmp(first.key, "sharp_weapons_blend") == 0, "the weapons blend is the first row of the table");
+    check(first.tier == MenuTier::Fix && std::strcmp(first.page, "performance") == 0, "...a Fix-tier row on the Performance page, the page the menu opens on");
+    check(first.kind == MenuKind::Choice && first.applies == 1 && std::strcmp(first.shipped, "matched") == 0, "...a live choice that ships matched");
+    check(std::strcmp(first.label, "Weapons blend") == 0, "...labelled plainly");
+    check(has(first.choices, "matched") && has(first.choices, "plain"), "...with matched and plain as its choices");
+    int rows = 0, dev = 0;
+    for (int i = 0; i < count; ++i)
+        if (std::strcmp(kMenuRows[i].key, "sharp_weapons_blend") == 0) {
+            ++rows;
+            if (kMenuRows[i].tier != MenuTier::Fix) ++dev;
+        }
+    check(rows == 1 && dev == 0, "the key is one row, not a second one in the developer tier");
+    // The Performance page lists Fix rows of page "performance" in table order: its first entry is this row, then Sharp weapons somewhere after.
+    int firstPerf = -1, sharp = -1;
+    for (int i = 0; i < count; ++i) {
+        if (kMenuRows[i].tier == MenuTier::Fix && std::strcmp(kMenuRows[i].page, "performance") == 0) {
+            if (firstPerf < 0) firstPerf = i;
+            if (std::strcmp(kMenuRows[i].key, "sharp_weapons") == 0) sharp = i;
+        }
+    }
+    check(firstPerf == 0 && sharp > 0, "the Performance page opens on the blend row, and the Sharp weapons switch is a row after it");
+}
+
+// ============================================================================================ the lost-layer instrument
+// "N layers' content never reached a tonemap" (0.5 to 5 percent of the weapon eye-frames of the 2026-10-16 combat flights, none for the HUD layer):
+// the cause is open, so each loss prints the eye's state and the tonemap-shaped draws the admission saw (ui_layer.cpp noteWeaponsLost / noteToneSight).
+static bool wiredLost(const std::string& t) {
+    const size_t loss = t.find("++g_win.weaponsLost;\n            noteWeaponsLost(g_draw.eye, e, g_draw.seq);");
+    size_t sights = 0, at = 0;
+    while ((at = t.find("noteToneSight(seq, seenRes, ", at)) != std::string::npos) {
+        ++sights;
+        ++at;
+    }
+    return loss != std::string::npos && sights == 4 && has(t, "void noteToneSight(uint64_t seq, const void* res, int eye, uint8_t outcome) {") &&
+           has(t, "if (e.wTarget != g_draw.targetRes) ++e.wOtherTargets;") && has(t, "e.wOtherTargets = 0;") && has(t, "if (!seenRes) seenRes = r.Get();") &&
+           has(t, "if (g_lostLines >= 24) return;") && before(t, "noteToneSight(seq, seenRes, eye, 0);", "crispArm(eye, seq, hdrSlot, ta.rtvRes, hdrRes, vs, ps);");
+}
+static void lostPins(const std::string& layer) {
+    check(wiredLost(layer), "ui_layer.cpp: a lost weapons layer prints the eye's state and the last tonemap-shaped draws, rate-limited, and every outcome of the admission is recorded");
+    check(!wiredLost(replaced(layer, "++g_win.weaponsLost;\n            noteWeaponsLost(g_draw.eye, e, g_draw.seq);", "++g_win.weaponsLost;")), "control: no line at the loss trips the pin");
+    check(!wiredLost(replaced(layer, "        noteToneSight(seq, seenRes, eye, 3);\n", "")), "control: an unrecorded outcome trips the pin");
+    check(!wiredLost(replaced(layer, "    noteToneSight(seq, seenRes, eye, 0);\n", "")), "control: an unrecorded admission trips the pin");
+    check(!wiredLost(replaced(layer, "if (g_lostLines >= 24) return;", "")), "control: an unlimited line trips the pin");
 }
 
 // ============================================================================================ the composite (WARP)
@@ -1257,6 +1321,7 @@ int main(int argc, char** argv) {
         censusTests("tools/sharp_weapons_test/fixtures/census_070029_c3_f0.txt", 4, 2);
         censusTests("tools/sharp_weapons_test/fixtures/census_070029_c4_f0.txt", 4, 0);
         wiringTests();
+        menuTests();
         gpuTests();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "sharp_weapons_test: FAIL: %s (after %u checks)\n", e.what(), g_checks);

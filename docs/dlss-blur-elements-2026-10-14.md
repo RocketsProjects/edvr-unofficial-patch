@@ -12,12 +12,14 @@
   TEMPORARY, to remove when this arc closes: `src\d3d11\producer_probe.h`, the `engine-producer-434d120-probe` entry and `producerObserved` in
   `kinematic_eval_hook.cpp`, the three rigid `noteRigid` calls, the 30 s line in `engine_velocity.cpp`, the eye-run capture in `object_probe.cpp`,
   the producer report in `tools\eye_run_ledger.py`, and rig cases P1-P4 in `tools\kinematic_probe_test`. See "Producer probe, 2026-10-16".
-- **Weapons fire (2026-10-16): BUILT, NOT FLOWN** (`claude/sharp-weapons`; entry "Built, 2026-10-16: weapons fire in its own HDR layer"). 1F17,
-  939D and 5C1D go into the eye's own additive HDR layer, composited after the upscale by tonemap difference; 820E stays. Key
-  `fix.sharp_weapons` (default on, independent of `fix.ui_quality`). **Temporary key:** `advanced.sharp_weapons_blend = matched | plain` (A/B of
-  the composite; ship matched and propose removing the key, quoted, when the arc closes). Open: W3 (the jitter in 1F17's CB1[41..48], 939D's and
-  5C1D's CB0 rows 4-7; the next eye dump watches them) and the flight. WARP proof: matched within 1/255 of T(F+L), the plain add 71/255 off over a lit
-  background.
+- **Weapons fire (2026-10-16): FLOWN OK in combat** (`claude/sharp-weapons`, flown as `claude/combat-flight-1`; entries "Built" and "Combat flights").
+  1F17, 939D and 5C1D go into the eye's own additive HDR layer, composited after the upscale by tonemap difference; 820E stays. Sean: weapons and
+  shields look much better, beams and tracers are sharp. Key `fix.sharp_weapons` (default on, independent of `fix.ui_quality`). **Temporary key:**
+  `advanced.sharp_weapons_blend = matched | plain`, now the FIRST row of the in-headset menu ("Weapons blend", live): Sean sees no difference between
+  the two live (log edvr_gfx_20261016_095256) and keeps the A/B for long sessions. When the arc closes ship matched and propose removing the key,
+  quoted, with its generator exception (`MENU_ADVANCED_EXCEPTIONS` in tools\gen_settings_schema.py) and its edvr.ini row. W3: 939D's cancel is
+  RIGHT (CB0 rows 4-7 equal the jittered cb1[270..273] bit for bit apart from translation); 1F17 and 5C1D still uncaptured. OPEN: 0.5 to 5 percent of
+  the weapon eye-frames report "layers' content never reached a tonemap" (HUD layer: none); cause unknown, instrument built (`claude/combat-flight-2`).
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
   path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
   docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
@@ -411,3 +413,31 @@ beams and multicannon over space, a planet and near a star, head still then movi
 line at 2 or more a frame while firing with 0 left in the scene, no trails, beams cut by hulls and never over the cockpit, the beam over a planet or
 star as bright as stock (A/B: `advanced.sharp_weapons_blend = plain` is brighter there), the dump's tonemap input without the beams. Repeat with
 `fix.ui_quality = off`, and with `fix.sharp_weapons = off` for the control. Then Sean judges the halo (no bloom in this tier, W2).
+
+## Combat flights, 2026-10-16, and what followed (`claude/combat-flight-2`, BUILT, NOT FLOWN)
+
+**Flown** (build fdb42b63, logs edvr_gfx_20261016_094708 and 095256). Sean: weapons and shields look much better, beams and tracers are sharp. He switched
+`advanced.sharp_weapons_blend` between plain and matched live (the 30 s line shows both kinds of eye-frame in 095256) and sees no difference; he keeps the
+A/B. W3 for 939D: its CB0 rows 4-7 equal the scene's jittered cb1[270..273] bit for bit apart from the translation, so the default cancel is right for it.
+
+**The menu row.** The A/B is the first row of the Performance page, the page the menu opens on: `# ui: Weapons blend | choices matched=Matched, plain=Plain |
+live | menu performance | top` above `#sharp_weapons_blend` in [advanced]. Two changes to tools\gen_settings_schema.py: a `top` token on a ui: line sorts a
+row first on its page (stable, every other row keeps the ini's order), and `MENU_ADVANCED_EXCEPTIONS` (one key, TEMPORARY) lets that [advanced] key carry a
+`menu` token as a Fix-tier row instead of being refused, skipped in the developer tier so it is one row. The menu code is unchanged: it lists the table in
+order. Held by the generator's self-test (three cases) and by `sharp_weapons_test` on the real generated table.
+
+**The never-tonemapped frames: cause OPEN, instrument built.** From the two logs: a weapons layer counted lost when the eye's next weapons draw clears it
+with its content not published (`wToneSeq != wSeq`). 18, 8 and 44 in the three 30 s windows of 094708 (390, 3204 and 1709 eye-frames) and 2, 2, 8, 4, 4, 0
+in 095256. The rate is highest in the beam-only windows (4.6 and 5.5 percent of 390 and 36 eye-frames) and lowest in the multicannon-heavy one (0.25
+percent). The HUD layer, in the same frames, lost none (0 in every window; a re-issue for every eye-frame that had HUD content), and no re-issue decline was counted, so the re-issue
+ran for the eye-frame; "left in the scene" holds only one `no-eye` draw. So a tonemap ran but did not take the weapons content. What the code allows, each
+with its signature: (a) the tonemap read a different frame number than the weapons draws carried (`wFresh`, `wpnC` compare `wSeq` with the tonemap's
+frame); (b) no tonemap-shaped draw ran for that eye; (c) the first weapons draw of the frame went into another HDR target than the one the tonemap reads
+(`wTarget` is the first draw's, and the admission matches the weapons content by it when the HUD layer has none that frame); (d) a refusal. Ruled out: the
+tonemap arriving before the weapons draw (that is `tone-late`, a decision counted in the left-in-the-scene list, which has none), and a second tonemap or a
+busy 8-bit layer (counted declines, none). The instrument: every lost layer prints (the first 24 a session) `sharp weapons: lost layer N`: the eye, the
+content's frame, its draws, the target of the first and how many went into another, the HUD layer's frame and whether it was tonemapped, the next weapons
+draw's frame, and the last six tonemap-shaped draws the admission saw (frame, resource read, eye matched, outcome). Next flight: read those lines; (a)
+shows as a tonemap entry one frame off the content's, (b) as no entry for the eye, (c) as a nonzero "into another target" or a read resource unlike the
+first-draw target. The fix follows the signature (a: the tonemap uses the eye's own frame; b: composite the leftover content at the door; c: match by
+the layer's own target set), with a rig case that fails first.
