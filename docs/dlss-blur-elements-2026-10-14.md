@@ -7,6 +7,9 @@
   See "Design, 2026-10-16: engine motion for the shield strike". Evidence E1-E3 done offline (run 070301): option (b) CLEARED
   with one amendment, the shield records must also be joined (they share the hull's pose but carry no previous pose). H-clobber RULED
   OUT; the hull's 13% stale_slot is open hypothesis H-bias (a depth bias missing from the exported z). E2 (do puffs ride the ship) inconclusive.
+  Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"); count-and-tag hook next.
+- **Weapons fire (2026-10-16): DESIGN ONLY:** the HDR-layer route (the space dust's) for 1F17, 939D and 5C1D; 820E stays. Evidence W1-W5
+  offline first. See "Design, 2026-10-16: weapons fire after the upscale".
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
   path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
   docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
@@ -246,3 +249,42 @@ FUN_14434D470/434D120 (prologue 48895C2408 48896C2410 4889742418 57 4883EC20). N
 rigid producers' buckets, appended addresses mapped to pool slots in an eye run) before any emission. "139 of 2048 joined" counts pool
 capacity, not a miss rate.
 - ruled out: FUN_14369C9C0 as the shield's producer, because it made 0 calls this session and it copies the model block.
+## Design, 2026-10-16: weapons fire after the upscale (the HDR layer route)
+
+Read-only design; no code. The route already exists: the space dust (vs 9BFC7FD2 / ps DBF17257) is an additive, GEQUAL, no-write world
+effect in the lit HDR target, taken into the per-eye HDR layer since 2026-10-07 (docs/ui-layer-2026-09-23.md, FLOWN OK b4d9d6ab).
+Weapons fire has the same shape.
+
+**What the route does.** The game's own draw goes into an R16G16B16A16F layer per eye at the DLSS output size times the `fix.ui_quality`
+target (4032² at 100 from a 2016² render); the viewport is remapped, NDC and the VS unchanged. Jitter is cancelled by a viewport offset
+(`uiLayerJitterCancel`), valid because the VR jitter goes in at GetProjectionRaw. Depth is tested with the game's own function against a
+nearest-sample, jitter-cancelled seed of the render-res depth (`ui_layer_seed.h`). The game's tonemap draw is re-issued with the layer as
+its HDR source (game exposure and LUT), and the result composited onto the RCAS output per eye before the menu and the submit. DLSS never
+sees the effect.
+
+**Proposed families.** The exact pairs 1F17BF54/A75C1DB6 (beams, bolts), 939D01F2/C5DF9CC9 (multicannon rounds) and 5C1D8EF5/C49F999F
+(shield-strike additive part), as one family `weapons fire` on the HDR branch of `uiLayerFamilyFor` and in `uiLayerFamilyTakesHdr`, exempt
+from the density rule. SRC_ALPHA,ONE and ONE,ONE both convert exactly.
+
+**What looks different, ranked.** (1) No bloom halo if bloom reads the HDR target after these draws (bloom BELIEVED baked in before the
+tonemap, never hashed). (2) Additive after the tonemap: T(F)+T(L) != T(F+L); exact over black space, brighter or clipped over a planet or a
+star (dust p90 6/255, p99 69). (3) Draw order: a later depth writer over beam pixels would be a defect; a later alpha layer no longer dims
+the beams. (4) A one-render-pixel occlusion step at hull silhouettes. (5) Planetary fog skipped. (6) 820E's refracted copy no longer holds
+the beams.
+
+**Alternatives.** A coverage mask with pinned or own motion: no motion source, and K ignores the mask. Drawing twice and subtracting:
+ghosts, additive light counts twice. A private-depth replica: camera motion at the effect's own depth, not its own motion. Kept for stage
+2: feed only the bloom chain from a private HDR copy, if the halo is missed.
+
+**Evidence before building (offline, runs 070301 and 070422, log 070029).** W1: no depth writer over the weapon pixels after the weapon
+draws and before the tonemap. W2: the first reader of the lit HDR target after them (the bloom chain), and the halo energy. W3: 1F17's
+CB1[41..48] and 939D's and 5C1D's CB0 rows 4-7 carry the eye jitter. W4: tone-order parity over the beam pixels. W5: the RTV is the lit HDR
+eye target, the DSV is seedable, and the stencil state.
+
+**Flight (after the build).** Frontier VR, DLSS K, `fix.ui_quality` 100. Fire beams and multicannon over space, a planet and near a star,
+head still then moving; hit a shield; eye dump during a burst. Pass: the 30 s `weapons fire` line at 2 or more a frame while firing with 0
+left in the scene; no trails; beams cut by hulls and never over the cockpit; the dump's tonemap input without the beams. Then Sean judges
+the halo.
+
+- ruled out: 820E/6EAA in the layer, because it samples the pre-DLSS eye HDR copy at the screen UV; it stays in the scene.
+- ruled out: drawing the effects at render size and upscaling the layer, because it is the blur DLSS already gives, without DLSS.
