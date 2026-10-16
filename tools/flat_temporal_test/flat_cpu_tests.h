@@ -455,6 +455,94 @@ inline int flatCpuTests() {
         expect(has(joined(el), "bind thunks (render thread, per clocked frame): EDVR 0.000 ms over 0.0 calls (- ns a call), the game's forwarded calls 0.000 ms over 0.0 (- ns a call)"),
                "a window with no bind prints dashes for the per-call time");
     }
+    // Round 4: the draw class census (flat_draw_classes.h). Classification precedence, the tracker's "same as the previous draw" counts, the frame
+    // reset, and the line.
+    {
+        auto cls = [](bool post, bool pool, bool ui, bool color, bool scene, bool hdr) {
+            DrawClassFacts f;
+            f.post = post; f.pool = pool; f.uiMayAsk = ui; f.hasColor = color; f.sceneExtent = scene; f.hdr = hdr;
+            return classifyDraw(f);
+        };
+        expect(cls(true, true, true, false, false, false) == DrawClass::Post, "class: a post-chain pair is the post chain whatever else it is");
+        expect(cls(false, true, true, true, true, true) == DrawClass::Pool, "class: a pool-family pair is a pool-family draw before the UI test");
+        expect(cls(false, false, true, true, true, true) == DrawClass::Ui, "class: a pair the UI rule can name is HUD/UI");
+        expect(cls(false, false, false, false, true, true) == DrawClass::Offscreen && cls(false, false, false, true, false, true) == DrawClass::Offscreen,
+               "class: no colour target, or a target not of the scene's extent, is offscreen");
+        expect(cls(false, false, false, true, true, true) == DrawClass::HdrScene && cls(false, false, false, true, true, false) == DrawClass::OtherScene,
+               "class: a scene-extent draw is HDR scene on format 26 and other scene on any other");
+        // The tracker: ten draws, the first of a frame compared with nothing, then each against the one before.
+        DrawClassTracker tracker;
+        DrawClassState a, b;
+        int target = 1, targetB = 2;
+        a.color = &target; a.depth = &target; a.format = 26; a.width = 100; a.height = 50; a.vs = 1; a.ps = 2; a.b1 = &target; a.cameraHash = 7; a.viewportCount = 1;
+        b = a; b.color = &targetB;                       // another target, same pair and camera
+        DrawClassState c = a; c.ps = 3;                  // the first target, another pixel shader
+        DrawClassState d = a; d.cameraHash = 8;          // the same state, another camera
+        tracker.beginFrame();
+        tracker.note(DrawClass::HdrScene, a);            // first: nothing to compare
+        tracker.note(DrawClass::HdrScene, a);            // all same
+        tracker.note(DrawClass::HdrScene, c);            // same target, another pair
+        tracker.note(DrawClass::Pool, c);                // same target and pair as the draw before (it is another class)
+        tracker.note(DrawClass::Offscreen, b);           // another target, another pair
+        tracker.note(DrawClass::Offscreen, b);           // all same
+        tracker.note(DrawClass::Offscreen, d);           // another target, pair of a (vs 1 ps 2 versus b's same): same pair, other camera
+        tracker.beginFrame();
+        tracker.note(DrawClass::HdrScene, a);            // a new frame compares with nothing, whatever the draw before it was
+        tracker.note(DrawClass::HdrScene, d);            // same target and pair, another camera hash
+        const DrawClassCounts counts = tracker.take();
+        const unsigned H = static_cast<unsigned>(DrawClass::HdrScene), P = static_cast<unsigned>(DrawClass::Pool), O = static_cast<unsigned>(DrawClass::Offscreen);
+        expect(counts.frames == 2 && counts.total() == 9, "the tracker counts two frames and nine draws");
+        expect(counts.draws[H] == 5 && counts.draws[P] == 1 && counts.draws[O] == 3, "and each draw in its class");
+        expect(counts.sameTarget[H] == 3 && counts.samePair[H] == 2 && counts.sameAll[H] == 1,
+               "HDR scene: the second repeats all, the third only the target, the new frame's first nothing, its second the target and pair but not the camera");
+        expect(counts.sameTarget[P] == 1 && counts.samePair[P] == 1 && counts.sameAll[P] == 1, "pool-family: the repeat of the draw before is counted in its own class");
+        expect(counts.sameTarget[O] == 1 && counts.samePair[O] == 2 && counts.sameAll[O] == 1,
+               "offscreen: the first differs in target and pair from the draw before, the second repeats all, the third is another target with the same pair");
+        expect(tracker.take().total() == 0, "a take empties the tracker");
+        // The line.
+        flatcpu::resetForTest();
+        fake(0);
+        Run run;
+        for (int i = 0; i < 300; ++i) run.frame(16667, false, {});
+        DrawClassCounts line;
+        line.frames = 20;
+        auto set = [&](DrawClass k, uint64_t n, uint64_t t, uint64_t p, uint64_t all) {
+            const unsigned i = static_cast<unsigned>(k);
+            line.draws[i] = n; line.sameTarget[i] = t; line.samePair[i] = p; line.sameAll[i] = all;
+        };
+        set(DrawClass::Post, 40, 20, 10, 8);
+        set(DrawClass::Pool, 4000, 3000, 2000, 1800);
+        set(DrawClass::Ui, 100, 50, 50, 25);
+        set(DrawClass::Offscreen, 6000, 5400, 5000, 4800);
+        set(DrawClass::HdrScene, 3000, 2400, 600, 500);
+        run.census->noteClasses(line);
+        flatcpu::WindowReport r;
+        const bool got = run.census->take(run.now, false, r);
+        flatcpu::Lines lines;
+        flatcpu::formatWindow(r, &lines);
+        const std::string text = joined(lines);
+        expect(got && !lines.truncated, "the class window closes and fits");
+        expect(has(text, "draw classes (render thread, per clocked frame; the previous watched draw is the comparison; 13140 draws in all over 20 clocked frames)"),
+               "the class header names the comparison and the totals");
+        expect(has(text, "post chain 2.0 a frame (same as the previous draw: target 50% pair 25% all 20%)") &&
+                   has(text, "pool-family 200.0 a frame (same as the previous draw: target 75% pair 50% all 45%)") &&
+                   has(text, "HUD/UI 5.0 a frame (same as the previous draw: target 50% pair 50% all 25%)"),
+               "the first three classes: draws a clocked frame and the share that repeats the previous draw's target, pair, both and camera");
+        expect(has(text, "offscreen 300.0 a frame (same as the previous draw: target 90% pair 83% all 80%)") &&
+                   has(text, "HDR scene 150.0 a frame (same as the previous draw: target 80% pair 20% all 17%)") &&
+                   has(text, "other scene 0.0 a frame (same as the previous draw: -)"),
+               "the rest, and a class with no draw says '-', not 0%");
+        // A window with no class draws prints no class tokens (the census never ran them), never zeros.
+        flatcpu::resetForTest();
+        fake(0);
+        Run none;
+        for (int i = 0; i < 300; ++i) none.frame(16667, false, {});
+        flatcpu::WindowReport nr;
+        none.census->take(none.now, false, nr);
+        flatcpu::Lines nl;
+        flatcpu::formatWindow(nr, &nl);
+        expect(!has(joined(nl), "draw classes"), "a window the class census did not run in has no class tokens");
+    }
     // H4: how each substituted draw ended, per frame, from the counts the wrapper hands the census.
     {
         flatcpu::resetForTest();

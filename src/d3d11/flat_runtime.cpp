@@ -615,6 +615,8 @@ struct State {
     // backend call. A timer is owned until its sample is read; with none free the
     // frame is skipped and counted.
     flatcpu::Census census{flatcpu::kRenderPeriod, flatcpu::clocksWanted()};
+    DrawClassTracker classes;                     // the draw class census (flat_draw_classes.h), noted on the census's clocked frames only
+    uint64_t classesFrame = ~0ull;                // the frame the tracker last began
     FlatPairFactsMemo pairFacts;                  // what a draw's shader pair alone says (flat_pair_facts.h), owner thread
     static constexpr int kGpuFrameTimers = 4, kGpuResolveTimers = 2;
     GpuTimer gpuFrameTimer[kGpuFrameTimers];
@@ -3867,6 +3869,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         if (censusWasRunning) s.census.noteWrapper(wrapper.stateCalls, wrapper.substitutedDraws);
         const EngineRunCounts runs = engineVelocityTakeRunCounts();   // drained whether or not the census runs, like the counts above
         if (censusWasRunning) s.census.noteRuns(runs);
+        const DrawClassCounts classes = s.classes.take();             // likewise
+        if (censusWasRunning) s.census.noteClasses(classes);
         // The questions the runtime answered from what it already knew (flat_query_cut.h): drained with the wrapper's counts,
         // and the frame that starts now says whether it is one of the checked ones (one in 64).
         const FlatQueryCounts queries = flatQueryCut().take();
@@ -5351,6 +5355,20 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         k.srvView[slot] = bindingGet(bind); k.srvResource[slot] = view(bind, 2 + slot).resource;
     }
     lookupBlock.stop();
+    // The draw class census: only on a frame the census clocks the render thread on (one test of the gate on every other), observe-only.
+    if (flatcpu::gateClocks(flatcpu::g_gate.load(std::memory_order_relaxed))) {
+        if (s.classesFrame != s.prefix.frame) { s.classesFrame = s.prefix.frame; s.classes.beginFrame(); }
+        DrawClassFacts cf;
+        cf.post = tone || copy || pairFact.mapToneSlot != ~0u || pairFact.sourceTone;
+        cf.pool = d.supported; cf.uiMayAsk = pairFact.uiMayAsk; cf.hasColor = k.color != nullptr;
+        cf.sceneExtent = k.kind != kFlatContractNone; cf.hdr = k.format == 26;
+        DrawClassState cs;
+        cs.color = k.color; cs.depth = k.depth; cs.dsv = k.dsv; cs.b1 = k.b1;
+        cs.format = k.format; cs.width = k.width; cs.height = k.height; cs.depthWidth = k.depthWidth; cs.depthHeight = k.depthHeight;
+        cs.viewportCount = k.viewportCount; std::memcpy(cs.viewport, k.viewport, sizeof(cs.viewport));
+        cs.vs = k.vs; cs.ps = k.ps; cs.cameraHash = k.cameraHash;
+        s.classes.note(classifyDraw(cf), cs);
+    }
     if (foreignWork.load(std::memory_order_acquire)) {
         s.prefix.uncertain = true;
         if(overlayOpen(s)) overlayFail(s,"overlay-foreign-work");

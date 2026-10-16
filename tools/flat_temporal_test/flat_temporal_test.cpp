@@ -2834,8 +2834,6 @@ void testFlatCpuWiring() {
         {&runtimeCpp, "g_flatPrevDrawSubstituted = producer;", 1, "a draw scope records whether it was substituted, for the next game draw's family (H2)"},
         {&vscreenCpp, "flatcpu::Scope thunk(flatcpu::kDrawThunk);", 5, "the flat branch of every draw thunk is one scope (H2)"},
         {&vscreenCpp, "flatcpu::Scope game(flatDraw.gameDrawFamily());", 5, "and its real draw call is timed apart, by what preceded it (H2)"},
-        {&vscreenCpp, "GpuCensusAlteredScope gpu(self, flatAlteredDraw(flatDraw));", 5, "the game's call of each flat draw thunk is a GPU-census altered-draw scope: the pool-family section reads in flat (round 3)"},
-        {&vscreenCpp, "return classifyAlteredDraw(d.ctx != nullptr, true, d.producer, false);", 1, "and a substituted producer draw is the pool-family class, the same classifier the VR path uses"},
         {&vscreenCpp, "flatcpu::Scope thunk(flatcpu::kBindShaders);", 2, "the two shader-set thunks are timed (round 2)"},
         {&vscreenCpp, "flatcpu::Scope thunk(flatcpu::kBindResources);", 2, "the two shader-resource thunks"},
         {&vscreenCpp, "flatcpu::Scope thunk(flatcpu::kBindConstants);", 2, "the two constant-buffer thunks"},
@@ -2893,6 +2891,9 @@ void testFlatCpuWiring() {
         {&engineCpp, "EngineRunCounts engineVelocityTakeRunCounts() noexcept {", 1, "the brackets by how they ended (H4) are drained by one function"},
         {&runtimeCpp, "const EngineRunCounts runs = engineVelocityTakeRunCounts();", 1, "every frame"},
         {&runtimeCpp, "if (censusWasRunning) s.census.noteRuns(runs);", 1, "and handed to the census only while it runs"},
+        {&runtimeCpp, "const DrawClassCounts classes = s.classes.take();", 1, "the draw class counts are drained every frame (round 4)"},
+        {&runtimeCpp, "if (censusWasRunning) s.census.noteClasses(classes);", 1, "and handed to the census only while it runs"},
+        {&runtimeCpp, "if (flatcpu::gateClocks(flatcpu::g_gate.load(std::memory_order_relaxed))) {\n        if (s.classesFrame != s.prefix.frame)", 1, "the class census runs only on a frame the census clocks the render thread on"},
         {&engineCpp, "g_substitutedBase += familyDraws[f];", 1, "a summary between two drains loses none of the substituted draws"},
     };
     for (const Pin& pin : pins) {
@@ -2960,10 +2961,10 @@ void testFlatCpuWiring() {
     if (first != std::string::npos && last != std::string::npos && first < last)
         check(runtimeCpp.substr(first, last - first).find("census") == std::string::npos,
               "the stand-down never reads the census: it measures, it does not decide");
-    // The same for the numbers: the runtime touches the census in twelve places and no other -- the four
+    // The same for the numbers: the runtime touches the census in thirteen places and no other -- the four
     // GPU notes and the skipped one, idle, and the block at the Present (running, onFrame, noteWrapper,
-    // noteRuns, noteQueries, take) -- and none of them reads a figure back into the runtime's state.
-    check(count(runtimeCpp, "s.census.") == 12,
+    // noteRuns, noteClasses, noteQueries, take) -- and none of them reads a figure back into the runtime's state.
+    check(count(runtimeCpp, "s.census.") == 13,
           "the runtime touches the census in exactly its known places (the GPU notes, idle, and the Present block)");
 }
 

@@ -56,6 +56,7 @@
 #include <cstring>
 
 #include "engine_motion_cpu.h"
+#include "flat_draw_classes.h"   // the draw class census: how many draws are of which kind, and how many repeat the previous draw
 #include "flat_engine_runs.h"   // how each substituted draw ended: lazy, guarded eager, capture eager (H4)
 #include "flat_query_cut.h"   // the counts of the questions answered from what the runtime tracks
 
@@ -484,6 +485,7 @@ struct WindowReport {
     EngineRunCounts runs;
     double runMs[kRunKinds] = {};
     double flushMs = 0;
+    DrawClassCounts classes;   // the draw class census over the render thread's clocked frames (flat_draw_classes.h)
     // The questions the flat path answered from what the runtime already tracks instead of asking the D3D
     // context (flat_query_cut.h): how many, how many were also put to the context and compared, how many of
     // those comparisons were wrong, and which states ask the context again.
@@ -605,6 +607,8 @@ public:
     }
     // The wrapper's brackets by how they ended, drained with the counts above (engine_velocity.h, engineVelocityTakeRunCounts).
     void noteRuns(const EngineRunCounts& c) noexcept { runs_.add(c); }
+    // The draw class census's counts for the frame that just ended (zero on a frame the render thread was not clocked on).
+    void noteClasses(const DrawClassCounts& c) noexcept { classes_.add(c); }
     // The query shortcuts' counts for the frame that just ended (flat_query_cut.h, take()), drained with
     // the wrapper's.
     void noteQueries(const FlatQueryCounts& c) noexcept {
@@ -668,6 +672,7 @@ public:
         out.runs = runs_;
         for (unsigned k = 0; k < kRunKinds; ++k) out.runMs[k] = static_cast<double>(runs_.ticks[k]) * msPerTick;
         out.flushMs = static_cast<double>(runs_.flushTicks) * msPerTick;
+        out.classes = classes_;
         out.queries = queries_;
         percentiles(interval_, (std::min)(frames_, kMaxSamples), &out.presentP50Ms, &out.presentP95Ms);
         out.gpuFrameSamples = gpuFrame_;
@@ -717,6 +722,7 @@ private:
         std::memset(emOtherCalls_, 0, sizeof(emOtherCalls_));
         stateCalls_ = substitutedDraws_ = 0;
         runs_ = EngineRunCounts{};
+        classes_ = DrawClassCounts{};
         queries_ = FlatQueryCounts{};
         gpuFrame_ = gpuResolve_ = 0;
         gpuSkipped_ = gpuInvalid_ = 0;
@@ -732,6 +738,7 @@ private:
     unsigned frames_ = 0, paused_ = 0, sampled_ = 0, renderClocked_ = 0, gpuFrame_ = 0, gpuResolve_ = 0;
     uint64_t renderTicks_[kFamilies] = {}, renderCalls_[kFamilies] = {}, renderWall_[kFamilies] = {};
     EngineRunCounts runs_;
+    DrawClassCounts classes_;
     uint64_t otherTicks_[kFamilies] = {}, otherCalls_[kFamilies] = {};
     uint64_t emRenderTicks_[emcpu::kParts] = {}, emRenderCalls_[emcpu::kParts] = {};
     uint64_t emOtherTicks_[emcpu::kParts] = {}, emOtherCalls_[emcpu::kParts] = {};
@@ -986,6 +993,17 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
         callsText(gameCalls, sizeof(gameCalls), static_cast<double>(r.renderCalls[kGameBind]) / clocked);
         tk.add("; ", "bind thunks (render thread, per clocked frame): EDVR %.3f ms over %s calls (%s ns a call), the game's forwarded calls %.3f ms over %s (%s ns a call)",
                bindMs / clocked, calls, ownNs, r.renderMs[kGameBind] / clocked, gameCalls, gameNs);
+    }
+    // The draw class census (flat_draw_classes.h): draws a clocked frame by class, and the share of each that repeats the previous watched draw's
+    // target, shader pair, or both with the camera. Two tokens (three classes each) so each fits the token. "-" for a class with no draw.
+    if (anyClocked && r.classes.frames) {
+        char text[300];
+        tk.add("; ", "draw classes (render thread, per clocked frame; the previous watched draw is the comparison; %llu draws in all over %llu clocked frames)",
+               static_cast<unsigned long long>(r.classes.total()), static_cast<unsigned long long>(r.classes.frames));
+        formatDrawClasses(text, sizeof(text), r.classes, 0, 3);
+        tk.add(": ", "%s", text);
+        formatDrawClasses(text, sizeof(text), r.classes, 3, kDrawClasses);
+        tk.add(", ", "%s", text);
     }
     // H4: how each substituted draw ended (flat_engine_runs.h). Counts and D3D calls from every frame, time from the clocked ones. A line of
     // zeros beside a substituted-draw count above means the counting never ran.

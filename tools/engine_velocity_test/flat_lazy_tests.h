@@ -1399,6 +1399,56 @@ inline void run(const Harness& h) {
         edvr::engineVelocityShutdown();
         g.ctx->ClearState();
     }
+    // The census's pool-family section is timed per RUN of kept-bound substituted draws, not per draw (gpu_census.h, RUN sections): a span around
+    // every draw, summed per frame, read 14.9, 17.1 and 25.9 ms of a 14.2 ms frame at a constant 8.6k draws a frame. Here every Begin the stub
+    // is asked is "timed", so the Ends count the spans: one per run, the draws counted as issued calls, an abandon leaves its span to the poll.
+    {
+        namespace lf = lifecycle_fake;
+        const unsigned sec = static_cast<unsigned>(edvr::GpuCensusSection::AlteredPoolFamily);
+        auto scene = [&](bool lazy, const std::function<void(Emu<>&)>& body, unsigned* begins, unsigned* ends, unsigned* issued) {
+            Game g(h);
+            g.setup();
+            SceneCleanup cleanup(g.ctx);
+            for (auto& s : lifecycle_fake::g_slots) { s.ptr = nullptr; s.hash = 0; ++s.gen; }
+            edvr::engineVelocityConfigure(true);
+            edvr::engineVelocityFlatLazy(lazy);
+            g.makeSource(40, 24);
+            Emu<> e(h, g);
+            e.warmUp();
+            e.startFrame();
+            lf::g_censusTimeEveryCall = true;
+            const unsigned b0 = lf::g_censusBegins[sec], e0 = lf::g_censusEnds[sec], i0 = lf::g_censusIssued[sec];
+            body(e);
+            *begins = lf::g_censusBegins[sec] - b0;
+            *ends = lf::g_censusEnds[sec] - e0;
+            *issued = lf::g_censusIssued[sec] - i0;
+            lf::g_censusTimeEveryCall = false;
+            edvr::engineVelocityShutdown();
+            g.ctx->ClearState();
+        };
+        unsigned b = 0, en = 0, is = 0;
+        scene(true, [](Emu<>& e) {
+            for (int i = 0; i < 5; ++i) e.producer("run span: a draw of a run");
+            e.otherDraw("run span: a draw that is not a producer ends the run");
+            for (int i = 0; i < 3; ++i) e.producer("run span: a draw of the next run");
+            e.present();
+        }, &b, &en, &is);
+        h.check(b == 2 && en == 2 && is == 8, "flat lazy: two runs of kept-bound draws (5 and 3) are two GPU spans, not eight, and the eight draws are counted as issued calls");
+        scene(false, [](Emu<>& e) {
+            for (int i = 0; i < 4; ++i) e.producer("run span: an eager draw");
+            e.present();
+        }, &b, &en, &is);
+        h.check(b == 4 && en == 4 && is == 4, "flat lazy: without the lazy form every draw is its own run: four spans for four draws");
+        scene(true, [](Emu<>& e) {
+            e.producer("run span: a draw before ClearState");
+            e.producer("run span: its second");
+            e.clearState();
+            e.restartPass();
+            e.producer("run span: a draw after ClearState starts a new run");
+            e.present();
+        }, &b, &en, &is);
+        h.check(b == 2 && en == 1 && is == 3, "flat lazy: a ClearState forgets the open run (its span is left to the poll, no End on a context that lost its state) and the next draw starts a new one");
+    }
     recRemove();
     edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
     std::printf("  flat lazy: the bracket's lazy form on WARP -- mixed scene, every restore dropped in turn, the saving counted on the "
