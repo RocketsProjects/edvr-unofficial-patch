@@ -2,8 +2,15 @@
 
 ## Status
 
-- **State:** read-only analysis, no code, no flight. Companion to
-  `docs/particle-billboards.md` (the Frontier write-up, left unchanged).
+- **State (2026-10-16, after the flight):** the narrow E1 is FLOWN and approved for main (branch
+  `claude/billboard-roll-free`): explosions no longer roll. Remaining: they FLEX when the head pitches (see
+  "Flight", below). The analysis further down is unchanged. Companion to `docs/particle-billboards.md`.
+- **Global E1 is REFUTED** (below, "2026-10-16: E1 narrowed"): about 190 G-buffer pixel shaders
+  encode normals with `cb1[277..279]`, so rows written into the game's block would change lighting.
+  What is built is vertex-slot-1-only, per draw, for 16 billboard vertex shaders, as part of
+  `fix.particle_billboard = steady` (no new key).
+- **Next flight:** the per-particle facing transcriptions for the explosion shaders (branch
+  `claude/billboard-facing`), read with the same 10 s `billboard roll-free` line.
 - **Verdict:** the single engine-side root cause exists and the arc already
   named it: every camera-facing billboard family spans its quad on the camera
   basis in the scene constant buffer, `cb1[277]` (right, inferred), `cb1[278]`
@@ -13,7 +20,7 @@
 - **What steady changes:** only the basis, per vertex (face = particle minus
   the viewer, up = world up). It leaves motion vectors, depth, blend and history
   weight alone. Its design says the bug is the basis.
-- **The cheaper engine-level fix that exists (E1, not built):** rewrite
+- **The cheaper engine-level fix that exists (E1; the global form below is refuted, the narrow form is built):** rewrite
   `cb1[277]`/`cb1[278]` once per view, in the game's mapped scene CB at Unmap, to
   a roll-free basis. That fixes ROLL for every family at once (the 7 shaders,
   plus `68DDDEF04D9894AF` and the untranscribed ones), with no shader swap and
@@ -22,7 +29,8 @@
   Steady is the minimal COMPLETE fix, and its cost is in how it is implemented,
   not in what it does (see "Cost" below).
 - **Open hypotheses:**
-  - H1: only billboard-family shaders read `cb1[277]`/`cb1[278]`. This gates E1.
+  - H1: REFUTED for a global rewrite (190 normal-encoding pixel shaders, some light-vector vertex
+    shaders); TRUE for the 16 vertex shaders in the list below, each disassembled.
   - H2: `[277..279]` are per eye, and differ between eyes on canted displays
     (Pimax), which gives the stock quads a different orientation in each eye.
   - H3: part of steady's frame cost is inherent: un-foreshortened peripheral
@@ -41,8 +49,6 @@
   log of `cb1[276..279]` for both eyes on Pimax and on SteamVR, which settles
   H2 and the "[277] = right" inference. The probe that particle_fix.h:15-18
   describes no longer exists; only `shapeOk` reads those registers.
-- **Next flight:** none of its own. If E1 is wanted, build the two instruments
-  above as log-only and fly them in one session at a geyser field.
 - **Temporary keys:** none added.
 
 ## The engine side, from the bytecode and the census
@@ -141,3 +147,87 @@ reprojection is right for it, apart from (d).
 
 Discriminator: steady against stock in a scene where the steady note reports
 0 draws. If fps still drops there, the cost is 1 or 2, not the substitution.
+
+## 2026-10-16: E1 narrowed, and built (branch `claude/billboard-roll-free`)
+
+### Global E1 is refuted
+
+The RE pass over the dumped corpus found about 190 G-buffer pixel shaders that encode normals with
+`cb1[277..279]`, and vertex shaders that move sun and light vectors into view space with them. Rows written
+into the game's mapped block (E1 as designed above) would change lighting everywhere. H1 is false for a
+rewrite of the game's block.
+
+### The family is 18 vertex shaders, the fix is vertex-slot-1-only
+
+The billboard vertex shaders, each disassembled with `D3DDisassemble` from the dumps in
+`edvr_logs\shaders` (Frontier and Steam copies) before inclusion. Rule: every use of `cb1[277]` and
+`cb1[278]` must be the quad span (or a span's fallback up), nothing for lighting or a view-space vector;
+`cb1[279]` is never changed, so its uses do not matter.
+
+| form | hashes | uses of [277]/[278] |
+|---|---|---|
+| cross | `AFBCD3ADB9092F78` `BBAD1CA808E1E292` `1B285CBC9F185D4D` `4BDE4DBF88C2BA27` `78F5F08D02EE38CC` `9F4BBCFCD3B68BC9` `2BF557356A28AA0D` `9AEC596A2B036EA6` | `cross(cb1[278], cb1[279])` only; [277] unread |
+| cross with a supplied axis | `1FBA99C4911D7ACF` `DB113566B6A59C5B` | `movc axis, cb3[1], cb1[278]`: [278] only as the fallback up |
+| direct span | `68DDDEF04D9894AF` `F7A6E916F14A3B1A` | `pos += cb1[277]*x + cb1[278]*y` |
+| pool-record sprite | `12382D2EA45E9632` `94EA991C3A03DBD9` `C31238331D8AC3D4` `F1502353BE051A2D` | the same direct span (these declare `cb1[279]`) |
+
+Not touched: `EB787F983BC1F5A3` (plume) and `6041FD2D3D0164E1` (flare) already have transcriptions; no
+transcription exists for `9AEC596A2B036EA6` (there is no `sprite_vs.h`), so it is included, and left alone
+(not rebound) while `fix.witchspace_stars = off` withholds it. EXCLUSIONS ON THE LIGHTING TEST: none; all 16
+passed, no dynamic indexing of cb1 in any of them. The explosion suspects (`9F4BBCFCD3B68BC9`, then
+`78F5F08D02EE38CC`) are in. Risks to read in the flight: `9AEC596A2B036EA6` is the hyperspace tunnel's
+starfield (roll-free streaks there are a judgement call); `2BF557356A28AA0D` declares `cb1[294]`.
+
+### The design (`billboard_rollfree.h`, `particle_fix.cpp`)
+
+- **Basis.** From the block's own forward `[279]` and WORLD UP (0,1,0), steady's convention:
+  `right = normalize(cross(up, fwd))`, `up = cross(fwd, right)`. The new [277]/[278] keep the game's row
+  LENGTHS, w components and HANDEDNESS (the sign of `[277] . cross([278],[279])`), so quad size and mirroring
+  do not change, only the roll. Forward within about a degree of world up has no defined roll: no rebind.
+- **GPU-side, no new CPU read.** The 160 bytes the particle fix already keeps give `[277..279]`. Per watched block
+  (a table of four, each with its shadow, write counter and copy): `CopyResource` of the game's block into an
+  EDVR DEFAULT constant buffer, `UpdateSubresource` of a 32-byte patch buffer, `CopySubresourceRegion` of the
+  patch into offset 277*16. This route is legal for constant-buffer-bound resources: clean under the WARP debug
+  layer (rig R2/R3/R5/R7), where a partial `UpdateSubresource` of a constant buffer is not before D3D11.1.
+- **Lazy.** The copy is made at the first billboard draw after a write of that block, once however many draws
+  follow (rig R5: 25 draws, 1 copy). Ten writes and no draw copy nothing.
+- **Per draw.** `particleOnDraw` matches by hash like the plume and flare, arms a pending flag and RETURNS FALSE:
+  the draw keeps its place in the ladder (it is still counted as an eye draw, still routed). `forwardWithVerdict`
+  binds the copy at VERTEX slot 1 for the draw and every re-issue, and restores on every exit. The pixel stage is
+  never set (rig R3: the pixel shader still reads the game's rows). EDVR's own copies and binds run inside
+  `FlatComputeInternalScope`, so the game's tees do not see them.
+- **Retirement.** The same 300-frame idle logic: a session with no billboard of the family drawn lets every
+  watched block go; the next matched draw learns again. Stock (`fix.particle_billboard = stock`, hot reload)
+  clears the table and disables it. No new key.
+- **Staleness.** The basis comes from the shadow of the last Map/Unmap write, as the plume's always has. A block
+  the game updates with `UpdateSubresource` instead would leave the shadow stale (small error: the forward only).
+
+### Instruments
+
+- Every 10 s: `billboard roll-free (N frame(s)), rebound/seen by vertex shader: HASH b/s; ... block copies X/frame
+  for B rebound draw(s), ...; cpu U us/draw (n timed); gpu copy M ms (n timed)`. Reads "not exercised" when none of
+  the 16 drew. The flight shows which hashes draw during an explosion.
+- Once per hash, at its first rebind: `roll-free scene block first bound for vs HASH`.
+- The CPU part of the capture is the existing `particle` reader of the unmap readers line (still 160 bytes).
+- GPU time of the copy is sampled one copy in 16 with `GpuIntervals` (the census's own primitive) and printed on the
+  roll-free line. A `GpuCensusSection` of its own was not added: the section table is pinned in the census rig in
+  several places (a follow-up if wanted).
+
+### Flight plan
+
+Frontier VR, `fix.particle_billboard = steady`: fly an explosion (a ship kill, a mining blast) with a rolled head.
+Read the `billboard roll-free` lines for the hashes that drew; the quads should stay upright, not mirrored, not
+mis-sized. A/B `stock` by editing the ini (hot). Pass: no roll on explosions and the other billboards, no change
+to lighting. Fail signals: mirrored or flipped sprites (handedness), pop at the pole, a quad size change.
+
+### Flight (Frontier, SteamVR aapvr, RTX 5090, `edvr_gfx_20261016_054341.log`)
+
+- Explosions no longer roll. Steady costs about 0.02 ms CPU and 0.05-0.08 ms GPU a frame; no FAILED copies.
+- Sean still sees explosions FLEX when he pitches his head. That is the expected limit of the roll-free basis:
+  it keeps the camera's FORWARD, so the quad plane follows the head's pitch. Facing the viewer is per particle,
+  and only a vertex shader reads the particle (E3 above): hence transcriptions.
+- Which hashes draw: `9F4BBCFCD3B68BC9`, `BBAD1CA808E1E292` and `9AEC596A2B036EA6` rose and decayed together and
+  later drew identical counts per window, so they are one effect (the explosion); `AFBCD3ADB9092F78`,
+  `4BDE4DBF88C2BA27` and `78F5F08D02EE38CC` drew around it.
+- The cb1 rows burst (instrument removed): `[277..279]` identical per eye; 63-122 writes of the scene block a frame.
+- The mapped read probe: write-combined mappings on NVIDIA too (13.6 us per full 5376-byte read).
