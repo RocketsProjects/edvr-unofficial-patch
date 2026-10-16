@@ -88,7 +88,6 @@
 #include "scrim_fix.h"
 #include "exposure_fix.h"
 #include "particle_fix.h"
-#include "cb1_rows_burst.h"   // a measurement-only burst over cb1 rows 275..279 (log only)
 #include "unmap_read_probe.h"   // what the Unmap tee reads from the mapped pointer, counted and timed (log only)
 #include "sunglare_fix.h"
 #include "graphics_bridge.h"
@@ -977,7 +976,6 @@ FaultBudget g_sunglareRowsBudget("vScreen.sunglareRows", 5);          // ...and 
 FaultBudget g_temporalCameraBudget("vScreen.temporalCamera", 5);      // the temporal pass's camera rows
 FaultBudget g_particleCaptureBudget("vScreen.particleCapture", 5);    // the particle billboards' constants
 FaultBudget g_billboardCaptureBudget("vScreen.billboardCapture", 5);  // the glare billboards' constants
-FaultBudget g_cb1BurstBudget("vScreen.cb1RowsBurst", 5);              // the cb1 rows burst's read (log only)
 FaultBudget g_mappedReadProbeBudget("vScreen.mappedReadProbe", 2);    // the one-off read of a mapped block (log only)
 
 // One-off and log only (docs/particle-billboards.md, 2026-10-16): is the mapped memory of a dynamic constant
@@ -986,7 +984,11 @@ FaultBudget g_mappedReadProbeBudget("vScreen.mappedReadProbe", 2);    // the one
 // without saying so here, so the three timed reads (the first is cold) against the same copy from ordinary
 // memory are the evidence. The read is of a freshly mapped WRITE_DISCARD block: its contents are undefined
 // and unused, the same pointer the Unmap tee reads from.
-static void mappedReadProbeOnce(const void* res, const char* what, const void* mapped, uint32_t bytes) {
+//
+// Each line names its buffer: the resource pointer, its ByteWidth and Usage, and who asked (the camera tee or the
+// plume tee), so the up to three lines of a session can be told apart. `res` is a buffer: both callers have
+// just had a nonzero ByteWidth from mapBufferDesc, which asks GetType first.
+static void mappedReadProbeOnce(ID3D11Resource* res, const char* what, const void* mapped, uint32_t bytes) {
     static const void* seen[3] = {};
     static int seenCount = 0;
     if (!res || !mapped || bytes == 0 || bytes > 8192) return;
@@ -1014,12 +1016,16 @@ static void mappedReadProbeOnce(const void* res, const char* what, const void* m
         }
         const volatile uint8_t keep = sink[bytes - 1];
         (void)keep;
+        D3D11_BUFFER_DESC bd{};
+        static_cast<ID3D11Buffer*>(res)->GetDesc(&bd);
+        const char* usage = bd.Usage == D3D11_USAGE_DYNAMIC ? "DYNAMIC" : bd.Usage == D3D11_USAGE_STAGING ? "STAGING"
+                            : bd.Usage == D3D11_USAGE_DEFAULT ? "DEFAULT" : "IMMUTABLE";
         Log::get().note(
-            "mapped read probe: %s, %u bytes mapped at %p, VirtualQuery protect 0x%lx (%s). Reading all of it took "
-            "%.1f, %.1f and %.1f us (the first is cold); the same copy from ordinary memory took %.1f us. A mapping "
-            "that costs several times the ordinary copy is uncached for CPU reads; the Unmap readers line says "
-            "what the tee's own reads of it cost a frame.",
-            what, bytes, mapped, known ? static_cast<unsigned long>(mbi.Protect) : 0ul,
+            "mapped read probe: %s, resource %p, %u bytes, usage %s, mapped at %p, VirtualQuery protect 0x%lx (%s). "
+            "Reading all of it took %.1f, %.1f and %.1f us (the first is cold); the same copy from ordinary memory "
+            "took %.1f us. A mapping that costs several times the ordinary copy is uncached for CPU reads; the "
+            "Unmap readers line says what the tee's own reads of it cost a frame.",
+            what, static_cast<const void*>(res), bytes, usage, mapped, known ? static_cast<unsigned long>(mbi.Protect) : 0ul,
             !known ? "VirtualQuery failed" : (mbi.Protect & PAGE_WRITECOMBINE) ? "write-combined" : "no write-combine flag",
             us[0], us[1], us[2], ord);
     });
@@ -2351,16 +2357,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         return DrawVerdict::kNone;
     }
     ++s->eyeDrawsThisFrame;
-    // The cb1 rows burst's clock, and its VS slot 1 note at a burst frame's first eye draw (cb1_rows_burst.h; log only).
-    if (s->eyeDrawsThisFrame == 1) {
-        cb1burst::g_burst.firstEyeDraw(nowMs(), s->frameNo, [&]() -> const void* {
-            ID3D11Buffer* cb = nullptr;
-            self->VSGetConstantBuffers(1, 1, &cb);
-            const void* p = cb;
-            if (cb) cb->Release();
-            return p;
-        });
-    }
     // (The temporal pass's camera latch used to fire at the frame's first
     // eye draw here; since 2026-09-04 the depth probe fires it at the
     // first draw into the scene pair's depth, which is the scene camera's
@@ -3481,7 +3477,6 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         // Each is counted and timed by unmap_read_probe.h only on a call that will read the mapped block
         // (the reader's own first early-outs, asked here), so "not exercised" means it never read.
         camBlockReadThisUnmap = true;
-        cb1burst::g_burst.noteBlockSeen();
         const bool camHasRows = s->camBytes >= 944 * 4;
         guardedBudget(g_glitchCameraBudget, [&] {
             unmapprobe::g_probe.timedIf(glitchFrameWindowOpen(), unmapprobe::kCamGlitch,
@@ -3506,14 +3501,6 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
                                         [&]() -> uint64_t {
                 temporalPassNoteSceneWrite(s->camResource, s->camData, s->camBytes);
                 return 56;
-            });
-        });
-        // The fourth reader (cb1_rows_burst.h): rows 275..279, 80 bytes, only inside a 4-frame burst.
-        guardedBudget(g_cb1BurstBudget, [&] {
-            unmapprobe::g_probe.timedIf(cb1burst::g_burst.active() && s->camBytes >= cb1burst::kNeedBytes,
-                                        unmapprobe::kCamRowsBurst, [&]() -> uint64_t {
-                cb1burst::g_burst.noteWrite(s->frameNo, s->camResource, s->camData);
-                return cb1burst::kBytes;
             });
         });
         s->camResource = nullptr;
@@ -6735,7 +6722,6 @@ void vScreenFrameBoundary() {
     // The particle billboards' target: let go of it when no plume or flare has been drawn for a while, so a
     // session without smoke does not copy the scene constants on every write (particle_capture_core.h).
     particleFrameBoundary();
-    cb1burst::g_burst.frameBoundary(s->frameNo, nowMs(), [](const char* line) { Log::get().note("%s", line); });
     // The Unmap tee's reads of the game's mapped pointers, counted and timed: one line every 30 s, a reader
     // that never read among them as "not exercised" (unmap_read_probe.h). Log only.
     {

@@ -2,25 +2,25 @@
 
 ## Status
 
-*Updated 2026-10-16. Update this block whenever the doc changes.*
+*Updated 2026-10-16 (after the Frontier flight). Update this block whenever the doc changes.*
 
-- **State:** the steady fix is shipped and flown (the sections below). The CPU cost of its constants
-  shadow is the open arc (entry "2026-10-16" at the end): fix and instrument BUILT on branch
-  `claude/particle-cb-copy`, NOT merged, NOT FLOWN.
-- **Open hypothesis:** with `fix.particle_billboard = steady` the Unmap tee reads the whole 5376-byte scene
-  block from the game's mapped pointer on every write (60+ a frame). If native AMD hands out write-combined
-  mapped memory, those reads cost 1-3 ms a frame. Confirmed on DXVK (issue 65), unmeasured on native AMD.
-- **Confirms it:** the `unmap readers` line shows `particle` at 5376 B/call before the fix and tens of
-  microseconds a call, or the `mapped read probe` line shows a full read several times the ordinary copy
-  (and a flag of "write-combined"). **Refutes it:** the particle reader costs under ~50 us a frame on the AMD
-  rig, or A/B `steady` vs `stock` shows no fps difference with the fix in.
-- **Also riding the flight:** the `cb1 rows burst:` lines (section "The cb1 rows burst"): per-write rows 275..279 for 4 frames twice, to see whether 277..279 differ per eye on canted displays and how many 5376-byte writes a frame the game makes.
-- **Roll-free for the other billboards (explosions above all):** built on `claude/billboard-roll-free`, not merged, not
-  flown, under the same `steady` key; see `billboard-root-cause-2026-10-16.md`, "E1 narrowed".
+- **State:** the steady fix is shipped and flown (the sections below). Two arcs rode `claude/billboard-roll-free`,
+  flown 2026-10-16 and approved for main: the shadow's CPU cost (entry "2026-10-16", cut from a whole-block read
+  to the 160 bytes the fix uses) and the roll-free basis for the untranscribed billboards
+  (`billboard-root-cause-2026-10-16.md`).
+- **Flown (Frontier, SteamVR aapvr, RTX 5090, log `edvr_gfx_20261016_054341.log`):** explosions no longer roll;
+  steady costs about 0.02 ms CPU and 0.05-0.08 ms GPU a frame; no FAILED copies. The one-off `cb1 rows burst`
+  showed `[277..279]` IDENTICAL for both eyes and 63-122 writes of the scene block a frame; it is removed.
+  The `mapped read probe` found WRITE-COMBINED mappings on NVIDIA too: a full 5376-byte read took 13.6 us, so
+  the old whole-block copy was worth about 0.9-1.7 ms a frame there before the 160-byte cut.
+- **Hypothesis "native AMD reads are slow":** now generalised; mapped dynamic constant buffers are write-combined
+  on NVIDIA as well. Still unmeasured on AMD; the `unmap readers` and `mapped read probe` lines stay, they are cheap.
+- **Open:** Sean still sees explosions FLEX when he pitches his head. That is the expected limit of the roll-free
+  basis, which keeps the camera's forward, so the quad plane follows pitch. Per-particle viewer facing (a
+  transcription, as the plume and flare have) is the fix: branch `claude/billboard-facing`.
 - **Temporary keys:** none added. `fix.particle_billboard` is hot-reloadable (edvr.ini, polled once a second).
 - **Ruled out:** nothing yet.
-- **Next flight:** Frontier VR install of the branch, RX 9070 XT user's setup if possible; A/B
-  `fix.particle_billboard` steady/stock in one session, away from smoke and then at a geyser field.
+- **Next flight:** the facing transcriptions (see the entry at the end).
 
 *Written to accompany a Frontier issue report; no tracker number yet.
 Companion write-ups in this folder cover the sun's glare (sun-glare.md),
@@ -333,24 +333,16 @@ mapped WRITE_DISCARD block whose contents are undefined and unused.
    and the `particle` figure falls from the tens of us a call to a few. If it does not close, the remaining cost
    is not this read, and the line says where to look next (`total` against the frame time).
 
-### The cb1 rows burst (measurement only, same branch)
+### The cb1 rows burst: findings, then removed (2026-10-16 flight)
 
-`cb1_rows_burst.h`; fourth reader in the camera tee beside `glitchFrameObserve`, `sunglareSceneRows` and
-`temporalPassNoteSceneWrite`, timed in the `unmap readers` line as `camera-rows-burst`. It reads only 80 bytes,
-camera block + 275*16 (row 275, the eye origin, and rows 276..279), and only inside a burst. No hotkey, no ini key.
+A measurement-only look at camera-block rows 275..279 (two 4-frame bursts per session, one line per Unmap of the
+block) flew once and was removed from the branch (`cb1_rows_burst.h`, its tee reader and its rig cases). It
+answered both questions it was built for:
 
-- **Arming:** once about 20 s after the session's first eye draw, once more 60 s after that first arming; each
-  burst is 4 consecutive frames. At arming time one line says `burst N of 2 armed at frame F`; if the camera tee
-  has never seen the block by then, a second line says so and no write lines follow.
-- **Per Unmap of the camera block in a burst:** `cb1 rows burst: frame F write K res=<ptr> [275]=(x y z w)
-  [276]=(...) [277]=(...) [278]=(...) [279]=(...)`, %.6g. Lines are formatted at the frame boundary, not in the
-  Unmap path; a frame logs at most 256 writes and its summary line
-  (`frame F: N write(s) of the camera block, M logged (burst B of 2, frame i of 4)`) says how many it saw.
-- **Per burst frame, at the first eye draw:** `cb1 rows burst: frame F first eye draw: VS slot 1 res=<ptr>`, so
-  the eye blocks can be told from shadow or cube views by matching `res`.
-- **Volume:** the design doc counts about 60 writes of the block a frame, so expect about 60 write lines a frame,
-  roughly 480 lines over the two bursts, not 40; the cap and summary keep a worse frame bounded.
-- **Reading it:** per eye, compare [277..279] between writes whose `res` equals the slot 1 resource of the eye's
-  draws; the number of writes a frame is the summary line.
-- **Rig:** `tools\particle_capture_test` P7 (arming at exactly 20 s and 60 s, the 80-byte read, the line format,
-  the cap, one slot 1 query a frame, two bursts and no third).
+- `[277..279]` are IDENTICAL for the two eyes on the flown headset (SteamVR aapvr). H2 (per-eye basis on canted
+  displays) is not shown by this flight; a Pimax canted display remains unmeasured.
+- The game writes the 5376-byte scene block 63-122 times a frame, so the old whole-block copy read about 340-650
+  KB of write-combined memory a frame.
+
+The `unmap readers` line and the `mapped read probe` lines stay. Each probe line now names its buffer (resource
+pointer, ByteWidth, usage) so the up to three lines of a session can be told apart.

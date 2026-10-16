@@ -2,15 +2,15 @@
 
 ## Status
 
-- **State (2026-10-16, later):** the narrow E1 is BUILT on branch `claude/billboard-roll-free`
-  (cut from `claude/particle-cb-copy`, not merged, NOT FLOWN); see the entry at the end. The analysis
-  below it is unchanged. Companion to `docs/particle-billboards.md`.
+- **State (2026-10-16, after the flight):** the narrow E1 is FLOWN and approved for main (branch
+  `claude/billboard-roll-free`): explosions no longer roll. Remaining: they FLEX when the head pitches (see
+  "Flight", below). The analysis further down is unchanged. Companion to `docs/particle-billboards.md`.
 - **Global E1 is REFUTED** (below, "2026-10-16: E1 narrowed"): about 190 G-buffer pixel shaders
   encode normals with `cb1[277..279]`, so rows written into the game's block would change lighting.
   What is built is vertex-slot-1-only, per draw, for 16 billboard vertex shaders, as part of
   `fix.particle_billboard = steady` (no new key).
-- **Next flight:** Frontier VR A/B with the `billboard roll-free` log line: which hashes draw during an
-  explosion, whether the explosion quads stop rolling, whether anything looks mirrored or mis-sized.
+- **Next flight:** the per-particle facing transcriptions for the explosion shaders (branch
+  `claude/billboard-facing`), read with the same 10 s `billboard roll-free` line.
 - **Verdict:** the single engine-side root cause exists and the arc already
   named it: every camera-facing billboard family spans its quad on the camera
   basis in the scene constant buffer, `cb1[277]` (right, inferred), `cb1[278]`
@@ -49,8 +49,6 @@
   log of `cb1[276..279]` for both eyes on Pimax and on SteamVR, which settles
   H2 and the "[277] = right" inference. The probe that particle_fix.h:15-18
   describes no longer exists; only `shapeOk` reads those registers.
-- **Next flight:** none of its own. If E1 is wanted, build the two instruments
-  above as log-only and fly them in one session at a geyser field.
 - **Temporary keys:** none added.
 
 ## The engine side, from the bytecode and the census
@@ -221,3 +219,15 @@ Frontier VR, `fix.particle_billboard = steady`: fly an explosion (a ship kill, a
 Read the `billboard roll-free` lines for the hashes that drew; the quads should stay upright, not mirrored, not
 mis-sized. A/B `stock` by editing the ini (hot). Pass: no roll on explosions and the other billboards, no change
 to lighting. Fail signals: mirrored or flipped sprites (handedness), pop at the pole, a quad size change.
+
+### Flight (Frontier, SteamVR aapvr, RTX 5090, `edvr_gfx_20261016_054341.log`)
+
+- Explosions no longer roll. Steady costs about 0.02 ms CPU and 0.05-0.08 ms GPU a frame; no FAILED copies.
+- Sean still sees explosions FLEX when he pitches his head. That is the expected limit of the roll-free basis:
+  it keeps the camera's FORWARD, so the quad plane follows the head's pitch. Facing the viewer is per particle,
+  and only a vertex shader reads the particle (E3 above): hence transcriptions.
+- Which hashes draw: `9F4BBCFCD3B68BC9`, `BBAD1CA808E1E292` and `9AEC596A2B036EA6` rose and decayed together and
+  later drew identical counts per window, so they are one effect (the explosion); `AFBCD3ADB9092F78`,
+  `4BDE4DBF88C2BA27` and `78F5F08D02EE38CC` drew around it.
+- The cb1 rows burst (instrument removed): `[277..279]` identical per eye; 63-122 writes of the scene block a frame.
+- The mapped read probe: write-combined mappings on NVIDIA too (13.6 us per full 5376-byte read).

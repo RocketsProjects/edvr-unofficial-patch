@@ -27,7 +27,6 @@ enum Reader : int {
     kCamGlitch,      // glitchFrameObserve: 3 floats, only inside an engine-fix event window
     kCamSunglare,    // sunglareSceneRows on the camera block: 12 floats at float 932, fix.sunglare world shader only
     kCamTemporal,    // temporalPassNoteSceneWrite: 12 floats at 932 and 2 at 792, only while the temporal pass wants them
-    kCamRowsBurst,   // cb1_rows_burst.h: 80 bytes at byte 4400 (rows 275..279), only inside a burst of 4 frames
     kSceneCb,        // sunglareSceneRows on the world shader's scene block (a 208-byte block never qualifies)
     kParticle,       // particleCapture: the plume shader's slot-1 block
     kBillboard,      // billboardCapture: the sun glare train's block, at most 512 bytes
@@ -36,7 +35,7 @@ enum Reader : int {
 
 inline const char* readerName(int r) {
     static const char* const names[kReaderCount] = {"panel", "camera-glitch", "camera-sunglare", "camera-temporal",
-                                                    "camera-rows-burst", "scene-cb", "particle", "billboard"};
+                                                    "scene-cb", "particle", "billboard"};
     return (r >= 0 && r < kReaderCount) ? names[r] : "?";
 }
 

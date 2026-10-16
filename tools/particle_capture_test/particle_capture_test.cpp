@@ -5,11 +5,9 @@
 //   P3 the target retires after kRetireFrames without a match, re-arms on the next one, a match postpones it
 //   P4 the probe: counts, the sampled mean, the clock's own cost taken off, "not exercised", the window, truncation
 //   P5 a smoke-free stretch after a plume: the bytes read from mapped memory, before and after
-//   P7 the cb1 rows burst: arming times, the 80-byte read, the line format, the cap, the slot 1 note, two bursts only
 //   P6 source pins (with a root argument): the probe and the retirement are wired where they run
 #include "particle_capture_core.h"
 #include "unmap_read_probe.h"
-#include "cb1_rows_burst.h"
 
 #include <cstdio>
 #include <cstring>
@@ -254,7 +252,7 @@ static void p4Probe() {
         check(has(s, "particle 6.4/frame 160 B/call 2.00 us/call 12.8 us/frame"), "P4.particle-figures");
         check(has(s, "total 12.8 us/frame"), "P4.total");
         for (const char* r : {"panel not exercised", "camera-glitch not exercised", "camera-sunglare not exercised",
-                              "camera-temporal not exercised", "camera-rows-burst not exercised", "scene-cb not exercised", "billboard not exercised"})
+                              "camera-temporal not exercised", "scene-cb not exercised", "billboard not exercised"})
             check(has(s, r), "P4.unexercised-readers-say-so");
         check(!has(s, "particle not exercised"), "P4.exercised-reader-does-not-say-so");
         check(has(s, "; particle target armed"), "P4.extra-appended");
@@ -318,86 +316,6 @@ static void p4Probe() {
     unmapprobe::g_frequencyForTest = 0;
 }
 
-static void p7Burst() {
-    using namespace cb1burst;
-    static_assert(kOffset == 4400 && kBytes == 80 && kNeedBytes == 4480, "rows 275..279");
-    // A block of exactly kNeedBytes, so a read past row 279 would leave it; rows carry their own index.
-    std::vector<uint8_t> blk(kNeedBytes, 0xEE);
-    auto fill = [&](float x) {
-        float* f = reinterpret_cast<float*>(blk.data() + kOffset);
-        for (int i = 0; i < 20; ++i) f[i] = x + static_cast<float>(i);
-    };
-    std::vector<std::string> lines;
-    auto emit = [&](const char* l) { lines.push_back(l); };
-    auto count = [&](const char* part) { int n = 0; for (auto& l : lines) if (l.find(part) != std::string::npos) ++n; return n; };
-    int queries = 0;
-    auto q = [&]() -> const void* { ++queries; return reinterpret_cast<const void*>(0x1234); };
-    {
-        Burst b;
-        b.frameBoundary(1, 999999, emit);
-        check(lines.empty() && b.phase == Burst::kWaitEye, "P7.no-eye-draw-no-clock");
-        b.noteWrite(1, blk.data(), blk.data());
-        check(b.kept == 0 && b.writes == 0, "P7.idle-reader-records-nothing");
-        b.firstEyeDraw(5000, 1, q);
-        check(b.phase == Burst::kWaitFirst && queries == 0, "P7.first-eye-draw-starts-the-clock-and-asks-nothing");
-        b.frameBoundary(2, 24999, emit);
-        check(lines.empty(), "P7.not-armed-at-19999-ms");
-        b.frameBoundary(3, 25000, emit);
-        check(b.active() && count("burst 1 of 2 armed at frame 3") == 1, "P7.armed-at-20-s");
-        check(count("has not seen the camera block") == 1, "P7.never-seen-says-so-at-arm-time");
-        // Frame 4: a first eye draw twice (one query), five writes with distinct rows.
-        lines.clear();
-        b.firstEyeDraw(26000, 4, q);
-        b.firstEyeDraw(26001, 4, q);
-        check(queries == 1, "P7.slot-1-asked-once-a-frame");
-        for (int w = 0; w < 5; ++w) { fill(static_cast<float>(w) * 100.0f); b.noteWrite(4, blk.data() + w, blk.data()); }
-        b.frameBoundary(4, 26100, emit);
-        check(lines.size() == 7, "P7.frame-lines-slot1-writes-summary");
-        check(lines[0].find("cb1 rows burst: frame 4 first eye draw: VS slot 1 res=") == 0, "P7.slot-1-line");
-        check(lines[1].find("cb1 rows burst: frame 4 write 1 res=") == 0 && lines[5].find("frame 4 write 5 res=") != std::string::npos,
-              "P7.ordinals-in-order-from-1");
-        check(lines[2].find("[275]=(100 101 102 103) [276]=(104 105 106 107) [277]=(108 109 110 111) [278]=(112 113 114 115) "
-                            "[279]=(116 117 118 119)") != std::string::npos, "P7.five-rows-in-six-significant-figures");
-        check(lines[6].find("frame 4: 5 write(s) of the camera block, 5 logged (burst 1 of 2, frame 1 of 4)") != std::string::npos,
-              "P7.summary-counts");
-        // Frames 5..7 finish the burst; a frame with no first eye draw has no slot 1 line.
-        lines.clear();
-        for (uint32_t f = 5; f <= 7; ++f) { b.noteWrite(f, blk.data(), blk.data()); b.frameBoundary(f, 26200 + f, emit); }
-        check(!b.active() && b.phase == Burst::kWaitNext, "P7.four-frames-then-closed");
-        check(count("first eye draw") == 0 && count("of 4)") == 3, "P7.later-frames");
-        const size_t total = lines.size();
-        b.noteWrite(8, blk.data(), blk.data());
-        b.frameBoundary(8, 26300, emit);
-        check(lines.size() == total && b.kept == 0, "P7.closed-reader-records-nothing");
-        b.frameBoundary(9, 25000 + 59999, emit);
-        check(lines.size() == total, "P7.second-burst-not-before-60-s-after-the-first-arming");
-        b.noteBlockSeen();
-        b.frameBoundary(10, 25000 + 60000, emit);
-        check(b.active() && count("burst 2 of 2 armed at frame 10") == 1 && count("has not seen") == 0, "P7.second-burst-at-60-s");
-        // The cap: 300 writes seen, 256 logged, the summary says both.
-        lines.clear();
-        for (int w = 0; w < 300; ++w) b.noteWrite(11, blk.data(), blk.data());
-        b.frameBoundary(11, 90000, emit);
-        check(count(": 300 write(s) of the camera block, 256 logged") == 1 && lines.size() == 257, "P7.cap-says-what-it-saw");
-        for (uint32_t f = 12; f <= 14; ++f) b.frameBoundary(f, 90000 + f, emit);
-        check(b.phase == Burst::kDone, "P7.two-bursts-then-done");
-        lines.clear();
-        b.frameBoundary(15, 999999999, emit);
-        b.firstEyeDraw(999999999, 15, q);
-        b.noteWrite(15, blk.data(), blk.data());
-        check(lines.empty() && b.kept == 0, "P7.no-third-burst");
-    }
-    {
-        // Seen-before-arming: no "never sees" line.
-        Burst b;
-        b.noteBlockSeen();
-        b.firstEyeDraw(1, 1, q);
-        lines.clear();
-        b.frameBoundary(2, 20001, emit);
-        check(b.active() && count("has not seen") == 0 && lines.size() == 1, "P7.seen-block-no-warning");
-    }
-}
-
 static std::string slurp(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     std::stringstream ss;
@@ -421,20 +339,16 @@ static void p6Pins(const std::string& root) {
     check(countOf(pf, "g_track.frameBoundary(anyBlockWatched())") == 1, "P6.the-boundary-asks-the-tracker");
     check(countOf(vs, "particleFrameBoundary();") == 1, "P6.vscreen-calls-the-boundary-once");
     check(countOf(vs, "unmapprobe::frameTick(") == 1, "P6.vscreen-prints-the-line-once");
-    for (const char* r : {"kPanel", "kCamGlitch", "kCamSunglare", "kCamTemporal", "kCamRowsBurst", "kSceneCb", "kParticle", "kBillboard"})
+    for (const char* r : {"kPanel", "kCamGlitch", "kCamSunglare", "kCamTemporal", "kSceneCb", "kParticle", "kBillboard"})
         check(countOf(vs, std::string("unmapprobe::") + r) == 1, (std::string("P6.reader-wired-once-") + r).c_str());
     check(countOf(vs, "unmapprobe::g_probe.noteParticleCapture(camBlockReadThisUnmap)") == 1, "P6.shared-block-noted");
-    check(countOf(vs, "cb1burst::g_burst.noteWrite(") == 1, "P6.burst-reader-wired-once");
-    check(countOf(vs, "cb1burst::g_burst.frameBoundary(") == 1, "P6.burst-boundary-wired-once");
-    check(countOf(vs, "cb1burst::g_burst.firstEyeDraw(") == 1, "P6.burst-eye-draw-wired-once");
-    check(countOf(vs, "cb1burst::g_burst.noteBlockSeen();") == 1, "P6.burst-block-seen-wired-once");
 }
 
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
     const std::string mode = argv[1];
     if (mode == "--dry-run") {
-        std::puts("particle_capture_test: P1-P7 pure cases; no files, no GPU device");
+        std::puts("particle_capture_test: P1-P6 pure cases; no files, no GPU device");
         return 0;
     }
     if (mode != "--self-test") return 2;
@@ -443,9 +357,8 @@ int main(int argc, char** argv) {
     p3Retire();
     p4Probe();
     p5Session();
-    p7Burst();
     if (argc > 2) p6Pins(argv[2]);
     if (failures) { std::printf("particle_capture_test: %d FAILED\n", failures); return 1; }
-    std::puts("particle_capture_test: PASS P1-P7");
+    std::puts("particle_capture_test: PASS P1-P6");
     return 0;
 }
