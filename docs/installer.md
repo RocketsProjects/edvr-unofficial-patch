@@ -34,6 +34,9 @@ This file is why it does what it does. Using it is one paragraph in the
   Odyssey folder. An older flat installer refused to proceed while Elite was
   running. A current unified installer preview and actual installation remain
   unverified; the game session logs do not establish VR rendering behavior.
+- **Windows validation:** The manual Windows test-build workflow runs all full
+  build gates; local Wine cannot pass the process-monitor self-tests. A build
+  result and an installer test are separate evidence.
 
 ## Why it exists
 
@@ -553,6 +556,16 @@ stale relative to HEAD. The session logs give no VR rendering conclusion.
 `runinprefix --help` returned 0 with usage in 2.02 seconds. The wrapper, path
 selection, and runtime launch have live smoke evidence; preview with a current
 unified installer and an actual installation remain unverified.
+
+#### 2026-10-16 native Windows build handoff
+
+The latest-main source's local MSVC build under Wine stopped before compilation
+at `tools/run_jobs.py --self-test`: eight process-tree, window, and CPU-time
+checks failed (log: `/tmp/edvr-installer-latest-main-full-build.log`). Ruled
+out: accepting a Wine-hosted full build as Windows validation, because those
+required gates did not pass. The manual Windows test-build workflow runs the
+unchanged full `build.bat` gate on Windows Server 2022. A green build does not
+establish an installer flight.
 
 The Linux installer ZIP includes `edvr_installer.sh`,
 `edvr-installer-linux.py`, the Windows installer, and `README-linux.txt`. The
