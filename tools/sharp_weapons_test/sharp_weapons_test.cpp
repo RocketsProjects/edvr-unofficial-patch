@@ -755,6 +755,86 @@ static void menuTests() {
 // ============================================================================================ the lost-layer instrument
 // "N layers' content never reached a tonemap" (0.5 to 5 percent of the weapon eye-frames of the 2026-10-16 combat flights, none for the HUD layer):
 // the cause is open, so each loss prints the eye's state and the tonemap-shaped draws the admission saw (ui_layer.cpp noteWeaponsLost / noteToneSight).
+// The bookkeeping of one eye's weapons layer, frame by frame, with the drop test as it was (frozen: the layer's content frame against the latest TONEMAP's
+// frame, which the HUD's re-issue advances every frame) and as it is (weaponsLayerDropped: against the last frame a re-issue CARRIED the content). The
+// 2026-10-16 10:36 flight's lost-layer lines were one per burst end: a layer holding one draw, then ~200 quiet frames, then the next burst's first draw
+// comparing the content's frame with the latest tonemap's. Nothing had been dropped.
+struct EyeModel {
+    uint64_t wSeq = 0, wToneSeq = 0, wPubSeq = 0;
+    uint32_t wDraws = 0;
+    unsigned lostOld = 0, lostNew = 0, carriedFrames = 0, contentFrames = 0;
+    // One eye-frame: `draws` weapons draws (0: none), a re-issue ran (the HUD's, every frame in flight), and it carried the weapons content.
+    void frame(uint64_t f, uint32_t draws, bool tone, bool carries) {
+        if (draws) {
+            if (wSeq && wDraws && wToneSeq != wSeq) ++lostOld;                       // the frozen rule
+            if (weaponsLayerDropped(wSeq, wDraws, wPubSeq)) ++lostNew;               // the production rule
+            wSeq = f;
+            wDraws = draws;
+            ++contentFrames;
+        }
+        if (tone) {
+            wToneSeq = f;
+            if (draws && carries) {
+                wPubSeq = f;
+                ++carriedFrames;
+            }
+        }
+    }
+};
+static void dropTests() {
+    // A burst ending in one draw, then quiet frames, then the next burst: nothing was dropped.
+    {
+        EyeModel m;
+        uint64_t f = 1;
+        for (int i = 0; i < 5; ++i) m.frame(f++, 3, true, true);   // a multicannon burst
+        m.frame(f++, 1, true, true);                               // its last draw, alone
+        const uint64_t lone = f - 1;
+        for (int i = 0; i < 200; ++i) m.frame(f++, 0, true, true);  // quiet, the HUD's tonemap running every frame
+        check(m.wPubSeq == lone && m.carriedFrames == 6, "the lone final draw was carried by its own frame's re-issue");
+        m.frame(f++, 2, true, true);                               // the next burst
+        check(m.lostNew == 0, "a burst's last draw followed by quiet frames is not a drop");
+        check(m.lostOld == 1, "fail-before: the frozen rule called it lost when the next burst began");
+        std::printf("burst ending in one draw, 200 quiet frames, next burst: frozen rule %u lost, production rule %u lost, %u of %u eye-frames carried\n",
+                    m.lostOld, m.lostNew, m.carriedFrames, m.contentFrames);
+    }
+    // Sparse bolts (one lone draw, quiet, repeat): the frozen rule counted nearly every one.
+    {
+        EyeModel m;
+        uint64_t f = 1;
+        for (int b = 0; b < 50; ++b) {
+            m.frame(f++, 1, true, true);
+            for (int i = 0; i < 30; ++i) m.frame(f++, 0, true, true);
+        }
+        check(m.lostNew == 0 && m.contentFrames == 50 && m.carriedFrames == 50, "fifty lone draws, all carried, none dropped");
+        check(m.lostOld == 49, "fail-before: the frozen rule counted 49 of the 50 as lost");
+    }
+    // A real drop is still caught: content drawn, and no re-issue at all in its frame (the next frame's re-issue has nothing of it)...
+    {
+        EyeModel m;
+        m.frame(10, 2, false, false);
+        m.frame(11, 0, true, true);
+        m.frame(12, 1, true, true);
+        check(m.lostNew == 1, "content with no re-issue in its frame is a drop");
+    }
+    // ...and so is content a re-issue ran past without carrying (the frozen rule missed this one: its latest-tonemap frame equalled the content's).
+    {
+        EyeModel m;
+        m.frame(10, 2, true, false);
+        m.frame(12, 1, true, true);
+        check(m.lostNew == 1, "a re-issue that ran in the content's frame but did not carry it is a drop");
+        check(m.lostOld == 0, "fail-before: the frozen rule could not see that one");
+    }
+    // Consecutive frames of weapons fire: every frame carried, none dropped, by either rule.
+    {
+        EyeModel m;
+        for (uint64_t f = 1; f <= 100; ++f) m.frame(f, 4, true, true);
+        check(m.lostNew == 0 && m.lostOld == 0 && m.carriedFrames == 100, "a continuous burst drops nothing");
+    }
+    check(!weaponsLayerDropped(0, 0, 0) && !weaponsLayerDropped(5, 0, 0) && !weaponsLayerDropped(0, 3, 0) && !weaponsLayerDropped(7, 2, 7) && weaponsLayerDropped(7, 2, 6) &&
+              weaponsLayerDropped(7, 2, 0),
+          "weaponsLayerDropped: an empty layer, a never-used layer and a carried layer are not drops; a layer carried at another frame, or never, is");
+}
+
 static bool wiredLost(const std::string& t) {
     const size_t loss = t.find("++g_win.weaponsLost;\n            noteWeaponsLost(g_draw.eye, e, g_draw.seq);");
     size_t sights = 0, at = 0;
@@ -764,6 +844,8 @@ static bool wiredLost(const std::string& t) {
     }
     return loss != std::string::npos && sights == 4 && has(t, "void noteToneSight(uint64_t seq, const void* res, int eye, uint8_t outcome) {") &&
            has(t, "if (e.wTarget != g_draw.targetRes) ++e.wOtherTargets;") && has(t, "e.wOtherTargets = 0;") && has(t, "if (!seenRes) seenRes = r.Get();") &&
+           has(t, "if (weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)) {") &&
+           has(t, "    if (hadWeapons) {\n        // Stamped ONLY by a bracket that carried the weapons layer's content") && has(t, "        e.wPubSeq = seq;\n        e.wMissStreak = 0;") &&
            has(t, "if (g_lostLines >= 24) return;") && before(t, "noteToneSight(seq, seenRes, eye, 0);", "crispArm(eye, seq, hdrSlot, ta.rtvRes, hdrRes, vs, ps);");
 }
 static void lostPins(const std::string& layer) {
@@ -772,6 +854,9 @@ static void lostPins(const std::string& layer) {
     check(!wiredLost(replaced(layer, "        noteToneSight(seq, seenRes, eye, 3);\n", "")), "control: an unrecorded outcome trips the pin");
     check(!wiredLost(replaced(layer, "    noteToneSight(seq, seenRes, eye, 0);\n", "")), "control: an unrecorded admission trips the pin");
     check(!wiredLost(replaced(layer, "if (g_lostLines >= 24) return;", "")), "control: an unlimited line trips the pin");
+    check(!wiredLost(replaced(layer, "if (weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)) {", "if (e.wSeq && e.wDraws && e.wToneSeq != e.wSeq) {")),
+          "control: the frozen drop test (against the latest tonemap's frame) trips the pin");
+    check(!wiredLost(replaced(layer, "    if (hadWeapons) {\n        // Stamped ONLY", "    {\n        // Stamped ONLY")), "control: a publication stamped by every re-issue trips the pin");
 }
 
 // ============================================================================================ the composite (WARP)
@@ -1322,6 +1407,7 @@ int main(int argc, char** argv) {
         censusTests("tools/sharp_weapons_test/fixtures/census_070029_c4_f0.txt", 4, 0);
         wiringTests();
         menuTests();
+        dropTests();
         gpuTests();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "sharp_weapons_test: FAIL: %s (after %u checks)\n", e.what(), g_checks);

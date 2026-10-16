@@ -14,8 +14,9 @@
   `advanced.sharp_weapons_blend = matched | plain`, now the FIRST row of the in-headset menu ("Weapons blend", live): Sean sees no difference between
   the two live (log edvr_gfx_20261016_095256) and keeps the A/B for long sessions. When the arc closes ship matched and propose removing the key,
   quoted, with its generator exception (`MENU_ADVANCED_EXCEPTIONS` in tools\gen_settings_schema.py) and its edvr.ini row. W3: 939D's cancel is
-  RIGHT (CB0 rows 4-7 equal the jittered cb1[270..273] bit for bit apart from translation); 1F17 and 5C1D still uncaptured. OPEN: 0.5 to 5 percent of
-  the weapon eye-frames report "layers' content never reached a tonemap" (HUD layer: none); cause unknown, instrument built (`claude/combat-flight-2`).
+  RIGHT (CB0 rows 4-7 equal the jittered cb1[270..273] bit for bit apart from translation); 1F17 and 5C1D still uncaptured. FOUND: the 0.5 to 5
+  percent "layers' content never reached a tonemap" was an accounting artifact (one false count per burst end), nothing was dropped; fixed on
+  `claude/combat-flight-3`, see "The never-tonemapped frames: found".
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
   path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
   docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
@@ -395,3 +396,31 @@ draw's frame, and the last six tonemap-shaped draws the admission saw (frame, re
 shows as a tonemap entry one frame off the content's, (b) as no entry for the eye, (c) as a nonzero "into another target" or a read resource unlike the
 first-draw target. The fix follows the signature (a: the tonemap uses the eye's own frame; b: composite the leftover content at the door; c: match by
 the layer's own target set), with a rig case that fails first.
+
+### The never-tonemapped frames: found (`claude/combat-flight-3`, BUILT, NOT FLOWN)
+
+**Cause.** Flight edvr_gfx_20261016_103639 (build a5709ce1), ten `lost layer` lines. Every one has the same shape: a weapons layer holding ONE draw (frame 5675,
+1 draw, first into the eye's own target, 0 into another), the next weapons draw ~200 frames later (frame 5879), and between them the tonemap-shaped draws of
+both eyes admitted every frame (the HUD's re-issue runs every frame). Lost layers 3 and 4 are the same (content 5887, next draw 6678). The count is made at the
+eye's NEXT weapons draw (`beginInner`, when the layer is cleared for the new frame), and compared the content's frame with `wToneSeq`, which every re-issue
+overwrites: by the time a burst's last draw is followed by quiet frames, `wToneSeq` is the latest frame, never the content's, so the next burst's first draw
+counted the previous burst's last draw as lost. One false count per burst end per eye; that is why beam-only windows (many short bursts) showed 4 to 5
+percent and the multicannon-heavy one 0.25. The hypotheses, against the code: (1) a final draw landing after its frame's tonemap is `tone-late`, a decision
+counted in the left-in-the-scene list, which had none; (2) there is no state where publication waits for a later frame: the admission matches the content by
+the eye's own frame and target in the frame it is drawn (`wFresh`), whatever the draw count, and the bracket carried the layer in that same re-issue; (3) the
+frame tag is stamped at the layer's first draw from the eye's own sequence, the one the tonemap reads. A lone final draw was composited in its own frame's
+tonemap all along. No tighter instrument was needed: the lines' own numbers (one draw, a ~200-frame gap, admitted tonemaps in between) show it.
+
+**Fix.** The accounting, not the compositing. A new tag `wPubSeq` is stamped only by a re-issue whose bracket carried the weapons layer's content
+(`uiLayerCrispToneEnd`, `hadWeapons`), and a layer is dropped iff `weaponsLayerDropped(contentFrame, draws, wPubSeq)` (weapons_fire.h). The miss streak
+(30 frames of unpublished content stands the weapons path down) resets only on such a bracket, so a real persistent failure can still reach it, which the
+old unconditional reset made impossible. The 30 s line now prints "of N eye-frames with weapons draws" beside the composites, so the identity
+`matched + plain + fell back == eye-frames with draws - layers lost` can be read off one line. Not changed: the HUD layer's own count
+(`hdrLost`, `hdrToneSeq`) has the same shape of comparison but its layer is drawn every frame, so it never showed; if the HUD is ever drawn in bursts it
+needs the same tag.
+
+**Rig** (`sharp_weapons_test`, `dropTests`): a burst of five three-draw frames and a lone final draw, 200 quiet frames with the tonemap running, then the next
+burst: the lone draw is carried by its own frame's re-issue, the production rule counts 0 lost and the frozen rule 1 (fail-before). Fifty lone draws 30 frames
+apart: production 0, frozen 49. A real drop (content, no re-issue in its frame) counts 1, and so does a re-issue that ran in the content's frame without
+carrying it, which the frozen rule could not see (0). A continuous burst counts 0 by both. Pins with controls: the production test is
+`weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)`, the stamp sits inside `if (hadWeapons)`.
