@@ -2930,10 +2930,11 @@ void testFlatCpuWiring() {
     if (first != std::string::npos && last != std::string::npos && first < last)
         check(runtimeCpp.substr(first, last - first).find("census") == std::string::npos,
               "the stand-down never reads the census: it measures, it does not decide");
-    // The same for the numbers: the runtime touches the census in twelve places and no other -- the four
-    // GPU notes and the skipped one, idle, and the block at the Present (running, onFrame, noteWrapper,
-    // noteOffscreen, noteQueries, take) -- and none of them reads a figure back into the runtime's state.
-    check(count(runtimeCpp, "s.census.") == 12,
+    // The same for the numbers: the runtime touches the census in thirteen places and no other -- the four
+    // GPU notes and the skipped one, idle, and the block at the Present (setClocks, the timing switch that follows
+    // advanced.flat_cpu_timing; running, onFrame, noteWrapper, noteOffscreen, noteQueries, take) -- and none of them
+    // reads a figure back into the runtime's state.
+    check(count(runtimeCpp, "s.census.") == 13,
           "the runtime touches the census in exactly its known places (the GPU notes, idle, and the Present block)");
 }
 

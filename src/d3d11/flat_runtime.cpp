@@ -317,6 +317,8 @@ struct State {
     // advanced.flat_refusal_view: paint the prep's classes into the resolved image. Read once a Present; refusalViewRead makes the first read
     // say its value, so a refused key shows in the log as "off" rather than as silence.
     bool refusalView = false, refusalViewRead = false;
+    // advanced.flat_cpu_timing: the census's clocks. Read once a Present; cpuTimingRead makes the first read say its state in the log.
+    bool cpuTimingRead = false;
     // The camera term's translation precision (design doc section 104): row 275 is the render origin the camera term subtracts
     // frame to frame (cameraBefore, flat_mono_shader_source.h). One 5 s window over the non-reset frames handed to the resolver.
     struct CameraOriginWindow { uint64_t frames = 0, moved = 0; float maxAbs = 0, maxStep = 0, minStep = 0; float last[3] = {}; };
@@ -615,7 +617,7 @@ struct State {
     // the whole frame, first game draw to Present, and the resolver's dispatches plus
     // backend call. A timer is owned until its sample is read; with none free the
     // frame is skipped and counted.
-    flatcpu::Census census{flatcpu::kRenderPeriod, flatcpu::clocksWanted()};
+    flatcpu::Census census{flatcpu::kRenderPeriod, false};   // off until advanced.flat_cpu_timing (or EDVR_FLAT_CPU_CLOCKS=1) says otherwise
     FlatPairFactsMemo pairFacts;                  // what a draw's shader pair alone says (flat_pair_facts.h), owner thread
     FlatOffscreenMemo offscreen;                  // the previous verified class-4 draw of the frame (flat_offscreen_fast.h), owner thread
     FlatOffscreenCounts offscreenCounts;          // what the fast path did since the last Present drained it, owner thread
@@ -3862,6 +3864,19 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     {
         static const int64_t censusFreq = flatcpu::qpcFrequency();
         const int64_t censusNow = EDVR_FLATCPU_NOW();
+        // The CPU timing switch (advanced.flat_cpu_timing, F8 > Debug), live; the environment variable wins when set. One log line per change
+        // and one for the state a session starts in, so a log says whether its flat cpu lines are timed.
+        {
+            const bool timingKey = Config::get().getBool("advanced.flat_cpu_timing", false);
+            const char* timingEnv = flatcpu::clocksEnv();
+            const bool timingWanted = flatcpu::clocksPolicy(timingKey, timingEnv);
+            const bool timingChanged = s.census.setClocks(timingWanted, censusNow);
+            if (timingChanged || !s.cpuTimingRead) {
+                s.cpuTimingRead = true;
+                Log::get().note("flat runtime: CPU timing in the log %s (advanced.flat_cpu_timing = %s%s)", timingWanted ? "on" : "off",
+                                timingKey ? "on" : "off", timingEnv ? "; EDVR_FLAT_CPU_CLOCKS decides it" : "");
+            }
+        }
         const bool censusWasRunning = s.census.running();
         s.census.onFrame(censusNow, censusFreq, endedPaused);
         // Always drained, so the priming frame (or a census that was stopped) leaves no backlog to

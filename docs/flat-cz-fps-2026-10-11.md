@@ -2,21 +2,15 @@
 
 ## Status
 
-State (2026-10-16, round 6): the POOL COPIER's claim check is BUILT on `claude/copier-claim-check`, NOT FLOWN: a copy whose range holds no claim and no
-patch is handed back without the mutex while claims are live or a pool holds a patch (the old exit needed neither). It reads one consistent pair of
-published tables (claim snapshot + lease table with a per-lease patch-slot bound) inside a new publish window. Rig: 0 acquisitions and 0 allocations for
-2000 copies under 1-4 claims and a patch (old code: 2000 acquisitions), 23 shapes against the frozen locked copier, 18 new mutants killed. The flight
-reads `Copier claim check` on the lock-free exits line, the copier lock line n near 0 in claim windows, and Present p50 against the ~0.5 ms left. Section "round 6".
-State (2026-10-16, offscreen fast path): BUILT, NOT FLOWN, on `claude/flat-offscreen-fastpath` (not main): a draw into a shadow map, a depth-only pass or a
-small intermediate (class 4: 3,773 draws a frame, 27%, 98% the same as the previous draw) that repeats the previous VERIFIED class-4 draw skips the draw
-scope's constructor and destructor and does only the pair-facts store, engine motion's restore, the reducer, the HDR detector, the trace and the UI note.
-THE REPLAY IS IDENTICAL: all 46 corpus frames (44,261 draws, 16,314 memo hits) leave the same contract and prefix with the fast path on and off. Flight reads
-the `offscreen fast path` token and family (calls = the draws served; expected 3.5-3.8k a frame) and the ctor time; expected saving 0.4-1.0 ms a frame,
-UNMEASURED. It declines on any live condition, with the reason in the token. Section "offscreen fast path".
-State (2026-10-16, round 5 results): the claim regime was MEASURED (log `edvr_gfx_20261016_102211.log`) and the claim check for clears and merges is
-FLOWN OK and MERGED to main (`claude/claim-precheck`): claim set live 13-21% of a window, size ALWAYS 1, 99.98% of 5.3M merges and 1.9M clears a window
-touched nothing; Present p50 12.3-12.6 -> 12.8-13.1 ms with the check (log `edvr_gfx_20261016_111653.log`), against a 3-5 ms jump without it. The remaining
-+0.5 ms against the quiet baseline is not attributed; the copier (~3.7M acquisitions a window, hold 0.1 us) is the named candidate. Section "round 5 results".
+State (2026-10-16, Steam flight build `claude/flat-settlement-cpu-7` = main + three branches, NOT FLOWN; each section has its rig numbers): COPIER claim check
+(`claude/copier-claim-check`, round 6): a copy whose range holds no claim and no patch skips the mutex; flight reads `Copier claim check` on the lock-free exits line and
+the copier lock line n near 0 in claim windows. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`): a repeat of the verified class-4 draw (shadow maps, small
+intermediates; 3,773 a frame) skips the draw scope's constructor; the 46-frame replay is identical (16,314 hits); flight reads the `offscreen fast path` token and
+family (expect 3.5-3.8k served a frame; saving 0.4-1.0 ms UNMEASURED). DEBUG tab (`claude/flat-debug-menu`): the CPU census (`flat cpu 5s` timing) is OFF by default; the
+flat F8 panel has Performance and Debug tabs: **CPU timing in the log** (`advanced.flat_cpu_timing`), **Motion source view** (`advanced.flat_refusal_view`); turn the
+timing on to see the family. Sections "round 6", "offscreen fast path", "debug tab".
+State (2026-10-16, round 5 results): the claim check for clears and merges is FLOWN OK and ON MAIN (`claude/claim-precheck`): 1.43M clears and 4.1M merges in the first
+window, 0 declined, Present p50 12.3-12.6 -> 12.8-13.1 ms against a 3-5 ms jump without it (log `edvr_gfx_20261016_111653.log`); the remaining +0.5 ms is not attributed.
 State (2026-10-16, results): the observer fix is FLOWN, CONFIRMED and ON MAIN (1ae94885, `claude/engine-motion-observers`): render-thread
 engine motion 427 -> 77 ns a call (about 0.8 ms a frame), job merge and clear down 92%, 100% of calls lock-free, 0 contention. The
 instruments (H1-H4, round 2) are on `claude/flat-settlement-cpu-2`, NOT on main. Round 2 flown (DLSS, 14.6k draws a frame): EDVR render
@@ -560,3 +554,42 @@ the reason names the live condition to refine (foreground active is the likely o
 The slow path's first class-4 draw of each kind per frame (verified, then remembered) is the `verified` count in the token. Class 4 only; the other
 classes are not touched. The memo is one draw deep: an alternation between two offscreen targets misses every time (the counters would show a large
 verified count and a small served one).
+
+## 2026-10-16: the CPU census off by default, and the flat Debug tab
+
+Branch `claude/flat-debug-menu` (from main 34c100f5). BUILT, NOT FLOWN. Sean's decision after the settlement flights: the census costs every flat user with a
+temporal mode on a hitch (a clocked frame runs 7-10 ms long at a settlement, once in sixteen frames: Present p95 about 22 ms against a p50 of 13) and
+about 0.27 ms a frame on average; so it is off unless a user turns it on, and a sampling rework was set aside (nothing of it is built).
+
+- **The switch.** `advanced.flat_cpu_timing` (on/off, default off, live; documented in edvr.ini; in the flat allow-list `flatProfileReadsKey`). The
+  flat runtime reads it once a Present (flat_runtime.cpp, before `s.census.onFrame`) and calls `Census::setClocks(on, now)` (flat_cpu.h). A change
+  starts a fresh window; off closes the gates at once, on opens them with the next frame and calibrates the clock floors at the close of its first
+  window. One log line when the session starts and one per change: `flat runtime: CPU timing in the log on|off (advanced.flat_cpu_timing = on|off[;
+  EDVR_FLAT_CPU_CLOCKS decides it])`. The environment variable stays: `=1` forces the timing on, `=0` off, whatever the key says (`clocksPolicy`).
+  The Wine-only default is gone (off everywhere).
+- **Off is the existing `clocksOff` mode.** No thread is clocked on any frame, so no scope reads the clock (engine motion's too: the census drives its
+  gate) and no floor is calibrated; the rig counts the reads on the render thread across 320 frames of scopes and the window close: zero. The
+  `flat cpu 5s` line is still written every window: `flat cpu 5s: frames=N (...) present p50 X ms (p95 Y); CPU timing is off; turn it on in F8 > Debug >
+  CPU timing in the log = render thread: CPU timing is off, no thread clocked (EDVR_FLAT_CPU_CLOCKS=1 also turns it on); other threads: CPU timing is off;
+  ...` followed by the parts that cost nothing: the camera witness count, the wrapper's D3D calls over substituted draws, the query shortcuts, the GPU
+  spans and the instrument-cost token (zeros). The Present figures and GPU spans keep the log readable for frame time without the timing.
+- **The tabs.** The flat panel (menu.cpp `buildPages`, rows in menu_flat_rows.h) had one page, "Flat graphics". It is now **Performance** (renamed, the
+  same six rows in the same order: intro movie, anti-aliasing, DLSS preset, sharpening, interface quality, optimized stations) and **Debug**, last,
+  with a heading ("For bug reports. Both are off unless you turn them on.") over the two toggles, in the generated order: CPU timing in the log, then
+  Motion source view. Both pages are built from tables (`kFlatPageRows`, `kFlatDebugRows`); `flatPageFirstRefused` checks both against the flat gate.
+  The keyboard footer gains "Tab page" (the pad's "LB/RB pages" was there already).
+- **The generator.** `menu debug` is a new page token (`MENU_PAGES`); an [advanced] key may carry a menu token only if named in
+  `MENU_ADVANCED_EXCEPTIONS`, which now names `advanced.sharp_weapons_blend`, `advanced.flat_cpu_timing` and `advanced.flat_refusal_view`. The rows
+  are Fix tier on the page `debug`, one row each (the developer tier does not repeat them, so VR's developer Advanced page no longer lists these two
+  flat-only switches); VR builds no `debug` page. Self-test cases: the rows and their order, and any other [advanced] key with `menu debug` refused.
+- **The motion source view** is `advanced.flat_refusal_view`, which exists and was not touched by the 2026-10-09 cull (that took VR's eye-path
+  `temporal_aa_debug`): see the flat temporal design doc, section "Flat Debug tab: the motion source view". Only its panel row is new.
+- **Rig.** tools\flat_sharpen_test (the generated table: two tabs, Performance's rows unchanged and in order, Debug's rows labelled, switches, shipped off,
+  live, Fix tier, page `debug`, once each; menu.cpp builds both tabs from the tables, with controls; the flat gate admits both keys and a gate
+  without either is caught by name, another [advanced] key stays a developer row); tools\flat_temporal_test (timing off reads no clock, on clocks one
+  frame in sixteen from the next frame and calibrates at its first window's close, off again closes the gates at once and starts a fresh window, the
+  line's text on and off, `clocksPolicy`); gen_settings_schema --self-test; check_config_contract.
+- **What a flight reads.** `flat runtime: CPU timing in the log off (advanced.flat_cpu_timing = off)` at the start; the `flat cpu 5s` lines say the timing
+  is off; Present p95 at a settlement near p50 (no clocked-frame hitch). Turned on from F8 > Debug: the line logs the change and the next window's
+  line carries the families again. NOT measured here: the off state's cost (the scopes' gate checks remain: a load and a compare each, about 130k a frame
+  at 14k draws).
