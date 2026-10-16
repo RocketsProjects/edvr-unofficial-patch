@@ -1456,22 +1456,44 @@ void buildPages() {
     const size_t keepCount = s.pages.empty() ? 0 : s.pages[s.page].entries.size();
     s.pages.clear();
     if (runtimeFlatProfile()) {
-        Page p;
-        p.name = "Flat graphics";
-        for (int i = 0; i < kRowDefCount; ++i) {
-            const MenuRowDef& d = kMenuRows[i];
-            // The rows are the table in menu_flat_rows.h, which a rig checks
-            // against the flat profile's key gate: a row listed there whose key
-            // is refused fails the build instead of reading a silent 0.
-            if (!flatPageHasRow(d.section, d.key)) continue;
-            Entry e;
-            e.kind = EntryKind::Setting;
-            e.def = i;
-            p.entries.push_back(e);
+        // Two tabs (2026-10-16): Performance, the flat settings the panel always had, then Debug, last.
+        {
+            Page p;
+            p.name = kFlatTabNames[0];
+            for (int i = 0; i < kRowDefCount; ++i) {
+                const MenuRowDef& d = kMenuRows[i];
+                // The rows are the table in menu_flat_rows.h, which a rig checks
+                // against the flat profile's key gate: a row listed there whose key
+                // is refused fails the build instead of reading a silent 0.
+                if (!flatPageHasRow(d.section, d.key)) continue;
+                Entry e;
+                e.kind = EntryKind::Setting;
+                e.def = i;
+                p.entries.push_back(e);
+            }
+            firstSelectable(p);
+            s.pages.push_back(p);
         }
-        firstSelectable(p);
-        s.pages.push_back(p);
-        s.page = 0;
+        {
+            // Debug: for bug reports, both off by default. A heading says so; the rows are the `menu debug` rows named in kFlatDebugRows.
+            Page p;
+            p.name = kFlatTabNames[1];
+            Entry h;
+            h.kind = EntryKind::Heading;
+            h.text = "For bug reports. Both are off unless you turn them on.";
+            p.entries.push_back(h);
+            for (int i = 0; i < kRowDefCount; ++i) {
+                const MenuRowDef& d = kMenuRows[i];
+                if (d.tier != MenuTier::Fix || _stricmp(d.page, kFlatDebugPage) != 0 || !flatDebugHasRow(d.section, d.key)) continue;
+                Entry e;
+                e.kind = EntryKind::Setting;
+                e.def = i;
+                p.entries.push_back(e);
+            }
+            firstSelectable(p);
+            s.pages.push_back(p);
+        }
+        s.page = keepPage < static_cast<int>(s.pages.size()) ? keepPage : 0;
         s.developerBuilt = s.developer;
         s.contentDirty = true;
         return;
@@ -2356,7 +2378,7 @@ void buildContent(MenuContent& c) {
             snprintf(c.footer, sizeof(c.footer), "D-pad move/change  A select  B back\nLB/RB pages  %s close%s",
                      s.summonName.c_str(), status);
         else
-            snprintf(c.footer, sizeof(c.footer), "Up/Down row  Left/Right change\n%s/Esc close%s",
+            snprintf(c.footer, sizeof(c.footer), "Up/Down row  Left/Right change  Tab page\n%s/Esc close%s",
                      s.summonName.c_str(), status);
         // The installed version, on every page, drawn at the right end of this same
         // footer line (menu_panel.cpp). Flat only: VR's footer does not carry it.
