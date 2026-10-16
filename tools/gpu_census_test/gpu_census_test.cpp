@@ -360,7 +360,8 @@ void rotationAndRealTimerCase(Device& d) {
     bool ownersVisited = true, membersSkipped = true, idleWorldSkipped = true;
     for (size_t i = 0; i < kSections; ++i) {
         // The VR world route's and the second skin's sections are turns only once called this window (nextTurnOwner): none was here.
-        if ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections)) { idleWorldSkipped = idleWorldSkipped && !visited[i]; continue; }
+        if ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) ||
+            (i >= kProbeFirst && i < kProbeFirst + kProbeSections)) { idleWorldSkipped = idleWorldSkipped && !visited[i]; continue; }
         if (turnOwnerOf(static_cast<GpuCensusSection>(i)) == static_cast<GpuCensusSection>(i)) ownersVisited = ownersVisited && visited[i];
         else membersSkipped = membersSkipped && !visited[i];
     }
