@@ -10,9 +10,10 @@
   Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"). A count-and-tag probe
   (`claude/producer-434d120-probe`) confirmed FUN_14434D470 makes the shield (see the flight notes); the probe and the parked join are NOT on main.
 - **Shield refraction after the upscale (2026-10-16): BUILT, NOT FLOWN** (`claude/shield-ripple`, VR only; entry "Built, 2026-10-16: the shield
-  refraction"). 820E is skipped in the scene and its displacement applied after RCAS via a per-eye layer D. Sean approved shipping it: it rides
-  `fix.sharp_weapons`, no key of its own. `advanced.shield_ripple` (sharp | none | stock) and the six-pair coverage instrument are REMOVED. R1 (gain,
-  filter) runs live on the first 820E draw and stands down to stock with a log line; D is released after 300 idle frames.
+  refraction"). 820E is skipped in the scene and its displacement applied after RCAS via a per-eye layer D. Sean approved shipping it under
+  `fix.sharp_weapons`; `advanced.shield_ripple` and the coverage instrument are REMOVED. R1 (gain, filter) runs live and stands down to stock with a log line.
+- **Flat port (2026-10-16): BUILT, NOT FLOWN** (`claude/flat-sharp-weapons`; entry "Flat port"). `fix.sharp_weapons` covers the flat edition too (weapons fire and shield
+  ripple through flat's adapter, panel row under UI quality). No flat combat capture exists; open: do flat's weapons draws carry camera rows (`flat ui layer weapons`).
 - **Weapons fire (2026-10-16): MERGED** (`claude/billboards-sharp-weapons`; flown OK in combat as `claude/combat-flight-1`; entries "Built" and
   "Combat flights"). 1F17, 939D and 5C1D go into the eye's own additive HDR layer, composited after the upscale by tonemap difference; 820E stays.
   Sean: weapons and shields look much better, beams and tracers are sharp. **ONE key, `fix.sharp_weapons = on | plain | off`** (default on, independent of
@@ -500,3 +501,46 @@ stall) and the covered samples per pair go in the 30 s line. The answer tells wh
 **Not verified until a flight:** R1's gain is INFERRED as 1 from 100257 and is checked live; the real refraction offsets, the idle release in a
 long session and the instrument's counts have never run in the game. Read the log with `python tools\edvr_log.py --target steam --expect-build HEAD`,
 then grep `shield ripple`. Compare `sharp` against `stock` and `none` on the same strike.
+
+## Flat port, 2026-10-16: `fix.sharp_weapons` in the flat edition (`claude/flat-sharp-weapons`, built on `claude/shield-ripple` and `claude/flat-debug-menu`, NOT FLOWN)
+
+**Question.** Is the route sound for flat, and what differs from VR? Read from the code. No flat log holds a combat capture: of the 400 or so flat logs on this machine
+one (edvr_gfx_20261015_155732) names a weapons pair at all, 5C1D/C49F (the shield strike's additive part) once, in a source-free census line with `same-camera=1` (its
+camera rows equal the scene camera's, which is what the jitter read needs). Everything below is design and rig, and the flight decides.
+
+**What is the same.** flat_ui_layer.cpp is a mono adapter over the VR layer's own take, tonemap re-issue, door and composite, driven as eye 0 (flat_ui_layer.h). The
+weapons and the ripple use exactly that machinery: the draw is taken by the shared decision (`uiLayerDecide`) with the draw's measured jitter, drawn into the weapons layer
+W or the displacement layer D at the door's size, the game's tonemap draw is re-issued with W at its HDR slot (matched: scene and scene plus light; plain: the light), and
+at the game's output copy `uiLayerComposite` adds the light and, first, the ripple. The tonemap is the game's own pointwise draw in both profiles (E894 / 0D43 reading
+the HDR target at t1 with a 2D bloom at t2, or the registry's pairs), so T(F_up + L) - T(F_up) is as valid in flat. The flat HDR route resolves H before the tonemap and the
+composite still runs at the output copy, so the picture the weapons land on is T(F_up) in both routes. The depth seed, the jitter cancel through the viewport, the
+GEQUAL test, R1 (the gain and s0's filter, read live) and D's idle release are the shared code.
+
+**What differs, and what was done about it.**
+1. *The take is gated by flat's own proofs.* A draw is taken only behind a tone pass proven the frame before to read its target (kToneUnproven), never after the tone
+   (kAfterTone), only when the camera injector owns the jitter (kNotUpstream) and only with camera rows whose shift is the frame's phase or zero (kNoRows, kOtherShift). A
+   refusal leaves the draw in the scene as stock, counted by reason. For the weapons that costs nothing (additive light: a pair left in the scene is as smeared as it
+   was, and the layer sums with it); for 820E it means no ripple that frame, in the scene as stock. The flat recipes list 1F17 (CB1 41..48 and 45..48), 939D, 5C1D and 820E
+   (CB0 row 4) as camera consumers, so rows are expected; the flight shows it in `no-camera-rows` and `other-shift`.
+2. *The door arms a frame late* (flatUiLayerDoorArms): the first weapons draw after a refused frame stays in the scene.
+3. *Flat's gate keys were fix.ui_quality's.* `flatUiLayerDecide` now asks the half of the layer that governs the family (`flatUiFamilyLive`): the weapons and the ripple
+   with fix.ui_quality off take alone, and the HUD is not asked when only the weapons are live. The `!flat` terms of the liveness math are gone.
+4. *The tone bracket was one issue.* The matched composite is up to three issues of the tone draw (the scene alone, the scene with the light, the HUD); flat's re-issue now
+   loops `flatUiLayerToneNext` as VR's does.
+5. *The picture at flat's door is not EDVR's to rewrite in place.* uiLayerComposite already writes its own output for flat; the ripple now does too: it copies the whole picture
+   into EDVR's own texture, rewrites the covered pixels from the pre-rewrite copy (the same compute pass), and hands that texture on as the frame the weapons and the
+   HUD composite over, or alone. The game's own picture is untouched (rig). A picture the resolve did not make (`treated` false) is not read at D minus the jitter and the
+   ripple is skipped for that frame (counted: "a picture the game made itself").
+6. *The panel* has a seventh row (kMenuMaxLines 17 to 18; the flat page, a blank line and the ten-line warning fill the card). Sharp weapons sits under UI quality and
+   dims with the flat AA mode off (`weaponsRowDim`, the flat reading `requestedTemporalMode`).
+7. *Logging.* The flat window prints `flat ui layer weapons:` (the two families asked, decided, taken, refused at issue, or "not exercised"); `sharp weapons:` and
+   `shield ripple:` print in flat as in VR, with their not-exercised forms.
+
+**Rig.** sharp_weapons_test (`flatTests`: the family rule, every combination of the three halves, the row and its place, the allow-list, the wiring pins with controls),
+shield_ripple_test (the not-EDVR's-own route: the rewritten copy agrees within 2/255, the original unchanged, two mutants), flat_sharpen_test (the seven rows),
+the existing flat gates.
+
+**The flight.** Flat edition (Steam or Epic), fix.sharp_weapons on, flat AA on (DLSS, XeSS or TAA), with a hostile close enough for beams, multicannon and shield strikes:
+about two minutes of firing and taking fire, ideally once with fix.ui_quality on and once off, and the same strike with the row on, plain and off from the panel (live).
+Send the log. Read: `flat ui layer weapons` taken against asked, the refusal counts, `sharp weapons: the left eye's weapons light was composited` first-seen lines,
+the `shield ripple` first-draw lines (R1 gain and filter) and the 30 s line; and look at a shield strike and a beam over a planet with the row on and off.

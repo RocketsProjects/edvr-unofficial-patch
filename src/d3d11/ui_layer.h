@@ -96,6 +96,10 @@ inline bool uiLayerLive() { return detail::g_uiLayerLive; }
 // take) -- the first half of uiLayerLive(), whose second half is fix.sharp_weapons (the weapons fire in its own HDR layer). With
 // fix.ui_quality off and fix.sharp_weapons on, uiLayerLive() is true and this is false: only the weapons fire is taken.
 inline bool uiLayerQualityLive() { return detail::g_uiQualityLive; }
+// The other two halves, each its own: the weapons fire (fix.sharp_weapons on or plain) and the shield ripple that rides the same key. The flat adapter asks them
+// to leave a family that is not live where it is (flat_ui_layer.cpp).
+bool uiLayerWeaponsLive();
+bool uiLayerRippleLive();
 
 // A persistent driver restoration fault leaves stock shader state untrusted.
 // Owner-context issues stay suppressed, Begin's fallback included, for the rest
@@ -383,9 +387,13 @@ void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source);
 // and always for a frame that is not EDVR's (the game's own image, a black layer-only frame, a
 // healed copy, the flat profile's picture), it writes its own output texture as before. The
 // caller must not use `frame` as the pre-composite image after a non-null return.
+//
+// `resolved` says `frame` is the picture the upscaler made (unjittered), which the shield ripple reads at D minus the jitter; false for a picture the game
+// made itself, over which the ripple is skipped (counted). A frame that is not EDVR's own and has a ripple to apply comes back as EDVR's own rewritten copy
+// of it, with the weapons and the interface composited over that in the usual way (or alone, when there is no other UI).
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4],
-                                  bool ownedFrame = false);
+                                  bool ownedFrame = false, bool resolved = true);
 // The frame that arrived at this eye's door this sequence is exactly the temporal pass's output
 // (EDVR's own, rewritten in full each frame): the `ownedFrame` of a composite over `source`.
 bool uiLayerDoorFromPass(uint32_t eye);

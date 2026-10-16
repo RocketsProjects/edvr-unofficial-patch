@@ -79,9 +79,9 @@ static void ruleTests() {
                 check(uiLayerFamilyEnabled(UiLayerFamily::kWeaponsFire, q != 0, s != 0, r != 0) == (s != 0), "the weapons fire still follows fix.sharp_weapons alone");
                 check(uiLayerFamilyEnabled(UiLayerFamily::kFlightHud, q != 0, s != 0, r != 0) == (q != 0), "the interface still follows fix.ui_quality alone");
             }
-    check(uiLayerRippleLiveFor(true, true, true, false, false) && !uiLayerRippleLiveFor(false, true, true, false, false) && !uiLayerRippleLiveFor(true, false, true, false, false) &&
-              !uiLayerRippleLiveFor(true, true, true, true, false) && !uiLayerRippleLiveFor(true, true, true, false, true),
-          "the ripple is live for fix.sharp_weapons on, a temporal mode, not stood down, not flat");
+    check(uiLayerRippleLiveFor(true, true, true, false) && !uiLayerRippleLiveFor(false, true, true, false) && !uiLayerRippleLiveFor(true, false, true, false) &&
+              !uiLayerRippleLiveFor(true, true, true, true),
+          "the ripple is live for fix.sharp_weapons on, a temporal mode, not stood down, in either profile");
     check(uiLayerMachineryLive(false, true) && !uiLayerMachineryLive(false, false), "the machinery runs for the ripple as it does for the weapons (their union is passed)");
     check(static_cast<int>(UiLayerFamily::kShieldRipple) + 1 == static_cast<int>(UiLayerFamily::kCount), "the family is last in its enum");
     UiLayerDrawFacts d;
@@ -130,14 +130,14 @@ static bool before(const std::string& t, const std::string& a, const std::string
 static bool wiredLayer(const std::string& t) {
     return
         // the door: the ripple, then the composite
-        before(t, "if (g_rippleLive) guarded(\"shieldRipple.door\", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame); });",
-               "if (!e.srv || !e.rtv || e.compositedSeq == sequence) return nullptr;") &&
+        before(t, "if (g_rippleLive) guarded(\"shieldRipple.door\", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame, resolved, &rewritten); });",
+               "if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();") &&
         // the draw: D cleared far outside [0, 1], blend off, t0 swapped for the ramp and put back
         has(t, "const FLOAT clearD[4] = {kShieldRippleNoCover, kShieldRippleNoCover, 0.0f, 0.0f};") &&
         has(t, "if (converted && rp) layerBlend = g_rip.blend.Get();") && has(t, "ID3D11ShaderResourceView* ramp = g_rip.rampSrv.Get();\n        vScreenPSSetShaderResourcesRaw(ctx, 0, 1, &ramp);") &&
         has(t, "if (g_draw.rippleSwapped) {") && has(t, "g_draw.rippleSwapped = false;") &&
         // the ripple is its own half of the layer, with the jitter subtracted from D at the door
-        has(t, "g_rippleLive = uiLayerRippleLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_rippleStoodDown, runtimeFlatProfile());") &&
+        has(t, "g_rippleLive = uiLayerRippleLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_rippleStoodDown);") &&
         has(t, "shieldRippleJitterUv(e.dJx, e.dJy, static_cast<float>(e.dRenderW), static_cast<float>(e.dRenderH), p.jitterUv);") &&
         has(t, "if (family == UiLayerFamily::kShieldRipple && f.familyEnabled) f.familyEnabled = rippleR1Allows(ctx);") &&
         // the first-draw checks
@@ -154,10 +154,9 @@ static void wiringTests() {
     const std::string layer = readFile("src/d3d11/ui_layer.cpp"), vscreen = readFile("src/d3d11/vscreen.cpp"), snap = readFile("src/d3d11/eye_draw_snapshot.h"), ini = readFile("edvr.ini");
     check(layer.size() > 100000 && vscreen.size() > 100000 && snap.size() > 1000 && ini.size() > 10000, "the sources are readable from the repo root");
     check(wiredLayer(layer), "ui_layer.cpp: the ripple before the composite, t0 swapped and restored, D cleared far outside, the checks, the idle release, the key");
-    check(!wiredLayer(replaced(layer, "if (g_rippleLive) guarded(\"shieldRipple.door\", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame); });\n", "")),
+    check(!wiredLayer(replaced(layer, "    if (g_rippleLive) guarded(\"shieldRipple.door\", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame, resolved, &rewritten); });\n", "")),
           "control: no door call trips the pin");
-    check(!wiredLayer(replaced(layer, "    if (g_rippleLive) guarded(\"shieldRipple.door\", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame); });\n    if (!e.srv || !e.rtv || e.compositedSeq == sequence) return nullptr;",
-                                      "    if (!e.srv || !e.rtv || e.compositedSeq == sequence) return nullptr;\n    if (g_rippleLive) guarded(\"shieldRipple.door\", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame); });")),
+    check(!wiredLayer(replaced(replaced(layer, "    if (g_rippleLive) guarded(\"shieldRipple.door\", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame, resolved, &rewritten); });\n", ""), "    if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();", "    if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();\n    if (g_rippleLive) guarded(\"shieldRipple.door\", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame, resolved, &rewritten); });")),
           "control: the ripple after the composite's early-out and so (on a UI frame) after nothing it must precede trips the pin");
     check(!wiredLayer(replaced(layer, "kShieldRippleNoCover, kShieldRippleNoCover, 0.0f, 0.0f}", "0.0f, 0.0f, 0.0f, 0.0f}")), "control: D cleared to a value inside [0, 1] trips the pin");
     check(!wiredLayer(replaced(layer, "if (converted && rp) layerBlend = g_rip.blend.Get();", "")), "control: the game's blend into D trips the pin");
@@ -596,6 +595,9 @@ struct Route {
     uint32_t R = 64, L = 96;
     float jx = 0.5f, jy = -0.5f;
     bool noJitterSubtract = false, flipRamp = false, scaleD = false, noSeed = false, inPlace = false, afterComposite = false, noD = false;
+    bool notOwned = false;       // the flat profile's picture: no UAV, not EDVR's to rewrite; the pass rewrites EDVR's copy of it
+    bool noBaseCopy = false;     // (mutant, with notOwned) the copy is not started as the whole picture
+    bool rewriteOriginal = false;// (mutant, with notOwned) the game's own picture is rewritten instead of the copy (here: a UAV-capable stand-in)
 };
 struct Result {
     int worstBubble = 0;    // max |out - expected| over the picture, 8-bit
@@ -603,6 +605,7 @@ struct Result {
     unsigned bubblePixels = 0;
     int wx = -1, wy = -1, wc = 0, got = 0, want = 0, wkind = 0;   // where the worst bubble error was: pixel, channel, values, 1 bubble 2 elsewhere
     unsigned over1 = 0, over2 = 0, countBubble = 0;               // bubble samples more than 1 and more than 2 off
+    unsigned origChanged = 0;                                     // (notOwned) bytes of the original picture the pass changed
 };
 
 static Result runRoute(Fx& f, const Route& r) {
@@ -625,7 +628,13 @@ static Result runRoute(Fx& f, const Route& r) {
             uint8_t* p = &frame8[(static_cast<size_t>(y) * L + x) * 4];
             p[0] = q8(tone(c.r)); p[1] = q8(tone(c.g)); p[2] = q8(tone(c.b)); p[3] = 255;
         }
-    auto frame = f.tex(L, L, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE, frame8.data(), L * 4);
+    auto frame = f.tex(L, L, DXGI_FORMAT_R8G8B8A8_UNORM,
+                       (r.notOwned && !r.rewriteOriginal) ? D3D11_BIND_SHADER_RESOURCE : (D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE),
+                       frame8.data(), L * 4);
+    // the texture the pass writes and the weapons/HUD composite lands on: the frame itself (EDVR's own), or EDVR's copy of the game's picture
+    ComPtr<ID3D11Texture2D> rewrittenTex;
+    if (r.notOwned && !r.rewriteOriginal) rewrittenTex = f.tex(L, L, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE, nullptr, 0);
+    ID3D11Texture2D* destTex = rewrittenTex ? rewrittenTex.Get() : frame.Get();
     // the layer route's draw into D
     auto ramp = makeRamp(f, R, R, r.flipRamp);
     auto rampSrv = f.srv(ramp.Get());
@@ -703,7 +712,7 @@ static Result runRoute(Fx& f, const Route& r) {
     std::vector<uint8_t> overlay(static_cast<size_t>(overlayBox.right - overlayBox.left) * (overlayBox.bottom - overlayBox.top) * 4);
     for (size_t i = 0; i < overlay.size(); i += 4) { overlay[i] = 255; overlay[i + 1] = 40; overlay[i + 2] = 200; overlay[i + 3] = 255; }
     const UINT overlayPitch = (overlayBox.right - overlayBox.left) * 4;
-    auto paintOverlay = [&] { f.ctx->UpdateSubresource(frame.Get(), 0, &overlayBox, overlay.data(), overlayPitch, 0); };
+    auto paintOverlay = [&] { f.ctx->UpdateSubresource(destTex, 0, &overlayBox, overlay.data(), overlayPitch, 0); };
     if (r.afterComposite) paintOverlay();
 
     // the door: the production pass over a copy of the picture
@@ -717,7 +726,8 @@ static Result runRoute(Fx& f, const Route& r) {
     auto copy = f.tex(L, L, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, nullptr, 0);
     if (!r.inPlace) f.ctx->CopyResource(copy.Get(), frame.Get());
     ComPtr<ID3D11UnorderedAccessView> uav;
-    hr(f.dev->CreateUnorderedAccessView(frame.Get(), nullptr, &uav), "uav");
+    hr(f.dev->CreateUnorderedAccessView(destTex, nullptr, &uav), "uav");
+    if (rewrittenTex && !r.noBaseCopy) f.ctx->CopyResource(rewrittenTex.Get(), frame.Get());   // the copy starts as the whole picture
     auto copySrv = f.srv(copy.Get());
     auto dSrv = f.srv(dTex.Get());
     ID3D11ShaderResourceView* srvs[2] = {r.inPlace ? nullptr : copySrv.Get(), dSrv.Get()};
@@ -734,11 +744,19 @@ static Result runRoute(Fx& f, const Route& r) {
     ID3D11UnorderedAccessView* nullUav = nullptr;
     f.ctx->CSSetShaderResources(0, 2, nullSrv);
     f.ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+    // the game's own picture, as the pass left it (before the composite lands anywhere)
+    unsigned origChanged = 0;
+    if (r.notOwned) {
+        const std::vector<uint8_t> after = f.read<uint8_t>(frame.Get(), 4);
+        for (size_t i = 0; i < after.size(); ++i)
+            if (after[i] != frame8[i]) ++origChanged;
+    }
     if (!r.afterComposite) paintOverlay();
-    const std::vector<uint8_t> out8 = f.read<uint8_t>(frame.Get(), 4);
+    const std::vector<uint8_t> out8 = f.read<uint8_t>(destTex, 4);
 
     // expected: the stock picture over the bubble that the occluder does not hide, the unrippled picture elsewhere, the overlay on top
     Result res;
+    res.origChanged = origChanged;
     for (uint32_t y = 0; y < L; ++y)
         for (uint32_t x = 0; x < L; ++x) {
             const float gx = (x + 0.5f) / L * 2.0f - 1.0f, gy = 1.0f - (y + 0.5f) / L * 2.0f;
@@ -785,6 +803,27 @@ static void routeTests(Fx& f) {
     check(g.bubblePixels > 1500, "the bubble covers a good part of the picture");
     check(g.worstBubble <= 2, "after the upscale agrees with the stock path within 2/255 over the bubble, and leaves the rest and the occluded part untouched");
     check(g.worstOverlay == 0, "the weapons/HUD composite lands on top of the rippled picture untouched");
+
+    // The flat profile's picture: not EDVR's to rewrite, so the pass rewrites EDVR's copy of it and hands that on; the game's own picture is left as it was.
+    {
+        Route nr;
+        nr.notOwned = true;
+        const Result n = runRoute(f, nr);
+        std::printf("route, a picture that is not EDVR's own (the flat profile's): max |rippled - stock| %d/255 over the bubble and the rest, %d/255 on the overlay, %u bytes of the "
+                    "original changed\n", n.worstBubble, n.worstOverlay, n.origChanged);
+        check(n.worstBubble <= 2 && n.worstOverlay == 0, "a picture that is not EDVR's own: EDVR's rewritten copy agrees with the stock path as the in-place route does");
+        check(n.origChanged == 0, "...and the game's own picture is not touched");
+        Route nb = nr;
+        nb.noBaseCopy = true;
+        const Result nbr = runRoute(f, nb);
+        std::printf("mutant %-44s max error %3d (bubble and rest) %3d (overlay)\n", "the copy not started as the whole picture", nbr.worstBubble, nbr.worstOverlay);
+        check(nbr.worstBubble > 3, "...a copy that does not start as the whole picture is caught");
+        Route ro = nr;
+        ro.rewriteOriginal = true;
+        const Result ror = runRoute(f, ro);
+        std::printf("mutant %-44s %u bytes of the original changed\n", "the game's own picture rewritten", ror.origChanged);
+        check(ror.origChanged > 100, "...rewriting the game's own picture instead of the copy is caught");
+    }
 
     struct Mut { const char* name; Route r; };
     std::vector<Mut> muts;
