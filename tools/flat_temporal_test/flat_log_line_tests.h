@@ -985,6 +985,12 @@ inline int flatLogLineTests() {
             r.emRenderCalls[p] = r.emOtherCalls[p] = 999999999999ull;
         }
         r.stateCalls = r.substitutedDraws = 99999999999999ull;
+        r.classes.frames = 313;   // the draw class census at its widest (round 4): twelve-digit draws in every class, every share
+        for (unsigned i = 0; i < kDrawClasses; ++i) {
+            r.classes.draws[i] = 99999999999ull;
+            r.classes.sameTarget[i] = r.classes.samePair[i] = r.classes.sameAll[i] = 99999999999ull;
+        }
+        r.runs.runs[kRunLazy] = r.runs.d3dCalls[kRunLazy] = r.runs.timedRuns[kRunLazy] = 999999999999ull;   // the run counts at their widest
         r.gpuFrameSamples = r.gpuResolveSamples = 2048;
         r.gpuFrameP50 = r.gpuFrameP95 = r.gpuResolveP50 = r.gpuResolveP95 = 99999.99;
         r.gpuSkipped = r.gpuInvalid = 999999999999ull;
