@@ -35,18 +35,24 @@ The 2026-10-09 and 2026-10-10 entries retain the flight numbers and PP limits.
 **Star dimming, 2026-10-16:** screenshots and matching show faint left-eye stars
 dim on pitch with PP off: 267 still and 198 pitch pairs, median residuals
 1.29/1.58 px; right/left flux moves from 0.945 still (95% CI 0.885–1.005) to
-3.996 pitching (3.30–4.77). The capture 224449 confirms PimaxXR / Pimax Vision
-8K X, PP off, 20° between eyes, 90 Hz, 1869x1579 input and 3738x3158 output. All 16
-captured frames (20376–20391) have DLSS success/history and no reset.
+3.996 pitching (3.30–4.77). Capture 224449 is PimaxXR / Pimax Vision 8K X, PP
+off, 20° between eyes, 90 Hz, 1869x1579 input, DLSS K; version unknown. All 16
+frames (20376–20391) have DLSS success/history and no reset. Exact raw crops
+C00/C02/C15 establish shared-world-basis error for LEFT; opposite-eye provenance
+is inferred, not traced to an owner. The source fix is BUILT, NOT FLOWN. Full
+build passed 26 Python gates, 164 pooled and 6 quiet rigs, production DLLs, and
+installer resource validation. Receipt verifies; actual capture fixture test
+passed.
+That first validation build had the DLSS and FSR SDKs; XeSS SDK was absent.
+The test DLL package requires a clean build with all three SDKs present.
 
 **Capture findings:** both eyes have valid bound camera rows, but their paired
-`cameraR` is identical; runtime `headR` differs slightly. Reconstructing
-`cameraR` from selected `S` agrees within 1e-7, confirming the shared field but
-not a wrong basis. `headR` motion is only 0.0037° RMS against the large ship
-motion, so the selected `S` basis remains unidentifiable from this CSV. The
-existing Elite 332841 disassembly traces eye transforms to its camera setter,
-but not that setter to the float-932 scene block. H-basis is unproven, not
-refuted.
+`cameraR` is identical; runtime `headR` differs slightly. The raw stars prove
+that this shared world basis is wrong for LEFT. Opposite-eye provenance is
+inferred from field geometry; no owner for the selected scene rows is traced.
+Elite 332841 disassembly traces eye transforms to its camera setter, but not
+that setter to the float-932 scene block. `headR` motion remains only 0.0037°
+RMS against the large ship motion.
 - **Ruled out:** TCAM D matrices as per-eye camera ground truth in run 224449,
   because they are identical across eyes and jump 90–180° between adjacent
   frames while selected S stays smooth; some D is previous-frame S. `df=9F`
@@ -54,11 +60,11 @@ refuted.
 - SKY ring retained 2048 eye-frames per dump, but had 0 camera-row events and
   0 per-eye SKY lines; SKYSEC combines both eyes and cannot measure asymmetry.
   Exposure sharing added 0 fallbacks near the capture. FinalCrisp shows the
-  left streak/dimming while the right image is sharp. No root fix is established.
-- **Next:** request only the existing raw left frames `eye_224449_C00.bmp`,
-  `eye_224449_C02.bmp`, and `eye_224449_C15.bmp`. Register stars across the
-  early turn and longer baseline against `cameraR` with correct jitter; use
-  the full CSV to compose all intervening rotations. No new flight is planned.
+  left streak/dimming while the right image is sharp. Raw pixels now establish
+  a shared-world-basis error for LEFT; implementation is built and awaits flight.
+- **Next:** one PP-off DLSS K pitch flight on the same 8KX/PimaxXR setup. Confirm
+  first-draw source-eye mapping and corrected left stars; inspect the basis log
+  counts. FSR/XeSS flights can follow if useful. No new key or eye-folder upload.
 
 ## What OpenVR says about a canted headset
 
@@ -541,23 +547,55 @@ frames while selected S stays smooth; some D equals the previous-frame S.
   because they are identical across eyes and jump 90–180° between adjacent
   frames while selected S stays smooth; some D is previous-frame S.
 
-`cameraR` reconstructed from S agrees within 1e-7, proving the field is shared
-but not that it is the wrong field. Runtime `headR` has the correct 20°
-conjugation, but head turn is only 0.0037° RMS against large ship motion, so
-selected S basis is unidentifiable from this CSV. SKY rings retain 2048
-eye-frames each, with 0 events and 0 per-eye SKY lines; SKYSEC combines eyes.
-Its final-bin motion rises to 73–79, while raw/out remains about 0.92. Exposure
-sharing adds 0 fallbacks near capture (2 cumulative, both earlier). FinalCrisp
-shows visible left streak/dimming against a sharp right image. No root fix yet.
+`cameraR` reconstructed from S agrees within 1e-7, proving the field is shared.
+The raw-star fits below prove this shared world basis is wrong for LEFT.
+Runtime `headR` has the correct 20° conjugation, but head turn is only 0.0037°
+RMS against large ship motion. SKY rings retain 2048 eye-frames each, with 0
+events and 0 per-eye SKY lines; SKYSEC combines eyes. Its final-bin motion rises
+to 73–79, while raw/out remains about 0.92. Exposure sharing adds 0 fallbacks
+near capture (2 cumulative, both earlier). FinalCrisp shows visible left
+streak/dimming against a sharp right image.
 
 The provenance audit found no eye assignment for the selected scene rows.
 Elite 332841 disassembly traces the eye transform to the camera setter, but
-does not trace the setter to the float-932 scene block. The draw-time per-eye
-constants are separate evidence. The shared `cameraR` and small head turn do
-not prove or refute H-basis.
+does not trace the setter to the float-932 scene block. Draw-time per-eye
+constants are separate evidence. Opposite-eye provenance remains an inference
+from field geometry, not a traced owner.
 
-Request only existing raw left frames `eye_224449_C00.bmp`,
-`eye_224449_C02.bmp`, and `eye_224449_C15.bmp`. Register true-left star motion
-against `cameraR` with correct jitter; compose the intervening rotations from
-the full CSV. C02 captures the early turn, and C15 provides a longer baseline.
-No new flight or full-folder request is needed.
+The exact raw left crops `eye_224449_C00.bmp`, `eye_224449_C02.bmp`, and
+`eye_224449_C15.bmp` were supplied and verified as 1400px crops from the
+1869x1579 input, origin 23489. Their motion fit is recorded next.
+
+### 2026-10-16 — raw-pixel star motion fit
+
+On Pimax Vision 8K X / PimaxXR, PP off, 20° eye cant, 90 Hz, DLSS K (runtime
+version unknown; tiny head motion), C00↔C02 gives 137 free-homography inliers.
+With shared world `cameraR`, residual is median 5.045 / RMS 5.123 input pixels;
+applying Y(-20) to the world and Y(+20) to the view gives 0.326 / 0.359. Free H
+gives 0.312px median; free Kabsch polar-rotation gap is 0.487° for shared vs
+0.0043° corrected. Fixed-yaw bootstrap 95% CI is -20.20° to -19.87° for the
+Y(-20) world / Y(+20) view definition.
+
+C15 was matched image-only: a two-star similarity seed, 34 central-tile
+projective RANSAC seeds, then 123 full-sky inliers. C15↔C02 all-candidate 1px
+counts are 120 for selected -20° and 0 for shared or +20°; on 123 matched
+stars, shared residual is 28.211 / 30.233px median/RMS vs 0.318 / 0.416px
+corrected. Head-center ±10 candidates are worse. Frustum XY-shift optimization
+remains 2.48 / 14.64px RMS vs 0.36 / 0.42px corrected; ≤1px jitter cannot
+explain the measured displacement. **Ruled out:** unchanged frustum-center or
+jitter-offset error as explanation of measured star displacement, because its
+optimized residuals remain far above the corrected shared-world fit.
+
+The result establishes a shared-world-basis error for LEFT from field
+geometry; opposite-eye provenance is inferred, not traced to an owner. The
+fix tags only the exact DSV source eye and converts the full selected pose from
+known source E to each E with handedness, preserving original motion,
+unknown/carry behavior, and the parallel-projection bit. It is built, not flown.
+The temporary basis instrument logs `temporal canted world 30s:` with
+`left_examined`, `right_examined`, `left_converted`, `right_converted`,
+`right_to_left`, `left_to_right`, `geometry`, `mapped`, `unknown_eye`, and
+`source_switch`. First-draw DSV mapping still needs in-headset confirmation.
+Next flight: same 8KX/PimaxXR, PP-off DLSS K pitch. Pass requires
+`left_converted` and `right_to_left` above zero with no left dimming/streaking.
+Collect logs only initially; no large eye-folder upload. The basis instrument
+is temporary while this arc remains open; no new config key.
