@@ -2,6 +2,9 @@
 
 ## Status
 
+- **Shield-strike smear (2026-10-16): DESIGN ONLY, nothing built.** The shield's pool meshes (5C1D, 820E) are unkeyed, and they write no
+  depth, so the engine path's ownership test rejects them. The design ranks a coverage replay that writes private depth plus the slot first.
+  See "Design, 2026-10-16: engine motion for the shield strike". Evidence E1-E3 there come before any code.
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
   path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
   docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
@@ -150,3 +153,64 @@ arrived (a menu, no VR), none was a candidate, or none reached the window.
   motion dispatch (and releases the 65 MB decision texture once no eye run or capture wants it); ui_depth.cpp `uiDepthDrawProbe` and
   ui_layer.cpp `uiLayerDecisionCount` expose per-draw state read-only. The full build is green with the rig in its gate; nothing was
   installed or flown. The probe is VR only; a flat press is refused with a reason.
+
+## Design, 2026-10-16: engine motion for the shield strike
+
+Read-only design; no code. Evidence: Frontier `edvr_gfx_20261016_070029.log` (139a6ff2), eye runs 070301 (beam on a shield) and
+070559. `tools\eye_decisions.py` on the shield regions gives world 100%, no valid depth, engine "unavailable", 2.5-6.6 px. The hull beside
+them is 87% engine "joined" and 13% `stale_slot`.
+
+**How the engine path works today.** Keyed pool families (`engine_velocity_families.h` `kFamilies`) are substituted at the draw:
+- Their PS is patched (`dxbc_engine_velocity.h`) to export MRT6 = (2·slot+1, SV_Position.z), under a derived blend with target 6
+  unblended RG (`engine_velocity_state.h`).
+- The UV-only family 5B4D/4375 also gets a patched VS that exports `EDVRPOOLSLOT`. That patch is BC3E/BA58 in the census.
+- The temporal pass's `enginePixelZ` (`temporal_shader_source.h:551-608`) owns a pixel only when the scene depth `zr` equals ES.y bit for
+  bit. It then reprojects the point at `zr` through the record's current and previous pose. A marked pixel that doesn't own the depth
+  returns code 4 (`stale_slot`); an unmarked pixel takes the camera path.
+
+**Why the shield gets nothing.** Two reasons, each enough on its own:
+1. 5C1D/C49F and 820E/6EAA are not in `kFamilies`, so they are never patched.
+2. Even if keyed, they write no depth (`17wZ`), so ES.y ≠ `zr` and the consumer rejects them.
+
+Corollary, hypothesis H-clobber: a keyed translucent draw (the 5B4D family's alpha draws, BC3E/BA58, in 070301/070559 only) overwrites
+the hull's valid ES with its own non-owning depth. That would explain the hull's 13% `stale_slot`.
+
+**Options, ranked.**
+1. **(b) Coverage replay with depth and slot.** This is the `ui_depth.cpp` pattern used for the drive smoke (`kSmokeVs`, `kSmokeDepthHlsl`)
+   and the reticle (`kHoloWorldMarkers`).
+   - Hook: `ui_depth`'s coverage pass, after each 5C1D/820E draw.
+   - The replay draw uses EDVR's PS: a transcription of the effect PS's alpha (C49F999F, 6EAA86EF), which discards below a floor and
+     writes the pass's private depth plus ES (slot from v0.x, depth = the same z). Ownership then holds with the consumer unchanged.
+   - Over the hull, the shield's record motion replaces the hull's. Both ride the ship, which E1 must confirm.
+   - Over the sky, stars inside the covered core take the ship's motion. The floor bounds that.
+   - Cost: one replay per shield draw (a few 2880-index draws), about 0.01-0.03 ms GPU; CPU one draw each. Shader work: two alpha
+     transcriptions plus a slot-exporting VS, which the patcher already makes for 5B4D.
+2. **(a) A translucent-owner channel.** Patch the effect PSs as pool producers that write the slot and their own z to a new target
+   (MRT4/5 if free; MRT6 would clobber the hull, see H-clobber). The consumer reconstructs at that z, not `zr`, when it lies nearer than
+   `zr`.
+   - More general (any keyed translucent family), but it changes `enginePixelZ` and the bind validation, and needs the corpus identity
+     harness for each PS.
+   - It has no coverage floor unless the PS computes one, so faint additive fringes would claim pixels. Over sky that ghosts the stars.
+   - Cost: one extra Load per pixel for each eye, about 0.03 ms.
+3. **(c) Composite the effect after DLSS (UI layer).** Crisp, but it loses AA and jitter on a 2880-triangle mesh, and costs a re-render at
+   output resolution. Better kept for beams and tracers (1F17, 939D), which have no record.
+
+**DLSS preset K.** It ignores the reactive mask (Finding 1), so correct motion is the only in-DLSS lever. With the target's motion, K
+keeps the effect's history instead of rejecting or ghosting it. The see-through background remains a translucency limit no motion fixes.
+
+**Impact puffs and sparks** (AFBC/9F4B/BBAD, 9AEC). They come from a CPU particle stream with no t33 record, so this mechanism cannot
+give them object motion. They need coverage depth (the camera path at their own depth, the smoke pattern), and object motion only if E2
+shows they ride the ship. Their VS is already EDVR's (the facing transcriptions), so a replay can reuse it.
+
+**VR and flat.** This design targets the VR temporal pass and `ui_depth`, which is VR-only. Flat consumes engine slots through its own
+ownership path (`flat_foreground_ownership.h`, OwnerDepth == ConsumerDepth), which has the same equality, so the same replay applies there.
+That is a separate change, and needs a flat combat capture.
+
+**Evidence before building.**
+- **E1.** Do the shield draws' t33 slots name records whose pose delta matches the hull's, and are those records "joined"? Run
+  `tools\eye_run_ledger.py` on run 070301's pool, draw and record files. It needs no flight.
+- **E2.** Do the impact puffs ride the ship? Track their screen offset from the hull across P00-P02 of 070301.
+- **E3.** H-clobber: map 070301's `stale_slot` hull pixels (D00) against the translucent 5B4D coverage. If confirmed, (b) must also keep a
+  translucent keyed draw from writing ES over an owned pixel.
+- **Rig.** `tools\engine_velocity_test` on WARP: an opaque hull record, plus the shield replay over the hull and over the sky. Assert
+  per-pixel ownership, a camera path below the floor, and an unchanged hull ES where nothing is replayed.
