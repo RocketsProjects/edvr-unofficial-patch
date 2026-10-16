@@ -425,3 +425,27 @@ burst: the lone draw is carried by its own frame's re-issue, the production rule
 apart: production 0, frozen 49. A real drop (content, no re-issue in its frame) counts 1, and so does a re-issue that ran in the content's frame without
 carrying it, which the frozen rule could not see (0). A continuous burst counts 0 by both. Pins with controls: the production test is
 `weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)`, the stamp sits inside `if (hadWeapons)`.
+## Design, 2026-10-16: the shield refraction after the upscale (820E5C13/6EAA86EF), DESIGN ONLY
+
+**What 6EAA computes** (disassembled from edvr_logs\shaders). It sums n = (0,0,1) plus, for each of `cb2[7].w` hits, the t1 normal (x2-1,
+faded by `saturate(0.5*x1.x)`, weighted by `saturate(dot(normalize(hitpos), v1))`), and samples `t0` at `uv_jit + normalize(n).xy*cb2[0].x`,
+where `uv_jit = v0.xy/v0.z*(0.5,-0.5)+0.5` and v0 is the jittered clip position. It writes `x cb1[90].z x cb1[90].y` with alpha 1 (an
+overwrite). In 100257 the frame CB row 90 is (0, 1/256, 256, 0), so the gain is exactly 1 (INFERRED for 820E's PS b1, not captured). No
+tint, fresnel, additive or chromatic term. d is a UV fraction, so it scales to any resolution.
+
+**Commute.** The tonemap 99C2 is one t1 tap, then exposure, LUT and saturation, plus a +-0.5/255 position dither: T(F)(x+d) = T(F(x+d))
+within about 1/255. The break is order: the canopy 8C091FFD, F512712C, 025B4B9F and the puffs 9AEC/9F4B/AFBC/BBAD are drawn after 820E
+unrippled in stock, and a post-DLSS ripple would ripple them.
+
+**Design.** Skip 820E in the scene. Re-issue it unchanged, in-frame, through the HDR layer route (remap, jitter cancel, seeded GEQUAL)
+into a cleared per-eye R32G32 layer D with t0 bound to a 2016² UV ramp, so D holds the game's own `uv_jit + d`. At the door, after RCAS and
+before the E composite: `out = copy(RCAS).Sample(D - jitter_uv)` over D's coverage. Fallback: a DXBC patch writing d to RG16F. Temporary
+A/B: ripple after the upscale, none, stock.
+
+**Alternatives.** The UI resolve bound over 820E's coverage (fallback; softens the whole bubble); the parked join plus displacement coverage
+(wrong for sky; the ripple animation keeps smearing); skipping with no ripple (diagnostic leg only).
+
+**Evidence before shipping.** R1: watch 820E in eye_draw_snapshot (PS b1, PS b2, s0) for the gain, cb2[0].x and the filter. R2: the draws
+after 820E that overlap the bubble (070301, 100257). R3: 820E draws per eye-frame. Rig: `tools\shield_ripple_test` (the game's ps_6EAA on a
+ramp against the analytic uv+d; stock against post-path within 2/255; mutants for the jitter, the y flip, the d scale, the depth seed, the
+copy, the order and a hole).
