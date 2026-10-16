@@ -2,6 +2,11 @@
 
 ## Status
 
+State (2026-10-16, round 3): BUILT, NOT FLOWN, on `claude/flat-settlement-cpu-3` (not main): the overlay guard remembers its verification
+(13 -> 10 D3D calls on a guarded run that follows an unmoved one, pixels byte-identical, 4 mutants killed); the constructor's shader-pair
+questions and the UI ask are remembered per (vs, ps, profile) (equivalence over a corpus and a cross product, each key part dropped in turn
+is caught); the census's pool-family GPU section is wired into the flat thunks (it never ran there); the structural fast path is a design.
+Flight: read `ctor lookup block`, `ctor tail block`, `pool-family draws`, then decide the class census. Section "2026-10-16, round 3".
 State (2026-10-16, results): the observer fix is FLOWN, CONFIRMED and ON MAIN (1ae94885, `claude/engine-motion-observers`): render-thread
 engine motion 427 -> 77 ns a call (about 0.8 ms a frame), job merge and clear down 92%, 100% of calls lock-free, 0 contention. The
 instruments (H1-H4, round 2) are on `claude/flat-settlement-cpu-2`, NOT on main. Round 2 flown (DLSS, 14.6k draws a frame): EDVR render
@@ -13,8 +18,6 @@ is 0.12-0.24 ms); a single hot block in the draw constructor (its 5 blocks hold 
 Next candidates, unbuilt: the overlay guard reading t3 from the shadow (0.2-0.4 ms); the ctor lookup memo (~0.2); the per-draw UI-layer
 ask memo (0.1-0.2); the census "pool-family draws" GPU timing to price ~1.0 ms; the structural fast path. Designs (d) guarded runs and
 (e) census cost: section "2026-10-16, round 2".
-Earlier state (2026-10-16): the observer reduction was ported onto main as `claude/flat-settlement-cpu` with H1-H4; the 5.8 ms a frame
-(0.52 in the cockpit; draws 360 -> 10.5k) in `edvr_gfx_20261016_023749.log` was the diagnosis.
 Earlier state: BUILT on `claude/fps-drops-onfoot-czs-577f5a` (observers, copier, lock lines, flat cpu by part, then the review's fixes), NOT
 FLOWN. A bounded experiment on one of three suspects, plus instruments that say whether it was the right one. NOT the fix: the
 expected gain is about 4-5 ms of a 13-25 ms gap at most, and the per-draw render-thread work (about 8-9 ms a frame) is untouched.
@@ -333,3 +336,110 @@ Recorded from the coordinator's analysis of the two flat flights below; the logs
 - STRUCTURAL: how much of the per-draw flat work is needed for draws that need nothing? A memoised per-pipeline-state "nothing to do"
   fast path would remove cost across the 20 small pieces that no single block change reaches. The question to answer first is what share
   of the 14.6k draws a frame are such draws, and what decides it (shader pair, targets, depth, camera rows).
+
+
+## 2026-10-16, round 3: the guard's verification and the constructor's pair questions remembered, the pool-family GPU section in flat, the fast-path design
+
+Branch `claude/flat-settlement-cpu-3` (round 2 kept, main merged in). Three commits of code, each with its own proof, and a design. BUILT, NOT
+FLOWN.
+
+### Fix 1: the overlay guard remembers its verification (engine_velocity.cpp, `GuardVerified`)
+A guarded draw (BBE/DB3E) read the context to prove one set: the game's t3 before the set, the private SRV after it, and once more before the
+restore. The answers are functions of what the binding shadow can see: the generations of PS t3, RTV0 and DSV0 and the identity of the private
+SRV (a texture bound for output cannot be bound to read). EDVR's own set runs under `FlatComputeInternalScope`, which the shadow does not hear,
+so it moves none of them. KEY of the memo: (PsSrv3 generation, Rtv0 generation, Dsv0 generation, the private SRV's identity); valid only while
+all four equal the values at the last draw that read the context; forgotten at the frame's end (`engineVelocityFlatFrameEnd`), on an abandon and
+on shutdown, so no view of the game's outlives the frame on this account. The game's t3 is the one the context returned at that read
+(`g_guardVerified.game`), not the shadow's raw pointer, so a shadow that was never told of a set made before the hooks cannot poison it: the
+first draw of a generation always reads.
+Per guarded run, D3D calls received on WARP's vtable, 9 guarded draws of the rig's sequence (underlay, overlay x2, underlay, overlay; a new
+frame; then a t3 rebind, a target rebind, an RTV0-only move and a DSV0-only move, one guarded draw after each):
+before 17 13 17 17 17 13 15 15 15, after 16 10 14 16 16 12 14 14 14. The typical guarded draw following an unmoved verified one: 13 -> 10 (the
+game's t3 read, the bound read and the restore's read are all skipped); the first after a move: 17 -> 16 (the restore's read is skipped, it
+follows the verification that just proved it). 139 -> 126 calls over the sequence. The bigger win (13 -> 1-2) needs the lazy form of design (d).
+Proof: the four game targets and the slot target (MRT6) are byte-identical after the sequence with the verification remembered and with the
+reads made every draw (`g_guardTrustOff`, the rig's switch back to the old form); the overlay counters (copies, guarded, declined) do not
+move; after every guarded draw the rig holds the context to the game's last set, t3 included, across a game rebind of t3 between two guarded
+draws (the restore must write the NEW one) and a rebind of the targets. Fail-before, as mutants (`tools\engine_velocity_test\mutants.py --run`,
+whose link had not included skin_join_gpu.cpp since F2 and now does): `guard-ignores-t3-generation` is killed by the t3-rebind check (case
+G1), `guard-ignores-rtv-generation`, `guard-ignores-dsv-generation` and `guard-never-trusts` by the call-shape check (case G2: 3 calls fewer
+only where nothing moved). Not covered by a mutant, and said so: the private SRV's identity part of the key (the rig has one private SRV).
+
+### Fix 2: the constructor's pair questions remembered (flat_pair_facts.h)
+The lookup block's pieces by what they cost to recompute: `view(Rtv0/Dsv0)` already keeps the resolved binding while identity and generation
+hold; the camera table keeps its answer until the binding, the frame or the table changes (`probe`); shader hashes are loads. What was
+recomputed on every draw was the shader pair's derivations: a keyed pool-family pair (two table scans), a pool family's vertex shader, a
+registry tone pass, the map's tonemap, a UI-only source tone, the final copy's pair, and whether the UI layer's family rule could ever name
+the pair. All are pure functions of (vs hash, ps hash, flat profile). MEMO KEY, all of it: (vs hash, ps hash, flat profile), direct-mapped,
+1024 entries, owner thread, the profile in the index so the two profiles of a pair do not evict each other. Nothing per target, per frame
+or per generation enters, because no answer reads any of them (the contract kind, the copy draw's target test, the UI layer's target class and
+map-open are recomputed per draw as before). UI ask memo: a pair no family names for any (map open, HDR target) skips building the layer's
+inputs and `flatUiLayerDecide`, which returns "not asked" at its family test before any counter or log (pinned by a source scan); the
+tone/copy/map/source/shape chain after it is unchanged.
+Proof (`flat_pair_facts_tests.h`, in the build): the memo equals the fresh computation field by field over every hash the facts read (family
+tables, self-marking pairs, tone and copy pairs, the map tonemap, source tones, the UI layer's families), zero, all-ones, 120 random hashes,
+their cross product (about 62k pairs), both profiles back to back, asked twice (the hit path) and through a four-slot table (collisions and
+evictions); the corpus reaches every fact and the profile changes an answer for some pair; a memo built to ignore the vertex shader, the pixel
+shader or the profile is seen to DISAGREE on the same stream (`FlatPairFactsMemoT<Slots, Dropped>`: 1 vs, 2 ps, 4 profile), so each input of
+the key is needed by a test that fails without it; a pair asked a thousand times is computed once; the engine's two pair questions are the
+two inline family calls the fresh computation makes (scan), and the constructor asks the memo once and no longer asks the replaced questions
+(scan). Expected gain: the lookup block's 0.33 ms and the tail's 0.2-0.37 ms were mostly these questions; the measured figure is the next
+flight's `ctor lookup block` and `ctor tail block` (round 2 families).
+
+### Instrument: the pool-family GPU section in flat
+Why it read "-" in every flat window: the census section `AlteredPoolFamily` (gpu_census.h) is opened by `GpuCensusAlteredScope` around the
+game's own draw in the VR-path thunks (`forwardWithVerdict`). The flat branch of the five draw thunks returns before that code and never
+constructed a scope, so the section counted nothing. Each flat thunk now wraps the game's call in the same scope with the same classifier
+(`classifyAlteredDraw(owner = the draw scope watched it, verdictNone = true, poolSubstituted = producer, uiLayered = false)`), so it counts every
+occurrence and times the section's turn through the census's usual gate and K cap (`gpuCensusBegin`: one turn in the rotation, stride and
+offset, K = occurrenceCapFor). Nothing else changes. The window line (the census's own format, in the altered-draw line after the 30 s line):
+`... pool-family draws (EDVR's slot target and shaders) <ms a frame> (<draws>/frame) ...`, "-" only when the section had no timed occurrence.
+It prices the roughly 1.0 ms of GPU the round-2 A/B left untimed: the game's own substituted draws, with MRT6 and the patched shaders bound,
+timed whole (the game's work plus what EDVR adds), not EDVR's cost.
+
+### Design (not built): a structural fast path for draws that need nothing
+Question: of about 14.6k draws a frame at a settlement, how many need which per-draw steps, and can a memoised verdict skip the constructor
+for the bulk? Classes, by what the constructor does for each (the steps: reducer = flatRuntimeObserve, nominate, domain, coverage, engine
+begin/end, UI ask, copy checks, trace record):
+1. Pool-family producers (leg A: about 2,400 a frame substituted). Every step. The reducer records them as scene sources (`sources[]`, the
+   camera and depth they name), engine begin/end brackets them, the domain and coverage blocks classify them. Not skippable.
+2. Scene geometry into the scene HDR target (format 26) that is not a pool family: lighting, glass, terrain, sky. The reducer's camera and
+   layout checks (CameraChange, DepthMismatch, Viewport, hdrLayoutChanged, CameraProvenance) must see each one: a single stray draw with
+   another camera marks the HDR bad, so run-length folding across a change of camera, depth or viewport is wrong, but a draw whose
+   (rtv, dsv, viewport, b1 camera row epoch) equals the previous watched draw's, with the same shader pair class, can only extend the
+   target's `writes.draws` and `last`. Nominate and domain act only on a draw that could name a world or a first-person camera
+   (`sourceShape`, `foregroundCandidate`); coverage classifies scene draws (counts by class, the projection recipe for the pair).
+3. HUD and UI draws (the cockpit families, hundreds): the UI ask (this round skips it for pairs no family names), the rest as class 2.
+4. Shadow, depth-only and offscreen draws (no colour, or a target of no scene extent): the reducer returns at `if (!k.color)` or touches only
+   its target's record; nominate and domain are shaped out by `sceneExtent` and `k.camera`; no coverage; no engine bracket. These are the
+   cheapest to prove "nothing but trace and count".
+5. The post chain (tone, copies, bloom, about ten): every step, including copy checks (the exact-shader D3D reads).
+Does the reducer need EVERY draw? No for contract content, yes for ordering and for the events that make a frame uncertain. Its output is
+(a) per HDR/format-9/tone/source target: first, last, draws, the first camera, the first conflict; (b) `unsupportedFamilyDraws` (a pool
+family's vertex shader left stock into a scene-sized depth), `firstPersonDraws`; (c) the sequence number `q` the trace and the witnesses use.
+A draw into a target that is not HDR, not format 9, not a tone/copy target and not a source target (class 4, and class 2's repeats) changes
+(c) only (q must still advance) and its target's `writes.draws/last`, whose order is read only for the tone target and sources
+(`tone->tone.last != tone->writes.last`, `source->writes.last < q`).
+Could a memoised per-pipeline-state verdict skip the constructor? Yes, in principle: key (vs, ps) -> {class, may-need list} from this round's
+pair facts, then a per-state verdict "needs nothing but count, trace and q" valid while every input the skipped steps read is unchanged since
+the verdict was made. The inputs are the real cost of the design, and each must be named, tested and invalidated: the bound render targets and
+depth (Rtv0/Dsv0 generations and the view-resolved format and extent), the viewport (generation), the camera row epoch of the bound b1
+(`cameras.probe`), the frame (`s.prefix.frame`) and the work tier (`s.work`), whether any of these frame-scoped states is live: an open
+overlay suffix, `s.namedDepth` (changes at naming), the foreground route and domain candidates (per depth), the untrusted nomination, a draw
+capture or draw packet armed (F10), the weapon footprint, the HDR route's trigger state, the stand-down and `uncertain`/`foreignWork`
+flags. A cheap way to keep that closed: an "epoch" word bumped at every write to any of them (one function, grep-able), and the verdict
+valid only for its epoch; any missed writer is a missed invalidation, which is the risk.
+Estimate from round 2's per-block numbers (about 0.85 ms net in the five blocks; shell residual 0.55; destructor 0.35; lookup 0.33 now
+largely memoised; "other" about 2.2 ms spread over about 20 pieces): if about 80% of the draws are class 2-4 repeats and a verdict skips
+nominate, domain, coverage, the tail and the destructor's undo (a draw that did nothing has nothing to undo), the saving is about 0.65 ms of
+the blocks plus 0.25 ms of the destructor plus part of the residual: 0.9 to 1.2 ms of the 5.17 ms (18-23%), against the 2.2 ms of CPU the
+DLSS frame is co-limited by (CPU cuts pay about 2.2 ms before the GPU chain binds). The shares are NOT measured: the first step is an
+instrument, a per-window count of draws by (kind, format-26, supported, colour-null, same-state-as-previous), which prices the class sizes
+with no behaviour change. Invariants to hold: every skipped step has no side effect a later step or the copy draw reads (trace ring
+included: the trace is the replay's input, so a counted draw still needs its ring entry, or the replay needs a run-length entry); `q` advances
+for every draw; a verdict never outlives a generation or epoch it was made under; the fast path is off for F10 captures and packets. Risks:
+a missed invalidation silently drops a draw from the contract (a frame treated that should have been refused, or the reverse), which is the
+class of bug the contract reducer exists to prevent, and it will not show in a log until a flight; the saving is modest against the surface.
+Recommendation: build the class census first (one flight), then only the cheapest provable class (4: no colour or no scene extent) with a
+rig that replays the recorded draw traces (the frame-contract corpus, 46/46 frames replay identical) with the fast path on and off and
+requires identical contracts, before any wider class.
