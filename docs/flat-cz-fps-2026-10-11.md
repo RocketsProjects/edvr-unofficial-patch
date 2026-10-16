@@ -2,15 +2,15 @@
 
 ## Status
 
-State (2026-10-16, round 5 results): the claim regime was MEASURED (log `edvr_gfx_20261016_102211.log`, f4e167db, meter on a diag branch) and the
-claim check is FLOWN OK (diag build `claude/flat-settlement-cpu-6`, log `edvr_gfx_20261016_111653.log`), merged to main on Sean's approval from
-`claude/claim-precheck`: clears and merges that find claims live but none in their native list are handed back from a lock-free snapshot of the live
-claim addresses. The regime (from 10:29:32): claim set live 13-21% of a window, 1.00 emissions a frame, set size ALWAYS 1, 99.98% of 5.3M merges and
-1.9M clears a window touched nothing, Present p50 13.2-14.2 -> 16.4-18.8 ms. Flown (claims live from about 11:36): first window 1.43M clears and 4.1M
-merges took the lock-free check, 0 declined; Present p50 12.3-12.6 -> 12.8-13.1 ms, against a 3-5 ms jump without it. Rig: zero-hit calls 0 mutex
-acquisitions and 0 allocations (old code 2000 and 10000 per 1000+1000 calls); 15 mutants killed. NOT done: the pool copier still takes the mutex whenever
-a claim is live (~3.7M acquisitions a window, render thread, hold 0.1 us); the same snapshot could clear it, with its own argument. Remaining Present
-+0.5 ms against the quiet baseline is not attributed. Section "round 5 results".
+State (2026-10-16, offscreen fast path): BUILT, NOT FLOWN, on `claude/flat-offscreen-fastpath` (not main): a draw into a shadow map, a depth-only pass or a
+small intermediate (class 4: 3,773 draws a frame, 27%, 98% the same as the previous draw) that repeats the previous VERIFIED class-4 draw skips the draw
+scope's constructor and destructor and does only the pair-facts store, engine motion's restore, the reducer, the HDR detector, the trace and the UI note.
+THE REPLAY IS IDENTICAL: all 46 corpus frames (44,261 draws, 16,314 memo hits) leave the same contract and prefix with the fast path on and off. Flight reads
+the `offscreen fast path` token and family (calls = the draws served; expected 3.5-3.8k a frame) and the ctor time; expected saving 0.4-1.0 ms a frame,
+UNMEASURED. It declines on any live condition, with the reason in the token. Section "offscreen fast path".
+State (2026-10-16, round 5 results): the claim check is FLOWN OK and ON MAIN (claim-precheck; flight `edvr_gfx_20261016_111653.log`): 1.43M clears and 4.1M
+merges in the first window, 0 declined, Present p50 12.3-12.6 -> 12.8-13.1 ms against a 3-5 ms jump without it. NOT done: the pool copier still takes
+the mutex while a claim is live (another agent has it); the remaining +0.5 ms is not attributed. Section "round 5 results".
 State (2026-10-16, results): the observer fix is FLOWN, CONFIRMED and ON MAIN (1ae94885, `claude/engine-motion-observers`): render-thread
 engine motion 427 -> 77 ns a call (about 0.8 ms a frame), job merge and clear down 92%, 100% of calls lock-free, 0 contention. The
 instruments (H1-H4, round 2) are on `claude/flat-settlement-cpu-2`, NOT on main. Round 2 flown (DLSS, 14.6k draws a frame): EDVR render
@@ -423,3 +423,59 @@ windows (the hits, once a frame, remain); contention near 0; `flat cpu` engine h
 `declined` is large, read which reason: only plan in flight, more than four claims and a torn read are counted. NOT done (adjacent, not folded in):
 the pool copier takes the mutex on every call while a claim is live (about 3.7M acquisitions a window on the render thread, hold 0.1 us): the
 snapshot could clear it for ranges holding no claim, with its pool-patch conditions; it needs its own argument.
+
+
+## 2026-10-16: the offscreen fast path (class 4 of the draw class census)
+
+Branch `claude/flat-offscreen-fastpath` (from main 34c100f5). BUILT, NOT FLOWN. The census (round 4, the diag branches) put offscreen draws at
+3,773 a frame, 27%, 98% of them the same as the previous draw on target, pair and all. The round 3 design said such a draw only extends its target's
+record and advances q. Reading the constructor for it showed that is only true while a short list of conditions holds; the work is naming them.
+
+### What a class-4 draw is, and what it still needs
+Class 4 here is stricter than the census's: not a motion source or tone or copy or UI family (the pair table says), no colour target or a colour target
+that is not the output and not format 9, 23, 26, 27 or 60 (the formats the skipped blocks act on), no depth of the scene's size (the foreground domain's
+candidate block reads it), and not a fullscreen triangle (the UI layer's tone probes and the back-off trail read it). `flatOffscreenShapeVerdict` is
+that, pure. The constructor's blocks for such a draw are no-ops while the LIVE conditions hold (`FlatOffscreenLive`, eleven fields, each filled from the
+state it names): the frame is Full; the GPU span is open and the foreground domain's frame reset ran; no ingress audit; no capture armed
+(`flatTemporalCapturing`, a draw capture, draw packets); no foreign work; no overlay suffix open or active; no F10 projection audit; no weapon footprint
+probe; the foreground probe is not active on a draw with a depth; and the HDR detector could not consume the draw. What it still does: `s.drawVs/Ps`,
+`engineVelocityFlatLazy(true)`, `flatRuntimeSubstitution` (the `!d.supported` call: engine motion's state goes back), the reducer for real, the HDR
+detector for real, the trace record for real, the new-target bookkeeping, and the UI layer's scene-draw note. Nothing the reducer, detector or trace
+read is cached except the draw record, which is a pure function of the key.
+
+### The key, and why there is no epoch word
+`FlatOffscreenKey`, fifteen inputs, each named in the header and each shown necessary by two draws that differ only in it (O1): the shader pair, the
+colour, depth, RTV, DSV and b1, the camera rows' hash and write epoch and sequence (the camera-row epoch) and whether there are rows, the extents and
+formats, the viewport, and the generations of the RTV and DSV bindings. The frame rides beside it. The design asked for an epoch word bumped at every
+write to the frame-scoped states; that is a list of writers to find and a missed one is silent. The live conditions are READ at every draw instead
+(about a dozen loads), so there is no writer to miss, and the rig pins each field to its source (O5). The memo holds the previous verified draw: one
+whose shape verdict and live verdict were None and whose slow path planned and started nothing (no producer, projection binding, capture, packet,
+overlay, foreground, untrusted or domain plan, no HUD take, tone, composite or replacement, no HDR trigger, no camera probe), registered no target and
+did not change certainty.
+
+### The decisive replay (O7)
+Every frame of the committed corpus (tools\flat_temporal_test\traces, 17 files, 46 frames, 44,261 draws) is replayed twice through the reducer, once as
+recorded and once with the rules: a candidate draw that repeats the verified key takes the memo's record in place of its own. 17,158 draws were
+candidates and 16,314 (36.9%) were memo hits; every frame's contract hash and prefix digest (every target's record, every source's, the counters) is
+identical, and every hit's cached record EQUALS the event's own field by field but the instance count. The corpus alone cannot tell any single key
+input apart (no two candidates in it differ in exactly one input), which is why O1 proves each input on constructed pairs.
+
+### The audit as a test (O5)
+Each gate that makes a skipped block a no-op is a pinned string of the source (verifyHdrCopy and its siblings off format 26 or 9, the F10-only captures,
+the weapon footprint, the cohort and overlay candidates, sceneExtent, the untrusted nominee, the foreground gap and domain block, the coverage
+classification, the UI layer's family, copy and triangle branches, the reducer's colourless return and format guards, the detector's gate). A change to
+any fails the rig until the fast path is reviewed against it. Against origin/main's flat_runtime.cpp the wiring check fails (the functions are not
+there): the fail-before. 49 mutants of the headers (`offscreen_mutants.py --run`) are each killed by the case that owns the rule.
+
+### Measurement
+The `flat cpu 5s` line carries `offscreen fast path: N draws a frame skipped the draw scope's constructor and destructor (V a frame were verified on the
+slow path first; D a frame matched but had to ask why not: reasons)`, a counter that prints with the timing off, and the timing-on line has a family
+`offscreen fast path` (calls = the draws served). The saving is the served draws times the difference between a class-4 draw's slow cost and the fast
+path's: not measured here; the flight reads it from the timing-on line (the ctor families against the previous build's) and from Present.
+Expected: 3,773 draws times 100-250 ns is 0.4-1.0 ms a frame, if the census's share holds in the flight. If `matched but had to ask why not` is large,
+the reason names the live condition to refine (foreground active is the likely one on foot).
+
+### Not done
+The slow path's first class-4 draw of each kind per frame (verified, then remembered) is the `verified` count in the token. Class 4 only; the other
+classes are not touched. The memo is one draw deep: an alternation between two offscreen targets misses every time (the counters would show a large
+verified count and a small served one).

@@ -1491,6 +1491,9 @@ REM and --dry-run writes nothing at all.
 "%BUILD%\flat_temporal_test.exe" --write-fixture "%OBJ%\flattemporaltest\never_written.log" --dry-run || exit /b 1
 if exist "%OBJ%\flattemporaltest\never_written.log" ( echo [edvr] ERROR: flat_temporal_test --write-fixture --dry-run wrote a file & exit /b 1 )
 "%BUILD%\flat_temporal_test.exe" --self-test || exit /b 1
+REM The offscreen fast path's mutation list (src\d3d11\flat_offscreen_fast.h, flat_offscreen_counts.h) is held to the headers as they are; --run builds the standalone
+REM driver (tools\flat_temporal_test\flat_offscreen_test.cpp) against each edit and requires the case that owns the rule to fail.
+python "tools\flat_temporal_test\offscreen_mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_vr_world_route_test
