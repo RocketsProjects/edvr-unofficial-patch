@@ -2,13 +2,17 @@
 
 ## Status
 
-State (2026-10-16, round 5): BUILT, NOT FLOWN, on `claude/flat-settlement-cpu-5` (not main; main 9b305835 merged in). MEASUREMENT ONLY: the claim
-meter (`engine_velocity_claim_meter.h`), two lines per 30 s, `primary copy claims` and `primary copy claim entities`. It answers whether the 09:17
-regime (emissions 0 -> 15,273 in six minutes, every merge and half the clears on the claimed locked path, render engine-motion hooks 0.14 -> 1.06 ms
-a frame; claims legitimate and short-lived) can take a lock-free claim-set pre-check (option 1). DECISION RULE: zero-hit share of claimed calls about
-100% AND the claim set 3 or fewer at claimed calls (5+ near zero): option 1 is CLEARED. A zero-hit share well under 100%, or 5+ common: NOT cleared
-(the hits take the lock anyway); read the lifetime p95 and the entity line for another cut. The entity line names what starts the regime (the first
-8 emissions after 10 s quiet: pose words, pool slot). Section "round 5". Temporary keys: none (no key; always on, one line pair per 30 s).
+State (2026-10-16, round 5 results): the claim regime was MEASURED (Steam log `edvr_gfx_20261016_102211.log`, f4e167db, claim meter on a
+diag branch) and the FIX is BUILT, NOT FLOWN, on `claude/claim-precheck` (not main): clears and merges that find claims live but none in their
+native list are handed back from a lock-free snapshot of the live claim addresses. The meter, from 10:29:32: claim set live 13-21% of a window,
+1.00 emissions a frame, claim-set size ALWAYS 1 (claimed merges 5.3M, clears 1.9M a window), 99.98% of claimed calls touched nothing, lifetime
+p50/p95 6554 us, one rigid record a frame at a new address, Present p50 13.2-14.2 -> 16.4-18.8 ms. Rig: zero-hit calls 0 mutex acquisitions and 0
+allocations (the old code: 2000 and 10000 per 1000+1000 calls); contended 4 threads 1922 -> 91 ns a call pair. Mutants: 15, all killed. Flight
+reads: `lock-free exits` (clear and merge near 100%, `Claim check ... N declined` near 0), the lock lines (merge begin, merge end and clear walk
+n near 0 while claims are live), Present p50 back to 13-14 ms. NOT done: the copier still takes the mutex whenever a claim is live (~3.7M
+acquisitions a window, render thread); the same snapshot would clear it (its own hits are slot ranges). Section "round 5 results".
+State (2026-10-16, diag build): `claude/flat-settlement-cpu-6` = the claim meter (`-cpu-5`; `primary copy claims` and `claim entities` lines) +
+`claude/claim-precheck`: zero-hit calls are counted from the lock-free exits too, the lock lines fall to the hits. NOT for main.
 State (2026-10-16, round 4): the lazy overlay guard and the run-section GPU timing are FLOWN and ON MAIN (9b305835); the draw class census
 (`draw classes`) is on `claude/flat-settlement-cpu-4` and this branch, not main. Round 3: the pair memo cut the tail 0.19 ms, the lookup 0.08 ms
 (ON MAIN b3386964); the guard memo saved about 0.04 ms. Sections "round 3" and "round 4".
@@ -20,9 +24,6 @@ suspended; the whole gap is the AA path. Section "2026-10-16, results" has the n
 spread thin (about 20 pieces, none above 0.6 ms); the open question is structural (a per-pipeline-state "nothing to do" fast path).
 Ruled out (2026-10-16, round 2): the unscoped binding thunks as the 2.4 ms unexplained (about 7.3k bind calls a frame at about 30 ns net
 is 0.12-0.24 ms); a single hot block in the draw constructor (its 5 blocks hold about 0.85 ms net); g_mutex contention (0 contended).
-Earlier state: BUILT on `claude/fps-drops-onfoot-czs-577f5a` (observers, copier, lock lines, flat cpu by part, then the review's fixes), NOT
-FLOWN. A bounded experiment on one of three suspects, plus instruments that say whether it was the right one. NOT the fix: the
-expected gain is about 4-5 ms of a 13-25 ms gap at most, and the per-draw render-thread work (about 8-9 ms a frame) is untouched.
 Report: flat v0.19.1 (Steam, build 6ACAF769), RTX 3050, "40 fps without the mod, 20-25 with DLSS" in on-foot CZs.
 Working files (gitignored): `reviews\flat-cz-fps-findings-2026-10-11.md`, `reviews\flat-cz-fps-review-2026-10-11.md`.
 
@@ -558,3 +559,79 @@ window`, which is also what a window with no emissions reads: tell them apart by
 Rig (`primary_copy_observer_tests.h`, `runClaimMeter`): the never-fired forms exactly; a synthetic stream through the real entry points with a scripted
 clock (live 500 + 200 + 801 of 3000 ticks, three flips, four emissions, lifetimes 300 consumed / 500 cleared / 600 dropped, sizes 1/1/0/0, one merge hit
 and one clear hit of two, the exact line); the burst keeps its first eight of twelve; dashes for no frames and no claimed calls; absurd values truncate.
+## 2026-10-16, round 5 results: the claim regime measured, and the claim check
+
+Branch `claude/claim-precheck` (from main eba550ad). BUILT, NOT FLOWN. The claim meter that took these numbers lives on the diag branch
+`claude/flat-settlement-cpu-5`/`-6`, not on main.
+
+### What the meter said (flight f4e167db, Steam, flat, log `edvr_gfx_20261016_102211.log`)
+From 10:29:32 the claims began and stayed: the claim set was non-empty 13-21% of each 30 s window, 1.00 emissions a frame, claim lifetime p50 and p95
+both 6554 us (consumed by the native copy; none cleared or dropped). The claim-set size was 1 at EVERY claimed call (merges 5.3M / 0 / 0 / 0, clears
+1.9M / 0 / 0 / 0 in the 1/2/3-4/5+ buckets); claimed merges that touched a claim 1621 of 5.3M and claimed clears 0 of 1.9M, so the zero-hit share of
+claimed calls was 99.98%. The entity: one rigid record a frame, a new address each frame, a near-static pose. Present p50 rose from 13.2-14.2 to
+16.4-18.8 ms once the claims began. The lock lines in the same windows: merge begin and end about 5.3M acquisitions each, clear walk 1.9M, copier 3.7M,
+contention 12-14%. The decision rule (zero-hit about 100%, set 3 or fewer) cleared the lock-free claim-set check; Sean approved building it.
+Premise check before building: the claim does get hit once (a merge carries it, 1621 hits for 1621 emissions), so the check cannot assume "never
+hit"; it takes the mutex on a hit and the hit path is unchanged.
+
+### The fix (engine_velocity_primary_copy.h)
+- `ClaimView`: the set of live claim addresses (at most 4, sorted; `kClaimViewMax`+1 as the count when more are live) and whether a merge plan is in
+  flight, as an immutable snapshot under a seqlock, the `g_poolView` pattern. `ClaimLock::publish` rewrites it from the containers at every unlock and
+  only when it differs, so it can lag only a critical section that has not finished.
+- `clearClaimCheck`: reached when `g_claimsLive` is true. It reads the snapshot; with a plan in flight, more than 4 claims, a torn read or an empty
+  snapshot (a flag one release behind) it returns at once and the clear takes the mutex as before. Otherwise it walks the dictionary with
+  `walkDictionary` (the locked clear's own walk, now shared, so the two refuse exactly the same shapes) and tests each node's 8 record slots against the
+  snapshot. Nothing held and the walk well formed: the call is counted and returns, no mutex, no address set built, no allocation (up to 64 nodes and
+  64 entries; past that the visited sets spill as they always did).
+- `mergeClaimCheck`: the same with `walkMerge` (the locked merge's walk, shared). A claim in any record slot the merge clears or overwrites (a source
+  node's 8 slots, and the destination tail's slots [tailCount, tailCount+fill)) is a hit; no hit: the fixed no-claims token (no plan, no mutex, no
+  allocation). Option 2 (a plan only when a claim is hit) is this: the plan is built only on the locked path.
+- A hit, a plan in flight, more than 4 claims, a refused list or dictionary (a refusal clears every claim and bumps the epoch, which only the locked
+  path may do), or any exception take the mutex and do what they always did, from the start. The merge-end epoch check and the plan's invalidation by a
+  clear are unchanged, since they only exist on the locked path. Counters: `Claim check (live claims, none touched): N clears and M merges ... K calls
+  declined it` joins the `lock-free exits` line; the figures sit inside the lock-free and call totals but not inside the no-claim skips.
+
+### Linearization
+Every call the check hands back is ordered at the instant it read the snapshot. The snapshot is a state some completed critical section left (publish
+runs before the unlock, and the seqlock read is kept only if no write began or ended during it), so the call is exactly a call that took the mutex when
+the claim set was that snapshot, found no claim in its list and no plan, and changed nothing. A claim published after that instant is ordered after the
+call; the mutex allowed that order for a producer that had not yet taken it, and nothing the producer's thread did before returning from
+`recordEmission` is missed, because that unlock published the snapshot before the call could have begun. A claim published BEFORE the call began is in
+the snapshot (the producer's release and the caller's acquire through Elite's own hand-off order the stores), so the walk finds it if it is in the
+list. The native list is not guarded by the mutex either way: the locked walk read it at a slightly different instant than the lock-free one, and
+nothing in the locked code made list and claims an atomic pair. A torn read (a write in flight) is retried by taking the mutex, not by trusting
+either half. What differs from the locked merge on a miss: it registered an empty plan; the token has none, so a concurrent clear cannot mark it
+invalid (nothing to lose) and a native unwind of the merge now always revokes the claims registered since (the safe direction, already the token's
+rule). x86 hides a weakened memory order from the rig, as for `g_poolView`.
+
+### Rig evidence (tools\engine_velocity_test\claim_check_tests.h, 18,506 checks in the whole rig)
+- C1: 1000 clears and 1000 merges under 1, 2, 3 and 4 live claims they do not touch: 0 mutex acquisitions, 0 heap allocations, no plan, claims and
+  snapshot exact. The same calls with the check off (`g_claimPrecheck=false`, the rig only): 2000 acquisitions and 10000 allocations, so the first
+  two checks FAIL on the old code. Mutex held by another thread: a clear and a merge with a live claim they do not touch return; with the claim in
+  their list they block until it is released.
+- C2/C3: the clear and the merge are compared with the pre-change code (the old clear and a copy of the old merge are in the rig) on 16 dictionary
+  shapes and 21 list shapes, each with the claim in the list (hit) and with a claim elsewhere only (miss), the merge also with a frame the claim is not
+  in: same claims after begin and after end, same transfers, failure, epoch and counters. The merge cases cover every slot class: a source node's slots
+  including past the count, the first, middle and last filled tail slots, tail slots kept (below the count, a full tail), a tail of 0, three source
+  nodes into a tail of 4, and six refusals (previous link, count 0, a self link, the last link, a tail count of 9, a tail whose next is wrong).
+- C4: four claims (the limit) check lock-free; five take the mutex and are counted as declined; back to four, lock-free again; a claim in the list among
+  six is revoked. C5: with a plan in flight a miss takes the mutex, walks and registers its plan, and a clear of the plan's list marks it invalid.
+  C6: the snapshot equals the containers (sorted, plan flag, the more-than-four marker) after every entry point of every existing test, and is
+  rewritten once per change and never for a repeated claim or a call that changes none.
+- C7: a claim published inside a call's snapshot read tears the read: the call takes the mutex and revokes (clear) or stages (merge) it. A claim
+  published after the check is ordered after the call and left alone, and the next call sees it. Four threads, 3000 rounds (a producer, a caller
+  behind a release/acquire hand-off, a churn thread keeping the claim count between two and six): 0 claims lost, 0 wrong moves, the sentinel claim
+  never erased, the snapshot exact at the end.
+- Mutants (`mutants.py --run`, 15 for this check, each killed by the case named): a plan in flight ignored (C5, clear and merge), the 4-claim limit
+  ignored (C4, both), hits ignored (C2), a refused walk or list accepted (C2, C3), source slots ignored, tail fill ignored, tail fill off by one,
+  the slot window missing the last slot (C2/C3), the snapshot never rewritten (C1), unsorted (C1), omitting the plan flag (C6), the read not re-checked (C7).
+- Bench (single thread, one claim live and untouched; ns a call): clear 1 node 69 -> 23, merge begin+end 314 -> 15 (8000 allocations per 1000 calls ->
+  0); four threads contending on merge+clear 1922 -> 91 ns a call pair a thread.
+
+### What the flight reads, and what is not done
+Per 30 s: `lock-free exits` clear and merge near 100% of calls (they were 80% and 60%); `Claim check ... N clears and M merges` in the millions while claims
+are live; `declined` near 0 (a plan in flight, a fifth claim, a torn read); lock lines: merge begin, merge end and clear walk n near 0 in claim-live
+windows (the hits, once a frame, remain); contention near 0; `flat cpu` engine hooks back to about 0.14 ms; Present p50 back to 13-14 ms. If
+`declined` is large, read which reason: only plan in flight, more than four claims and a torn read are counted. NOT done (adjacent, not folded in):
+the pool copier takes the mutex on every call while a claim is live (about 3.7M acquisitions a window on the render thread, hold 0.1 us): the
+snapshot could clear it for ranges holding no claim, with its pool-patch conditions; it needs its own argument.
