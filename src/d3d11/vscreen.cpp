@@ -4810,6 +4810,14 @@ static void flatCensusDraw(ID3D11DeviceContext* self, char kind, uint32_t count,
     if (drawCensusArmed()) drawCensusOffDraw(self, kind, count, instances, args);
 }
 
+// The GPU census's altered-draw section for a flat draw (gpu_census.h): a pool-family draw EDVR substituted (its MRT6 slot target bound, its
+// shaders swapped) is timed on the section's turn, like the VR path's (forwardWithVerdict), which the flat branch never reached: the line read "-"
+// in every flat window until 2026-10-16. The same classifier, the same gate and K cap (gpuCensusBegin); a draw the scope did not watch has no
+// context (None), and the flat profile has no verdict, UI redirect or other wrapper to name.
+static inline AlteredDraw flatAlteredDraw(const FlatRuntimeDrawScope& d) {
+    return classifyAlteredDraw(d.ctx != nullptr, true, d.producer, false);
+}
+
 // Built v14.34: the optimized station's sun skip in the flat profile. Flat draws never reach beginPanelOverride (VR's verdict makes the same call after its
 // foreign-context return), so the four draw kinds ask here, first, in their flat branch: owner context only, one atomic load while the sun is on.
 static inline bool flatStationSkipsDraw(ID3D11DeviceContext* self) {
@@ -4834,7 +4842,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        { flatcpu::Scope game(flatDraw.gameDrawFamily()); g_state->realDraw(self, count, start); }   // the game's own draw, timed apart from EDVR's
+        { flatcpu::Scope game(flatDraw.gameDrawFamily()); GpuCensusAlteredScope gpu(self, flatAlteredDraw(flatDraw)); g_state->realDraw(self, count, start); }   // the game's own draw, timed apart from EDVR's (CPU: the census; GPU: the altered-draw section)
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
         return;
@@ -4880,7 +4888,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
         FlatRuntimeDrawScope flatDraw(self, 0, 'A');
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        { flatcpu::Scope game(flatDraw.gameDrawFamily()); g_state->realDrawAuto(self); }
+        { flatcpu::Scope game(flatDraw.gameDrawFamily()); GpuCensusAlteredScope gpu(self, flatAlteredDraw(flatDraw)); g_state->realDrawAuto(self); }
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         flatDraw.uiReissue([&] { g_state->realDrawAuto(self); });
         return;
@@ -4910,7 +4918,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        { flatcpu::Scope game(flatDraw.gameDrawFamily()); g_state->realDrawIndexed(self, count, startIndex, baseVertex); }
+        { flatcpu::Scope game(flatDraw.gameDrawFamily()); GpuCensusAlteredScope gpu(self, flatAlteredDraw(flatDraw)); g_state->realDrawIndexed(self, count, startIndex, baseVertex); }
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
         return;
@@ -4984,7 +4992,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
                                       static_cast<int32_t>(startVertex), startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        { flatcpu::Scope game(flatDraw.gameDrawFamily()); g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); }
+        { flatcpu::Scope game(flatDraw.gameDrawFamily()); GpuCensusAlteredScope gpu(self, flatAlteredDraw(flatDraw)); g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); }
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
         return;
@@ -5056,6 +5064,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         {
             flatcpu::Scope game(flatDraw.gameDrawFamily());
+            GpuCensusAlteredScope gpu(self, flatAlteredDraw(flatDraw));
             g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance);
         }
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();

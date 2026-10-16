@@ -2834,6 +2834,8 @@ void testFlatCpuWiring() {
         {&runtimeCpp, "g_flatPrevDrawSubstituted = producer;", 1, "a draw scope records whether it was substituted, for the next game draw's family (H2)"},
         {&vscreenCpp, "flatcpu::Scope thunk(flatcpu::kDrawThunk);", 5, "the flat branch of every draw thunk is one scope (H2)"},
         {&vscreenCpp, "flatcpu::Scope game(flatDraw.gameDrawFamily());", 5, "and its real draw call is timed apart, by what preceded it (H2)"},
+        {&vscreenCpp, "GpuCensusAlteredScope gpu(self, flatAlteredDraw(flatDraw));", 5, "the game's call of each flat draw thunk is a GPU-census altered-draw scope: the pool-family section reads in flat (round 3)"},
+        {&vscreenCpp, "return classifyAlteredDraw(d.ctx != nullptr, true, d.producer, false);", 1, "and a substituted producer draw is the pool-family class, the same classifier the VR path uses"},
         {&vscreenCpp, "flatcpu::Scope thunk(flatcpu::kBindShaders);", 2, "the two shader-set thunks are timed (round 2)"},
         {&vscreenCpp, "flatcpu::Scope thunk(flatcpu::kBindResources);", 2, "the two shader-resource thunks"},
         {&vscreenCpp, "flatcpu::Scope thunk(flatcpu::kBindConstants);", 2, "the two constant-buffer thunks"},
