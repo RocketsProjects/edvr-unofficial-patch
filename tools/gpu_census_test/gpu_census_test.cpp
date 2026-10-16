@@ -945,7 +945,7 @@ void seedTableCases() {
     check(!isDoorSection(seed) && occurrenceCapFor(seed) == 8 && turnOwnerOf(seed) == seed,
           "seed section: an in-frame section like the others: per draw, K = 8, a turn of its own in the rotation");
     check(static_cast<size_t>(seed) == kDoorSections + 7 && static_cast<size_t>(seed) + 1 == kWorldFirst &&
-              kWorldFirst + kWorldSections == kFssFirst && kFssFirst + 1 == kSkinFirst && kSkinFirst + kSkinSections == kAlteredFirst &&
+              kWorldFirst + kWorldSections == kFssFirst && kFssFirst + 1 == kSkinFirst && kSkinFirst + kSkinSections == kProbeFirst && kProbeFirst + kProbeSections == kAlteredFirst &&
               seed > GpuCensusSection::FrameUiLayerReissues && seed < GpuCensusSection::AlteredPoolFamily,
           "seed section: the eighth in-frame section (the ninth before the terrain's went, 2026-10-01), followed by the three world-route ones, so the altered-draw sections still follow the in-frame ones");
     bool filled = true, distinct = true;
