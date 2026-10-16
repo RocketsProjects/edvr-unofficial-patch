@@ -909,9 +909,25 @@ echo [edvr] === smoke.exe ===
 if not exist "%OBJ%\smoke" mkdir "%OBJ%\smoke"
 %CC% /nologo /W4 /O2 /EHsc /std:c++17 /MT /DNDEBUG ^
     /Fo"%OBJ%\smoke\\" /Fe"%BUILD%\smoke.exe" ^
-    "tools\smoke\smoke.cpp" /link /INCREMENTAL:NO kernel32.lib
+    "tools\smoke\smoke.cpp" /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: smoke build failed & exit /b 1 )
 echo [edvr] built %BUILD%\smoke.exe
+REM The focused modes run here; until 2026-10-16 this rig only compiled smoke.exe and nothing ran any mode, which is how
+REM advanced.d3d11_fixes = 0 crashed on the first Present for three releases with every gate green. --fixes-off-device presents
+REM frames through a swap chain with the fixes off. All three load build\d3d11.dll, so they run one after another in this
+REM rig (each clears the sentinel it uses first), under this rig's own EDVR_LOG_DIR.
+"%BUILD%\smoke.exe" "%BUILD%\d3d11.dll" --fixes-off-device || (
+    echo [edvr] ERROR: smoke --fixes-off-device failed: with the fixes off the proxy must still survive a Present
+    exit /b 1
+)
+"%BUILD%\smoke.exe" "%BUILD%\d3d11.dll" --recovery-device || (
+    echo [edvr] ERROR: smoke --recovery-device failed
+    exit /b 1
+)
+"%BUILD%\smoke.exe" "%BUILD%\d3d11.dll" --foreign-device || (
+    echo [edvr] ERROR: smoke --foreign-device failed
+    exit /b 1
+)
 exit /b 0
 
 :rig_fakechain
