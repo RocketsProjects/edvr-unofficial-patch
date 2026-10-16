@@ -236,3 +236,13 @@ of the keyed draws for slots 220 and 238.
 - finding: 6EAA writes constant alpha 1.0 and is a refraction pass (samples the eye HDR copy at screen UV plus a normal-map ripple),
   so there is no alpha to transcribe; coverage for 820E would have to be displacement-based, and object motion for refracted content
   is unproven. 5C1D/C49F is ONE+ONE with constant alpha 1.0, so its coverage floor is on HDR intensity (alpha*colour*cb1[90].y).
+**Producer hunt, 2026-10-16 (offline: decompiles, capstone on PE 1788384820, run 070301).** In frame 15468, 162 slots are drawn: all 85
+joined records carry the model+0x478 block at record +0x20..+0x9F, and 70 of the 77 unjoined have it zeroed. The rigid producers (42B4130,
+42B4420 inline, 369C9C0) copy that block; FUN_14434D470 (matrix to packed quaternion, scale at +0x50) does not, and appends through
+FUN_14434D120 (bucket, model key, record, node key), which nothing in EDVR hooks or counts. The four shield slots and the target-anchored
+records 118 (E508) and 156 (1989) share the stack-leftover +0x120 word 0x447BF39C: one producer call. Candidate producer:
+FUN_14434D470/434D120 (prologue 48895C2408 48896C2410 4889742418 57 4883EC20). Not yet excluded: the other initializer callers
+1431FA800, 143C8F8C0, 143DA1DE0, 143E7AF20, 1443ED820. Next: a count-and-tag hook on 434D120 (calls, buckets, threads, overlap with the
+rigid producers' buckets, appended addresses mapped to pool slots in an eye run) before any emission. "139 of 2048 joined" counts pool
+capacity, not a miss rate.
+- ruled out: FUN_14369C9C0 as the shield's producer, because it made 0 calls this session and it copies the model block.
