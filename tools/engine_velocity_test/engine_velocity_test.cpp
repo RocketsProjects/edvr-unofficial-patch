@@ -52,6 +52,7 @@
 #include "consumer_tests.h"
 #include "capture_tests.h"
 #include "primary_copy_tests.h"
+#include "append_tests.h"
 #include "primary_copy_observer_tests.h"
 #include "panel_tests.h"
 #include "corpus_identity.h"
@@ -423,6 +424,9 @@ int wmain(int argc, wchar_t** argv) {
         consumer_tests::run({device.Get(), context.Get(), &check},primary.data(),101);
     capture_tests::run(device.Get(),context.Get(),&check);
     primary_copy_tests::run(device.Get(),context.Get(),&check);
+    append_tests::run(device.Get(), &check);
+    // The append producer's joined shield-strike record (A1) through the production mv consumer: exact record motion, kind 1.
+    consumer_tests::run({device.Get(), context.Get(), &check}, append_tests::g_joinedAppend.data(), append_tests::kJoinedFrame);
     primary_copy_observer_tests::run(device.Get(),&check);
     panel_tests::run({device.Get(), context.Get(), &check});
     lifecycle_tests::run({device.Get(), context.Get(), &check});

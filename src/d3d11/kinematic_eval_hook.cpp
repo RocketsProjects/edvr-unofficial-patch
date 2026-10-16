@@ -58,6 +58,7 @@ std::atomic<bool> emitWanted{false};
 // Engine-record velocity's emit observer (direct producer 0's post-forward).
 alignas(8) std::atomic<EngineEmitObserverFn> emitObserver{nullptr};
 alignas(8) std::atomic<EnginePrimaryEmitObserverFn> primaryEmitObserver{nullptr};
+alignas(8) std::atomic<EngineAppendEmitObserverFn> appendEmitObserver{nullptr};   // FUN_14434D120's append feed (the shield strike's producer)
 alignas(8) std::atomic<uintptr_t> primaryGate{0};
 std::atomic<uintptr_t> g_primaryReturn{0};
 std::atomic<const char*> g_primaryStatus{"not requested"};
@@ -812,7 +813,22 @@ __declspec(noinline) uintptr_t __fastcall producerObserved(uintptr_t bucket,uint
     // The relay JUMPS here, so the slot holds the native caller's return address.
     const uintptr_t base=g_producerBase.load(std::memory_order_relaxed);
     const uintptr_t from=reinterpret_cast<uintptr_t>(_ReturnAddress());
+    // The append emission (engine_velocity_emit.h "THE APPEND PRODUCER"): the bucket's item count either side of the forward. Only read when
+    // an observer is attached; a failed read leaves INT32_MIN and the observer declines the call as unproven.
+    const auto appendObserve=appendEmitObserver.load(std::memory_order_acquire);
+    int32_t countBefore=INT32_MIN;
+    if(appendObserve && !engine_velocity_emit::read(bucket+engine_velocity_emit::kOwnerCount,&countBefore,sizeof(countBefore)))countBefore=INT32_MIN;
     const uintptr_t result=forward(bucket,modelKey,record,nodeKey,e,f);
+    if(appendObserve) {
+        int32_t countAfter=INT32_MIN;
+        if(!engine_velocity_emit::read(bucket+engine_velocity_emit::kOwnerCount,&countAfter,sizeof(countAfter)))countAfter=INT32_MIN;
+        engine_velocity_emit::AppendIdentity identity;
+        identity.bucket=bucket;identity.modelKey=modelKey;identity.nodeKey=nodeKey;
+        identity.tid=GetCurrentThreadId();
+        identity.bucketIsRigid=producer_probe::bucketIsRigid(bucket);
+        emcpu::Scope engineMotion(emcpu::kRigid);   // EDVR's own work only; counted with the rigid emit (the producer is another primary-style emit)
+        appendObserve(identity,record,countBefore,countAfter);
+    }
     uint8_t local[producer_probe::kRecordBytes];
     producer_probe::RecordKind kind=producer_probe::kUnreadable;
     if(readProducerRecord(record,local)) {
@@ -1363,6 +1379,10 @@ void kinematicEvalSetPrimaryEmitObserver(EnginePrimaryEmitObserverFn fn) noexcep
 const char* kinematicEvalPrimaryEmitStatus() noexcept {
     return g_primaryStatus.load(std::memory_order_acquire);
 }
+void kinematicEvalSetAppendEmitObserver(EngineAppendEmitObserverFn fn) noexcept {
+    appendEmitObserver.store(fn,std::memory_order_release);
+}
+const char* kinematicEvalAppendEmitStatus() noexcept { return producer_probe::status(); }
 void kinematicEvalPrimaryEmitCounters(uint64_t& calls,uint64_t& unowned) noexcept {
     calls=g_primaryCalls.exchange(0,std::memory_order_relaxed);
     unowned=g_primaryUnowned.exchange(0,std::memory_order_relaxed);

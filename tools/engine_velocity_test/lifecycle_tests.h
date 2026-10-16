@@ -74,6 +74,7 @@ unsigned g_emitAttaches = 0, g_emitDetaches = 0;
 // The pool copier's observer as configure registers it (copier_tests.h calls it
 // the way the game's job threads do).
 edvr::EnginePoolCopyObserverFn g_poolCopyObserver = nullptr;
+edvr::EngineAppendEmitObserverFn g_appendObserver = nullptr;   // the append feed's observer, set by engineVelocityConfigure
 std::vector<std::string> g_log;
 uint64_t g_clock = 1000;
 uint64_t fakeClock() { return g_clock; }
@@ -119,6 +120,8 @@ bool depthProbeCurrentSceneEyeOf(ID3D11DepthStencilView* dsv, int* outEye, int* 
 }
 void kinematicEvalSetEmitObserver(EngineEmitObserverFn) noexcept {}
 void kinematicEvalSetPrimaryEmitObserver(EnginePrimaryEmitObserverFn) noexcept {}
+void kinematicEvalSetAppendEmitObserver(EngineAppendEmitObserverFn fn) noexcept { lifecycle_fake::g_appendObserver = fn; }
+const char* kinematicEvalAppendEmitStatus() noexcept { return "hooked"; }
 const char* kinematicEvalPrimaryEmitStatus() noexcept { return "rig: hooked"; }
 void kinematicEvalPrimaryEmitCounters(uint64_t& calls,uint64_t& unowned) noexcept { calls=unowned=0; }
 void kinematicEvalSetPoolCopyObserver(EnginePoolCopyObserverFn fn) noexcept { lifecycle_fake::g_poolCopyObserver = fn; }

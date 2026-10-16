@@ -432,6 +432,12 @@ std::unique_ptr<emit::Census> g_census;
 emit::Stats g_emit;
 emit::Stats g_primaryEmit;
 std::atomic<uint64_t> g_primaryAttempts{0};
+// FUN_14434D120's append feed (the shield strike's records; engine_velocity_emit.h "THE APPEND PRODUCER"). Its Stats are the shared
+// counters' shape; AppendStats holds what is its own (the unit-scale filter, the single-writer guards). One bucket in practice.
+emit::Stats g_appendEmit;
+emit::AppendStats g_appendStats;
+emit::AppendBuckets g_appendBuckets;
+std::atomic<uint32_t> g_appendGuardNoted{0};   // bit 0: a shared bucket was logged, bit 1: a second thread was logged
 std::atomic<emit::LookupFn> g_lookup{nullptr};
 std::atomic<uint64_t> g_emitSampled{0}, g_emitSampledTicks{0};
 const char* g_verifyWhy = nullptr;            // the build check's refusal, null = passed
@@ -651,6 +657,29 @@ void observePrimaryEmit(const emit::PrimaryIdentity& identity, uintptr_t owner, 
     } else primaryCopy::invalidateEmission(0); // ownership/fault: no stale CPU claim may survive
     emit::observePrimary(identity,owner,key,position,quaternion,before,after,frameNow(),
                          g_lookup.load(std::memory_order_acquire),*g_table,g_primaryEmit,sink);
+}
+
+// FUN_14434D120's append, after its forward (the render thread). The same sink and the same claim discipline as the primary path; the
+// identity is the append's own (bucket, model key, node key, LOD), never a pose. See emit::observeAppend for the filter and the guards.
+void observeAppendEmit(const emit::AppendIdentity& identity, uintptr_t record, int32_t before, int32_t after) noexcept {
+    if (!live.load(std::memory_order_acquire) || !g_table) return;
+    const auto sink=+[](uintptr_t item,const emit::Pose&,const emit::Pose& previous,uint32_t marker,uint32_t frame) noexcept {
+        uint32_t native[84]{};
+        return emit::read(item,native,sizeof(native)) && primaryCopy::recordEmission(item,native,previous,marker,frame);
+    };
+    const auto invalidate=+[](uintptr_t item) noexcept {primaryCopy::invalidateEmission(item);};   // 0 = no claim may survive
+    bool conflict=false;
+    emit::observeAppend(identity,record,before,after,frameNow(),g_lookup.load(std::memory_order_acquire),*g_table,g_appendEmit,
+                        g_appendStats,g_appendBuckets,sink,invalidate,&conflict);
+    // A guard that fired is said once, immediately: a window line a half minute later is the wrong moment to learn the premise broke.
+    if (identity.bucketIsRigid && !(g_appendGuardNoted.fetch_or(1u,std::memory_order_relaxed)&1u))
+        Log::get().note("engine motion: ship-effect append (FUN_14434D120) wrote to bucket %llX, which the rigid producers also write: the "
+                        "single-writer premise is broken, so its records are DECLINED (no history, no join) for as long as that holds.",
+                        static_cast<unsigned long long>(identity.bucket));
+    if (conflict && !(g_appendGuardNoted.fetch_or(2u,std::memory_order_relaxed)&2u))
+        Log::get().note("engine motion: ship-effect append (FUN_14434D120) wrote to bucket %llX from a second thread (%u): the "
+                        "single-writer premise is broken, so that bucket's records are DECLINED until the engine state is cleared.",
+                        static_cast<unsigned long long>(identity.bucket),static_cast<unsigned>(identity.tid));
 }
 
 // The engine's pool copier (game job threads, once per copy-list entry). No
@@ -2228,6 +2257,13 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
                     r(g_primaryEmit.itemsJoined),r(g_primaryEmit.itemsMoving),r(g_primaryEmit.itemsMasked),
                     u(attempts>=written?attempts-written:0),r(g_primaryEmit.disagreements),r(g_primaryEmit.locateFailures),
                     r(g_primaryEmit.readFaults),r(g_primaryEmit.writeFaults));
+    {   // The append emission on FUN_14434D120 (the shield strike's records): one line a window, in every state (not running, never fired, all
+        // filtered, exercised). The window counters reset below with the other emit windows.
+        char appendLine[900];
+        emit::formatAppendLine(g_appendStats, kinematicEvalAppendEmitStatus(), seconds, frames, g_appendBuckets.buckets(), appendLine, sizeof(appendLine));
+        appendLine[sizeof(appendLine) - 1] = 0;
+        Log::get().note("%s", appendLine);
+    }
     {   // The producer probe on FUN_14434D120 (temporary, producer_probe.h): one line a window, in every state (counts, never fired, stood down).
         char producerLine[1100];   // producer_probe::kLineBytes
         static_assert(sizeof(producerLine) == producer_probe::kLineBytes, "the producer line buffer is the formatter's");
@@ -2520,6 +2556,7 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
     skinSummaryLocked(ctx);
     g_emit.clear();
     g_primaryEmit.clear(); g_primaryAttempts.store(0,std::memory_order_relaxed);
+    g_appendEmit.clear(); g_appendStats.clear();   // the window; g_appendBuckets is the guard's memory and stays
     g_lastGaps = 0;
     g_draw.clear();
     g_stateCallsAtWindow = g_stateCalls;
@@ -2570,6 +2607,7 @@ void clearLocked() {
     if (g_census) g_census->clear();
     g_emit.clear();
     g_primaryEmit.clear(); g_primaryAttempts.store(0,std::memory_order_relaxed);
+    g_appendEmit.clear(); g_appendStats.clear(); g_appendBuckets.clear(); g_appendGuardNoted.store(0,std::memory_order_relaxed);
     g_lastGaps = 0;
     g_lastSubstitution = ~0u;
     g_draw.clear();
@@ -2633,6 +2671,7 @@ void engineVelocityConfigure(bool on) {
         g_lookup.store(nullptr, std::memory_order_release);
         kinematicEvalSetEmitObserver(nullptr);
         kinematicEvalSetPrimaryEmitObserver(nullptr);
+        kinematicEvalSetAppendEmitObserver(nullptr);
         kinematicEvalSetPoolCopyObserver(nullptr);
         kinematicEvalSetMergeObserver(nullptr,nullptr);
         kinematicEvalSetClearObserver(nullptr);
@@ -2640,6 +2679,7 @@ void engineVelocityConfigure(bool on) {
         g_lookup.store(reinterpret_cast<emit::LookupFn>(base + kLookupRva), std::memory_order_release);
         kinematicEvalSetEmitObserver(&observeEmit);
         kinematicEvalSetPrimaryEmitObserver(&observePrimaryEmit);
+        kinematicEvalSetAppendEmitObserver(&observeAppendEmit);
         kinematicEvalSetPoolCopyObserver(&observePoolCopy);
         kinematicEvalSetMergeObserver(&observeMergeBegin,&observeMergeEnd);
         kinematicEvalSetClearObserver(&observeDictionaryClear);
@@ -2666,6 +2706,7 @@ void engineVelocityShutdown() {
     guardForget();
     kinematicEvalSetEmitObserver(nullptr);
     kinematicEvalSetPrimaryEmitObserver(nullptr);
+    kinematicEvalSetAppendEmitObserver(nullptr);
     kinematicEvalSetPoolCopyObserver(nullptr);
     kinematicEvalSetMergeObserver(nullptr,nullptr);
     kinematicEvalSetClearObserver(nullptr);

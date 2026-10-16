@@ -45,6 +45,15 @@ namespace engine_velocity_emit { struct PrimaryIdentity; }
 using EnginePrimaryEmitObserverFn = void (*)(const engine_velocity_emit::PrimaryIdentity&, uintptr_t owner,
     uintptr_t key, uintptr_t position, uintptr_t quaternion, int32_t before, int32_t after) noexcept;
 void kinematicEvalSetPrimaryEmitObserver(EnginePrimaryEmitObserverFn fn) noexcept;
+// FUN_14434D120's append feed (the shield strike's producer; engine_velocity_emit.h "THE APPEND PRODUCER"): called AFTER the forward on the
+// calling thread (the render thread, in practice) with the append's own identity, the caller's stack record (r8, still live) and bucket+0x2A4
+// before and after. Rides the producer probe's relay and gate (engine motion wanted and the hook verified ours); null = off.
+namespace engine_velocity_emit { struct AppendIdentity; }
+using EngineAppendEmitObserverFn = void (*)(const engine_velocity_emit::AppendIdentity&, uintptr_t record,
+                                            int32_t before, int32_t after) noexcept;
+void kinematicEvalSetAppendEmitObserver(EngineAppendEmitObserverFn fn) noexcept;
+// The relay's own state, for the log: whether the hook is installed (producer_probe's status text) and the calls it forwarded.
+const char* kinematicEvalAppendEmitStatus() noexcept;
 const char* kinematicEvalPrimaryEmitStatus() noexcept;
 void kinematicEvalPrimaryEmitCounters(uint64_t& calls, uint64_t& unowned) noexcept;
 using EnginePoolCopyObserverFn = void (*)(uintptr_t mappedBase, uint32_t stride, uintptr_t source,

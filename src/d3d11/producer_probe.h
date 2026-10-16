@@ -176,6 +176,14 @@ inline void noteRigid(RigidSource source, uint32_t tid, uint64_t bucket) noexcep
     if (!w.rigidThreads.contains(tid)) w.rigidThreads.insert(tid);
 }
 
+// Whether a rigid producer appended to `bucket` in the current or the previous window (up to 60 s back): the append emission's guard that
+// the bucket it writes history for is never one the rigid producers also write (engine_velocity_emit.h, "SINGLE WRITER"). Lock-free.
+inline bool bucketIsRigid(uint64_t bucket) noexcept {
+    if (!enabled()) return false;
+    const uint32_t cur = g_active.load(std::memory_order_relaxed) & 1;
+    return g_window[cur].rigidBuckets.contains(bucket) || g_window[cur ^ 1].rigidBuckets.contains(bucket);
+}
+
 // --- The 30 s line -----------------------------------------------------------------------------------------------------------
 constexpr unsigned kListedThreads = 6;
 constexpr unsigned kListedCallers = 4;

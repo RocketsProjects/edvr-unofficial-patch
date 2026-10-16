@@ -57,6 +57,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -531,6 +532,169 @@ inline void observePrimary(const PrimaryIdentity& identity, uintptr_t owner, uin
     // share its table and all continuity/ambiguity rules, but use the actual
     // primary model key rather than the secondary record+0x250 key.
     observe(identity.record, owner, before, after, frame, lookup, table, s, nullptr, key, true, sink);
+}
+
+// ---- THE APPEND PRODUCER: FUN_14434D120 (docs/dlss-blur-elements-2026-10-14.md, "Producer hunt" and "Producer probe") --------------
+// FUN_14434D470 (matrix to packed-quaternion record) builds a 0x150-byte record on its own stack and appends it through
+// FUN_14434D120(bucket = rcx, modelKey = rdx = matrixOwner+0x180, &record = r8, nodeKey = r9). The shield strike (5C1D, 820E) and the
+// cockpit and HUD (2CEC, 1989, E508, 5DAD) records come from it, on the RENDER thread, into a bucket the rigid producers never use.
+// What FUN_14434D120 does is the rigid append (decomp_434D120.txt): FUN_143696FA0(bucket+0x260, modelKey) -> the entry, a verbatim
+// 0x150-byte copy into the tail node, the node's key word at +0xAA0+count*8, node count + 1, bucket+0x2A4 + 1. So the record the engine
+// built is also the item at the tail (count - 1) afterwards, and the same collectItems / sink machinery applies.
+//
+// IDENTITY. There is no rig record to key a history on. The identity is the append's own arguments: bucket + model key + node key + the
+// LOD bits the record carries (flags word +0x1C, bits 18..23). A pose match is never an identity. The table key is a hash of that tuple;
+// the discriminator it resets on is the record's flags word (a model key reused for another effect changes it).
+//
+// The initializer (FUN_14434D470) writes the record's second block itself: previous position = position and previous quaternion =
+// quaternion, scale words (+0x04, +0x134) = the source's scale (matrixOwner+0x50). The record is therefore "current-only" exactly as
+// primaryCopy::recordEmission requires, and a unit scale is the guard (the same domain the rigid producers certify).
+//
+// FILTER. About 60 to 80 of these calls a frame are cockpit and HUD records nobody consumes, almost all at a non-unit scale (measured in
+// the five probe captures of 2026-10-16: 4 to 12 unit-scale records of 58 to 80). A call is dropped after one 336-byte read, before any
+// lock or lookup, when its record is not unit scale: the unit-scale guard IS the filter.
+//
+// SINGLE WRITER. observe()'s premise is that nothing else appends to the bucket's entry between the forward and the tail read. The probe
+// found one bucket, one thread (the render thread), never a rigid bucket. Two guards keep it true if that ever changes: a bucket the
+// rigid producers also appended to (producer_probe's overlap set) is declined, and so is a bucket appended by a second thread. Both are
+// counted and logged once. Behind them, the tail item must equal the caller's stack record word for word, or it is declined as a
+// disagreement (a racing append makes them differ).
+struct AppendIdentity {
+    uintptr_t bucket = 0, modelKey = 0, nodeKey = 0;
+    uint32_t tid = 0;            // the calling thread
+    bool bucketIsRigid = false;  // the rigid producers appended to this bucket (producer_probe's overlap set)
+};
+constexpr uintptr_t kItemFlags = 0x1C;
+constexpr uintptr_t kItemScale = 0x04, kItemScaleCopy = 0x134;
+constexpr uint32_t kItemWords = 84;
+inline uint32_t appendLod(uint32_t flags) { return (flags >> 18) & 0x3Fu; }
+inline uint64_t appendKey(const AppendIdentity& id, uint32_t flags) {
+    uint64_t h = mixBits(static_cast<uint64_t>(id.bucket) + 0x9E3779B97F4A7C15ull);
+    h = mixBits(h ^ static_cast<uint64_t>(id.modelKey));
+    h = mixBits(h ^ static_cast<uint64_t>(id.nodeKey));
+    h = mixBits(h ^ (static_cast<uint64_t>(appendLod(flags)) + 1));
+    return h ? h : 1ull;
+}
+struct AppendStats {
+    std::atomic<uint64_t> calls{0}, readFaults{0}, filteredScale{0}, unproven{0}, sharedBucket{0}, threadConflict{0},
+        locateFailures{0}, disagreements{0}, joined{0}, masked{0}, writeFaults{0}, itemFaults{0};
+    // Records admitted this frame and the busiest frame so far (a window figure for the log).
+    std::atomic<uint32_t> frame{~0u}, frameCount{0}, maxPerFrame{0};
+    void clear() {
+        for (auto* c : {&calls, &readFaults, &filteredScale, &unproven, &sharedBucket, &threadConflict, &locateFailures,
+                        &disagreements, &joined, &masked, &writeFaults, &itemFaults}) c->store(0, std::memory_order_relaxed);
+        frame.store(~0u, std::memory_order_relaxed);
+        frameCount.store(0, std::memory_order_relaxed);
+        maxPerFrame.store(0, std::memory_order_relaxed);
+    }
+};
+// The thread each appended bucket was first written from. Not lock-free: it is reached only by unit-scale records (a handful a frame).
+class AppendBuckets {
+public:
+    static constexpr unsigned kCap = 16;
+    enum class Verdict { Ours, OtherThread, Full };
+    Verdict admit(uintptr_t bucket, uint32_t tid, bool* firstConflict) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (unsigned i = 0; i < used_; ++i) {
+            if (e_[i].bucket != bucket) continue;
+            if (e_[i].tid == tid && !e_[i].poisoned) return Verdict::Ours;
+            if (!e_[i].poisoned) { e_[i].poisoned = true; if (firstConflict) *firstConflict = true; }
+            return Verdict::OtherThread;   // once a second thread has appended, the bucket stays declined until clear()
+        }
+        if (used_ == kCap) return Verdict::Full;
+        e_[used_++] = Entry{bucket, tid, false};
+        return Verdict::Ours;
+    }
+    unsigned buckets() { std::lock_guard<std::mutex> lock(mutex_); return used_; }
+    void clear() { std::lock_guard<std::mutex> lock(mutex_); used_ = 0; }
+private:
+    struct Entry { uintptr_t bucket = 0; uint32_t tid = 0; bool poisoned = false; };
+    std::mutex mutex_;
+    Entry e_[kCap];
+    unsigned used_ = 0;
+};
+// Called with the item located at the tail (0 when it could not be), before any validation: the caller drops an older claim on that exact
+// address (a freed and reused node must not inherit an emission), as the primary path does.
+using InvalidateFn = void (*)(uintptr_t item) noexcept;
+
+// The whole bracket, after the forward. `record` is the stack record the caller passed (r8), still live. before/after are bucket+0x2A4
+// around the call.
+inline void observeAppend(const AppendIdentity& id, uintptr_t record, int32_t before, int32_t after, uint32_t frame, LookupFn lookup,
+                          Table& table, Stats& s, AppendStats& as, AppendBuckets& buckets, EmissionSink sink,
+                          InvalidateFn invalidate = nullptr, bool* conflictFirst = nullptr) noexcept {
+    bump(as.calls);
+    uint32_t rec[kItemWords];
+    if (!read(record, rec, sizeof(rec))) { bump(as.readFaults); return; }
+    // The filter and the scale guard in one: only a unit-scale, base-0 record is ever looked at again.
+    if (rec[0] != 0 || rec[1] != 0x3F800000u || rec[77] != 0x3F800000u) { bump(as.filteredScale); return; }
+    if (as.frame.load(std::memory_order_relaxed) != frame) {
+        as.frame.store(frame, std::memory_order_relaxed);
+        as.frameCount.store(0, std::memory_order_relaxed);
+    }
+    const uint32_t perFrame = as.frameCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    uint32_t seen = as.maxPerFrame.load(std::memory_order_relaxed);
+    while (seen < perFrame && !as.maxPerFrame.compare_exchange_weak(seen, perFrame, std::memory_order_relaxed)) {}
+    const uint64_t key = appendKey(id, rec[7]);
+    const uint64_t node = (uint64_t(1) << 32) | rec[7];
+    if (id.bucketIsRigid) { bump(as.sharedBucket); table.taint(key, frame, s); return; }
+    if (buckets.admit(id.bucket, id.tid, conflictFirst) != AppendBuckets::Verdict::Ours) {
+        bump(as.threadConflict); table.taint(key, frame, s); return;
+    }
+    if (int64_t(after) - int64_t(before) != 1) { bump(as.unproven); bump(s.callsUnproven); table.taint(key, frame, s); return; }
+    bump(s.callsWithItems);
+    bump(s.itemsAppended);
+    const uintptr_t entry = lookup ? guardedLookup(lookup, id.bucket + kOwnerDictionary, id.modelKey) : 0;
+    uintptr_t item = 0;
+    const bool located = entry && collectItems(entry, 1, &item);
+    if (invalidate) invalidate(located ? item : 0);
+    if (!located) { bump(as.locateFailures); bump(s.locateFailures); table.taint(key, frame, s); return; }
+    uint32_t got[kItemWords];
+    if (!read(item, got, sizeof(got))) { bump(as.itemFaults); bump(s.readFaults); table.taint(key, frame, s); return; }
+    if (std::memcmp(got, rec, sizeof(rec)) != 0) { bump(as.disagreements); bump(s.disagreements); table.taint(key, frame, s); return; }
+    Pose pose;
+    std::memcpy(&pose.w[0], &got[kItemPos / 4], 12);
+    std::memcpy(&pose.w[3], &got[kItemQuat / 4], 8);
+    Pose prev;
+    const Table::Result result = table.resolve(key, node, frame, pose, true, prev, s);
+    const bool joined = result == Table::Result::Joined;
+    const Pose& written = joined ? prev : pose;
+    const uint32_t marker = (joined ? kJoined : kMasked) ^ markerHash(pose, written, frame);
+    if (!sink || !sink(item, pose, written, marker, frame)) { bump(as.writeFaults); bump(s.writeFaults); return; }
+    if (joined) { bump(as.joined); bump(s.itemsJoined); if (written != pose) bump(s.itemsMoving); }
+    else { bump(as.masked); bump(s.itemsMasked); }
+}
+
+// The 30 s line of the append emission, built here so the rig prints exactly what the DLL writes. Every state has a form: not running (the
+// hook's status is not "hooked"), never fired, fired but every record filtered (no unit-scale record: the shield strike is not on screen),
+// and exercised. `seconds`/`frames` are the window; `buckets` is AppendBuckets::buckets().
+inline int formatAppendLine(const AppendStats& as, const char* status, double seconds, double frames, unsigned buckets,
+                            char* out, size_t size) noexcept {
+    const auto r = [](const std::atomic<uint64_t>& c) { return static_cast<unsigned long long>(c.load(std::memory_order_relaxed)); };
+    const bool hooked = status && std::strcmp(status, "hooked") == 0;
+    if (!hooked)
+        return std::snprintf(out, size,
+            "engine motion: ship-effect append emit (FUN_14434D120, %s): NOT RUNNING, so no shield-strike record can be joined. \"not "
+            "requested\" means engine motion never attached the hook; any other text is why it stood down.",
+            status ? status : "no status");
+    const unsigned long long calls = r(as.calls), filtered = r(as.filteredScale);
+    const double perFrame = frames > 0 ? double(calls) / frames : 0.0;
+    if (calls == 0)
+        return std::snprintf(out, size,
+            "engine motion: ship-effect append emit (FUN_14434D120, hooked, %.0f s): NOT EXERCISED: the producer made no call this window, so "
+            "no record was observed (the hook is up; the producer did not run or engine motion was off).", seconds);
+    if (calls == filtered + r(as.readFaults))
+        return std::snprintf(out, size,
+            "engine motion: ship-effect append emit (FUN_14434D120, hooked, %.0f s): NOT EXERCISED: %llu calls (%.1f a frame), all dropped "
+            "before the join (%llu not unit scale, %llu unreadable): no unit-scale ship-effect record was built, so no shield strike "
+            "was on screen.", seconds, calls, perFrame, filtered, r(as.readFaults));
+    return std::snprintf(out, size,
+        "engine motion: ship-effect append emit (FUN_14434D120, hooked, %.0f s): calls %llu (%.1f a frame), %llu dropped as not unit scale; "
+        "%llu unit-scale records observed (at most %u in a frame, %u bucket%s): joined %llu, masked %llu; declined: unproven count %llu, "
+        "locate failures %llu, disagreements %llu, read faults %llu, write faults %llu, bucket shared with the rigid producers %llu, "
+        "bucket from a second thread %llu. Identity is bucket + model key + node key + LOD, never a pose.",
+        seconds, calls, perFrame, filtered, calls - filtered - r(as.readFaults), as.maxPerFrame.load(std::memory_order_relaxed), buckets,
+        buckets == 1 ? "" : "s", r(as.joined), r(as.masked), r(as.unproven), r(as.locateFailures), r(as.disagreements), r(as.readFaults) + r(as.itemFaults),
+        r(as.writeFaults), r(as.sharedBucket), r(as.threadConflict));
 }
 
 } // namespace engine_velocity_emit

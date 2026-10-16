@@ -8,6 +8,11 @@
   with one amendment, the shield records must also be joined (they share the hull's pose but carry no previous pose). H-clobber RULED
   OUT; the hull's 13% stale_slot is open hypothesis H-bias (a depth bias missing from the exported z). E2 (do puffs ride the ship) inconclusive.
   Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"); count-and-tag hook next.
+- **Shield-strike join (2026-10-16): PARKED, WRITTEN BUT UNBUILT AND NOT COMPILED, NO CONSUMER** (`claude/shield-strike-motion`). FUN_14434D120 now feeds the pool-clone emission
+  sink (identity = bucket + model key + node key + LOD, unit-scale only, single-writer guards), so the shield records carry real previous poses.
+  The coverage REPLAY for 5C1D is NOT built: with `fix.sharp_weapons` live 5C1D is drawn into the HDR layer and DLSS never sees it, so there
+  is nothing in the scene to give motion to (820E stays on the camera path by decision). Nothing reads the joined records today. See "Built,
+  2026-10-16: the shield-strike join". Next flight: the `ship-effect append emit` line (joined > 0 in a hit), `sharp weapons` (0 left in the scene).
 - **Producer probe (2026-10-16): BUILT, NOT FLOWN** (`claude/producer-434d120-probe`). A count-and-tag hook on FUN_14434D120, no emission, no key.
   TEMPORARY, to remove when this arc closes: `src\d3d11\producer_probe.h`, the `engine-producer-434d120-probe` entry and `producerObserved` in
   `kinematic_eval_hook.cpp`, the three rigid `noteRigid` calls, the 30 s line in `engine_velocity.cpp`, the eye-run capture in `object_probe.cpp`,
@@ -428,3 +433,70 @@ model key 2317A8D34F0, stable for 19 frames, render thread); FUN_14434D470 makes
 billboard draw went through a facing transcription (100% swapped); no untranscribed billboard and no B477/E812 drew; 6A19 is a pool mesh,
 not a billboard. Sharp weapons: 1.4-4.7% of weapon eye-frames' layers never reach a tonemap (the HUD layer lost none); the flown build
 cannot locate it. Sean A/B'd plain against matched at 09:54-09:57 and saw no difference; the key stays for long-session A/B.
+
+## Parked, 2026-10-16: the shield-strike join (`claude/shield-strike-motion`, WRITTEN, UNBUILT, NOT COMPILED, no consumer)
+
+PARKED by the coordinator: no build.bat or compiler has run on this code, the rig has never run, and nothing reads the joined records while
+`fix.sharp_weapons` moves 5C1D after DLSS. Everything below describes what the code is meant to do; none of it is verified. To resume: merge main,
+run the full build, fix whatever the first compile finds, then fly. The replay design stays as written.
+
+Base: `claude/combat-flight-1` (fdb42b63) plus main (eba550ad). No key. Rig: `tools\engine_velocity_test\append_tests.h`, cases A1-A7.
+
+**What it does.** The producer probe's relay on FUN_14434D120 (bucket rcx, model key rdx, &record r8, node key r9) now reads `bucket+0x2A4` either side
+of the forward and hands the append to `engine_velocity_emit::observeAppend`. The record the engine built on its stack is also the item at the tail
+node (count-1), found with `collectItems(entry, 1)` through the same `FUN_143696FA0(bucket+0x260, modelKey)` lookup. The previous pose goes through
+`Table::resolve` and the production sink (`primaryCopy::recordEmission`, then the copier and the scatter), exactly as a 42B4130 emission does.
+
+- **Identity:** bucket + model key + node key + the LOD bits of the record's flags word (+0x1C, bits 18..23), hashed to the table key; the flags word is
+  the reuse discriminator. Never a pose. The four shield records (one model key, four node keys 0xC05E, 0x60BC<<32, 0x80000000, 0x1<<32; four identical
+  poses a frame) are four identities, measured in eye run 100257: 0 duplicates of (model, node, LOD) in 78 calls.
+- **Initializer facts (decomp_434D470):** the record's second block is written by the initializer itself (previous position = position, previous
+  quaternion = quaternion, scale words +0x04 and +0x134 = matrixOwner+0x50), so the record is "current-only" as `recordEmission` requires. Unit scale
+  and base 0 are the guard.
+- **Filter:** the unit-scale test is also the filter. The five probe captures hold 58 to 80 calls a frame and only 4 to 12 are unit scale (the rest are
+  cockpit and HUD records at 0.65, 0.7 and so on). A dropped call costs one 336-byte read and touches no table, no lock and no claim. There is one
+  bucket, so a bucket filter would filter nothing. CPU is clocked under the rigid emit part of `engine motion CPU`.
+- **Threading verdict:** the probe measured one bucket, one thread (the render thread, 51656 in every capture), never a rigid bucket. The table and
+  the claim store are internally locked (16 shard mutexes; `primaryCopy::g_mutex`), so render-thread and job-thread emitters can coexist. What is not
+  protected is `observe`'s read of the tail node, which assumes no other thread appends to that entry. Three guards keep it true: a bucket the
+  rigid producers also appended to (`producer_probe::bucketIsRigid`, current and previous window) is declined; a bucket appended by a second thread
+  is declined from then on (`AppendBuckets`); and the tail item must equal the caller's stack record word for word or the call is a disagreement.
+  Each guard is counted and the first firing of the first two logs a line at once. One more premise to flight: the emission and the copier run in
+  the same present frame (`recordEmission` clears all claims when the frame number changes), which holds for job-thread emissions and should for
+  the render thread, since it also runs the copier; the 30 s line's `masked` against `joined` and the `primary copy certificates` line's declined
+  count show it.
+
+**The replay decision: NOT built, because with sharp weapons live there is nothing in the scene to replay.**
+- `fix.sharp_weapons` (default on, VR, temporal AA on) sends 5C1D/C49F into the weapons HDR layer; the flight of fdb42b63 logged "no draws left in the
+  scene, no fallbacks" and Sean found the shields "much better". DLSS never sees the 5C1D colour, so its pixels cannot smear. The pixels UNDER it are
+  the hull (a joined keyed record, correct motion) or the sky (camera term, correct).
+- The uiDepth coverage pass sees only the in-scene draw, so a replay would fire only when 5C1D is NOT redirected: `fix.sharp_weapons = off`, a
+  stood-down weapons layer, or a `family-off` decision. That is an opt-out path, not the default.
+- 820E/6EAA stays on the camera path (it is a refraction pass with constant alpha 1.0; see "Build attempt stopped"), so it needs no replay either.
+- A replay for the opt-out path remains designed (option (b) above, coverage = alpha x colour x cb1[90].y from C49F's bytecode). Build it only if a
+  flight with sharp weapons off still shows the smear and Sean wants that path fixed.
+
+**What the join is worth now.** Nothing visible: no shader reads the shield records' previous poses. It is the prerequisite for any replay and
+it measures, in the next flight, that a render-thread producer can be joined at all (joined > 0 during a hit). Cost: about 4 to 12 emissions a
+frame on the render thread, plus one 336-byte read for every other call. If the first flight shows no use and a cost, remove it.
+
+**Log (30 s, in the engine-motion summary, next to the primary line):** `engine motion: ship-effect append emit (FUN_14434D120, hooked, 30 s): calls N
+(x a frame), N dropped as not unit scale; N unit-scale records observed (at most K in a frame, B buckets): joined J, masked M; declined: unproven
+count, locate failures, disagreements, read faults, write faults, bucket shared with the rigid producers, bucket from a second thread.` Forms: `NOT
+RUNNING` (hook stood down, with the reason), `NOT EXERCISED: ... made no call`, `NOT EXERCISED: ... all dropped before the join ... no shield strike was
+on screen`. Trace if it never runs: the hook is the probe's relay (`engine-producer-434d120-probe`, gate = engine motion wanted and the patch
+verified ours), so a stood-down probe shows `NOT RUNNING` with its reason; a quiet window shows the all-filtered form, which is distinguishable from
+success by `joined 0`.
+
+**Rig (WARP, A1-A7).** A1 first sight masked, next frame joined with exactly the previous pose through the real claim, copier and patch route, the
+native record unchanged, a gap masks; the joined record then goes through the production `mv` consumer (kind 1). A2 the same pose under another
+node key, model key or LOD is masked (a pose match never joins); the same identity at a very different pose joins. A3 non-unit scale and a nonzero
+base are dropped with no table entry or claim and the pool record is untouched. A4 a rigid-shared bucket and a second thread are declined (and stay
+declined), an unproven count taints. A5 a tail item that is not the caller's record is a disagreement. A6 FAIL-BEFORE: without the observer the
+record keeps previous == current and a marker that is neither tag (kind 3). A7 every log form. Not shown by the rig: that CodeHook's relay and the
+render thread's frame clock behave as assumed; that is the flight.
+
+**Flight.** Frontier VR, DLSS K. Read with `python tools\edvr_log.py --target frontier --expect-build HEAD`, grep `ship-effect append emit` and
+`sharp weapons`. In a combat window with a shield hit: `joined` above 0 and rising, `declined` zero, `bucket shared` and `second thread` zero,
+`sharp weapons` 5C1D left in the scene 0. The CPU line's rigid emit time must not move by more than 0.02 ms a frame.
+- ruled out: a 5C1D coverage replay as a default-path change, because `fix.sharp_weapons` already takes the colour out of the scene (fdb42b63 flight).
