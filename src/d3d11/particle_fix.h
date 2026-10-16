@@ -18,6 +18,7 @@
 // costs a field session.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 struct ID3D11DeviceContext;
@@ -108,7 +109,16 @@ void particleEnd(ID3D11DeviceContext* ctx);
 
 // The Map/Unmap tee: the buffer whose writes to shadow, and the write.
 void* particleTarget();
-void particleCapture(const void* data, uint32_t bytes);
+// Copies the rows the fix reads (270..279, 160 bytes) of the written block, not all of it; returns the bytes
+// copied (particle_capture_core.h).
+uint32_t particleCapture(const void* data, uint32_t bytes);
+
+// Once a frame on the owner thread: lets go of a target no plume or flare has matched for a while, so a
+// session without smoke pays nothing for the Map/Unmap tee. The next matched draw learns it again.
+void particleFrameBoundary();
+
+// "particle target armed, retired N, re-armed M" for the unmap readers line.
+void particleDescribeTarget(char* out, size_t cap);
 
 // Whether anything here wants to see draws at all -- false is free.
 bool particleWantsDraws();

@@ -18,6 +18,7 @@
 #include "../common/timing.h"
 #include "binding_shadow.h"   // bindingShaderHash: the bound vertex shader's hash, set with the shader
 #include "exposure_fix.h"   // lookupShaderHash
+#include "particle_capture_core.h"
 #include "supercruise_lines.h"   // kUiVsSpaceDust, kUiPsSpaceDust: the dust's shader pair
 // flare_vs.h is compiled by the build shader generator.
 // particle_vs.h is compiled by the build shader generator.
@@ -187,11 +188,13 @@ int billboardVariantFor(ID3D11DeviceContext* ctx) {
 // dynamic buffer the GPU owns is write-only from here -- so the only way
 // to substitute is to watch the game write it, which is the mechanism the
 // panel distance fix has used since 0.3.
-constexpr uint32_t kMaxShadow = 8192;
+//
+// The shadow keeps only rows 270..279 of the block (particle_capture_core.h says why and what reads
+// them), laid out at the block's own offsets; `size` is the mapped size the readers gate on.
 void*    g_target = nullptr;
-uint8_t  g_shadow[kMaxShadow];
-uint32_t g_shadowBytes = 0;
-bool     g_shadowValid = false;
+particlecap::Shadow  g_sh;
+particlecap::Tracker g_track;
+uint32_t g_retireNotes = 0;
 uint64_t g_applied = 0;
 uint64_t g_appliedAtNote = 0;
 uint64_t g_noteMs = 0;
@@ -258,8 +261,8 @@ bool  g_camOk = false;
 
 void solveCamera() {
     g_camOk = false;
-    if (!g_shadowValid || g_shadowBytes < 274 * 16) return;
-    const float* f = reinterpret_cast<const float*>(g_shadow);
+    if (!g_sh.valid || g_sh.size < 274 * 16) return;
+    const float* f = reinterpret_cast<const float*>(g_sh.bytes);
     const float* c0 = f + 270 * 4;   // the x contribution
     const float* c1 = f + 271 * 4;   // y
     const float* c2 = f + 272 * 4;   // z
@@ -387,14 +390,36 @@ void* particleTarget() {
     return detail::g_particleMode == Mode::kSteady ? g_target : nullptr;
 }
 
-void particleCapture(const void* data, uint32_t bytes) {
-    if (detail::g_particleMode != Mode::kSteady || !data || bytes < 64 || bytes > kMaxShadow) {
-        g_shadowValid = false;
-        return;
+uint32_t particleCapture(const void* data, uint32_t bytes) {
+    return particlecap::capture(g_sh, detail::g_particleMode == Mode::kSteady, data, bytes,
+                                [](void* dst, const void* src, size_t n) { memcpy(dst, src, n); });
+}
+
+// Once a frame, from vScreenFrameBoundary (the owner thread). A target that has seen no plume or flare draw
+// for kRetireFrames frames is let go: particleTarget() then answers null, the Map tee stops remembering the
+// buffer's pointer and the Unmap tee stops reading it. The next matched draw learns the buffer again
+// (particleOnDraw), and the first write after that is what the substitution is built from, exactly as at
+// the first learn of a session.
+void particleFrameBoundary() {
+    if (detail::g_particleMode != Mode::kSteady) return;
+    if (!g_track.frameBoundary(g_target != nullptr)) return;
+    g_target = nullptr;
+    g_sh.valid = false;
+    if (g_retireNotes < 4) {
+        ++g_retireNotes;
+        Log::get().note(
+            "particle billboard: no plume or flare drawn for %u frames; the constants at slot 1 are no longer "
+            "watched until one is drawn again (retired %llu time(s) this session).",
+            particlecap::kRetireFrames, static_cast<unsigned long long>(g_track.retired));
     }
-    memcpy(g_shadow, data, bytes);
-    g_shadowBytes = bytes;
-    g_shadowValid = true;
+}
+
+void particleDescribeTarget(char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    const char* state = detail::g_particleMode != Mode::kSteady ? "off (stock)"
+                        : g_target ? "armed" : (g_track.retired ? "retired" : "not learned");
+    std::snprintf(out, cap, "particle target %s, retired %llu, re-armed %llu", state,
+                  static_cast<unsigned long long>(g_track.retired), static_cast<unsigned long long>(g_track.rearmed));
 }
 
 bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
@@ -405,6 +430,7 @@ bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     const int variant = billboardVariantFor(ctx);
     if (variant < 0) return false;
     g_activeVariant = variant;
+    g_track.noteMatch();
 
     // Follow the buffer the game binds for these draws. Learning it here
     // rather than assuming means a build that moves the block simply never
@@ -414,7 +440,14 @@ bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     if (!cb) return false;
     if (cb != g_target) {
         g_target = cb;
-        g_shadowValid = false;
+        g_sh.valid = false;
+        if (g_track.noteLearned() && g_retireNotes < 4) {
+            ++g_retireNotes;
+            Log::get().note(
+                "particle billboard: a plume or flare is drawn again; watching the constants at slot 1 once "
+                "more (re-armed %llu time(s) after a retirement).",
+                static_cast<unsigned long long>(g_track.rearmed));
+        }
         if (!g_learnNoted) {
             g_learnNoted = true;
             Log::get().note(
@@ -428,13 +461,13 @@ bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     }
     cb->Release();
 
-    if (!g_shadowValid) return false;
-    return shapeOk(reinterpret_cast<const float*>(g_shadow), g_shadowBytes / 4);
+    if (!g_sh.valid) return false;
+    return shapeOk(reinterpret_cast<const float*>(g_sh.bytes), g_sh.size / 4);
 }
 
 void particleBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
-    if (!ctx || !g_shadowValid) return;
+    if (!ctx || !g_sh.valid) return;
     const int variant = g_activeVariant;
     if (variant < 0 || variant >= kVariantCount) return;
     guardedBudget(g_subBudget, [&] {
@@ -631,7 +664,7 @@ void particleConfigure(Config& cfg) {
                 "docs/particle-billboards.md.");
         } else {
             g_target = nullptr;
-            g_shadowValid = false;
+            g_sh.valid = false;
             Log::get().note("particle billboard: stock.");
         }
     }
@@ -665,7 +698,7 @@ void particleShutdown() {
     }
     g_engaged = false;
     g_target = nullptr;
-    g_shadowValid = false;
+    g_sh.valid = false;
 }
 
 }  // namespace edvr

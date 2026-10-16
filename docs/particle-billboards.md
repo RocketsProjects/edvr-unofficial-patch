@@ -1,5 +1,25 @@
 # Smoke, steam and solar flares swim with the camera in VR
 
+## Status
+
+*Updated 2026-10-16. Update this block whenever the doc changes.*
+
+- **State:** the steady fix is shipped and flown (the sections below). The CPU cost of its constants
+  shadow is the open arc (entry "2026-10-16" at the end): fix and instrument BUILT on branch
+  `claude/particle-cb-copy`, NOT merged, NOT FLOWN.
+- **Open hypothesis:** with `fix.particle_billboard = steady` the Unmap tee reads the whole 5376-byte scene
+  block from the game's mapped pointer on every write (60+ a frame). If native AMD hands out write-combined
+  mapped memory, those reads cost 1-3 ms a frame. Confirmed on DXVK (issue 65), unmeasured on native AMD.
+- **Confirms it:** the `unmap readers` line shows `particle` at 5376 B/call before the fix and tens of
+  microseconds a call, or the `mapped read probe` line shows a full read several times the ordinary copy
+  (and a flag of "write-combined"). **Refutes it:** the particle reader costs under ~50 us a frame on the AMD
+  rig, or A/B `steady` vs `stock` shows no fps difference with the fix in.
+- **Also riding the flight:** the `cb1 rows burst:` lines (section "The cb1 rows burst"): per-write rows 275..279 for 4 frames twice, to see whether 277..279 differ per eye on canted displays and how many 5376-byte writes a frame the game makes.
+- **Temporary keys:** none added. `fix.particle_billboard` is hot-reloadable (edvr.ini, polled once a second).
+- **Ruled out:** nothing yet.
+- **Next flight:** Frontier VR install of the branch, RX 9070 XT user's setup if possible; A/B
+  `fix.particle_billboard` steady/stock in one session, away from smoke and then at a geyser field.
+
 *Written to accompany a Frontier issue report; no tracker number yet.
 Companion write-ups in this folder cover the sun's glare (sun-glare.md),
 the RemLok overlay (remlok-lines.md), terrain culling (terrain-culling.md)
@@ -209,3 +229,126 @@ The replacement shader was written as a *mechanical transcription* of the
 original rather than a reimplementation, so that it could be checked rather
 than trusted: its input signature, output signature and instruction mix were
 compared against the game's own before it was ever run.
+
+---
+
+## 2026-10-16: the constants shadow read 5376 bytes of mapped memory on every write
+
+### The report
+
+A user on an AMD RX 9070 XT (native D3D11, Quest 3 through Virtual Desktop's OpenXR runtime, 80 Hz) lost more
+than 10 fps with `fix.particle_billboard = steady` (the default) against `stock`, with temporal AA off.
+
+### What the code does with `steady` on
+
+- The Map tee remembers the mapped pointer of the plume shader's slot-1 constant buffer once the fix has
+  learned it (vscreen.cpp hookedMap, `res == particleTarget()`).
+- The Unmap tee then calls `particleCapture`, which copied the whole scene block (5376 bytes) from that
+  pointer into a shadow. It did so on every write of the buffer: about 60 a frame
+  (`design-transition-flash-engine-fix-2026-09-23.md`, flight 195435).
+- The consumers read rows 270..273 (`solveCamera`) and 278, 279 (`shapeOk`): 160 bytes.
+- The target was learned at the first plume or flare draw and kept for the session, so the copy ran every
+  frame after the first smoke, whether or not any was on screen.
+
+### Hypothesis
+
+On AMD's native driver the mapped memory of a dynamic constant buffer is write-combined, which makes each CPU
+read slow. A 5376-byte read at 18-54 us (the issue 65 figures on DXVK) times 60 is 1-3 ms a frame. Same class
+as issue 65 (`issue-65-proton-cb-shadows-2026-10-02.md`, which left native AMD unchecked). Not yet measured on
+the user's rig.
+
+### The instrument (log only; `unmap_read_probe.h`)
+
+Every 30 s the owner thread logs one line, a reader that never read as "not exercised":
+
+    unmap readers (2400 frame(s), 1 call in 8 timed, clock pair 40 ns): panel 3.0/frame 208 B/call 0.15 us/call 0.4 us/frame; camera-glitch not exercised; camera-sunglare not exercised; camera-temporal 60.8/frame 56 B/call 2.40 us/call 146.0 us/frame; camera-rows-burst not exercised; scene-cb not exercised; particle 60.8/frame 160 B/call 3.10 us/call 188.6 us/frame; billboard not exercised; total 335.0 us/frame; particle block is the camera block on 146000 of 146000 capture(s); particle target armed, retired 0, re-armed 0
+
+(Rendered by the formatter from synthetic figures: the shape and field order are real, the numbers are not a measurement. In a window with no smoke and a retired target, `particle` reads `not exercised` and the tail reads `particle target retired, retired 1, re-armed 0`.)
+Calls a frame, bytes a call (summed over every call), microseconds a call (the mean of the timed one call in
+eight, the clock pair's own cost taken off) and a frame. A call is counted only when the reader will read
+mapped memory (its own early-outs asked first), so `camera-sunglare` and `scene-cb` read "not exercised" unless
+the sun-glare world shader is on, `camera-temporal` unless the temporal pass wants camera rows, and
+`camera-glitch` outside an engine-fix event window.
+
+The readers priced, and what each reads FROM THE MAPPED POINTER:
+
+| reader | reads | when |
+|---|---|---|
+| panel | the composite constants' whole block, at most 512 B | every composite-CB write |
+| camera-glitch | 3 floats (12 B) | an engine-fix event window is open |
+| camera-sunglare | 12 floats at float 932 (48 B) | fix.sunglare world shader on |
+| camera-temporal | 12 floats at 932 and 2 at 792 (56 B) | temporal pass wants the rows |
+| camera-rows-burst | rows 275..279 (80 B at byte 4400), see below | only inside a burst (4 frames, twice a session) |
+| scene-cb | 48 B at float 932 | world shader on, and a block of 3776 B or more (a 208 B block never qualifies) |
+| particle | rows 270..279 (160 B), was the whole block (5376 B) | steady, target armed |
+| billboard | at most 512 B | the sun glare train's block |
+
+Not priced, by design: the planet-patch segment copy (`celestial motion` logs its own tee ticks), the census CB
+watch (F10 only), the engine-record motion reader (96 B, rows 270..275, only while engine velocity is live and
+only the watched scene block) and the flat projection runtime (the flat profile; issue 65's counters).
+
+Two more lines, once each, at the first Map of up to three distinct buffers (scene camera block, plume block):
+
+    mapped read probe: <what>, N bytes mapped at <ptr>, VirtualQuery protect 0x.. (write-combined | no write-combine flag).
+    Reading all of it took A, B and C us (the first is cold); the same copy from ordinary memory took D us.
+
+`PAGE_WRITECOMBINE` in `VirtualQuery` is the cheap half and not reliable (a driver can map write-combined
+without saying so); the three timed reads against the ordinary copy are the evidence. They read a freshly
+mapped WRITE_DISCARD block whose contents are undefined and unused.
+
+### The fix
+
+1. `particleCapture` copies rows 270..279 (byte offsets 4320..4480, guarded by the mapped size), not the block.
+   The shadow keeps the block's own layout so `solveCamera` and `shapeOk` index it exactly as before, and its
+   `size` is still the mapped size, so their gates are unchanged. The rig holds this byte for byte against the
+   old whole-block copy, over mapped sizes from 0 to 65536.
+   (The brief named rows 270..273 and 278; `shapeOk` also reads 279, the forward vector, so the range is 10 rows,
+   160 bytes, not 144.)
+2. Not fed from the camera tee. The camera tee (`camResource`, a 5376-byte buffer) is the same resource, and the
+   `unmap readers` line reports how often (`particle block is the camera block on K of M`), but its readers copy
+   no block: they read 48-56 bytes at float 932 and 792, nowhere near rows 270..279. Feeding the shadow from
+   there would still read those rows from mapped memory, so nothing is saved; the particle read stays its own,
+   now 160 bytes.
+3. The target retires after 300 frames (about 4 s at 80 Hz) with no plume or flare draw
+   (`particleFrameBoundary`, once a frame), and the next matched draw learns it again. A session without smoke
+   then pays nothing: `particleTarget()` answers null and the Map tee remembers no pointer. Re-arm costs what
+   the first learn always cost: draws of that frame before the next write of the buffer go through as the
+   game draws them. Logged for the first four retire/re-arm events.
+4. The camera readers are untouched in this branch: they read 12-56 bytes, and the issue 65 map bounce already
+   covers the VR side in design (its section 2 names the camera block readers).
+
+### Flight plan
+
+1. Install the branch on Frontier VR (`python tools\install_edvr.py`, `--verify-only`), check the log's version
+   line (`python tools\edvr_log.py --target ... --expect-build HEAD`).
+2. Same session, hot-reload A/B: `fix.particle_billboard = stock` then `steady` in `edvr.ini` (polled once a
+   second), 2 minutes each, away from smoke. With `steady` and the target retired, expect `particle target
+   retired` and the `particle` reader `not exercised`.
+3. Fly to a geyser field or a star's flares: `particle target armed`, `particle` at 160 B/call, and the
+   substitution visible as before (no plume rolling with the head).
+4. Read the `mapped read probe` lines: protection flag and the three timings against the ordinary copy.
+5. The AMD user: the same A/B on their rig. Prediction if the hypothesis holds: the fps gap closes with the fix
+   and the `particle` figure falls from the tens of us a call to a few. If it does not close, the remaining cost
+   is not this read, and the line says where to look next (`total` against the frame time).
+
+### The cb1 rows burst (measurement only, same branch)
+
+`cb1_rows_burst.h`; fourth reader in the camera tee beside `glitchFrameObserve`, `sunglareSceneRows` and
+`temporalPassNoteSceneWrite`, timed in the `unmap readers` line as `camera-rows-burst`. It reads only 80 bytes,
+camera block + 275*16 (row 275, the eye origin, and rows 276..279), and only inside a burst. No hotkey, no ini key.
+
+- **Arming:** once about 20 s after the session's first eye draw, once more 60 s after that first arming; each
+  burst is 4 consecutive frames. At arming time one line says `burst N of 2 armed at frame F`; if the camera tee
+  has never seen the block by then, a second line says so and no write lines follow.
+- **Per Unmap of the camera block in a burst:** `cb1 rows burst: frame F write K res=<ptr> [275]=(x y z w)
+  [276]=(...) [277]=(...) [278]=(...) [279]=(...)`, %.6g. Lines are formatted at the frame boundary, not in the
+  Unmap path; a frame logs at most 256 writes and its summary line
+  (`frame F: N write(s) of the camera block, M logged (burst B of 2, frame i of 4)`) says how many it saw.
+- **Per burst frame, at the first eye draw:** `cb1 rows burst: frame F first eye draw: VS slot 1 res=<ptr>`, so
+  the eye blocks can be told from shadow or cube views by matching `res`.
+- **Volume:** the design doc counts about 60 writes of the block a frame, so expect about 60 write lines a frame,
+  roughly 480 lines over the two bursts, not 40; the cap and summary keep a worse frame bounded.
+- **Reading it:** per eye, compare [277..279] between writes whose `res` equals the slot 1 resource of the eye's
+  draws; the number of writes a frame is the summary line.
+- **Rig:** `tools\particle_capture_test` P7 (arming at exactly 20 s and 60 s, the 80-byte read, the line format,
+  the cap, one slot 1 query a frame, two bursts and no third).
