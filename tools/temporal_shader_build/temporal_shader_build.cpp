@@ -106,6 +106,7 @@ struct LegacyContract {
 #include "fixed_core_shader_variants.h"
 #include "fixed_extra_shader_variants.h"
 #include "fixed_facing_shader_variants.h"
+#include "fixed_sharp_weapons_variants.h"
 
 static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = false) {
     v.bytes.clear();
@@ -321,6 +322,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), composite.begin(), composite.end());
     const auto facing = billboardFacingVariants();
     variants.insert(variants.end(), facing.begin(), facing.end());
+    const auto sharpWeapons = sharpWeaponsVariants();
+    variants.insert(variants.end(), sharpWeapons.begin(), sharpWeapons.end());
     return variants;
 }
 
@@ -582,8 +585,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 68 && coreLegacy.size() + 21 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite and the explosion billboards' five facing transcriptions are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 70 && coreLegacy.size() + 23 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions and the sharp weapons' two source-pass shaders are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -902,6 +905,41 @@ static void selfTest() {
                 }
                 check(ok && desc.BoundResources == expected,
                       "each facing transcription keeps the game's b0[12], b1[280] (and b2[3] or b2[1] where the original has one) and ours at b3[2], and binds nothing else");
+            }
+        }
+    }
+
+    // fix.sharp_weapons' source pass (src/d3d11/sharp_weapons_shaders.h): new, held to its own contract -- the symbols, source names, entry, profile and flags, the
+    // text each compiles, the vertex stage (SV_VertexID in, position and UV out, no resource) and the pixel stage (the one texture at t0, two render targets, no
+    // constant buffer and no sampler: the filter is made of Loads, so nothing of the game's sampler state matters).
+    {
+        struct Src { const char* symbol; const char* sourceName; const char* source; const char* profile; };
+        const Src src[2] = {{"kSharpWeaponsSourceVsBytecode", "sharp_weapons_source_vs", edvr::kSharpWeaponsSourceVsHlsl, "vs_5_0"},
+                            {"kSharpWeaponsSourcePsBytecode", "sharp_weapons_source_ps", edvr::kSharpWeaponsSourcePsHlsl, "ps_5_0"}};
+        for (size_t i = 0; i < 2; ++i) {
+            auto& shader = coreFixed[coreLegacy.size() + 21 + i];
+            check(!std::strcmp(shader.symbol, src[i].symbol) && !std::strcmp(shader.sourceName, src[i].sourceName) &&
+                  !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, src[i].profile) && shader.alternate == src[i].source &&
+                  shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+                  "each sharp weapons source-pass shader has its distinct symbol and exact source/stage contract");
+            check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+                  "each sharp weapons source-pass shader compiles to fixed DXBC");
+            if (reflect && !shader.bytes.empty()) {
+                ComPtr<ID3D11ShaderReflection> reflection;
+                D3D11_SHADER_DESC desc{};
+                const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection),
+                                           reinterpret_cast<void**>(reflection.GetAddressOf()));
+                const D3D11_SHADER_VERSION_TYPE want = i == 0 ? D3D11_SHVER_VERTEX_SHADER : D3D11_SHVER_PIXEL_SHADER;
+                bool ok = SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                          D3D11_SHVER_GET_TYPE(desc.Version) == want && D3D11_SHVER_GET_MAJOR(desc.Version) == 5 && desc.ConstantBuffers == 0;
+                if (i == 1 && ok) {
+                    D3D11_SHADER_INPUT_BIND_DESC bind{};
+                    ok = SUCCEEDED(reflection->GetResourceBindingDescByName("Src", &bind)) && bind.Type == D3D_SIT_TEXTURE && bind.BindPoint == 0 &&
+                         desc.BoundResources == 1;
+                } else if (ok) {
+                    ok = desc.BoundResources == 0;
+                }
+                check(ok, "the sharp weapons source pass: the vertex shader binds nothing, the pixel shader reads one texture at t0 and no constant buffer or sampler");
             }
         }
     }
