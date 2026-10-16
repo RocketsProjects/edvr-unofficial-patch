@@ -967,7 +967,7 @@ inline int flatLogLineTests() {
     // ===== 2. the flat cpu packer ===============================================================================================================
     {
         expect(flatcpu::kLineLimit == kFlatLogLineBudget, "the cpu packer's line limit is the repo's budget, not the truncation limit less a margin");
-        expect(flatcpu::kMaxLines == 5, "the cpu packer holds five lines (a window is typically three)");
+        expect(flatcpu::kMaxLines == 7, "the cpu packer holds seven lines (a window is typically four)");
         flatcpu::WindowReport r;
         r.valid = true;
         r.frames = 5000;
@@ -1045,8 +1045,8 @@ inline int flatLogLineTests() {
         expect(mutant.count == 1 && !linesWithin(mutant, kFlatLogLineBudget),
                "mutation control: the same tokens packed at a limit of 1090 make a first line over the budget, which the check refuses");
         const std::string cpuHeader = slurpFile("src/d3d11/flat_cpu.h");
-        expect(cpuHeader.find("constexpr size_t kLineLimit = 1000;") != std::string::npos && cpuHeader.find("constexpr int kMaxLines = 5;") != std::string::npos,
-               "flat_cpu.h declares a line limit of 1000 and five lines");
+        expect(cpuHeader.find("constexpr size_t kLineLimit = 1000;") != std::string::npos && cpuHeader.find("constexpr int kMaxLines = 7;") != std::string::npos,
+               "flat_cpu.h declares a line limit of 1000 and seven lines");
         const std::string cpuCompact = compactText(cpuHeader);
         const auto limitValid = [&](const std::string& text) { return text.find(compactText("constexpr size_t kLineLimit = 1000;")) != std::string::npos; };
         expect(limitValid(cpuCompact), "the pin on the packer's limit holds on the source");

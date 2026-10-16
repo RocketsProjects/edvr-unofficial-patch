@@ -162,7 +162,7 @@ inline int flatCpuTests() {
         flatcpu::resetForTest();
         fake(0);
         {
-            flatcpu::Scope outer(flatcpu::kOther);
+            flatcpu::Scope outer(flatcpu::kDrawCtor);
             t_now = 10;
             {
                 flatcpu::Scope inner(flatcpu::kReduce);
@@ -180,7 +180,7 @@ inline int flatCpuTests() {
                "the innermost scope is its own 5 ticks");
         expect(s && s->cell[flatcpu::kReduce].ticks.load() == 25 && s->cell[flatcpu::kReduce].calls.load() == 1,
                "the middle scope is its 30 ticks (10 to 40) less the innermost's 5, and none of the outer's");
-        expect(s && s->cell[flatcpu::kOther].ticks.load() == 70 && s->cell[flatcpu::kOther].calls.load() == 1,
+        expect(s && s->cell[flatcpu::kDrawCtor].ticks.load() == 70 && s->cell[flatcpu::kDrawCtor].calls.load() == 1,
                "the outer scope is its 100 ticks less the middle's whole 30: 70; the three add up to 100");
     }
 
@@ -193,7 +193,7 @@ inline int flatCpuTests() {
         Run run;
         for (int i = 0; i < 300; ++i) {
             run.frame(16667, false, [] {
-                flatcpu::Scope shell(flatcpu::kOther);
+                flatcpu::Scope shell(flatcpu::kDrawCtor);
                 t_now += 50;
                 { flatcpu::Scope r(flatcpu::kReduce); t_now += 40; }
                 for (int w = 0; w < 3; ++w) { flatcpu::Scope wt(flatcpu::kWitness); t_now += 10; }
@@ -210,8 +210,8 @@ inline int flatCpuTests() {
         const double k = static_cast<double>(K);
         expect(got && r.valid && r.frames == 300 && r.pausedFrames == 0, "the window closes after 5 s with 300 frames");
         expect(K == 18 || K == 19, "the render thread is clocked on one frame in each block of 16: 18 or 19 of 300");
-        expect(nearly(r.renderMs[flatcpu::kOther] / k, 0.060) && r.renderCalls[flatcpu::kOther] == K,
-               "other: 60 ticks and one call on each clocked frame");
+        expect(nearly(r.renderMs[flatcpu::kDrawCtor] / k, 0.060) && r.renderCalls[flatcpu::kDrawCtor] == K,
+               "draw ctor shell: 60 ticks and one call on each clocked frame");
         expect(nearly(r.renderMs[flatcpu::kReduce] / k, 0.040) && r.renderCalls[flatcpu::kReduce] == K,
                "contract reduction: 40 ticks and one call on each clocked frame");
         expect(nearly(r.renderMs[flatcpu::kWitness] / k, 0.030) && r.renderCalls[flatcpu::kWitness] == 3u * K,
@@ -223,13 +223,21 @@ inline int flatCpuTests() {
         const std::string promised =
             "flat cpu 5s: frames=300 (stood down 0) present p50 16.67 ms (p95 16.67); render thread clocked on " +
             std::to_string(K) + " of 300 frames, one in 16 (its figures are per clocked frame); EDVR per frame total 0.150 ms = "
-            "other 0.060 ms (calls 1.0) + contract reduction 0.040 ms (calls 1.0) + copy checks 0.000 ms (calls 0.0) + "
+            "draw ctor shell 0.060 ms (calls 1.0) + contract reduction 0.040 ms (calls 1.0) + copy checks 0.000 ms (calls 0.0) + "
             "camera rows 0.000 ms (calls 0.0) + trace ring 0.020 ms (calls 1.0) + resource lookup 0.000 ms (calls 0.0) + "
             "coverage 0.000 ms (calls 0.0) + projection readiness 0.000 ms (calls 0.0) + cb shadows 0.000 ms (calls 0.0) + "
             "camera witness 0.030 ms (calls 3.0) + engine motion draw wrapper 0.000 ms (calls 0.0) + resolve 0.000 ms (calls 0.0) + "
             "backend 0.000 ms (calls 0.0) + discovery 0.000 ms (calls 0.0) + state trackers 0.000 ms (calls 0.0) + "
-            "hdr route 0.000 ms (calls 0.0) + foreground capture 0.000 ms (calls 0.0) + camera inject 0.000 ms (calls 0.0) + engine motion hooks 0.000 ms (calls 0.0)";
-        expect(std::string(lines.line[0]).compare(0, promised.size(), promised) == 0,
+            "hdr route 0.000 ms (calls 0.0) + foreground capture 0.000 ms (calls 0.0) + draw dtor shell 0.000 ms (calls 0.0) + "
+            "dispatch shell 0.000 ms (calls 0.0) + ctor lookup block 0.000 ms (calls 0.0) + ctor predicate block 0.000 ms (calls 0.0) + "
+            "draw hook remainder 0.000 ms (calls 0.0) + game draw substituted 0.000 ms (calls 0.0) + "
+            "game draw after substituted 0.000 ms (calls 0.0) + game draw other 0.000 ms (calls 0.0) + "
+            "camera inject 0.000 ms (calls 0.0) + engine motion hooks 0.000 ms (calls 0.0)";
+        // The family chain is longer than a log line now: it continues on the next, where the packer drops the " + " it broke at.
+        std::string chain = text;
+        const std::string cont = "\nflat cpu 5s (cont.): ";
+        for (size_t at = chain.find(cont); at != std::string::npos; at = chain.find(cont)) chain.replace(at, cont.size(), " + ");
+        expect(chain.compare(0, promised.size(), promised) == 0,
                "the first line has the promised shape, in the promised order, with the figures the frames spent");
         expect(has(text, "camera witness 10.00 us/write (" + std::to_string(3u * K) + " writes clocked)"),
                "the witness prints its cost per write, and how many writes it clocked");
@@ -293,6 +301,131 @@ inline int flatCpuTests() {
         expect(!has(text, "GPU frame p50") && !has(text, "GPU resolve p50"), "and no percentile");
         expect(has(text, "engine motion wrapper D3D calls 0/frame over 0.0 substituted draws/frame"),
                "the draw wrapper's calls print as zero");
+    }
+
+    // ---- 4a: the settlement CPU instruments (H1, H2, H4) ----------------------------------------------
+    // stop() ends a span early, once: a constructor's lookup block is a stretch of a function, not a block of its own.
+    {
+        flatcpu::resetForTest();
+        fake(0);
+        {
+            flatcpu::Scope shell(flatcpu::kDrawCtor);
+            t_now = 10;
+            flatcpu::Scope lookup(flatcpu::kCtorLookup);
+            t_now = 40;
+            lookup.stop();
+            t_now = 45;
+            lookup.stop();                                    // a second stop adds nothing
+            flatcpu::Scope predicates(flatcpu::kCtorPredicates);
+            t_now = 60;
+            predicates.stop();
+            t_now = 100;
+        }                                                      // and neither destructor adds the span again
+        const flatcpu::Slot* s = flatcpu::t_ctx.slot;
+        expect(s && s->cell[flatcpu::kCtorLookup].ticks.load() == 30 && s->cell[flatcpu::kCtorLookup].calls.load() == 1,
+               "a scope stopped early is the stretch to the stop (10 to 40), once, though stop() ran twice and the destructor after it");
+        expect(s && s->cell[flatcpu::kCtorPredicates].ticks.load() == 15 && s->cell[flatcpu::kCtorPredicates].calls.load() == 1,
+               "the second block is its own 15 ticks (45 to 60)");
+        expect(s && s->cell[flatcpu::kDrawCtor].ticks.load() == 55 && s->cell[flatcpu::kDrawCtor].calls.load() == 1,
+               "the shell is its 100 ticks less the two blocks' whole 45: 55 (the stretch between them, 40 to 45, stays in the shell)");
+        expect(s && s->cell[flatcpu::kCtorLookup].wall.load() == 30 && s->cell[flatcpu::kDrawCtor].wall.load() == 100,
+               "wall time is the whole span, nested scopes counted");
+    }
+    // The thunk: wall, the game's draw timed apart, EDVR's hook cost, the unscoped remainder, and the game's time out of EDVR's total.
+    // Each of 300 frames: thunk = 10 (remainder) + ctor shell 50 + the game's draw (substituted 200 or after 300 or other 100), and
+    // on every third frame a second draw of the other kind.
+    {
+        flatcpu::resetForTest();
+        fake(0);
+        Run run;
+        for (int i = 0; i < 300; ++i) {
+            run.frame(16667, false, [] {
+                for (int d = 0; d < 3; ++d) {
+                    flatcpu::Scope thunk(flatcpu::kDrawThunk);
+                    t_now += 10;
+                    { flatcpu::Scope shell(flatcpu::kDrawCtor); t_now += 50; }
+                    const unsigned family = d == 0 ? flatcpu::kGameDrawSubst : d == 1 ? flatcpu::kGameDrawAfter : flatcpu::kGameDrawOther;
+                    const int64_t game = d == 0 ? 200 : d == 1 ? 300 : 100;
+                    { flatcpu::Scope g(family); t_now += game; }
+                }
+            });
+        }
+        flatcpu::WindowReport r;
+        const bool got = run.census->take(run.now, false, r);
+        const double k = r.renderClockedFrames;
+        expect(got && k > 0, "the thunk window closes");
+        expect(nearly(r.renderMs[flatcpu::kDrawThunk] / k, 0.030) && r.renderCalls[flatcpu::kDrawThunk] == 3 * r.renderClockedFrames,
+               "the thunk's own figure is its unscoped remainder: 10 ticks a draw, 3 draws a frame");
+        expect(nearly(r.renderWallMs[flatcpu::kDrawThunk] / k, 0.060 * 3 + 0.600),
+               "and its wall is everything inside it: 3 x (10 + 50) + 600 game ticks = 780 ticks a frame");
+        flatcpu::Lines lines;
+        flatcpu::formatWindow(r, &lines);
+        const std::string text = joined(lines);
+        expect(!lines.truncated, "the new tokens fit the lines");
+        expect(has(text, "EDVR per frame total 0.180 ms"), "the game's own draw is in no part of EDVR's total: 3 x 60 ticks");
+        expect(has(text, "draw hook flat branch (render thread, per clocked frame): wall 0.780 ms over 3.0 draws, game draw 0.600 ms, "
+                         "EDVR hook cost 0.180 ms (unscoped remainder 0.030 ms)"),
+               "the draw hook line: wall, draws a frame, the game's draw, EDVR's hook cost, the unscoped remainder");
+        expect(has(text, "game draw per call: substituted 200.00 us a call (1.0 a frame), after substituted 300.00 us a call (1.0 a frame), "
+                         "other 100.00 us a call (1.0 a frame)"),
+               "the game's draw per call, by what preceded it");
+        expect(has(text, "game draw substituted 0.200 ms (calls 1.0)") && has(text, "game draw after substituted 0.300 ms (calls 1.0)") &&
+                   has(text, "game draw other 0.100 ms (calls 1.0)"),
+               "and the three families are in the chain with their own names");
+        // An empty window: no game draw ran, so no per-call time is invented.
+        flatcpu::resetForTest();
+        fake(0);
+        Run empty;
+        for (int i = 0; i < 300; ++i) empty.frame(16667, false, {});
+        flatcpu::WindowReport e;
+        empty.census->take(empty.now, false, e);
+        flatcpu::Lines el;
+        flatcpu::formatWindow(e, &el);
+        const std::string et = joined(el);
+        expect(has(et, "wall 0.000 ms over 0.0 draws, game draw 0.000 ms, EDVR hook cost 0.000 ms (unscoped remainder 0.000 ms)") &&
+                   has(et, "game draw per call: substituted - us a call (0.0 a frame), after substituted - us a call (0.0 a frame), other - us a call (0.0 a frame)"),
+               "a window with no draw prints dashes for the per-call time, never 0.00, so a dead instrument reads differently from a fast one");
+    }
+    // H4: how each substituted draw ended, per frame, from the counts the wrapper hands the census.
+    {
+        flatcpu::resetForTest();
+        fake(0);
+        Run run;
+        for (int i = 0; i < 300; ++i) run.frame(16667, false, {});
+        EngineRunCounts c;
+        c.runs[kRunLazy] = 600;           c.d3dCalls[kRunLazy] = 3000;           c.timedRuns[kRunLazy] = 30;        c.ticks[kRunLazy] = 1200;
+        c.runs[kRunEagerGuard] = 60;      c.d3dCalls[kRunEagerGuard] = 1200;     c.timedRuns[kRunEagerGuard] = 3;   c.ticks[kRunEagerGuard] = 300;
+        c.flushes = 150;                  c.flushCalls = 300;                    c.timedFlushes = 6;                c.flushTicks = 60;
+        run.census->noteRuns(c);
+        flatcpu::WindowReport r;
+        const bool got = run.census->take(run.now, false, r);
+        const unsigned K = r.renderClockedFrames;
+        flatcpu::Lines lines;
+        flatcpu::formatWindow(r, &lines);
+        const std::string text = joined(lines);
+        char want[900];
+        std::snprintf(want, sizeof(want),
+                      "engine motion runs (the wrapper's brackets, a frame; the time is the clocked frames'): "
+                      "lazy 2.0 runs/frame (5.0 D3D calls/run, 40.00 us/run, %.3f ms per clocked frame), "
+                      "eager guarded (overlay t3) 0.2 runs/frame (20.0 D3D calls/run, 100.00 us/run, %.3f ms per clocked frame), "
+                      "eager capture armed 0.0 runs/frame (- D3D calls/run, - us/run, 0.000 ms per clocked frame), "
+                      "lazy flushes 0.5 flushes/frame (2.0 D3D calls/flush, 10.00 us/flush, %.3f ms per clocked frame)",
+                      1.2 / K, 0.3 / K, 0.06 / K);
+        expect(got && K > 0, "the runs window closes with clocked frames");
+        expect(has(text, want), "the engine motion runs line: runs a frame, D3D calls and microseconds per run, the clocked frames' time");
+        expect(r.runs.totalRuns() == 660 && nearly(r.runMs[kRunLazy], 1.2) && nearly(r.flushMs, 0.06), "the window carries the counts and the time in ms");
+        // The next window starts from zero: nothing is carried.
+        for (int i = 0; i < 300; ++i) run.frame(16667, false, {});
+        flatcpu::WindowReport next;
+        run.census->take(run.now, false, next);
+        expect(next.runs.totalRuns() == 0 && next.runs.flushes == 0, "a window's run counts are emptied when it closes");
+        // A census that is not running keeps nothing (the runtime hands counts over only while it runs): idle() empties a half window.
+        run.census->noteRuns(c);
+        run.census->idle();
+        for (int i = 0; i < 300; ++i) run.frame(16667, false, {});
+        flatcpu::WindowReport after;
+        run.census->take(run.now, false, after);
+        expect(after.runs.totalRuns() == 0, "stopping the census empties the run counts with the rest");
     }
 
     // ---- 5: another thread is clocked on one frame in 32, and its figure is per sampled frame ----
@@ -420,7 +553,8 @@ inline int flatCpuTests() {
                 char ms[32], calls[32];
                 std::snprintf(ms, sizeof(ms), "%.3f", r.emRenderMs[p] / 20.0);
                 flatcpu::callsText(calls, sizeof(calls), static_cast<double>(r.emRenderCalls[p]) / 20.0);
-                const std::string token = std::string(i ? ", " : "engine motion hooks by part (render thread, per clocked frame): ") +
+                // (no leading ", " for the later parts: a line may break between two tokens, and the packer drops the separator it broke at)
+                const std::string token = std::string(i ? "" : "engine motion hooks by part (render thread, per clocked frame): ") +
                                           (flatcpu::kEmNames[i].name + 7) + " " + ms + " ms (calls " + calls + ")";
                 tokens = tokens && has(text, token);
             }
@@ -791,7 +925,7 @@ inline int flatCpuTests() {
             return static_cast<int64_t>(2800 + x % 1200);
         };
         auto workload = [](int i) {
-            flatcpu::Scope shell(flatcpu::kOther);
+            flatcpu::Scope shell(flatcpu::kDrawCtor);
             t_now += 30 + (i % 7) * 4;
             { flatcpu::Scope t(flatcpu::kTrace); t_now += 6; }
             for (int c = 0; c < 1 + i % 5; ++c) { flatcpu::Scope red(flatcpu::kReduce); t_now += 12; }
@@ -822,8 +956,8 @@ inline int flatCpuTests() {
                    "a sampled window reports the same per-call cost as a fully clocked one");
         }
         // The shell's per-call cost varies with the frame; the sampled mean is within 10% of the full one.
-        const double fullOtherPerCall = full.renderMs[flatcpu::kOther] / static_cast<double>(full.renderCalls[flatcpu::kOther]);
-        const double sampledOtherPerCall = sampled.renderMs[flatcpu::kOther] / static_cast<double>(sampled.renderCalls[flatcpu::kOther]);
+        const double fullOtherPerCall = full.renderMs[flatcpu::kDrawCtor] / static_cast<double>(full.renderCalls[flatcpu::kDrawCtor]);
+        const double sampledOtherPerCall = sampled.renderMs[flatcpu::kDrawCtor] / static_cast<double>(sampled.renderCalls[flatcpu::kDrawCtor]);
         expect(std::fabs(sampledOtherPerCall - fullOtherPerCall) <= 0.10 * fullOtherPerCall,
                "and where a call's cost varies from frame to frame, the sampled mean is within 10% of the full one");
         // A per-frame figure is a mean over the clocked frames. Constant per frame: exact. Varying: within 15%.
@@ -833,7 +967,7 @@ inline int flatCpuTests() {
                        nearly(static_cast<double>(sampled.renderCalls[f]) / kSampled, static_cast<double>(full.renderCalls[f]) / kFull, 1e-12),
                    "a per-frame figure that is the same every frame comes out exactly, from the clocked frames");
         }
-        for (unsigned f : {static_cast<unsigned>(flatcpu::kOther), static_cast<unsigned>(flatcpu::kReduce)}) {
+        for (unsigned f : {static_cast<unsigned>(flatcpu::kDrawCtor), static_cast<unsigned>(flatcpu::kReduce)}) {
             const double a = full.renderMs[f] / kFull, b = sampled.renderMs[f] / kSampled;
             const double ca = static_cast<double>(full.renderCalls[f]) / kFull, cb = static_cast<double>(sampled.renderCalls[f]) / kSampled;
             expect(std::fabs(b - a) <= 0.15 * a && std::fabs(cb - ca) <= 0.15 * ca,

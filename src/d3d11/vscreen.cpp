@@ -73,7 +73,8 @@
 #include "vscreen_footprint.h"   // fix.vscreen_res_width = auto's footprint instrument (the on-foot screen's width in the eye)
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "flat_runtime.h"
-#include "flat_temporal.h"   // bounded, flat-profile-only scene discovery
+#include "flat_cpu.h"        // the flat CPU census: the draw thunks' flat branch is one scope (H2)
+#include "flat_temporal.h"  // bounded, flat-profile-only scene discovery
 #include "cross_profile_cost.h"   // the flat PS constant-buffer observer's cost while VR is active (log only)
 #include "../common/runtime_profile.h"
 #include "intro_panel.h"
@@ -4703,6 +4704,7 @@ static inline bool flatStationSkipsDraw(ID3D11DeviceContext* self) {
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'D', count, 1);
     if (runtimeFlatProfile()) {
+        flatcpu::Scope thunk(flatcpu::kDrawThunk);   // H2: this whole branch, the draw scope's constructor and destructor inside it
         if (flatStationSkipsDraw(self)) return;
         // Planet patch motion (celestial_motion.h): the flat profile's capture of a colour-pass patch draw, before the game's own issue.
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
@@ -4717,7 +4719,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDraw(self, count, start);
+        { flatcpu::Scope game(flatDraw.gameDrawFamily()); g_state->realDraw(self, count, start); }   // the game's own draw, timed apart from EDVR's
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
         return;
@@ -4759,10 +4761,11 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'A', 0, 1);
     if (runtimeFlatProfile()) {
+        flatcpu::Scope thunk(flatcpu::kDrawThunk);   // H2, as hookedDraw
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
         FlatRuntimeDrawScope flatDraw(self, 0, 'A');
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawAuto(self);
+        { flatcpu::Scope game(flatDraw.gameDrawFamily()); g_state->realDrawAuto(self); }
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         flatDraw.uiReissue([&] { g_state->realDrawAuto(self); });
         return;
@@ -4779,6 +4782,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'I', count, 1);
     if (runtimeFlatProfile()) {
+        flatcpu::Scope thunk(flatcpu::kDrawThunk);   // H2, as hookedDraw
         if (flatStationSkipsDraw(self)) return;
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         ++g_state->thunkHits[kHitDrawIndexed];
@@ -4791,7 +4795,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         }
         FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        { flatcpu::Scope game(flatDraw.gameDrawFamily()); g_state->realDrawIndexed(self, count, startIndex, baseVertex); }
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
         return;
@@ -4851,6 +4855,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     }
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'N', perInstance, instances);
     if (runtimeFlatProfile()) {
+        flatcpu::Scope thunk(flatcpu::kDrawThunk);   // H2, as hookedDraw
         if (flatStationSkipsDraw(self)) return;
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
@@ -4864,7 +4869,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
                                       static_cast<int32_t>(startVertex), startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        { flatcpu::Scope game(flatDraw.gameDrawFamily()); g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); }
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
         return;
@@ -4919,6 +4924,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT startInstance) {
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'X', perInstance, instances);
     if (runtimeFlatProfile()) {
+        flatcpu::Scope thunk(flatcpu::kDrawThunk);   // H2, as hookedDraw
         if (flatStationSkipsDraw(self)) return;
         if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
@@ -4933,8 +4939,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
                                       baseVertex, startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
-        g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
-                                          baseVertex, startInstance);
+        {
+            flatcpu::Scope game(flatDraw.gameDrawFamily());
+            g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance);
+        }
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
         flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
         return;

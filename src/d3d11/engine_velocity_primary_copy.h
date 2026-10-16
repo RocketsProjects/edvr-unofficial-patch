@@ -99,7 +99,9 @@ constexpr unsigned kCallers=static_cast<unsigned>(Caller::Count);
 constexpr unsigned kLockSamplePeriod=64;
 static_assert((kLockSamplePeriod&(kLockSamplePeriod-1))==0,"the sampling test is a mask");
 inline constexpr const char* kCallerNames[kCallers]={"merge begin","merge end","clear skip","clear walk","copier","beginMap","endMap","emit","other"};
-struct LockCell { std::atomic<uint64_t> n{0},wait{0},waitMax{0},hold{0},holdMax{0}; };   // ticks
+// ticks. `contended` is not sampled: every acquisition tries the mutex first, and each that finds it held counts here (H3: the
+// settlement CPU arc asks whether the render thread and the job threads meet on this lock at all). Written only on that failure.
+struct LockCell { std::atomic<uint64_t> n{0},wait{0},waitMax{0},hold{0},holdMax{0},contended{0}; };
 inline LockCell g_lockCells[kCallers][2];   // [caller][0 render thread, 1 any other]
 inline thread_local uint32_t t_lockTick[kCallers]{};
 inline int64_t (*g_lockClock)() noexcept=&emcpu::qpcNow;   // the rig substitutes a counting clock
@@ -108,23 +110,47 @@ inline void raiseTo(std::atomic<uint64_t>& cell,uint64_t value) noexcept {
     uint64_t seen=cell.load(std::memory_order_relaxed);
     while(seen<value && !cell.compare_exchange_weak(seen,value,std::memory_order_relaxed)){}
 }
+inline bool onRenderThread() noexcept {return emcpu::g_renderThreadId.load(std::memory_order_relaxed)==emcpu::currentThreadId();}   // not the gate: see there
+inline void lockContended(Caller c) noexcept {
+    g_lockCells[static_cast<unsigned>(c)][onRenderThread()?0:1].contended.fetch_add(1,std::memory_order_relaxed);
+}
 inline void lockRecord(Caller c,int64_t waited,int64_t held) noexcept {
-    const bool render=emcpu::g_renderThreadId.load(std::memory_order_relaxed)==emcpu::currentThreadId();   // not the gate: see there
+    const bool render=onRenderThread();
     LockCell& cell=g_lockCells[static_cast<unsigned>(c)][render?0:1];
     const uint64_t w=waited>0?static_cast<uint64_t>(waited):0,h=held>0?static_cast<uint64_t>(held):0;
     cell.n.fetch_add(1,std::memory_order_relaxed);cell.wait.fetch_add(w,std::memory_order_relaxed);cell.hold.fetch_add(h,std::memory_order_relaxed);
     raiseTo(cell.waitMax,w);raiseTo(cell.holdMax,h);
 }
-struct LockWindow { uint64_t n[kCallers][2]{},wait[kCallers][2]{},waitMax[kCallers][2]{},hold[kCallers][2]{},holdMax[kCallers][2]{}; };
+struct LockWindow { uint64_t n[kCallers][2]{},wait[kCallers][2]{},waitMax[kCallers][2]{},hold[kCallers][2]{},holdMax[kCallers][2]{},contended[kCallers][2]{}; };
 inline LockWindow takeLockWindow() noexcept {
     LockWindow w;
     for(unsigned c=0;c<kCallers;++c)for(unsigned k=0;k<2;++k) {
         LockCell& cell=g_lockCells[c][k];
         w.n[c][k]=cell.n.exchange(0,std::memory_order_relaxed);w.wait[c][k]=cell.wait.exchange(0,std::memory_order_relaxed);
         w.waitMax[c][k]=cell.waitMax.exchange(0,std::memory_order_relaxed);w.hold[c][k]=cell.hold.exchange(0,std::memory_order_relaxed);
-        w.holdMax[c][k]=cell.holdMax.exchange(0,std::memory_order_relaxed);
+        w.holdMax[c][k]=cell.holdMax.exchange(0,std::memory_order_relaxed);w.contended[c][k]=cell.contended.exchange(0,std::memory_order_relaxed);
     }
     return w;
+}
+constexpr size_t kContentionLineBytes=1100;
+// The third lock line: engine motion: primary copy lock contention (30 s, ...): merge begin: render 0 of ~6400, other 12 of ~640 | ...
+// Every acquisition counted (not sampled) when it found the mutex held and had to block; "of ~N" is the acquisitions, estimated from the
+// 1-in-64 timed sample (n x 64), so a rate reads off it. All zeros beside lock lines with a large n means nothing met on the lock.
+inline void formatContentionLine(const LockWindow& w,double seconds,char (&out)[kContentionLineBytes]) noexcept {
+    size_t used=0;
+    auto put=[&](const char* format,auto... args){
+        if(used+1>=kContentionLineBytes)return;
+        const int n=std::snprintf(out+used,kContentionLineBytes-used,format,args...);
+        if(n>0)used=std::min(used+static_cast<size_t>(n),kContentionLineBytes-1);
+    };
+    put("engine motion: primary copy lock contention (%.0f s; acquisitions that found the mutex held, per thread class, of ~acquisitions): ",seconds);
+    for(unsigned c=0;c<kCallers;++c) {
+        put("%s%s: ",c?" | ":"",kCallerNames[c]);
+        for(unsigned k=0;k<2;++k)
+            put("%s%s %llu of ~%llu",k?", ":"",k?"other":"render",static_cast<unsigned long long>(w.contended[c][k]),
+                static_cast<unsigned long long>(w.n[c][k])*kLockSamplePeriod);
+    }
+    out[used]=0;
 }
 constexpr size_t kLockLineBytes=1160;   // the log's line buffer is 1200 and takes about 1166 characters of text
 // One of two lines (half 0: callers 0-4, half 1: callers 5-8): engine motion: primary copy lock (sampled 1 in 64, 30 s, 1 of 2):
@@ -159,9 +185,11 @@ inline void formatLockLine(const LockWindow& w,unsigned half,double ticksPerUs,d
 // kLockSamplePeriod is timed (wait from before the acquire to after it, hold from there to the release).
 struct ClaimLock {
     explicit ClaimLock(Caller caller=Caller::Other) noexcept : caller_(caller) {
-        if(lockSample(caller)) {
-            sampled_=true;acquireStart_=g_lockClock();g_mutex.lock();acquired_=g_lockClock();
-        } else g_mutex.lock();
+        const bool sample=lockSample(caller);
+        if(sample) {sampled_=true;acquireStart_=g_lockClock();}
+        // try first: the same single atomic as lock() when the mutex is free, and a held one is counted before it blocks
+        if(!g_mutex.try_lock()) {lockContended(caller);g_mutex.lock();}
+        if(sample)acquired_=g_lockClock();
     }
     ~ClaimLock() {
         publish();

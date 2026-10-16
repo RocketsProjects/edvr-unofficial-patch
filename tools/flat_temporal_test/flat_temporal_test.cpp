@@ -2810,6 +2810,7 @@ void testFlatCpuWiring() {
     const std::string engineCpp = slurp("src/d3d11/engine_velocity.cpp");
     const std::string engineH = slurp("src/d3d11/engine_velocity.h");
     const std::string cpuH = slurp("src/d3d11/flat_cpu.h");
+    const std::string vscreenCpp = slurp("src/d3d11/vscreen.cpp");
     const std::string menuCpp = slurp("src/d3d11/menu.cpp");
     check(!runtimeCpp.empty() && !resolveCpp.empty() && !resolveH.empty() && !injectCpp.empty() && !temporalCpp.empty() &&
           !engineCpp.empty() && !engineH.empty() && !cpuH.empty() && !menuCpp.empty(),
@@ -2822,7 +2823,16 @@ void testFlatCpuWiring() {
     struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
     const Pin pins[] = {
         // Every family the census names has its scope at the entry points that family stands for.
-        {&runtimeCpp, "flatcpu::Scope shell(flatcpu::kOther);", 3, "the draw scope (both halves) and the dispatch scope time their own shells"},
+        {&runtimeCpp, "flatcpu::Scope shell(flatcpu::kDrawCtor);", 1, "the draw scope's constructor times its own shell (H1)"},
+        {&runtimeCpp, "flatcpu::Scope shell(flatcpu::kDrawDtor);", 1, "and its destructor times its own (H1)"},
+        {&runtimeCpp, "flatcpu::Scope shell(flatcpu::kDispatchShell);", 1, "and the dispatch scope its own (H1)"},
+        {&runtimeCpp, "flatcpu::Scope lookupBlock(flatcpu::kCtorLookup);", 1, "the constructor's lookup block is one scope (H1)"},
+        {&runtimeCpp, "lookupBlock.stop();", 1, "that ends where the lookup block does"},
+        {&runtimeCpp, "flatcpu::Scope predicateBlock(flatcpu::kCtorPredicates);", 1, "the constructor's predicate block is one scope (H1)"},
+        {&runtimeCpp, "predicateBlock.stop();", 1, "that ends where the predicate block does"},
+        {&runtimeCpp, "g_flatPrevDrawSubstituted = producer;", 1, "a draw scope records whether it was substituted, for the next game draw's family (H2)"},
+        {&vscreenCpp, "flatcpu::Scope thunk(flatcpu::kDrawThunk);", 5, "the flat branch of every draw thunk is one scope (H2)"},
+        {&vscreenCpp, "flatcpu::Scope game(flatDraw.gameDrawFamily());", 5, "and its real draw call is timed apart, by what preceded it (H2)"},
         {&runtimeCpp, "flatcpu::kReduce", 2, "contract reduction times the reducer and the final copy's admission by structure"},
         {&runtimeCpp, "flatcpu::kCopyChecks", 2, "the exact-shader verifications and the F10 captures are timed"},
         {&runtimeCpp, "flatcpu::kCameraRows", 2, "the camera lookup and hash, and capture()"},
@@ -2860,6 +2870,9 @@ void testFlatCpuWiring() {
         // The draw wrapper's D3D calls are counted where they are made.
         {&engineH, "inline void engineVelocityNoteStateCalls(unsigned n) noexcept { engine_velocity_detail::g_stateCalls += n; }", 1, "the count is one owner-thread add"},
         {&engineCpp, "EngineVelocityWrapperCounts engineVelocityTakeWrapperCounts() noexcept {", 1, "and drained by one function"},
+        {&engineCpp, "EngineRunCounts engineVelocityTakeRunCounts() noexcept {", 1, "the brackets by how they ended (H4) are drained by one function"},
+        {&runtimeCpp, "const EngineRunCounts runs = engineVelocityTakeRunCounts();", 1, "every frame"},
+        {&runtimeCpp, "if (censusWasRunning) s.census.noteRuns(runs);", 1, "and handed to the census only while it runs"},
         {&engineCpp, "g_substitutedBase += familyDraws[f];", 1, "a summary between two drains loses none of the substituted draws"},
     };
     for (const Pin& pin : pins) {
@@ -2927,10 +2940,10 @@ void testFlatCpuWiring() {
     if (first != std::string::npos && last != std::string::npos && first < last)
         check(runtimeCpp.substr(first, last - first).find("census") == std::string::npos,
               "the stand-down never reads the census: it measures, it does not decide");
-    // The same for the numbers: the runtime touches the census in eleven places and no other -- the four
+    // The same for the numbers: the runtime touches the census in twelve places and no other -- the four
     // GPU notes and the skipped one, idle, and the block at the Present (running, onFrame, noteWrapper,
-    // noteQueries, take) -- and none of them reads a figure back into the runtime's state.
-    check(count(runtimeCpp, "s.census.") == 11,
+    // noteRuns, noteQueries, take) -- and none of them reads a figure back into the runtime's state.
+    check(count(runtimeCpp, "s.census.") == 12,
           "the runtime touches the census in exactly its known places (the GPU notes, idle, and the Present block)");
 }
 

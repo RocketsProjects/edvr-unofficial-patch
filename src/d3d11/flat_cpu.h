@@ -56,6 +56,7 @@
 #include <cstring>
 
 #include "engine_motion_cpu.h"
+#include "flat_engine_runs.h"   // how each substituted draw ended: lazy, guarded eager, capture eager (H4)
 #include "flat_query_cut.h"   // the counts of the questions answered from what the runtime tracks
 
 #ifndef EDVR_FLATCPU_NOW
@@ -90,7 +91,7 @@ constexpr int64_t kWindowMs = 5000;
 // Named as the rest of the flat log names them. The comments say which entry points each
 // one times; flat_runtime.cpp and its neighbours carry the scopes.
 enum Family : unsigned {
-    kOther = 0,     // the outermost hook scopes' own time: the draw scope's shell, the dispatch scope
+    kDrawCtor = 0,  // the draw scope constructor's own time: its shell, less the two blocks below and the named families (was "other")
     kReduce,        // contract reduction: flatRuntimeObserve / flatRuntimeObserveContract (the reducer)
     kCopyChecks,    // the exact-shader verifications on the copy draws (D3D state reads) and the F10-only captures
     kCameraRows,    // camera lookup and hashing: the draw scope's camera table lookup and rows hash, capture()
@@ -107,15 +108,26 @@ enum Family : unsigned {
     kTrackers,      // the O(1) state trackers: constant-buffer binds, viewport, ClearState, UAV binds
     kHdrRoute,      // the HDR route's trigger detector (flat_hdr_route.h) on every draw, observe-only with the key off
     kForegroundCapture, // foreground identity/certificate and original-VS stream-output capture
+    // The settlement CPU instruments (docs\flat-cz-fps-2026-10-11.md, 2026-10-16): the old "other" split three ways, two blocks of the
+    // constructor named, the draw thunks' own time, and the game's own draw timed apart from EDVR's.
+    kDrawDtor,      // the draw scope destructor's own time (its shell)
+    kDispatchShell, // the dispatch scope's own time
+    kCtorLookup,    // inside the constructor: binding views, the contract-kind calls, the pool-family pair, the tone slots (H1)
+    kCtorPredicates,// inside the constructor: the weapon, overlay and untrusted-nomination predicates (H1)
+    kDrawThunk,     // the flat branch of the draw thunks (vscreen.cpp), less everything nested in it: the unscoped remainder (H2)
+    kGameDrawSubst, // the game's own draw call when engine motion substituted it (the game's time, not EDVR's)
+    kGameDrawAfter, // the game's own draw call right after a substituted draw (state the driver must revalidate)
+    kGameDrawOther, // the game's own draw call, any other
     kInject,        // the camera inject callback (refreshPre / refreshPost): game threads
     kFamilies
 };
 struct FamilyInfo {
     const char* name;
-    bool gameThreads;   // its other-thread time is listed by name, per SAMPLED frame
+    bool gameThreads;        // its other-thread time is listed by name, per SAMPLED frame
+    bool gameTime = false;   // the game's own time inside EDVR's hook: timed and printed, not part of EDVR's total
 };
 inline constexpr FamilyInfo kInfo[kFamilies] = {
-    {"other", false},
+    {"draw ctor shell", false},
     {"contract reduction", false},
     {"copy checks", false},
     {"camera rows", false},
@@ -132,6 +144,14 @@ inline constexpr FamilyInfo kInfo[kFamilies] = {
     {"state trackers", false},
     {"hdr route", false},
     {"foreground capture", false},
+    {"draw dtor shell", false},
+    {"dispatch shell", false},
+    {"ctor lookup block", false},
+    {"ctor predicate block", false},
+    {"draw hook remainder", false},
+    {"game draw substituted", false, true},
+    {"game draw after substituted", false, true},
+    {"game draw other", false, true},
     {"camera inject", true},
 };
 constexpr unsigned kCal = kFamilies;   // the calibration cell, never reported
@@ -184,8 +204,10 @@ inline std::atomic<uint64_t> g_calGate{kSampledBit};
 struct alignas(32) Cell {
     std::atomic<uint64_t> ticks{0};   // exclusive time, running total
     std::atomic<uint64_t> calls{0};
-    uint64_t spare_[2] = {};
+    std::atomic<uint64_t> wall{0};    // inclusive time (nested scopes and all), running total: the draw thunk's whole span
+    uint64_t spare_ = 0;
 };
+static_assert(sizeof(Cell) == 32, "a cell is half a cache line");
 struct alignas(64) Slot {
     Cell cell[kCells];
     std::atomic<uint32_t> tid{0};
@@ -220,14 +242,19 @@ public:
     explicit Scope(unsigned family) noexcept { open(g_gate, family); }
     // The calibration and the rig give the gate.
     Scope(unsigned family, const std::atomic<uint64_t>& gate) noexcept { open(gate, family); }
-    ~Scope() {
+    ~Scope() { stop(); }
+    // Ends the span now instead of at the end of the block: for a stretch of a function that has no block of its own (the draw
+    // scope's constructor, whose locals outlive the stretch). Idempotent; the destructor then has nothing left to do.
+    void stop() noexcept {
         if (!live_) return;
+        live_ = false;
         const int64_t now = EDVR_FLATCPU_NOW();
         int64_t excl = (now - begin_) - ctx_->child;
         if (excl < 0) excl = 0;
         Cell& c = slot_->cell[family_];
         c.ticks.store(c.ticks.load(std::memory_order_relaxed) + static_cast<uint64_t>(excl), std::memory_order_relaxed);
         c.calls.store(c.calls.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        c.wall.store(c.wall.load(std::memory_order_relaxed) + static_cast<uint64_t>(now - begin_), std::memory_order_relaxed);
         // The parent sees this scope's whole wall time as its child.
         ctx_->child = savedChild_ + (now - begin_);
     }
@@ -259,12 +286,14 @@ private:
 struct CutState {
     uint64_t ticks[kFamilies];
     uint64_t calls[kFamilies];
+    uint64_t wall[kFamilies];
 };
 inline CutState g_cut[kMaxSlots + 1];
 
 struct FrameCut {
     uint64_t renderTicks[kFamilies];
     uint64_t renderCalls[kFamilies];
+    uint64_t renderWall[kFamilies];
     uint64_t otherTicks[kFamilies];
     uint64_t otherCalls[kFamilies];
 };
@@ -283,10 +312,12 @@ inline void cutFrame(FrameCut& out) noexcept {
         for (unsigned f = 0; f < kFamilies; ++f) {
             const uint64_t t = s->cell[f].ticks.load(std::memory_order_relaxed);
             const uint64_t k = s->cell[f].calls.load(std::memory_order_relaxed);
-            const uint64_t dt = t - st.ticks[f], dk = k - st.calls[f];
+            const uint64_t w = s->cell[f].wall.load(std::memory_order_relaxed);
+            const uint64_t dt = t - st.ticks[f], dk = k - st.calls[f], dw = w - st.wall[f];
             st.ticks[f] = t;
             st.calls[f] = k;
-            if (render) { out.renderTicks[f] += dt; out.renderCalls[f] += dk; }
+            st.wall[f] = w;
+            if (render) { out.renderTicks[f] += dt; out.renderCalls[f] += dk; out.renderWall[f] += dw; }
             else { out.otherTicks[f] += dt; out.otherCalls[f] += dk; }
         }
     }
@@ -297,10 +328,10 @@ inline void cutFrame(FrameCut& out) noexcept {
 inline void resetForTest() noexcept {
     for (unsigned i = 0; i < kMaxSlots; ++i) {
         Slot& s = g_slots[i];
-        for (unsigned f = 0; f < kCells; ++f) { s.cell[f].ticks.store(0); s.cell[f].calls.store(0); }
+        for (unsigned f = 0; f < kCells; ++f) { s.cell[f].ticks.store(0); s.cell[f].calls.store(0); s.cell[f].wall.store(0); }
         s.tid.store(0);
     }
-    for (unsigned f = 0; f < kCells; ++f) { g_overflow.cell[f].ticks.store(0); g_overflow.cell[f].calls.store(0); }
+    for (unsigned f = 0; f < kCells; ++f) { g_overflow.cell[f].ticks.store(0); g_overflow.cell[f].calls.store(0); g_overflow.cell[f].wall.store(0); }
     std::memset(g_cut, 0, sizeof(g_cut));
     g_slotCount.store(0);
     g_gate.store(kSampledBit);
@@ -410,6 +441,7 @@ struct WindowReport {
     // From every frame, clocked or not.
     double presentP50Ms = 0, presentP95Ms = 0;
     double renderMs[kFamilies] = {};
+    double renderWallMs[kFamilies] = {};   // inclusive time of the render thread's scopes (nested scopes counted)
     double otherMs[kFamilies] = {};
     uint64_t renderCalls[kFamilies] = {};
     uint64_t otherCalls[kFamilies] = {};
@@ -421,6 +453,10 @@ struct WindowReport {
     // The engine-motion draw wrapper's D3D immediate-context calls in the window (state gets and
     // sets, clears and copies), and the draws it substituted, which they belong to.
     uint64_t stateCalls = 0, substitutedDraws = 0;
+    // The same draws by how each ended (flat_engine_runs.h), with their time in ms (clocked frames only).
+    EngineRunCounts runs;
+    double runMs[kRunKinds] = {};
+    double flushMs = 0;
     // The questions the flat path answered from what the runtime already tracks instead of asking the D3D
     // context (flat_query_cut.h): how many, how many were also put to the context and compared, how many of
     // those comparisons were wrong, and which states ask the context again.
@@ -508,6 +544,7 @@ public:
         for (unsigned f = 0; f < kFamilies; ++f) {
             renderTicks_[f] += cut.renderTicks[f];
             renderCalls_[f] += cut.renderCalls[f];
+            renderWall_[f] += cut.renderWall[f];
             otherTicks_[f] += cut.otherTicks[f];
             otherCalls_[f] += cut.otherCalls[f];
         }
@@ -539,6 +576,8 @@ public:
         stateCalls_ += stateCalls;
         substitutedDraws_ += substitutedDraws;
     }
+    // The wrapper's brackets by how they ended, drained with the counts above (engine_velocity.h, engineVelocityTakeRunCounts).
+    void noteRuns(const EngineRunCounts& c) noexcept { runs_.add(c); }
     // The query shortcuts' counts for the frame that just ended (flat_query_cut.h, take()), drained with
     // the wrapper's.
     void noteQueries(const FlatQueryCounts& c) noexcept {
@@ -586,6 +625,7 @@ public:
         out.samplePeriod = samplingOk_ ? kSamplePeriod : 1u;
         for (unsigned f = 0; f < kFamilies; ++f) {
             out.renderMs[f] = static_cast<double>(renderTicks_[f]) * msPerTick;
+            out.renderWallMs[f] = static_cast<double>(renderWall_[f]) * msPerTick;
             out.otherMs[f] = static_cast<double>(otherTicks_[f]) * msPerTick;
             out.renderCalls[f] = renderCalls_[f];
             out.otherCalls[f] = otherCalls_[f];
@@ -598,6 +638,9 @@ public:
         }
         out.stateCalls = stateCalls_;
         out.substitutedDraws = substitutedDraws_;
+        out.runs = runs_;
+        for (unsigned k = 0; k < kRunKinds; ++k) out.runMs[k] = static_cast<double>(runs_.ticks[k]) * msPerTick;
+        out.flushMs = static_cast<double>(runs_.flushTicks) * msPerTick;
         out.queries = queries_;
         percentiles(interval_, (std::min)(frames_, kMaxSamples), &out.presentP50Ms, &out.presentP95Ms);
         out.gpuFrameSamples = gpuFrame_;
@@ -638,6 +681,7 @@ private:
         frames_ = paused_ = sampled_ = renderClocked_ = 0;
         std::memset(renderTicks_, 0, sizeof(renderTicks_));
         std::memset(renderCalls_, 0, sizeof(renderCalls_));
+        std::memset(renderWall_, 0, sizeof(renderWall_));
         std::memset(otherTicks_, 0, sizeof(otherTicks_));
         std::memset(otherCalls_, 0, sizeof(otherCalls_));
         std::memset(emRenderTicks_, 0, sizeof(emRenderTicks_));
@@ -645,6 +689,7 @@ private:
         std::memset(emOtherTicks_, 0, sizeof(emOtherTicks_));
         std::memset(emOtherCalls_, 0, sizeof(emOtherCalls_));
         stateCalls_ = substitutedDraws_ = 0;
+        runs_ = EngineRunCounts{};
         queries_ = FlatQueryCounts{};
         gpuFrame_ = gpuResolve_ = 0;
         gpuSkipped_ = gpuInvalid_ = 0;
@@ -658,7 +703,8 @@ private:
     emcpu::Floor emFloor_;
     ClockSchedule schedule_;
     unsigned frames_ = 0, paused_ = 0, sampled_ = 0, renderClocked_ = 0, gpuFrame_ = 0, gpuResolve_ = 0;
-    uint64_t renderTicks_[kFamilies] = {}, renderCalls_[kFamilies] = {};
+    uint64_t renderTicks_[kFamilies] = {}, renderCalls_[kFamilies] = {}, renderWall_[kFamilies] = {};
+    EngineRunCounts runs_;
     uint64_t otherTicks_[kFamilies] = {}, otherCalls_[kFamilies] = {};
     uint64_t emRenderTicks_[emcpu::kParts] = {}, emRenderCalls_[emcpu::kParts] = {};
     uint64_t emOtherTicks_[emcpu::kParts] = {}, emOtherCalls_[emcpu::kParts] = {};
@@ -677,8 +723,8 @@ private:
 // (kFlatLogLineBudget, 1000), no longer the truncation limit less a margin: a line near the cut
 // loses its tail when a figure grows a digit.
 constexpr size_t kLineLimit = 1000;
-constexpr int kMaxLines = 5;
-constexpr int kMaxTokens = 64;
+constexpr int kMaxLines = 7;
+constexpr int kMaxTokens = 96;
 struct Lines {
     char line[kMaxLines][1400];
     int count = 0;
@@ -777,8 +823,9 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
         emRenderMs += r.emRenderMs[p];
         emRenderCalls += r.emRenderCalls[p];
     }
+    // EDVR's time only: the game's own draw, timed inside EDVR's thunk, is printed and is not in this total.
     double totalMs = emRenderMs;
-    for (unsigned f = 0; f < kFamilies; ++f) totalMs += r.renderMs[f];
+    for (unsigned f = 0; f < kFamilies; ++f) if (!kInfo[f].gameTime) totalMs += r.renderMs[f];
 
     char total[32] = "-";
     if (anyClocked) std::snprintf(total, sizeof(total), "%.3f ms", totalMs / clocked);
@@ -826,7 +873,7 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
         callsText(calls, sizeof(calls), static_cast<double>(r.emRenderCalls[emcpu::kEval] + r.emOtherCalls[emcpu::kEval]) / sampled);
         tk.add(" + ", "engine eval relays %s calls (counted, not clocked)", calls);
         double elsewhere = 0;
-        for (unsigned f = 0; f < kFamilies; ++f) if (!kInfo[f].gameThreads) elsewhere += r.otherMs[f];
+        for (unsigned f = 0; f < kFamilies; ++f) if (!kInfo[f].gameThreads && !kInfo[f].gameTime) elsewhere += r.otherMs[f];
         tk.add(" + ", "every other family %.3f ms", elsewhere / sampled);
     }
 
@@ -876,6 +923,41 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
     tk.add("; ", "the clocks cost the render thread about %.3f ms a frame on average (%.3f ms on a clocked frame, %.0f scopes; "
                  "the gate checks on the other frames are not counted) and put about %.3f ms of the per-clocked-frame total above into it",
            price.costMs, price.clockedMs, price.scopesPerFrame, price.recordedMs);
+    // H2: the flat branch of the draw thunks, whole. Wall is the thunk's span from the station-skip test to the return, nested scopes and the
+    // game's own draw included; the hook cost is that less the game's draw (EDVR's per-draw cost the families above partition, plus the
+    // thunk's own unscoped remainder, which is "draw hook remainder" above). The game's draw per call, by what preceded it: a draw right
+    // after a substituted one is the state the driver must revalidate. Calls are per clocked frame, so draws/frame is the thunk's calls.
+    if (anyClocked) {
+        const double gameMs = r.renderMs[kGameDrawSubst] + r.renderMs[kGameDrawAfter] + r.renderMs[kGameDrawOther];
+        const uint64_t thunkCalls = r.renderCalls[kDrawThunk];
+        callsText(calls, sizeof(calls), static_cast<double>(thunkCalls) / clocked);
+        tk.add("; ", "draw hook flat branch (render thread, per clocked frame): wall %.3f ms over %s draws, game draw %.3f ms, EDVR hook cost %.3f ms "
+                     "(unscoped remainder %.3f ms)",
+               r.renderWallMs[kDrawThunk] / clocked, calls, gameMs / clocked, (r.renderWallMs[kDrawThunk] - gameMs) / clocked,
+               r.renderMs[kDrawThunk] / clocked);
+        const unsigned game[3] = {kGameDrawSubst, kGameDrawAfter, kGameDrawOther};
+        for (unsigned i = 0; i < 3; ++i) {
+            const uint64_t n = r.renderCalls[game[i]];
+            char per[24] = "-";
+            if (n) std::snprintf(per, sizeof(per), "%.2f", r.renderMs[game[i]] * 1000.0 / static_cast<double>(n));
+            callsText(calls, sizeof(calls), static_cast<double>(n) / clocked);
+            tk.add(i ? ", " : "; ", "%s%s %s us a call (%s a frame)", i ? "" : "game draw per call: ", kInfo[game[i]].name + (sizeof("game draw ") - 1), per, calls);
+        }
+    }
+    // H4: how each substituted draw ended (flat_engine_runs.h). Counts and D3D calls from every frame, time from the clocked ones. A line of
+    // zeros beside a substituted-draw count above means the counting never ran.
+    {
+        const double clockedFrames = static_cast<double>(r.renderClockedFrames);
+        char text[300];
+        tk.add("; ", "engine motion runs (the wrapper's brackets, a frame; the time is the clocked frames')");
+        for (unsigned k = 0; k < kRunKinds; ++k) {
+            formatEngineRun(text, sizeof(text), kEngineRunNames[k], "run", "runs", r.runs.runs[k], r.runs.d3dCalls[k], r.runs.timedRuns[k], r.runMs[k], frames,
+                            clockedFrames);
+            tk.add(k ? ", " : ": ", "%s", text);
+        }
+        formatEngineRun(text, sizeof(text), "lazy flushes", "flush", "flushes", r.runs.flushes, r.runs.flushCalls, r.runs.timedFlushes, r.flushMs, frames, clockedFrames);
+        tk.add(", ", "%s", text);
+    }
     // The render thread's engine motion hooks again, one token a part: the fold into "engine motion hooks" above hides which
     // one is expensive. Last, so the lines above keep their layout. kEmNames is exactly the folded, clocked parts; the names
     // drop the "engine " they carry on the other threads' list, so a search for "engine copier" finds one figure.

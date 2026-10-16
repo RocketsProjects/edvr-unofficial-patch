@@ -1206,8 +1206,20 @@ inline void run(const Harness& h) {
 
     // The overlay guard: the counters agree with the eager form's.
     {
+        edvr::engineVelocityTakeRunCounts();   // empty
         const OverlayCounts eager = overlaySequence(h, false);
+        const edvr::EngineRunCounts eagerRuns = edvr::engineVelocityTakeRunCounts();
         const OverlayCounts lazy = overlaySequence(h, true);
+        const edvr::EngineRunCounts lazyRuns = edvr::engineVelocityTakeRunCounts();
+        // H4: the same sequence, filed by how each substituted draw ended. Lazy mode off, every run is an eager capture run; lazy mode on,
+        // the guarded draws are eager under the guard and the rest stay lazy. The wrapper's D3D calls are counted for each.
+        h.check(eagerRuns.runs[edvr::kRunLazy] == 0 && eagerRuns.runs[edvr::kRunEagerGuard] == 0 && eagerRuns.runs[edvr::kRunEagerCapture] > 0 &&
+                    eagerRuns.d3dCalls[edvr::kRunEagerCapture] > 0,
+                "flat lazy: with the lazy form off every run of the overlay sequence is filed as an eager capture run, with its D3D calls");
+        h.check(lazyRuns.runs[edvr::kRunEagerGuard] == lazy.guarded && lazyRuns.runs[edvr::kRunEagerGuard] > 0 && lazyRuns.runs[edvr::kRunLazy] > 0 &&
+                    lazyRuns.runs[edvr::kRunEagerCapture] == 0 && lazyRuns.d3dCalls[edvr::kRunEagerGuard] > lazyRuns.runs[edvr::kRunEagerGuard],
+                "flat lazy: with it on the guarded draws are filed as eager-guarded runs (one per guarded draw), the others lazy, none as capture runs");
+        h.check(eagerRuns.totalRuns() == lazyRuns.totalRuns(), "flat lazy: and both forms count the same substituted draws");
         h.check(eager.guarded == 4 && eager.declined == 0, "flat lazy: the overlay sequence, every draw restoring after itself, guards four draws and declines none");
         h.check(lazy.copies == eager.copies && lazy.guarded == eager.guarded && lazy.declined == eager.declined,
                 "flat lazy: and with the lazy form the overlay counters are the same: no group was declined for a state left bound");
@@ -1224,6 +1236,7 @@ inline void run(const Harness& h) {
         Emu<> e(h, g);
         e.warmUp();
         e.startFrame();
+        edvr::engineVelocityTakeRunCounts();   // empty: the warm-up's draw is not this case's
         // A diagnostic capture arms in the middle of a run: the runtime turns the lazy form off and, in the draw scope's
         // constructor, puts the game's state back first; every producer draw after that restores after itself.
         edvr::engineVelocityFlatLazy(true);
@@ -1235,6 +1248,13 @@ inline void run(const Harness& h) {
         for (int i = 0; i < 3; ++i) {
             e.producer("not lazy: a producer draw");
             e.expectGame("not lazy: after a producer draw the game's state is back");
+        }
+        {
+            const edvr::EngineRunCounts runs = edvr::engineVelocityTakeRunCounts();
+            h.check(runs.runs[edvr::kRunLazy] == 2 && runs.runs[edvr::kRunEagerCapture] == 3 && runs.runs[edvr::kRunEagerGuard] == 0,
+                    "flat lazy: the run counts file two lazy runs before the capture armed and three eager capture runs after it");
+            h.check(runs.flushes == 1 && runs.d3dCalls[edvr::kRunLazy] > 0 && runs.d3dCalls[edvr::kRunEagerCapture] > 0,
+                    "flat lazy: one lazy flush (the capture's), and the D3D calls of the runs are counted");
         }
         h.check(!edvr::engineVelocityFlatPending(), "flat lazy: not lazy, nothing is left pending");
         if (!e.ok) std::printf("  flat lazy: not lazy, failed at: %s\n", e.why.c_str());
@@ -1256,6 +1276,7 @@ inline void run(const Harness& h) {
         Emu<> e(h, g);
         e.warmUp();
         e.startFrame();
+        edvr::engineVelocityTakeRunCounts();   // empty
         for (int i = 0; i < 5; ++i) e.producer("census: a producer draw");
         e.otherDraw("census: another draw");
         for (int i = 0; i < 3; ++i) e.producer("census: a producer draw");
@@ -1263,6 +1284,14 @@ inline void run(const Harness& h) {
         for (int i = 0; i < 2; ++i) e.producer("census: a producer draw");
         e.present();
         g.endFrame(true);
+        {
+            // H4 beside the 30 s line: the same 10 draws as runs, the three restores as flushes, and nothing eager.
+            const edvr::EngineRunCounts runs = edvr::engineVelocityTakeRunCounts();
+            h.check(runs.runs[edvr::kRunLazy] == 10 && runs.totalRuns() == 10 && runs.flushes == 3 && runs.d3dCalls[edvr::kRunLazy] > 0 &&
+                        runs.flushCalls > 0,
+                    "flat lazy: the run counts agree with the census line: 10 lazy runs, 3 flushes, each with D3D calls, nothing eager");
+            h.check(edvr::engineVelocityTakeRunCounts().totalRuns() == 0, "flat lazy: and a drain empties them");
+        }
         const std::string line = lifecycle_tests::lastLine("engine motion: flat draw bracket over", mark);
         h.check(!line.empty(), "flat lazy: the 30 s summary has a flat draw bracket line");
         if (line.empty() || lifecycle_tests::number(line, "put back ") != 3) std::printf("  flat lazy: the census line is: %s\n", line.c_str());

@@ -47,6 +47,7 @@
 
 #include "binding_shadow.h"
 #include "engine_velocity_families.h"
+#include "flat_engine_runs.h"
 
 struct ID3D11Buffer;
 struct ID3D11DeviceContext;
@@ -312,6 +313,9 @@ struct EngineVelocityWrapperCounts {
     uint64_t substitutedDraws = 0;
 };
 EngineVelocityWrapperCounts engineVelocityTakeWrapperCounts() noexcept;
+// The same brackets by how each ended: lazy, eager under the overlay guard, eager under a capture (flat_engine_runs.h), with their D3D
+// calls and, on the census's clocked frames, their time. Drained once a frame with the counts above, owner thread.
+EngineRunCounts engineVelocityTakeRunCounts() noexcept;
 // Owner-thread diagnostic, sampled after BeforeDraw and before restoring the
 // draw bracket. A source candidate alone does not prove substitution succeeded.
 inline bool engineVelocityDrawSubstituted() noexcept {

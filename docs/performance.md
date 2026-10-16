@@ -1794,6 +1794,9 @@ Hypotheses and observations from the same logs; none is a built fix.
 biggest parts are "other" 2.95 ms, the engine motion draw wrapper 0.99, the
 engine motion hooks 1.0, coverage 0.7, copy checks 0.6 and contract reduction
 0.55 (the `flat cpu 5s` families).
+Update 2026-10-16: the instruments to split "other", time the thunk and the game's own draw, and count the engine-motion wrapper's
+runs, with the observer reduction, are on `claude/flat-settlement-cpu` (BUILT, NOT FLOWN); see the 2026-10-16 entry of
+[flat-cz-fps-2026-10-11.md](flat-cz-fps-2026-10-11.md).
 
 (b) Flat cockpit: `flat resolve reset event ... camera-cut=1` every ~953 frames
 (about 10.6 s) in DLSS and TAA, with the now and previous camera positions about

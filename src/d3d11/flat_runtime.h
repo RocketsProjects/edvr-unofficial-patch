@@ -125,6 +125,10 @@ struct FlatRuntimeDrawScope {
     ID3D11ShaderResourceView* original = nullptr;
     bool gameHadTarget6 = false;   // the game's own slot 6 was occupied under a substituted draw
     bool producer = false, replaced = false;
+    // The census (flat_cpu.h, H2): the last draw this thread watched was a substituted one, so the game's draw that follows meets the state
+    // engine motion put back, or left bound. gameDrawFamily() says which family the thunk's real draw call is timed under.
+    bool afterSubstituted = false;
+    unsigned gameDrawFamily() const;
     bool drawCaptureStarted = false;
     void* drawPacket=nullptr;
     bool drawPacketExecuted=false;

@@ -559,6 +559,52 @@ inline void runLock(ID3D11Device* device,Check check) {
         }
         copy::reset();
     }
+    {   // H3: contention. Every acquisition tries the mutex first; one that finds it held is counted, per caller and thread class, before it blocks.
+        copy::reset();drain();
+        for(unsigned i=0;i<1000;++i)copy::invalidateEmission(where);
+        auto w=drain();
+        uint64_t any=0;for(unsigned c=0;c<copy::kCallers;++c)for(unsigned k=0;k<2;++k)any+=w.contended[c][k];
+        check(any==0,"contention: a thousand acquisitions that found the mutex free count none");
+        for(int renderClass=0;renderClass<2;++renderClass) {
+            std::atomic<bool> locked{false},release{false},done{false};
+            std::thread holder([&]{std::unique_lock<std::mutex> hold(copy::g_mutex);locked.store(true);while(!release.load())std::this_thread::yield();});
+            while(!locked.load())std::this_thread::yield();
+            std::thread waiter([&]{
+                if(renderClass)emcpu::g_renderThreadId.store(emcpu::currentThreadId());
+                copy::invalidateEmission(where);done.store(true);
+            });
+            // The counter moves while the waiter is still blocked: it is counted before the blocking lock, not after.
+            const auto start=std::chrono::steady_clock::now();
+            while(copy::g_lockCells[unsigned(Caller::Emit)][renderClass?0:1].contended.load()==0 && std::chrono::steady_clock::now()-start<std::chrono::seconds(5))std::this_thread::yield();
+            const bool blockedWhileCounted=!done.load() && copy::g_lockCells[unsigned(Caller::Emit)][renderClass?0:1].contended.load()==1;
+            release.store(true);holder.join();waiter.join();
+            w=drain();
+            const unsigned mine=renderClass?0:1,theirs=renderClass?1:0;
+            check(blockedWhileCounted && w.contended[kEmit][mine]==1 && w.contended[kEmit][theirs]==0,
+                  renderClass?"contention: a call that blocks on the render thread is counted once, under render, while it is still blocked"
+                             :"contention: a call that blocks on another thread is counted once, under other, while it is still blocked");
+            check(w.contended[kOther][0]+w.contended[kOther][1]==0,"contention: and under its own caller only");
+            emcpu::g_renderThreadId.store(0);
+        }
+        // The text, exactly, from a known window; the estimate of acquisitions is the sampled n times 64.
+        copy::LockWindow known;
+        known.contended[unsigned(Caller::Copier)][0]=3;known.n[unsigned(Caller::Copier)][0]=100;
+        known.contended[unsigned(Caller::ClearWalk)][1]=12;known.n[unsigned(Caller::ClearWalk)][1]=5;
+        char text[copy::kContentionLineBytes];copy::formatContentionLine(known,30.0,text);
+        check(std::string(text)=="engine motion: primary copy lock contention (30 s; acquisitions that found the mutex held, per thread class, of ~acquisitions): "
+                                 "merge begin: render 0 of ~0, other 0 of ~0 | merge end: render 0 of ~0, other 0 of ~0 | clear skip: render 0 of ~0, other 0 of ~0 | "
+                                 "clear walk: render 0 of ~0, other 12 of ~320 | copier: render 3 of ~6400, other 0 of ~0 | beginMap: render 0 of ~0, other 0 of ~0 | "
+                                 "endMap: render 0 of ~0, other 0 of ~0 | emit: render 0 of ~0, other 0 of ~0 | other: render 0 of ~0, other 0 of ~0",
+              "contention: the line's text, exactly");
+        copy::LockWindow huge;
+        for(unsigned c=0;c<copy::kCallers;++c)for(unsigned k=0;k<2;++k){huge.contended[c][k]=~0ull;huge.n[c][k]=~0ull;}
+        copy::formatContentionLine(huge,1e9,text);
+        check(std::strlen(text)<copy::kContentionLineBytes,"contention: absurd values truncate inside the buffer and stay terminated");
+        copy::LockWindow plausible;
+        for(unsigned c=0;c<copy::kCallers;++c)for(unsigned k=0;k<2;++k){plausible.contended[c][k]=999999999999ull;plausible.n[c][k]=999999999999ull;}
+        copy::formatContentionLine(plausible,1800.0,text);
+        check(std::strlen(text)<copy::kContentionLineBytes-1 && std::strstr(text,"other: render")!=nullptr,"contention: a day of counts on every cell still fits whole");
+    }
     {   // The text. One known window, exactly.
         copy::LockWindow w;
         const unsigned mergeBegin=unsigned(Caller::MergeBegin),copier=unsigned(Caller::Copier);

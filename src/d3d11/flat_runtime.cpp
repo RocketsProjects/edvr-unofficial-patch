@@ -3863,6 +3863,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         // be read as the first window's.
         const EngineVelocityWrapperCounts wrapper = engineVelocityTakeWrapperCounts();
         if (censusWasRunning) s.census.noteWrapper(wrapper.stateCalls, wrapper.substitutedDraws);
+        const EngineRunCounts runs = engineVelocityTakeRunCounts();   // drained whether or not the census runs, like the counts above
+        if (censusWasRunning) s.census.noteRuns(runs);
         // The questions the runtime answered from what it already knew (flat_query_cut.h): drained with the wrapper's counts,
         // and the frame that starts now says whether it is one of the checked ones (one in 64).
         const FlatQueryCounts queries = flatQueryCut().take();
@@ -4531,6 +4533,11 @@ void flatRuntimeSubstitution(ID3D11DeviceContext* ctx, FlatSubstEvent event) {
         return;
     }
 }
+// Owner thread only (the draw scope's constructor returns first for any other): the last watched draw was a substituted one.
+static bool g_flatPrevDrawSubstituted = false;
+unsigned FlatRuntimeDrawScope::gameDrawFamily() const {
+    return producer ? flatcpu::kGameDrawSubst : afterSubstituted ? flatcpu::kGameDrawAfter : flatcpu::kGameDrawOther;
+}
 void flatRuntimeViewport(UINT n, const D3D11_VIEWPORT* vp) {
     if (!owner()) return;
     flatcpu::Scope tracker(flatcpu::kTrackers);
@@ -4617,7 +4624,7 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
     flatRuntimeSubstitution(ctx, FlatSubstEvent::kDispatch);
     if (s.work == FlatWork::Paused) return;
     captureHdrProjectionDispatch(s);
-    flatcpu::Scope shell(flatcpu::kOther);   // the dispatch scope's own time
+    flatcpu::Scope shell(flatcpu::kDispatchShell);   // the dispatch scope's own time
     if(s.work==FlatWork::Full && s.projection) {
         if(s.projectionFrames)++s.projectionDispatches;
         // CSSetShader records only the pointer via bindingSet, unlike the
@@ -5201,8 +5208,9 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         ingress.paused.fetch_add(1, std::memory_order_relaxed);
     if (s.work == FlatWork::Paused) return;
     if (auditing) ingress.accepted.fetch_add(1, std::memory_order_relaxed);
-    flatcpu::Scope shell(flatcpu::kOther);   // the scope's own time; the named families below are carved out of it
+    flatcpu::Scope shell(flatcpu::kDrawCtor);   // the scope's own time; the named families and the two blocks below are carved out of it
     ctx = context;
+    afterSubstituted = g_flatPrevDrawSubstituted;
     drawPacketJitterBefore=s.jitterRefusals;drawPacketOverlayBefore=s.overlayRefusedWindow;
     weaponDrawKind=kind;weaponDrawCount=count;weaponDrawStart=start;weaponDrawBase=base;
     weaponDrawInstances=instances;weaponDrawStartInstance=startInstance;
@@ -5223,6 +5231,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     const FlatProjectionBindingPlan* projectionPlan=nullptr;
     const FlatProjectionBindingPlan* deferredPlan=nullptr;
+    flatcpu::Scope lookupBlock(flatcpu::kCtorLookup);   // H1: the binding views to the tone slots, stopped below (the locals outlive it)
     const auto rt = view(BindSlot::Rtv0, 0), ds = view(BindSlot::Dsv0, 1);
     k.color = rt.resource; k.rtv = bindingGet(BindSlot::Rtv0); k.width = rt.a; k.height = rt.b; k.format = rt.fmt;
     k.depth = ds.resource; k.dsv = bindingGet(BindSlot::Dsv0); k.depthWidth = ds.a; k.depthHeight = ds.b; k.depthFormat = ds.fmt;
@@ -5337,6 +5346,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         const auto bind = static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + slot);
         k.srvView[slot] = bindingGet(bind); k.srvResource[slot] = view(bind, 2 + slot).resource;
     }
+    lookupBlock.stop();
     if (foreignWork.load(std::memory_order_acquire)) {
         s.prefix.uncertain = true;
         if(overlayOpen(s)) overlayFail(s,"overlay-foreign-work");
@@ -5359,6 +5369,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         flatcpu::Scope checks(flatcpu::kCopyChecks);   // F10-only unless it is the camera-conflict draw
         return captureCameraConflict(s,d);
     }();
+    flatcpu::Scope predicateBlock(flatcpu::kCtorPredicates);   // H1: the weapon, overlay and untrusted-nomination predicates, stopped below
     if(s.weaponFootprint.active() && k.vs==0x025B4B9FF54622EDull &&
        k.ps==0x46F92DC71BF8DFA5ull) {
         const FlatRuntimeTarget* target=nullptr;
@@ -5487,6 +5498,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             }
         }
     }
+    predicateBlock.stop();
     // A protected HDR suffix can only finish at the HDR consumer. The final
     // LDR copy is never allowed to feed overlay-containing colour to a
     // temporal backend if that consumer was absent or declined.
@@ -7053,6 +7065,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     }
     if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);
     if (!ctx) return;
+    g_flatPrevDrawSubstituted = producer;   // the next watched draw's game call follows this one (gameDrawFamily)
     // A taken HUD draw whose End never ran (the hook did not reach endActualDraw): the game's state back from the layer.
     if(uiTaken&&!uiEnded){flatUiLayerEnd(ctx);uiEnded=true;}
     FlatComputeInternalScope guard;
@@ -7060,7 +7073,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
         engineVelocityFlatDomainEndDraw(ctx);domainStarted=false;
         if(auto* candidate=domainCandidate(state(),domainDepth))candidate->motion.fail("foreground-abandoned-writer");
     }
-    flatcpu::Scope shell(flatcpu::kOther);
+    flatcpu::Scope shell(flatcpu::kDrawDtor);
     if(untrustedStarted) {state().untrusted.endDraw(ctx,false);untrustedStarted=false;}
     if(untrustedPlanned && !untrustedEnded)state().untrusted.abandon();
     if(foregroundStarted) {state().foreground.endDraw(ctx,false);foregroundStarted=false;}

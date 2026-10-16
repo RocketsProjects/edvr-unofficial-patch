@@ -67,6 +67,15 @@ uint64_t g_stateCalls = 0;
 // already handed over, and the draws the 30 s summary zeroed out of familyDraws before it could.
 uint64_t g_stateCallsTaken = 0, g_substitutedBase = 0, g_substitutedTaken = 0;
 uint64_t g_stateCallsAtWindow = 0;   // g_stateCalls when the 30 s summary last ran: its window's share is the difference
+// H4 (flat_engine_runs.h): the flat wrapper's brackets by how each ended, owner thread, drained once a frame by the flat census
+// (engineVelocityTakeRunCounts). The begin half of a run is held until its end half says what kind of run it was.
+EngineRunCounts g_runs;
+uint64_t g_runBeginCalls = 0;
+int64_t g_runBeginTicks = 0;
+bool g_runBeginTimed = false;
+// Whether this thread is clocked this frame: the census's own decision (flat_cpu.h writes the gate it shares with engine_motion_cpu.h),
+// so the time is read on the same one frame in 16 as every other clocked figure, and on no other.
+inline bool runClocked() noexcept { return emcpu::gateClocks(emcpu::g_gate.load(std::memory_order_relaxed)); }
 std::atomic<const ID3D11Resource*> watch[kWatchSlots] = {};
 
 // --- The keyed pool families -------------------------------------------------
@@ -2185,6 +2194,10 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
             primaryCopy::formatLockLine(lockWindow, half, freq / 1e6, seconds, lockLine);
             Log::get().note("%s", lockLine);
         }
+        char contentionLine[1100];   // primaryCopy::kContentionLineBytes
+        static_assert(sizeof(contentionLine) == primaryCopy::kContentionLineBytes, "the contention line buffer is the formatter's");
+        primaryCopy::formatContentionLine(lockWindow, seconds, contentionLine);
+        Log::get().note("%s", contentionLine);
     }
     Log::get().note("engine motion: emit (%s) over %.0f s, %.0f frames: FUN_144312E00 calls %llu (%llu appended, %llu pool "
                     "records in all); pool records joined %llu (with motion %llu), masked %llu; masked for: first seen %llu, "
@@ -2815,6 +2828,9 @@ bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth,ID3D11ShaderResourceVi
 
 bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6) {
     const bool wasBound = g_flatPending.load(std::memory_order_relaxed);
+    const uint64_t callsBefore = g_stateCalls;
+    const bool timed = runClocked();
+    const int64_t began = timed ? EDVR_EMCPU_NOW() : 0;
     flatSaveTargets(ctx);
     if (gameHadTarget6) *gameHadTarget6 = g_flatGame.rtv[kEngineVelocityTarget] != nullptr;
     engineVelocityBeforeDraw(ctx, false);
@@ -2823,6 +2839,10 @@ bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6)
         flatFlushLocked(ctx, EngineVelocityFlushCause::kDeclined, wasBound);
         return false;
     }
+    // The run's begin half (what the draw cost to bind), held for EndDraw to file under the kind the run turns out to be.
+    g_runBeginCalls = g_stateCalls - callsBefore;
+    g_runBeginTimed = timed;
+    g_runBeginTicks = timed ? EDVR_EMCPU_NOW() - began : 0;
     if (wasBound) ++g_draw.flatKept; else ++g_draw.flatRuns;
     return true;
 }
@@ -2831,18 +2851,45 @@ void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx) {
     g_flatGame.bound = true;   // the draw was substituted: MRT6 is bound over the game's set, kept or not
     // An overlay guard's private t3 stays bound for its own draw only, and a diagnostic capture wants the
     // game's state back at once: the state goes back now, as it always did.
-    if (!g_flatLazy || g_bound.guardSrv3) {
+    const bool eager = !g_flatLazy || g_bound.guardSrv3;
+    const unsigned kind = !eager ? kRunLazy : !g_flatLazy ? kRunEagerCapture : kRunEagerGuard;
+    const uint64_t callsBefore = g_stateCalls;
+    const bool timed = g_runBeginTimed;
+    const int64_t began = timed && eager ? EDVR_EMCPU_NOW() : 0;
+    if (eager) {
         std::lock_guard<std::recursive_mutex> lock(g_mutex);
         flatFlushLocked(ctx, EngineVelocityFlushCause::kEager);
-        return;
+    } else {
+        g_flatPending.store(true, std::memory_order_release);
     }
-    g_flatPending.store(true, std::memory_order_release);
+    ++g_runs.runs[kind];
+    g_runs.d3dCalls[kind] += g_runBeginCalls + (g_stateCalls - callsBefore);
+    if (timed) {
+        ++g_runs.timedRuns[kind];
+        g_runs.ticks[kind] += static_cast<uint64_t>(g_runBeginTicks + (eager ? EDVR_EMCPU_NOW() - began : 0));
+    }
+    g_runBeginCalls = 0; g_runBeginTicks = 0; g_runBeginTimed = false;
 }
 
 void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause) {
     if (!g_flatPending.load(std::memory_order_acquire)) return;
+    const uint64_t callsBefore = g_stateCalls;
+    const bool timed = runClocked();
+    const int64_t began = timed ? EDVR_EMCPU_NOW() : 0;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     flatFlushLocked(ctx, cause);
+    ++g_runs.flushes;
+    g_runs.flushCalls += g_stateCalls - callsBefore;
+    if (timed) {
+        ++g_runs.timedFlushes;
+        g_runs.flushTicks += static_cast<uint64_t>(EDVR_EMCPU_NOW() - began);
+    }
+}
+
+EngineRunCounts engineVelocityTakeRunCounts() noexcept {
+    const EngineRunCounts out = g_runs;
+    g_runs = EngineRunCounts{};
+    return out;
 }
 
 // The frame ends (the runtime's Present, after the flush): what the bracket kept for the frame -- the game's render-target
