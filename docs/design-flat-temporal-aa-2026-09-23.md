@@ -52,6 +52,7 @@
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
+- **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
 - **10-16 BUILT, NOT FLOWN:** flat origin re-anchors (~5 km) and fast travel no longer reset TAA/DLSS; a re-anchor drops its camera
   translation, travel keeps it (review F1). Open: engine-record scenePrev in the old anchor frame; VR drops all 50 m+ translation.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
@@ -15036,3 +15037,36 @@ with no panel row, and the work of this entry is the row. The F8 panel's Debug t
 switch, live, off by default, beside **CPU timing in the log** (`advanced.flat_cpu_timing`, docs\flat-cz-fps-2026-10-11.md). The key was not renamed.
 Both keys sit in [advanced] with `# ui: ... | live | menu debug`; the generator (tools\gen_settings_schema.py) takes that token only on the keys named in
 MENU_ADVANCED_EXCEPTIONS, so any other [advanced] key with a menu token is still refused, and VR's menu has no `debug` page.
+
+## 2026-10-16 — Operations FSR report, log stopped before report
+
+Archive `edvr_logs\reports\20261016-230503`; flat /novr `v0.20.0-rc.2`, build `6AD165AB`.
+The configured mode was experimental mono temporal FSR; game SS controlled render size.
+The HDR route target and HDR extent were both 5120x1440 (R=D). FSR3 used AMD's
+port version 3.1.2 on an AMD Radeon RX 9070 XT; EDHM was in the mod chain.
+
+FSR treated frames early and late. At 21:17:02, 142/146 HDR triggers were treated;
+backend=142. Intermittent blank-scene windows at 21:46:34–21:46:39 and 21:48:44
+had zero treatment and backend work, then treatment resumed. At 21:51:54 the route
+treated 300/300 frames; admitted, reached, captured, copied, prepped, backend,
+finished and restored were each 300, with no backend failures reported.
+
+The runtime logged FSR/XeSS/off mode changes from 21:17 through 21:30. The 3D-mode
+watch found no profile switch. No manual diagnostic capture was included. The graphics log
+hit its 16 MB cap at 21:52:18; breadcrumbs continued to uptime 6744 s, frame 388600,
+and the bundle was created at 23:05. Breadcrumbs prove liveness only, so post-cap
+AA mode and treatment are unknown. **Ruled out:** permanent flat SDK/backend failure
+within the captured interval; the later interval remains unknown.
+
+Sean clarified that Operations are a new instanced game feature he has not tried.
+Open hypothesis: unfamiliar shaders or a different scene route refuse treatment;
+this bundle does not establish that cause or capture the affected shader bytecode.
+Discriminate with `no-supported-motion-source-pair`, `no-known-tone-pass` or
+`no-known-output-copy`: these normally recover in a recognized scene (structural
+stand-down probes every 1.5 s). A persistent late-write latch instead logs
+`flat hdr route: turned off`. The affected interval is missing, so none is confirmed.
+
+Next: ask the reporter to set `edvr-flat.ini` `[log] max_mb=128`, restart, and reproduce.
+Press NumLock while FSR has no visible effect inside the Operation, then again after
+leaving if it remains ineffective; note both times and bundle promptly. A normal-scene
+capture with FSR working would provide the comparison. Keep FSR selected for captures.
