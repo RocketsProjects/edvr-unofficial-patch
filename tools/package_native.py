@@ -409,7 +409,8 @@ def self_test():
             assert _stamped_versions(bare) is None
 
     with tempfile.TemporaryDirectory(prefix="edvr-package-test-") as temp:
-        root = Path(temp); (root / "build").mkdir(); (root / "release").mkdir()
+        # Windows TEMP may use an 8.3 alias; match package()'s resolved paths.
+        root = Path(temp).resolve(); (root / "build").mkdir(); (root / "release").mkdir()
         for source, _ in _files(root, True):
             source.parent.mkdir(parents=True, exist_ok=True); source.write_bytes(b"payload")
         wrapper_source = root / "tools" / "install_proton.py"

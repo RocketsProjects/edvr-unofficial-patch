@@ -388,7 +388,8 @@ def self_test():
             pass
 
     with TemporaryDirectory() as tmp:
-        root = Path(tmp)
+        # Windows TEMP may use an 8.3 alias; match build_plan()'s resolved paths.
+        root = Path(tmp).resolve()
         home = root / "home"
         steam = home / ".local/share/Steam"
         other = home / "other Steam"
