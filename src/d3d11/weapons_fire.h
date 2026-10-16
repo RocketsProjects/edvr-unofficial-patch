@@ -58,6 +58,15 @@ inline bool weaponsFireJitterCancel(uint64_t vs) {
     return i < 0 ? true : kWeaponPairs[i].cancelJitter;
 }
 
+// Was a weapons layer's content DROPPED: the layer holds `draws` draws of frame `contentSeq`, and the last frame a re-issue CARRIED the weapons' light
+// into the picture (`publishedSeq`, stamped only by a re-issue whose bracket included the layer's content) is not that frame. Asked at the eye's next
+// weapons draw, which may be many frames after the content (a burst's last draw, then quiet). Not the latest TONEMAP's frame: the re-issue runs every
+// frame for the HUD, so comparing against it called every burst's last draw lost when the next burst began (the 2026-10-16 10:36 flight's "lost layer"
+// lines, one per burst end; docs/dlss-blur-elements-2026-10-14.md, "The never-tonemapped frames: found").
+inline bool weaponsLayerDropped(uint64_t contentSeq, uint32_t draws, uint64_t publishedSeq) {
+    return contentSeq != 0 && draws != 0 && publishedSeq != contentSeq;
+}
+
 // advanced.sharp_weapons_blend (TEMPORARY, an A/B while the arc is open): how the layer's weapons light reaches the picture.
 //   matched: by tonemap difference, T(F_up + L) - T(F_up), added onto the upscaled picture: the light is tonemapped WITH the scene it
 //            lands on, so it is as bright as the game would have drawn it.

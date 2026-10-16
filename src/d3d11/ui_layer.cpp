@@ -368,7 +368,8 @@ struct Eye {
     uint64_t wSeq = 0;               // the frame whose weapons draws it holds
     uint32_t wDraws = 0;
     const void* wTarget = nullptr;   // the HDR target those draws left (identity)
-    uint64_t wToneSeq = 0;           // the frame the tonemap re-issue ran for
+    uint64_t wToneSeq = 0;           // the frame the tonemap re-issue ran for (any re-issue: the HUD's runs every frame)
+    uint64_t wPubSeq = 0;            // the last frame a re-issue carried THIS layer's content (weaponsLayerDropped asks it)
     uint32_t wMissStreak = 0;        // consecutive content-frames no re-issue published
     uint32_t wOtherTargets = 0;      // this frame's weapons draws made into another HDR target than wTarget (the instrument below)
 
@@ -573,7 +574,7 @@ struct Window {
     uint64_t hdrDrawTimingAborted = 0;
     // fix.sharp_weapons: weapons draws taken into the weapons layer (by pair), layers whose content no re-issue published, and the
     // eye-frames' composites by kind: the matched difference, the plain add, and the plain add a matched frame fell back to.
-    uint64_t weaponsTaken = 0, weaponsLost = 0;
+    uint64_t weaponsTaken = 0, weaponsLost = 0, weaponsContentFrames = 0;
     uint64_t weaponsPair[kWeaponPairCount] = {};
     uint64_t weaponsEyeMatched = 0, weaponsEyePlain = 0, weaponsEyeFallback = 0;
     uint64_t hdrDeclined[static_cast<size_t>(CrispToneDecline::kCount)] = {};
@@ -1242,6 +1243,7 @@ bool releaseLayers() {
         e.wDraws = 0;
         e.wTarget = nullptr;
         e.wToneSeq = 0;
+        e.wPubSeq = 0;
         e.wMissStreak = 0;
         e.dsCopy.Reset();
         e.dsCopyDepth.Reset();
@@ -1905,7 +1907,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ++g_win.clears;
     }
     if (wl && e.wSeq != g_draw.seq) {
-        if (e.wSeq && e.wDraws && e.wToneSeq != e.wSeq) {
+        if (weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)) {
             ++g_win.weaponsLost;
             noteWeaponsLost(g_draw.eye, e, g_draw.seq);
             // The missing-consumer deadline, as the HUD layer's: content no tonemap re-issue published for a streak of frames says
@@ -1923,6 +1925,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         routeEnd(ctx, timer);
         e.wSeq = g_draw.seq;
         e.wDraws = 0;
+        ++g_win.weaponsContentFrames;
         e.wOtherTargets = 0;
         e.wTarget = g_draw.targetRes;
         ++g_win.clears;
@@ -3092,11 +3095,11 @@ void logSharpWeapons() {
     }
     Log::get().note(
         "sharp weapons: %.2f draws a frame in the HDR layer, %.2f a frame left in the scene%s%s%s, blend %s; eye-frames: %llu matched, %llu plain, "
-        "%llu plain after a matched frame fell back; %llu layers' content never reached a tonemap; draws by pair: %s.",
+        "%llu plain after a matched frame fell back, of %llu eye-frames with weapons draws; %llu layers' content never reached a tonemap; draws by pair: %s.",
         static_cast<double>(taken) / frames, static_cast<double>(leftTotal) / frames, reasons.empty() ? "" : " (", reasons.c_str(),
         reasons.empty() ? "" : ")", blend, static_cast<unsigned long long>(g_win.weaponsEyeMatched),
         static_cast<unsigned long long>(g_win.weaponsEyePlain), static_cast<unsigned long long>(g_win.weaponsEyeFallback),
-        static_cast<unsigned long long>(g_win.weaponsLost), pairs.c_str());
+        static_cast<unsigned long long>(g_win.weaponsContentFrames), static_cast<unsigned long long>(g_win.weaponsLost), pairs.c_str());
 }
 
 void logTotals(double seconds) {
@@ -4733,7 +4736,11 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
     e.wToneSeq = seq;
     if (runtimeFlatProfile()) flatUiTrailNoteReissue(seq, FlatUiTrailReissue::kPublished, 0, seq);
     e.hdrMissStreak = 0;  // a publication landed: the R1 deadline's streak resets
-    e.wMissStreak = 0;
+    if (hadWeapons) {
+        // Stamped ONLY by a bracket that carried the weapons layer's content: the drop test (weaponsLayerDropped) compares it with the content's frame.
+        e.wPubSeq = seq;
+        e.wMissStreak = 0;
+    }
     g_lastRedirectSeq = seq;
     detail::g_uiLayerWatching = true;
     ++g_win.hdrReissued;
