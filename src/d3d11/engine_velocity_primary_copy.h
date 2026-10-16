@@ -408,9 +408,12 @@ inline Stats stats() {
     const uint64_t clearSkipped=g_clearSkipped.load(std::memory_order_relaxed),mergeSkipped=g_mergeSkipped.load(std::memory_order_relaxed);
     result.clearCalls+=clearSkipped;result.clearNoClaims+=clearSkipped;
     result.mergeCalls+=mergeSkipped;result.mergeWithoutClaims+=mergeSkipped;
-    result.copies+=g_copierSkipped.load(std::memory_order_relaxed);result.copierNoLease+=g_copierNoLeaseSkipped.load(std::memory_order_relaxed);
+    // One read of each counter feeds both its total and its lock-free figure: these advance outside g_mutex, and two loads could straddle a
+    // fast copy, leaving a lock-free count above the total it is said to be inside.
+    const uint64_t copierSkipped=g_copierSkipped.load(std::memory_order_relaxed),copierNoLeaseSkipped=g_copierNoLeaseSkipped.load(std::memory_order_relaxed);
+    result.copies+=copierSkipped;result.copierNoLease+=copierNoLeaseSkipped;
     result.clearLockFree=clearSkipped;result.mergeLockFree=mergeSkipped;
-    result.copiesLockFree=g_copierSkipped.load(std::memory_order_relaxed);result.copierNoLeaseLockFree=g_copierNoLeaseSkipped.load(std::memory_order_relaxed);
+    result.copiesLockFree=copierSkipped;result.copierNoLeaseLockFree=copierNoLeaseSkipped;
     result.activeClaims=g_emissions.size();result.activePlans=g_mergePlans.size();return result;
 }
 constexpr size_t kExitLineBytes=400;

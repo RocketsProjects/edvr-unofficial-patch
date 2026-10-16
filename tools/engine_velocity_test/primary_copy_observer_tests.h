@@ -454,6 +454,20 @@ inline void runExitLine(ID3D11Device* device,Check check) {
     const auto st=copy::stats();
     check(st.clearLockFree==10 && st.clearCalls==11 && st.mergeLockFree==4 && st.mergeCalls==4 && st.copiesLockFree==9 && st.copies==9 &&
           st.copierNoLeaseLockFree==3 && st.copierNoLease==3,"exit line: the lock-free counts come from the real exits and sit inside the totals the other lines print");
+    {   // Review 49f28838 F2: the lock-free counters advance outside the mutex, so each must be read ONCE per snapshot. With no locked copy in
+        // the state (nothing but lock-free exits), every snapshot taken while a thread keeps counting must still have the lock-free figure
+        // equal to its total; two loads per counter let a copy land between them and put the figure above the total.
+        copy::reset();
+        std::atomic<bool> stop{false};
+        std::thread counter([&]{while(!stop.load(std::memory_order_relaxed)){
+            copy::g_copierSkipped.fetch_add(1,std::memory_order_relaxed);copy::g_copierNoLeaseSkipped.fetch_add(1,std::memory_order_relaxed);}});
+        unsigned torn=0;
+        for(unsigned i=0;i<400000;++i){const auto s=copy::stats();
+            if(s.copiesLockFree!=s.copies || s.copierNoLeaseLockFree!=s.copierNoLease)++torn;}
+        stop.store(true);counter.join();
+        if(torn)std::printf("info: %u of 400000 snapshots had a lock-free copier count different from its total\n",torn);
+        check(torn==0,"stats(): a snapshot taken beside a counting thread reads each lock-free counter once, so the figure equals its total");
+    }
     copy::reset();
 }inline void formatBoth(const copy::LockWindow& w,double perUs,double seconds,char (&lines)[2][copy::kLockLineBytes]){for(unsigned half=0;half<2;++half)copy::formatLockLine(w,half,perUs,seconds,lines[half]);}
 inline void runLock(ID3D11Device* device,Check check) {

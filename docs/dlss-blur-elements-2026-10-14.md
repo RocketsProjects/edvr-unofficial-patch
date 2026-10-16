@@ -411,3 +411,20 @@ beams and multicannon over space, a planet and near a star, head still then movi
 line at 2 or more a frame while firing with 0 left in the scene, no trails, beams cut by hulls and never over the cockpit, the beam over a planet or
 star as bright as stock (A/B: `advanced.sharp_weapons_blend = plain` is brighter there), the dump's tonemap input without the beams. Repeat with
 `fix.ui_quality = off`, and with `fix.sharp_weapons = off` for the control. Then Sean judges the halo (no bloom in this tier, W2).
+
+**Flight fdb42b63 (2026-10-16 09:47, Frontier VR, eye run 094919; claude/combat-flight-1).** Producer probe 434D120: hooked; 1 bucket,
+render thread only, never a rigid bucket; caller 0x434D741 (FUN_14434D470); every record zero-block. It produces the cockpit and HUD
+pool records (2CEC 30, 1989 22, E508 8, 5DAD 2 of 67 tagged slots). No shield drew in the dump, so the shield link is still indirect
+(070301's shared +0x120 fingerprint); next, an eye dump during a shield hit. Sharp weapons: no draws left in the scene, no fallbacks,
+matched only (no A/B yet); Sean: "weapons/shields look much better", beams and tracers sharp. 0.5-2.6% of weapon eye-frames' layer
+content never reached a tonemap (possible occasional bolt flicker; open). W3: 939D's CB0 rows 4-7 equal the scene's jittered
+cb1[270..273] bit for bit apart from translation, so its cancel is right; 1F17 and 5C1D were not captured. Explosion: drawn by the five
+transcriptions only; B477 and E812 were not created this session. New untranscribed billboard VS dumped: F5CF and A958 (fade and
+no-fade, 9F4B layout), EF5D and 5218 (BBAD layout), 83E9 (9AEC layout); they need PS names from a census before transcription.
+**Flight fdb42b63, session 095256 (2026-10-16 10:02-10:05).** W3 settled: 1F17's `cb1[41..43]`, and 5C1D's and 939D's CB0 rows 4-7,
+equal the jittered scene `cb1[270..272]` bit for bit apart from translation (dump 100257), so jitter cancel is right for all three pairs.
+Shield producer CONFIRMED: in 100257 the 5C1D slots 69/70 and 820E slots 109/110 are 434D120-appended records (bucket 2312D2D2A50, one
+model key 2317A8D34F0, stable for 19 frames, render thread); FUN_14434D470 makes the shield. Smoke dumps 100331/100415/100454: every
+billboard draw went through a facing transcription (100% swapped); no untranscribed billboard and no B477/E812 drew; 6A19 is a pool mesh,
+not a billboard. Sharp weapons: 1.4-4.7% of weapon eye-frames' layers never reach a tonemap (the HUD layer lost none); the flown build
+cannot locate it. Sean A/B'd plain against matched at 09:54-09:57 and saw no difference; the key stays for long-session A/B.

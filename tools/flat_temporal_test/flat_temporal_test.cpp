@@ -29,6 +29,7 @@
 #include "flat_standdown_tests.h"
 #include "flat_elite_settings_tests.h"
 #include "flat_cpu_tests.h"
+#include "flat_pair_facts_tests.h"
 #include "flat_witness_bound_tests.h"
 #include "flat_camera_table_tests.h"
 #include "flat_query_cut_tests.h"
@@ -3204,7 +3205,7 @@ void testFlatSubstitutionWiring() {
     const char* const order[] = {
         "engineVelocityFlatLazy(!diagnostics);",
         "if (diagnostics) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);",
-        "d.supported = engineVelocityPoolFamilyPair(k.vs, k.ps);",
+        "d.supported = pairFact.supported;",
         "if (!d.supported) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);",
         "d.hdrCopyVerified=verifyHdrCopy(ctx,d);",
         "const bool continuesRun =",
@@ -3967,6 +3968,7 @@ int main(int argc, char** argv) {
     failures += flatEliteSettingsTests();
     testFlatWarningWiring();
     failures += flatCpuTests();
+    failures += flatPairFactsTests();
     testFlatCpuWiring();
     failures += flatOwnerGateTests();
     failures += flatOwnerGateWiringTests();
