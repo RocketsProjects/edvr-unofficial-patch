@@ -2,11 +2,12 @@
 
 ## Status
 
-State (2026-10-16, round 3): BUILT, NOT FLOWN, on `claude/flat-settlement-cpu-3` (not main): the overlay guard remembers its verification
-(13 -> 10 D3D calls on a guarded run that follows an unmoved one, pixels byte-identical, 4 mutants killed); the constructor's shader-pair
-questions and the UI ask are remembered per (vs, ps, profile) (equivalence over a corpus and a cross product, each key part dropped in turn
-is caught); the census's pool-family GPU section is wired into the flat thunks (it never ran there); the structural fast path is a design.
-Flight: read `ctor lookup block`, `ctor tail block`, `pool-family draws`, then decide the class census. Section "2026-10-16, round 3".
+State (2026-10-16, round 4): BUILT, NOT FLOWN, on `claude/flat-settlement-cpu-4` (not main): the draw class census (the sizing instrument for the
+structural fast path), the pool-family GPU section fixed (timed per RUN of draws: the per-draw spans summed past the frame time), and the lazy
+overlay guard (the group's private t3 stays bound: 12.4 -> 6.2 D3D calls a guarded draw on WARP, pixels byte-identical, mutants killed).
+Round 3 flown: the guard's verification memo saved ~0.04 ms (13 -> 10 calls; the Sets remain), the pair memo cut the tail by 0.19 ms and the
+lookup block by 0.08 ms (both on `claude/flat-guard-pair-memo`, for main). Flight: read `draw classes`, `pool-family draws`, `eager guarded`.
+Sections "2026-10-16, round 3" and "round 4".
 State (2026-10-16, results): the observer fix is FLOWN, CONFIRMED and ON MAIN (1ae94885, `claude/engine-motion-observers`): render-thread
 engine motion 427 -> 77 ns a call (about 0.8 ms a frame), job merge and clear down 92%, 100% of calls lock-free, 0 contention. The
 instruments (H1-H4, round 2) are on `claude/flat-settlement-cpu-2`, NOT on main. Round 2 flown (DLSS, 14.6k draws a frame): EDVR render
@@ -443,3 +444,62 @@ class of bug the contract reducer exists to prevent, and it will not show in a l
 Recommendation: build the class census first (one flight), then only the cheapest provable class (4: no colour or no scene extent) with a
 rig that replays the recorded draw traces (the frame-contract corpus, 46/46 frames replay identical) with the fast path on and off and
 requires identical contracts, before any wider class.
+
+
+## 2026-10-16, round 4: the draw class census, the pool-family GPU figure fixed, the lazy overlay guard
+
+Branch `claude/flat-settlement-cpu-4` (round 3 kept, main merged in). BUILT, NOT FLOWN. Round 3, flown: the guard's verification memo saved only
+about 0.04 ms (13 -> 10 calls; the Sets remain); the pair memo cut the constructor tail by 0.19 ms and the lookup block by 0.08 ms (both are on
+`claude/flat-guard-pair-memo`, un-instrumented, for main); the pool-family GPU figure was credible in its first two windows only.
+
+### The draw class census (flat_draw_classes.h)
+Per 5 s window, on the render thread's clocked frames only (one gate test per draw on the other frames), the draws a clocked frame by class and the
+share of each that repeats the previous WATCHED draw's state. Classes, in precedence order: post chain (tone passes, the map tonemap, the UI-only
+source tones, the final copy), pool-family (a keyed pair), HUD/UI (a pair the UI rule can ever name), offscreen (no colour target, or a target
+that is not of the scene's extent), HDR scene (format 26, none of the above), other scene. "Same" = target (colour, depth view, depth, format,
+extent, viewport), shader pair, or all of them plus the b1 buffer and the camera rows hash. It sizes the memoised-verdict fast path of the round-3
+design: a draw that is "same all" as the one before is what a run-length fold could absorb.
+Line (a token after the bind thunks token; three classes to a token; real lines are single lines):
+`; draw classes (render thread, per clocked frame; the previous watched draw is the comparison; 13140 draws in all over 20 clocked frames): post chain
+2.0 a frame (same as the previous draw: target 50% pair 25% all 20%), pool-family 200.0 a frame (same as the previous draw: target 75% pair 50% all
+45%), HUD/UI 5.0 a frame (same as the previous draw: target 50% pair 50% all 25%), offscreen 300.0 a frame (same as the previous draw: target 90%
+pair 83% all 80%), HDR scene 150.0 a frame (same as the previous draw: target 80% pair 20% all 17%), other scene 0.0 a frame (same as the previous
+draw: -)` (made-up figures). Absent when the census did not run in the window. How to read it: the fast path is worth building for the classes
+whose "all" share is high AND whose constructor steps are skippable; offscreen and the repeats of HDR scene are the candidates, pool-family and
+post chain never. Rig: classification precedence, the tracker's counts (a new frame compares with nothing), the line.
+
+### The pool-family GPU figure: the bug and the fix
+Flown windows (07:09-07:13, the round-3 build): `pool-family draws` read - for three windows, then 0.116, 4.223, 4.237, 14.853, 17.100 and 25.903 ms
+a frame at 1.7k, 6.4k, then a constant 8.6k draws a frame: the per-draw mean 0.07 us, 0.66, 0.49, then 1.73, 1.99 and 3.00 us. Not a missing reset (every
+section's window bases are taken in the log-and-reset loop, and the counts are per window) and not a cumulative K-cap extrapolation (the figure is
+mean timed span x occurrences a frame, both per window). It is the method: a timestamp pair around ONE draw covers the pipeline depth in flight on
+a busy GPU, not that draw alone, so the per-draw mean rises with GPU load, and multiplying thousands of such serialised intervals by the draws a
+frame counts time the frame never spent serially (overlapping intervals summed). Fix (gpu_census.h, "RUN sections"): the section is timed per RUN of
+kept-bound substituted draws: one span opened after the first draw's binds, closed at the restore (flatRestoreLocked) before its state calls,
+occurrences are runs (the K cap and the stride count runs), each draw is an issued call, and the figure is the mean span of a timed run times the
+runs a frame, printed `pool-family draws (EDVR's slot target and shaders) 0.600 (10.00 draws in 3.00 runs/frame)`. The runs are disjoint in stream
+order, so the sum cannot exceed the frame. The flat thunks' per-draw altered scopes are gone. Rig: the stub census counts spans: 5+3 kept-bound
+draws are two spans, not eight, and eight issued calls; eager draws are one span each; a ClearState leaves its span to the poll (no End on a context
+that lost its state); gpu_census_test prints a run section as `N draws in R runs/frame` with the mean run span times the runs. NOT done: timing
+EDVR's own extra GPU work on those draws (the MRT6 write): the same draw with and without the slot target would be an invasive A/B; the census
+spans around EDVR's added passes already exist (engine velocity, the skin passes), so what the section still holds is the game's work in these
+draws plus the target and shader swap, not EDVR's share alone. The figure is trustworthy as an upper bound of the section, no longer a sum of
+serialised intervals.
+
+### The lazy overlay guard (design (d) built; engine_velocity.cpp)
+The guard's private t3 now stays bound across a group's guarded draws and goes back where the rest of the run's state goes. The five conditions:
+(1) the private t3 stays bound across consecutive guarded draws of one group (`keptBound`: same private SRV, PS t3's generation unchanged: nothing
+to read or set); (2) the next non-guarded substituted draw restores the game's t3 first (`guardRestoreT3`: writes back only if the game has not set t3
+since, the srv3Gen check; every other restore() calls it too); (3) the kOverlay flush happens only when a NEW snapshot is to be copied; (4) a game
+set of t3 is caught by generation: the draw cache's fast path compares PS t3's generation while a guard is bound (a guarded draw issued with
+nothing else rebound otherwise ran with the game's t3 under the guarded shader); (5) EndDraw is eager only without the lazy form (a capture armed);
+the eager-guarded run kind is now always zero. The 30 s overlay line counts guarded draws the fast path let through.
+WARP, 14 guarded draws (a t3 rebind, target rebinds, an RTV0-only and a DSV0-only move, fast-path draws, a rebind between fast-path draws), D3D
+calls the context received per guarded draw: restoring after every draw `14 10 12 14 14 12 14 14 14 14 10 10 12 10` (174, 12.43 a draw), kept bound
+`12 2 10 12 12 5 10 4 4 12 0 0 4 0` (87, 6.21 a draw): the second draw of a group costs 2 against 10, a draw with nothing rebound 0. The game
+targets and the slot target hash byte-identical between the forms. Exposure (unchanged in kind): a game Get of t3 between two guarded draws of a
+group reads the private SRV, as a Get already reads MRT6 and the derived blend in the lazy bracket. The remaining cost per guarded draw is
+`overlayDepthState` (one OMGetDepthStencilState). Fail-before, mutants (mutants.py --run, one by hand): `lazy-guard-kept-ignores-t3-generation` and
+a fast path blind to t3 (header, by hand) are killed by the t3-rebind sequence (G1), `lazy-guard-nonguard-draw-keeps-t3` by the mixed scene,
+`lazy-guard-flushes-at-every-overlay-draw` and `lazy-guard-ends-eager` by the call shape of a group (G5). What the flight reads: `eager guarded` in
+the runs line is 0.0 runs/frame and the guarded draws are in `lazy`; `engine motion hooks`, `lazy flushes` and the render-thread frame time.
