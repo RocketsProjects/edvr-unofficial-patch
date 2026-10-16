@@ -85,32 +85,34 @@ rename that most manual installs get wrong.
 ### Linux on Steam (Proton)
 
 Download `edvr-installer-linux-<version>.zip` from the release and unzip it. It
-contains `edvr-installer-linux.py`, the Windows `edvr-installer.exe`, and
-`README-linux.txt`. The wrapper needs Python 3 and the Proton installation
-already used by Steam. It needs no Protontricks or system Wine. Run Elite once
-from Steam, then close it. On Steam Deck, use Desktop Mode and run as your
-normal user:
+contains `edvr_installer.sh`, `edvr-installer-linux.py`, the Windows
+`edvr-installer.exe`, and `README-linux.txt`. The launcher needs Python 3 and
+the Proton installation already used by Steam. It needs no Protontricks or
+system Wine. Run Elite once from Steam, then close it. On Steam Deck, use
+Desktop Mode and run as your normal user:
 
 ```sh
-python3 edvr-installer-linux.py
+./edvr_installer.sh
 ```
 
 This opens the Windows installer GUI with the Odyssey product folder
 preselected. For a flat install with a current installer build:
 
 ```sh
-python3 edvr-installer-linux.py --install --scope flat
+./edvr_installer.sh --install --scope flat
 ```
 
 To see the Windows install plan without changing game files:
 
 ```sh
-python3 edvr-installer-linux.py --preview --scope flat
+./edvr_installer.sh --preview --scope flat
 ```
 
 Preview starts Steam's Proton and runtime and may update prefix bookkeeping.
 `--dry-run` resolves and prints the exact launch command without starting
-anything or writing files. See `README-linux.txt` in the ZIP for options.
+anything or writing files. See `README-linux.txt` in the ZIP for options. The
+shell launcher forwards all options to the Python wrapper; you can also run
+`python3 edvr-installer-linux.py` directly.
 
 ### Checking it worked
 
