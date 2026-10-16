@@ -49,6 +49,7 @@
 #include "flat_sibling_policy_tests.h"
 #include "flat_shadow_model_tests.h"
 #include "flat_log_line_tests.h"
+#include "flat_owner_gate_tests.h"
 #include "../../src/d3d11/flat_runtime.h"
 #include "../../src/d3d11/flat_foreground_probe_policy.h"
 
@@ -3967,6 +3968,8 @@ int main(int argc, char** argv) {
     testFlatWarningWiring();
     failures += flatCpuTests();
     testFlatCpuWiring();
+    failures += flatOwnerGateTests();
+    failures += flatOwnerGateWiringTests();
     failures += flatWitnessBoundTests();
     testFlatWitnessWiring();
     failures += flatCameraTableTests();
