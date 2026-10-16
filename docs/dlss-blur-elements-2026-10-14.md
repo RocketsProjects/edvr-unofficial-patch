@@ -288,3 +288,12 @@ the halo.
 
 - ruled out: 820E/6EAA in the layer, because it samples the pre-DLSS eye HDR copy at the screen UV; it stays in the scene.
 - ruled out: drawing the effects at render size and upscaling the layer, because it is the blur DLSS already gives, without DLSS.
+**Flight fdb42b63 (2026-10-16 09:47, Frontier VR, eye run 094919; claude/combat-flight-1).** Producer probe 434D120: hooked; 1 bucket,
+render thread only, never a rigid bucket; caller 0x434D741 (FUN_14434D470); every record zero-block. It produces the cockpit and HUD
+pool records (2CEC 30, 1989 22, E508 8, 5DAD 2 of 67 tagged slots). No shield drew in the dump, so the shield link is still indirect
+(070301's shared +0x120 fingerprint); next, an eye dump during a shield hit. Sharp weapons: no draws left in the scene, no fallbacks,
+matched only (no A/B yet); Sean: "weapons/shields look much better", beams and tracers sharp. 0.5-2.6% of weapon eye-frames' layer
+content never reached a tonemap (possible occasional bolt flicker; open). W3: 939D's CB0 rows 4-7 equal the scene's jittered
+cb1[270..273] bit for bit apart from translation, so its cancel is right; 1F17 and 5C1D were not captured. Explosion: drawn by the five
+transcriptions only; B477 and E812 were not created this session. New untranscribed billboard VS dumped: F5CF and A958 (fade and
+no-fade, 9F4B layout), EF5D and 5218 (BBAD layout), 83E9 (9AEC layout); they need PS names from a census before transcription.
