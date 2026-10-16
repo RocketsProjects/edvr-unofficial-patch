@@ -4476,7 +4476,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             static_cast<unsigned long long>(s.resetDepthWindow), static_cast<unsigned long long>(s.resetColorWindow),
             static_cast<unsigned long long>(s.resetExtentWindow), static_cast<unsigned long long>(s.presentNotOkWindow));
         const auto renderer = flatMonoResolveStats();
-        Log::get().note("flat runtime renderer cumulative: calls=%llu init=%llu context-change=%llu allocations=%llu full-reset=%llu invalidations=%llu accepted-reset=%llu accepted-continue=%llu requested-reset=%llu lost-history=%llu frame-gap=%llu invalid-prev-camera=%llu format-change=%llu camera-cut=%llu backend-failure=%llu continue-run=%llu longest-continue-run=%llu hdr-resolves=%llu hdr-spatial=%llu origin-rebases-absorbed=%llu last-rebase-m=%.1f",
+        Log::get().note("flat runtime renderer cumulative: calls=%llu init=%llu context-change=%llu allocations=%llu full-reset=%llu invalidations=%llu accepted-reset=%llu accepted-continue=%llu requested-reset=%llu lost-history=%llu frame-gap=%llu invalid-prev-camera=%llu format-change=%llu camera-cut=%llu backend-failure=%llu continue-run=%llu longest-continue-run=%llu hdr-resolves=%llu hdr-spatial=%llu origin-rebases-absorbed=%llu last-rebase-m=%.1f fast-travel-steps-kept=%llu",
             static_cast<unsigned long long>(renderer.calls), static_cast<unsigned long long>(renderer.initializations),
             static_cast<unsigned long long>(renderer.contextPointerMismatches), static_cast<unsigned long long>(renderer.allocations),
             static_cast<unsigned long long>(renderer.fullResets), static_cast<unsigned long long>(renderer.invalidations),
@@ -4487,7 +4487,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             static_cast<unsigned long long>(renderer.backendFailures), static_cast<unsigned long long>(renderer.currentContinueRun),
             static_cast<unsigned long long>(renderer.longestContinueRun), static_cast<unsigned long long>(renderer.hdrResolves),
             static_cast<unsigned long long>(renderer.hdrSpatial),
-            static_cast<unsigned long long>(renderer.originRebases), renderer.lastOriginRebaseM);
+            static_cast<unsigned long long>(renderer.originRebases), renderer.lastOriginRebaseM,
+            static_cast<unsigned long long>(renderer.travelSteps));
         s.refusedWindow.clear(); s.acceptedResetWindow = s.acceptedHistoryWindow = 0;
         s.resetMissingWindow = s.resetGapWindow = s.resetDepthWindow = s.resetColorWindow = s.resetExtentWindow = 0;
         s.presentNotOkWindow = 0;
