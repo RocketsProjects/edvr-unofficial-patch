@@ -27,13 +27,13 @@ This file is why it does what it does. Using it is one paragraph in the
   runtime is recovered from the newest receipt that still holds it, so an
   update, a switch to flat-only and an uninstall work after two tool installs
   (see "Receipts from the tool"). `installer_test` pins it over real files.
-- **Linux Steam wrapper:** `tools/install_proton.py` ships in the Linux
-  installer and full release ZIPs. It uses Steam's existing Proton prefix,
-  recorded Proton runner, and required runtime directly; Protontricks is no
-  longer needed. On 2026-10-16, the direct route reached the Odyssey folder. An
-  older flat installer refused to proceed while Elite was running. A current
-  unified installer preview and actual installation remain unverified; the game
-  session logs do not establish VR rendering behavior.
+- **Linux Steam wrapper:** `tools/install_proton.py` and `edvr_installer.sh`
+  ship in the Linux installer and full release ZIPs. They use Steam's existing
+  Proton prefix, recorded Proton runner, and required runtime directly;
+  Protontricks is no longer needed. On 2026-10-16, the direct route reached the
+  Odyssey folder. An older flat installer refused to proceed while Elite was
+  running. A current unified installer preview and actual installation remain
+  unverified; the game session logs do not establish VR rendering behavior.
 
 ## Why it exists
 
@@ -554,28 +554,30 @@ stale relative to HEAD. The session logs give no VR rendering conclusion.
 selection, and runtime launch have live smoke evidence; preview with a current
 unified installer and an actual installation remain unverified.
 
-The Linux installer ZIP includes `edvr-installer-linux.py`, the Windows
-installer, and `README-linux.txt`. The wrapper needs Python 3 and Steam's
-existing Proton installation, with no Protontricks or system Wine dependency.
-Run Elite once from Steam, close it, then run the wrapper as your normal user.
-On Steam Deck, use Desktop Mode. With no action option, the Windows installer
-GUI opens with the Odyssey product folder selected. For a flat install with a
-current installer build:
+The Linux installer ZIP includes `edvr_installer.sh`,
+`edvr-installer-linux.py`, the Windows installer, and `README-linux.txt`. The
+launcher needs Python 3 and Steam's existing Proton installation, with no
+Protontricks or system Wine dependency. Run Elite once from Steam, close it,
+then run the wrapper as your normal user. On Steam Deck, use Desktop Mode. With
+no action option, the Windows installer GUI opens with the Odyssey product
+folder selected. For a flat install with a current installer build:
 
 ```sh
-python3 edvr-installer-linux.py --install --scope flat
+./edvr_installer.sh --install --scope flat
 ```
 
 To see the Windows install plan without changing game files:
 
 ```sh
-python3 edvr-installer-linux.py --preview --scope flat
+./edvr_installer.sh --preview --scope flat
 ```
 
 Preview invokes the Windows installer with `--install --dry-run` through the
 selected Proton and its runtime. It may update Proton prefix bookkeeping. The
 wrapper's `--dry-run` instead resolves and prints the exact paths and command
-without starting a process or writing files.
+without starting a process or writing files. The shell launcher works from any
+directory and forwards all options to the Python wrapper, which you can run
+directly as `python3 edvr-installer-linux.py`.
 
 The wrapper discovers native or Flatpak Steam roots, reads Steam's library and
 app manifests, and requires an existing Elite prefix (`pfx/drive_c`). It uses
