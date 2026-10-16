@@ -1084,7 +1084,26 @@ void flatSaveTargets(ID3D11DeviceContext* ctx) {
 // slowPath calls this mid-visit, and the visit goes on to bind MRT6 over the set again. The saved set stays: the
 // context holds it again, and the generations say for how long that stays true. It does not stay past the frame
 // (engineVelocityFlatFrameEnd): a set held that long would keep the game's views alive.
+// The GPU census's pool-family section in the flat profile, timed per RUN (gpu_census.h, RUN sections). A run is what the bracket keeps bound:
+// from the visit that binds EDVR's state to the restore that gives the game's back (flatRestoreLocked), the consecutive substituted draws between.
+// The span opens after the first draw's binds and closes at the restore, before its state calls; each draw adds itself as an issued call. A span
+// around every draw summed to more than the frame (the serialised intervals of a busy GPU; gpu_census.h), a span around the run does not.
+// Owner thread. Left open by an abandon: no context to end it on, and GpuIntervals::poll voids an open interval.
+bool g_gpuRunActive = false, g_gpuRunTimed = false;
+inline void gpuRunBegin(ID3D11DeviceContext* ctx) noexcept {
+    if (g_gpuRunActive) return;
+    g_gpuRunActive = true;
+    g_gpuRunTimed = gpuCensusBegin(ctx, GpuCensusSection::AlteredPoolFamily);
+}
+inline void gpuRunEnd(ID3D11DeviceContext* ctx) noexcept {
+    if (!g_gpuRunActive) return;
+    g_gpuRunActive = false;
+    if (g_gpuRunTimed) gpuCensusEnd(ctx, GpuCensusSection::AlteredPoolFamily);
+    g_gpuRunTimed = false;
+}
+
 void flatRestoreLocked(ID3D11DeviceContext* ctx) {
+    gpuRunEnd(ctx);   // the run's GPU span closes before the state goes back
     restore(ctx);
     if (g_flatGame.bound && g_flatGame.saved && ctx && bindingGeneration(BindSlot::Rtv0) == g_flatGame.rtvGen &&
         bindingGeneration(BindSlot::Dsv0) == g_flatGame.dsvGen) {
@@ -2887,12 +2906,14 @@ bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6)
         flatFlushLocked(ctx, EngineVelocityFlushCause::kDeclined, wasBound);
         return false;
     }
+    gpuRunBegin(ctx);   // a no-op inside a run the bracket kept bound
     if (wasBound) ++g_draw.flatKept; else ++g_draw.flatRuns;
     return true;
 }
 
 void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx) {
     g_flatGame.bound = true;   // the draw was substituted: MRT6 is bound over the game's set, kept or not
+    gpuCensusNoteIssued(GpuCensusSection::AlteredPoolFamily);   // this draw is one of the run's (an eager flush below ends the run)
     // A capture wants the game's state back at once. The overlay guard no longer does: its private t3 stays bound across the group's draws and goes
     // back where the rest of the run's state goes.
     if (!g_flatLazy) {
@@ -2922,6 +2943,7 @@ void engineVelocityFlatFrameEnd() noexcept {
 
 void engineVelocityFlatAbandon() noexcept {
     guardForget();
+    g_gpuRunActive = g_gpuRunTimed = false;   // the context lost its state and may be gone: no End on it
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     g_bound = Bound{};   // the context lost every binding: nothing of EDVR's is left to put back
     g_anyBound.store(false, std::memory_order_release);
