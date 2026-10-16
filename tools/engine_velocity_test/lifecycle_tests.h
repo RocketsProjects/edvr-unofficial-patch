@@ -1499,6 +1499,7 @@ inline void run(const Harness& h) {
         overlay();
         g.endFrame(true);
         const std::string summary = lastLine("engine motion: flat overlay guard:", overlayMark);
+        if (number(summary, "copies ") != 3 || number(summary, "guarded draws ") != 4) std::printf("  flat overlay lifecycle: the summary line is: %s\n", summary.c_str());
         h.check(number(summary, "copies ") == 3 && number(summary, "guarded draws ") == 4,
                 "flat overlay lifecycle: one base copy per group, refreshed after other producer and next frame");
         h.check(number(summary, "declined state ") == 0 && number(summary, "resource ") == 0 &&
