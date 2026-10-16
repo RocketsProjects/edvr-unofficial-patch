@@ -3938,6 +3938,25 @@ if errorlevel 1 ( echo [edvr] ERROR: supercruise census test build failed & exit
 "%OBJ%\supercruisecensus\supercruise_census_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_sharp_weapons_test
+echo [edvr] === sharp_weapons_test.exe ===
+REM fix.sharp_weapons (docs\dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16"): the weapons-fire family rule and its one-token mutants, the jitter-cancel table,
+REM the two keys' independence over the four combinations (the family gate, the decisions, the layer's two halves), the tonemap re-issue plan with its mutants,
+REM three recorded census frames of the 2026-10-16 flight (tools\sharp_weapons_test\fixtures: exactly the weapon rows change decision), the source scans of the
+REM wiring with a control for each, and -- on WARP, with the debug layer -- the production source pass, blend states and step bindings driven through a synthetic
+REM game tonemap: the tonemap-difference composite equals T(F + L) over a lit background where the plain add is far off, and over black the two agree, with
+REM mutants of the sequence caught. Built outside build\ and without d3d11.lib's build dir: its device is System32's. Runs at the repo root (the scans read sources).
+if not exist "%OBJ%\sharpweapons" mkdir "%OBJ%\sharpweapons"
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\sharpweapons\\" /Fe"%OBJ%\sharpweapons\sharp_weapons_test.exe" ^
+    "tools\sharp_weapons_test\sharp_weapons_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: sharp weapons test build failed & exit /b 1 )
+"%OBJ%\sharpweapons\sharp_weapons_test.exe" --dry-run || exit /b 1
+"%OBJ%\sharpweapons\sharp_weapons_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_menu_pad_test
 echo [edvr] === menu_pad_test.exe ===
 if not exist "%OBJ%\menupad" mkdir "%OBJ%\menupad"

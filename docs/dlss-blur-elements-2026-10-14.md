@@ -8,8 +8,12 @@
   with one amendment, the shield records must also be joined (they share the hull's pose but carry no previous pose). H-clobber RULED
   OUT; the hull's 13% stale_slot is open hypothesis H-bias (a depth bias missing from the exported z). E2 (do puffs ride the ship) inconclusive.
   Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"); count-and-tag hook next.
-- **Weapons fire (2026-10-16): DESIGN ONLY:** the HDR-layer route (the space dust's) for 1F17, 939D and 5C1D; 820E stays. Evidence W1-W5
-  offline first. See "Design, 2026-10-16: weapons fire after the upscale".
+- **Weapons fire (2026-10-16): BUILT, NOT FLOWN** (`claude/sharp-weapons`; entry "Built, 2026-10-16: weapons fire in its own HDR layer"). 1F17,
+  939D and 5C1D go into the eye's own additive HDR layer, composited after the upscale by tonemap difference; 820E stays. Key
+  `fix.sharp_weapons` (default on, independent of `fix.ui_quality`). **Temporary key:** `advanced.sharp_weapons_blend = matched | plain` (A/B of
+  the composite; ship matched and propose removing the key, quoted, when the arc closes). Open: W3 (the jitter in 1F17's CB1[41..48], 939D's and
+  5C1D's CB0 rows 4-7; the next eye dump watches them) and the flight. WARP proof: matched within 1/255 of T(F+L), the plain add 71/255 off over a lit
+  background.
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
   path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
   docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
@@ -304,3 +308,60 @@ model key 2317A8D34F0, stable for 19 frames, render thread); FUN_14434D470 makes
 billboard draw went through a facing transcription (100% swapped); no untranscribed billboard and no B477/E812 drew; 6A19 is a pool mesh,
 not a billboard. Sharp weapons: 1.4-4.7% of weapon eye-frames' layers never reach a tonemap (the HUD layer lost none); the flown build
 cannot locate it. Sean A/B'd plain against matched at 09:54-09:57 and saw no difference; the key stays for long-session A/B.
+
+## Built, 2026-10-16: weapons fire in its own HDR layer (`claude/sharp-weapons`, BUILT, NOT FLOWN)
+
+The design above, built. Key `fix.sharp_weapons = on | off` (default on, F8 Performance page "Sharp weapons"), VR only, needs temporal AA on. A
+temporary A/B, `advanced.sharp_weapons_blend = matched | plain` (default matched, hidden), is listed in the Status block and goes when the arc closes.
+
+**What it does.** The three exact pairs 1F17BF54/A75C1DB6 (beams, bolts), 939D01F2/C5DF9CC9 (multicannon) and 5C1D8EF5/C49F999F (the shield strike's
+additive part) are family `weapons fire` (`weapons_fire.h`; `UiLayerFamily::kWeaponsFire`, last in its enum). It is on the HDR branch of
+`uiLayerFamilyFor`, in `uiLayerFamilyTakesHdr`, not in `uiLayerFamilyIsSceneLines` (exempt from the density rule). vscreen.cpp reads the pixel
+shader for these vertex shaders; 820E/6EAA stays in the scene. The draw goes through the space dust's route (seeded depth, GEQUAL/GREATER no write,
+the viewport remap with the jitter cancel), but into the eye's OWN additive HDR layer W (R16G16B16A16_FLOAT, the HUD layer's size), not the HUD's.
+
+**The toggle is independent of `fix.ui_quality`.** `refreshLive()` computes two halves: `quality = uiLayerLiveFor(g_target, ...)` (unchanged, now
+`detail::g_uiQualityLive`) and `g_weaponsLive = uiLayerWeaponsLiveFor(fix.sharp_weapons, temporal, ..., not flat)`. `detail::g_uiLayerLive` (the
+machinery: the door, the HDR tonemap re-issue, the composite) is their union. A family is decided only if its own key is on
+(`uiLayerFamilyEnabled`; new decision `family-off`, tested right after the verdict). The parts that are the interface's stay on the first half: the 2D
+screen and the post-tonemap rules (`uiLayerFamilyOf` returns none for the 8-bit target), the VR world route and the on-foot gate
+(`uiLayerLiveForWorldRoute`), the composite census, the after-UI take (`uiLayerNoteOther` returns after its seed check). With `fix.ui_quality` off the
+layer size is the DLSS output times 1.0, and at the frame boundary the interface's HDR layer, transmittance and depth are released. All four
+combinations are in `tools\sharp_weapons_test` (the family gate, the decisions on every family and on the recorded rows, the two liveness halves).
+
+**A2, the brightness fix (matched).** Per eye-frame with weapons content, the layer re-issues the game's own tonemap draw (its exposure, LUT and b2,
+nothing rebound but the target, the blend and the HDR source) over the 8-bit layer E: clear E to (0,0,0,1); one source pass (`sharp_weapons.h`,
+fullscreen, two targets, the viewport the layer's) writes S = F_up (the tonemap's HDR input resampled to the layer's size by a bilinear made of Loads, so
+the game's sampler is not involved) and adds the same F_up onto W, so W = L + F_up; then tonemap(S) replaces E, and tonemap(W) is drawn with blend
+SUBTRACT (source minus E), which leaves T(F_up + L) - T(F_up) in E (8-bit, clamped at 0); the HUD's tonemap, when the HUD layer has content, is then
+ADDED (ONE, ONE) so it does not erase the weapons. The door's existing composite adds E onto the post-RCAS picture (alpha one, no coverage). `plain` is
+`E = T(W)` with W holding L alone. `sharpTonePlan` is the pure plan (`vscreen.cpp` issues the game's draw once per step through
+`uiLayerCrispToneNext`); a matched frame that has no scratch, shaders or deferred context falls back to plain, counted. S is one scratch for both eyes.
+- **Proof (WARP, `sharp_weapons_test`, a synthetic tonemap with a scalar exposure, a 3D LUT and a compressing curve, so T(F+L) != T(F)+T(L)):** over a lit
+  background the matched composite is within 1/255 of T(F + L), the plain add 71/255 off; over black both are within 1. Mutants of the sequence (the
+  source pass replacing instead of adding, the lit step replacing, the base step missing, the lit step reading the scratch) are off by 44, 71, 71, 71.
+  S is exact to the CPU resample, W within 0.002 of L + F_up. The source pass leaves the immediate context's targets, viewport and shaders as it found
+  them, and the debug layer reports nothing. Needs the game's tonemap to read its HDR source by the vertex stream's UV (its layout is POSITION +
+  TEXCOORD; the HUD's re-issue has flown on the same assumption).
+
+**A1, the watch.** `eye_draw_snapshot.h` watches 1F17BF54, 939D01F2 and 5C1D8EF5, so the next eye dump holds their VS b0/b1/b2. W3 stays OPEN until
+1F17's CB1[41..48] and 939D's and 5C1D's CB0 rows 4-7 are compared with the jittered scene camera's matrix of the same frame. The cancel is read per pair
+from `kWeaponPairs[].cancelJitter` (default true, as the dust): `weaponsFireJitterCancel(vs)` sets `g_draw.jx/jy` to zero for a pair marked false. If a
+pair is unjittered, set its entry false and nothing else.
+
+**Log lines** (all `sharp weapons:`; each has a not-exercised form). Once per change: on or off with the state of `fix.ui_quality`, the blend. First
+sight of each pair: `first <pair> draw seen (vs .. ps ..): <decision>; jitter cancel yes|NO`. Every 30 s: `<K> draws a frame in the HDR layer, <L> a
+frame left in the scene (reasons), blend matched|plain; eye-frames: N matched, N plain, N plain after a matched frame fell back; N layers' content never
+reached a tonemap; draws by pair: ...`, or `not exercised in this window (no weapons-fire draw reached the layer's decision)`, or `not live this window
+(fix.temporal_aa is off ...)`. First composite of each kind, the first fall-back, the scratch and each weapons layer when created.
+
+**Not changed / accepted.** The weapons' light is added to E independently of the HUD's coverage: a translucent HUD over a beam no longer dims it (W1
+accepted that later over-blends no longer dim the beams). The matched difference is made from two 8-bit results, so it carries +-1/255. T(0) is
+taken as 0, as the HUD route does. A failure of the weapons layer stands down the weapons alone (`sharp weapons: stands down`); the missing tonemap
+consumer stands down the shared re-issue, HUD and weapons both.
+
+**Flight (Frontier VR, DLSS K).** Read the log with `python tools\edvr_log.py --target frontier --expect-build HEAD`, then grep `sharp weapons`. Fire
+beams and multicannon over space, a planet and near a star, head still then moving; hit a shield; an eye dump during a burst for W3. Pass: the 30 s
+line at 2 or more a frame while firing with 0 left in the scene, no trails, beams cut by hulls and never over the cockpit, the beam over a planet or
+star as bright as stock (A/B: `advanced.sharp_weapons_blend = plain` is brighter there), the dump's tonemap input without the beams. Repeat with
+`fix.ui_quality = off`, and with `fix.sharp_weapons = off` for the control. Then Sean judges the halo (no bloom in this tier, W2).
