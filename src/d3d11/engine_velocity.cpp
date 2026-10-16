@@ -2165,10 +2165,27 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
     Log::get().note("engine motion: primary copy observer work cumulative: clear calls %llu, no-claim skips %llu, "
                     "nodes walked %llu; merge calls %llu, started without claims %llu, nodes walked %llu; "
                     "active source claims %llu, detached plans %llu. Skips do not inspect native dictionaries; "
-                    "clear failures describe attempted observer work, not skipped calls. Merge walks are retained for clear/unwind safety.",
+                    "clear failures describe attempted observer work, not skipped calls. A merge or clear with no live claim is counted "
+                    "without a lock or a walk of the native lists, so nodes walked count only calls that had claims to protect.",
                     u(copyStats.clearCalls),u(copyStats.clearNoClaims),u(copyStats.clearNodes),
                     u(copyStats.mergeCalls),u(copyStats.mergeWithoutClaims),u(copyStats.mergeNodes),
                     u(copyStats.activeClaims),u(copyStats.activePlans));
+    {   // How many of those calls never took the mutex (the lock-free exits), so a flight can read the share.
+        char exitLine[400];   // primaryCopy::kExitLineBytes
+        static_assert(sizeof(exitLine) == primaryCopy::kExitLineBytes, "the exit line buffer is the formatter's");
+        primaryCopy::formatExitLine(copyStats, exitLine);
+        Log::get().note("%s", exitLine);
+    }
+    {   // Who waited for primaryCopy's mutex and who held it, this window (engine_velocity_primary_copy.h, the lock instrument).
+        // All zeros while the counters above grow means the instrument did not run.
+        const auto lockWindow = primaryCopy::takeLockWindow();
+        char lockLine[1160];   // primaryCopy::kLockLineBytes
+        static_assert(sizeof(lockLine) == primaryCopy::kLockLineBytes, "the lock line buffer is the formatter's");
+        for (unsigned half = 0; half < 2; ++half) {
+            primaryCopy::formatLockLine(lockWindow, half, freq / 1e6, seconds, lockLine);
+            Log::get().note("%s", lockLine);
+        }
+    }
     Log::get().note("engine motion: emit (%s) over %.0f s, %.0f frames: FUN_144312E00 calls %llu (%llu appended, %llu pool "
                     "records in all); pool records joined %llu (with motion %llu), masked %llu; masked for: first seen %llu, "
                     "gap %llu, reused pointer %llu, pose changed within one frame %llu, previous frame not certified %llu, "
