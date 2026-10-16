@@ -397,6 +397,8 @@ def self_test():
         exe = script.parent / "edvr-installer.exe"
         exe.write_bytes(b"exe")
         proton = steam / "steamapps/common/Proton's $() Experimental"
+        if os.name == "nt":
+            proton = Path("//?/" + proton.resolve().as_posix())
         (proton / "files/share/default_pfx").mkdir(parents=True)
         (proton / "proton").write_bytes(b"script")
         (proton / "toolmanifest.vdf").write_text(
