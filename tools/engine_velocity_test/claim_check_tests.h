@@ -10,6 +10,13 @@
 //   C6  the snapshot equals the containers after every entry point, and is rewritten only when it changes
 //   C7  a claim published while a call is checking is never lost and never wrongly moved: a torn read falls back to the mutex,
 //       a claim published after the check is ordered after the call, and four threads of churn never lose or move a claim
+// The pool copier's claim check (round 6, runCopierCheck): a copy whose range holds no claim and no patch, with claims live or patches held
+// (the checks run C8, C10, C11, C9, C12: the mutation proof reads the first failing check, so the narrow cases come before the wide table)
+//   C8  such copies take no mutex and allocate nothing (and the same copies with the check off take it every time)
+//   C9  every shape of claim, patch and lease around the range leaves exactly the state the copier as it was leaves
+//   C10 a plan in flight and more than four claims take the mutex, as before
+//   C11 a claim or a lease change published inside the check's reads tears them; one published after is ordered after the copy
+//   C12 four threads (a producer, a re-mapping caller, a claim churn, a lease churn): no claim published before a copy is missed
 #include "primary_copy_observer_tests.h"
 #include "allocation_counter.h"
 #include <atomic>
@@ -133,8 +140,234 @@ inline std::vector<uintptr_t> keysNow() {
 // Publishes a claim from inside a reader's window (rig hooks); one shot.
 inline Record* g_hookRecord=nullptr;
 inline void publishHookClaim() noexcept {
-    copy::g_claimMidRead=nullptr;copy::g_claimAfterWalk=nullptr;
+    copy::g_claimMidRead=nullptr;copy::g_claimAfterWalk=nullptr;copy::g_copierClaimMidRead=nullptr;
     claim(*g_hookRecord,kFrame);
+}
+inline ID3D11Buffer* g_hookPool=nullptr;
+inline void endHookPool() noexcept {copy::g_copierClaimMidRead=nullptr;copy::endMap(g_hookPool,1);}
+
+// ---- the copier's claim check (round 6) ------------------------------------------------------------------------------------------------
+// What the pool copier changes, for a call whose range holds no claim: nothing but a counter, unless the lease table or a patch in the range
+// says otherwise. These cases pin each reason to take the mutex, and that everything else does not.
+struct CopyOutcome {
+    uint64_t copies=0,noLease=0,ambiguous=0,invalidRange=0,invalidated=0,declined=0,joined=0,epochDelta=0;
+    std::vector<uintptr_t> keys;std::vector<std::vector<uint64_t>> pools;
+    bool operator==(const CopyOutcome& o) const {
+        return copies==o.copies && noLease==o.noLease && ambiguous==o.ambiguous && invalidRange==o.invalidRange && invalidated==o.invalidated &&
+               declined==o.declined && joined==o.joined && epochDelta==o.epochDelta && keys==o.keys && pools==o.pools;
+    }
+};
+struct CopyScenario {
+    const char* name;
+    bool leaseA,secondLeaseAtA;           // a lease on pool A (4 slots); and a second pool leased at the same base
+    std::vector<unsigned> joins;          // slots of A joined first (a claim made and copied): the pool holds a patch there
+    std::vector<unsigned> claimed;        // src[i] claimed and left live
+    unsigned extras;                      // further claims on records no call touches
+    bool plan;                            // a merge plan in flight
+    unsigned sourceIndex,first,count;uint32_t stride;
+    bool free;                            // expected: handed back without the mutex
+};
+inline void runCopierCheck(ID3D11Device* device,Check check) {
+    D3D11_BUFFER_DESC d{};d.ByteWidth=4*336;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.StructureByteStride=336;d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> poolA,poolB,poolY;
+    if(!device || FAILED(device->CreateBuffer(&d,nullptr,&poolA)) || FAILED(device->CreateBuffer(&d,nullptr,&poolB)) || FAILED(device->CreateBuffer(&d,nullptr,&poolY))){
+        check(false,"claim check C8: pool fixtures");return;
+    }
+    static Record src[4]={record(10),record(20),record(30),record(40)},mappedA[4]={src[0],src[1],src[2],src[3]},mappedB[4]={src[0],src[1],src[2],src[3]};
+    static Record extra[6]={record(50),record(51),record(52),record(53),record(54),record(55)},clean=record(60);
+    const uintptr_t baseA=reinterpret_cast<uintptr_t>(mappedA),baseB=reinterpret_cast<uintptr_t>(mappedB);
+    auto refill=[&]{for(unsigned i=0;i<4;++i){mappedA[i]=src[i];mappedB[i]=src[i];}};
+    auto mapA=[&]{return copy::beginMap(poolA.Get(),mappedA,sizeof(mappedA),336,D3D11_MAP_WRITE_DISCARD,1,kFrame);};
+    auto mapB=[&](uintptr_t base){return copy::beginMap(poolB.Get(),reinterpret_cast<void*>(base),sizeof(mappedB),336,D3D11_MAP_WRITE_DISCARD,1,kFrame);};
+    auto join=[&](unsigned slot){claim(src[slot],kFrame);copy::copier(baseA,336,addressOf(src[slot]),slot,1,kFrame);};
+    auto capture=[&](uint64_t epoch){
+        CopyOutcome o;const auto s=copy::stats();
+        o.copies=s.copies;o.noLease=s.copierNoLease;o.ambiguous=s.copierAmbiguous;o.invalidRange=s.copierInvalidRange;
+        o.invalidated=s.invalidated;o.declined=s.declined;o.joined=s.joined;o.epochDelta=copy::g_emissionEpoch-epoch;
+        o.keys=keysNow();
+        for(auto* buffer:{poolA.Get(),poolB.Get()}) {
+            const auto it=copy::g_pools.find(buffer);
+            if(it==copy::g_pools.end()){o.pools.push_back({0});continue;}
+            std::vector<uint64_t> state={1,it->second.active?1u:0u,it->second.valid?1u:0u},slots;
+            for(const auto& p:it->second.patches)slots.push_back(p.first);
+            std::sort(slots.begin(),slots.end());state.insert(state.end(),slots.begin(),slots.end());o.pools.push_back(state);
+        }
+        return o;
+    };
+    static Tree detachedTree(1,1);static Destination detachedDestination;detachedTree.item(0,0,0)=record(5);
+    // ---- C8: under live claims and a held patch, copies that touch neither take the mutex 0 times and allocate nothing ----------------------
+    for(unsigned live=1;live<=copy::kClaimViewMax;++live) {
+        constexpr unsigned N=1000;
+        auto traffic=[&]{for(unsigned i=0;i<N;++i){copy::copier(baseA,336,addressOf(src[3]),3,1,kFrame);copy::copier(baseB,336,addressOf(src[3]),0,1,kFrame);}};
+        auto setup=[&]{copy::reset();refill();mapA();join(0);for(unsigned i=0;i<live;++i)claim(extra[i],kFrame);};   // a patch at slot 0, `live` claims
+        const std::string suffix=" ("+std::to_string(live)+" live claims and a patch)";
+        setup();const auto lockedBefore=copy::g_stats.copies;
+        rig_allocations::start();traffic();const auto allocations=rig_allocations::stop();
+        const auto lockedWith=copy::g_stats.copies-lockedBefore;
+        const auto s=copy::stats();
+        check(lockedWith==0 && s.copierPrechecked==2*N && s.copiesLockFree==2*N && s.copierPrecheckDeclined==0,
+              ("claim check C8: copies that touch no claim and no patch take the mutex 0 times and are counted by the claim check"+suffix).c_str());
+        check(s.copierNoLease==N && s.copierNoLeaseLockFree==N && s.copies==lockedBefore+2*N,
+              ("claim check C8: and the copies that found no lease are counted as no-lease copies, inside the copy total"+suffix).c_str());
+        check(allocations==0 && copy::g_emissions.size()==live && published(),("claim check C8: and allocate nothing, leaving the claims and the published state exact"+suffix).c_str());
+        setup();const auto lockedBeforeOff=copy::g_stats.copies;copy::g_claimPrecheck=false;
+        rig_allocations::start();traffic();const auto offAllocations=rig_allocations::stop();
+        copy::g_claimPrecheck=true;
+        const auto lockedOff=copy::g_stats.copies-lockedBeforeOff;
+        std::printf("claim check C8 (%u live claims and a patch, %u + %u copies): with the check: %llu mutex acquisitions, %llu heap allocations; check off (the code as it was): %llu acquisitions, %llu allocations\n",
+                    live,N,N,static_cast<unsigned long long>(lockedWith),static_cast<unsigned long long>(allocations),
+                    static_cast<unsigned long long>(lockedOff),static_cast<unsigned long long>(offAllocations));
+        check(lockedOff==2*N && copy::stats().copierPrechecked==0,
+              ("claim check C8: with the check off the same copies take the mutex "+std::to_string(2*N)+" times (the counters are live)"+suffix).c_str());
+    }
+    copy::reset();
+    // ---- C10: a plan in flight, more than four claims: every copy takes the mutex, as before; back under the limits the check returns ----------
+    {
+        refill();mapA();for(unsigned i=0;i<5;++i)claim(extra[i],kFrame);
+        copy::copier(baseA,336,addressOf(src[3]),3,1,kFrame);
+        check(copy::g_stats.copies==1 && copy::stats().copierPrecheckDeclined==1 && copy::stats().copierPrechecked==0,
+              "claim check C10: five live claims: a copy that touches none of them takes the mutex and is counted as declined");
+        copy::invalidateEmission(addressOf(extra[4]));
+        copy::copier(baseA,336,addressOf(src[3]),3,1,kFrame);
+        check(copy::g_stats.copies==1 && copy::stats().copierPrechecked==1 && published(),"claim check C10: back to four claims, the same copy is handed back without the mutex");
+        copy::reset();refill();mapA();claim(extra[0],kFrame);claim(detachedTree.item(0,0,0),kFrame);
+        void* plan=copy::beginMergeOpaque(detachedDestination.ptr(),detachedTree.anchor(0),kFrame);
+        copy::copier(baseA,336,addressOf(src[3]),3,1,kFrame);
+        check(plan!=copy::mergeNoClaimsToken() && copy::g_stats.copies==1 && copy::stats().copierPrecheckDeclined==1 && copy::stats().copierPrechecked==0,
+              "claim check C10: a merge plan in flight: a copy that touches no claim takes the mutex and is counted as declined");
+        copy::endMergeOpaque(plan,true);
+        copy::copier(baseA,336,addressOf(src[3]),3,1,kFrame);
+        check(copy::g_stats.copies==1 && copy::stats().copierPrechecked==1 && published(),"claim check C10: and when the plan ends the same copy is handed back without the mutex");
+        copy::reset();
+    }
+    // ---- C11: a change published while a copy is checking is never missed ----------------------------------------------------------------------
+    {
+        // A claim for the copy's own range published between the check's reads and its re-check: the read is torn, the copy takes the mutex and joins it.
+        copy::reset();refill();mapA();claim(extra[0],kFrame);g_hookRecord=&src[3];copy::g_copierClaimMidRead=&publishHookClaim;
+        copy::copier(baseA,336,addressOf(src[3]),3,1,kFrame);
+        check(copy::g_copierClaimMidRead==nullptr && copy::g_stats.copies==1 && copy::stats().copierPrecheckDeclined==1 && copy::stats().copierPrechecked==0 &&
+              !heldLocked(addressOf(src[3])) && copy::g_stats.joined==1 && published(),
+              "claim check C11: a claim for the copy's range published inside the check's reads tears them; the copy takes the mutex and joins that claim");
+        // A lease that ends between the reads and the re-check must not count as a lease found: the locked copy finds none.
+        copy::reset();refill();mapA();claim(extra[0],kFrame);g_hookPool=poolA.Get();copy::g_copierClaimMidRead=&endHookPool;
+        copy::copier(baseA,336,addressOf(src[3]),3,1,kFrame);
+        check(copy::g_copierClaimMidRead==nullptr && copy::g_stats.copies==1 && copy::g_stats.copierNoLease==1 && copy::stats().copierPrecheckDeclined==1 &&
+              copy::stats().copierPrechecked==0 && published(),"claim check C11: a lease that ends inside the check's reads tears them; the copy takes the mutex and finds no lease");
+        // A claim published after the check found the range clean is ordered after the copy: it is left alone, and the next copy takes it.
+        copy::reset();refill();mapA();claim(extra[0],kFrame);g_hookRecord=&src[3];copy::g_claimAfterWalk=&publishHookClaim;
+        copy::copier(baseA,336,addressOf(src[3]),3,1,kFrame);
+        check(copy::stats().copierPrechecked==1 && copy::g_stats.copies==0 && heldLocked(addressOf(src[3])) && copy::g_stats.joined==0 && published(),
+              "claim check C11: a claim published after the check is ordered after the copy: handed back without the mutex, the claim left alone");
+        copy::copier(baseA,336,addressOf(src[3]),3,1,kFrame);
+        check(!heldLocked(addressOf(src[3])) && copy::g_stats.copies==1 && copy::g_stats.joined==1,"claim check C11: and the next copy takes it");
+        copy::reset();
+    }
+    // ---- C9: against the copier as it was (always the mutex), on every shape of claim, patch and lease around the range ----------------
+    const CopyScenario scenarios[]={
+        {"a claim elsewhere, the lease fits",true,false,{},{0},0,false,3,3,1,336,true},
+        {"a claim in the range",true,false,{},{3},0,false,3,3,1,336,false},
+        {"a claim in the last record of a three-record range",true,false,{},{3},0,false,1,1,3,336,false},
+        {"a claim in the first record of a two-record range",true,false,{},{2},0,false,2,2,2,336,false},
+        {"a claim one record past the range",true,false,{},{3},0,false,1,1,2,336,true},
+        {"a claim one record before the range",true,false,{},{0},0,false,1,1,2,336,true},
+        {"a claim elsewhere, no lease at the base",false,false,{},{0},0,false,3,3,1,336,true},
+        {"a claim in the range, no lease at the base",false,false,{},{3},0,false,3,3,1,336,false},
+        {"a claim elsewhere, the whole lease copied",true,false,{},{},1,false,0,0,4,336,true},
+        {"a claim elsewhere, a range one past the lease",true,false,{},{0},0,false,3,3,2,336,false},
+        {"a claim elsewhere, a stride that is not a record",true,false,{},{0},0,false,3,3,1,320,false},
+        {"a claim elsewhere, two leases at the base",true,true,{},{0},0,false,3,3,1,336,false},
+        {"a patch below the range, a claim elsewhere",true,false,{0},{1},0,false,3,3,1,336,true},
+        {"a patch at the range's first slot, a claim elsewhere",true,false,{1},{0},0,false,3,1,2,336,false},
+        {"a patch at the range's last slot, a claim elsewhere",true,false,{2},{0},0,false,3,1,2,336,false},
+        {"a patch one slot past the range, a claim elsewhere",true,false,{2},{0},0,false,3,0,2,336,true},
+        {"a patch, a claim elsewhere, a range past the lease",true,false,{0},{1},0,false,3,3,2,336,false},
+        {"two patches around the range (the bound is a span, so the mutex)",true,false,{0,3},{},1,false,3,1,2,336,false},
+        {"four claims elsewhere",true,false,{},{0,1},2,false,3,3,1,336,true},
+        {"five claims elsewhere",true,false,{},{0,1},3,false,3,3,1,336,false},
+        {"five claims, one of them in the range",true,false,{},{0,1,3},2,false,3,3,1,336,false},
+        {"four claims, one of them in the range",true,false,{},{0,1,3},1,false,3,3,1,336,false},
+        {"a plan in flight, a claim elsewhere",true,false,{},{0},0,true,3,3,1,336,false},
+    };
+    for(const auto& sc:scenarios) {
+        CopyOutcome outcome[2];uint64_t lockedCopies=0,prechecked=0;
+        for(int reference=1;reference>=0;--reference) {
+            copy::reset();refill();
+            if(sc.leaseA)mapA();
+            if(sc.secondLeaseAtA)mapB(baseA);
+            for(unsigned slot:sc.joins)join(slot);
+            for(unsigned i:sc.claimed)claim(src[i],kFrame);
+            for(unsigned i=0;i<sc.extras;++i)claim(extra[i],kFrame);
+            if(sc.plan){claim(detachedTree.item(0,0,0),kFrame);copy::beginMergeOpaque(detachedDestination.ptr(),detachedTree.anchor(0),kFrame);}
+            const uint64_t epoch=copy::g_emissionEpoch,before=copy::g_stats.copies;
+            const uintptr_t source=addressOf(src[sc.sourceIndex]);
+            if(reference)obs::referenceCopier(baseA,sc.stride,source,sc.first,sc.count,kFrame);
+            else copy::copier(baseA,sc.stride,source,sc.first,sc.count,kFrame);
+            lockedCopies=copy::g_stats.copies-before;if(!reference)prechecked=copy::stats().copierPrechecked;
+            check(published(),(std::string("claim check C9: the published state is exact after a copy (")+sc.name+")").c_str());
+            outcome[reference]=capture(epoch);
+        }
+        check(outcome[0]==outcome[1],(std::string("claim check C9: same counters, claims, patches, lease state and epoch as the locked copier (")+sc.name+")").c_str());
+        check((lockedCopies==0)==sc.free && prechecked==(sc.free?1u:0u),
+              (std::string("claim check C9: ")+(sc.free?"handed back without the mutex and counted by the claim check (":"takes the mutex (")+sc.name+")").c_str());
+    }
+    copy::reset();
+    // ---- C12: four threads. A producer claims a record of a pool the caller then copies it from, behind a release/acquire hand-off (the claim
+    // happened before the call); the caller re-maps the pool every round (the published tables change under the readers) and must always take
+    // the claim. A churn thread keeps the claim count between two and six; a lease thread maps and unmaps another pool and copies a clean range
+    // of it. A sentinel claim no range holds must survive every copy; clean copies must never take a claim.
+    {
+        constexpr unsigned K=3000;
+        static Record regX[4],regY[4];Record sentinel=record(93);
+        std::vector<std::unique_ptr<Record>> noise;for(unsigned i=0;i<3;++i)noise.push_back(std::make_unique<Record>(record(float(100+i))));
+        copy::reset();for(unsigned i=0;i<4;++i){regX[i]=src[i];regY[i]=src[i];}claim(sentinel,kFrame);
+        const uintptr_t baseX=reinterpret_cast<uintptr_t>(regX),baseY=reinterpret_cast<uintptr_t>(regY);
+        std::atomic<unsigned> turn{0};std::atomic<bool> stop{false};std::atomic<unsigned> lost{0},wrong{0};std::atomic<uint64_t> cleanCopies{0};
+        std::thread producer([&]{
+            for(unsigned i=0;i<K;++i) {
+                while(turn.load(std::memory_order_acquire)!=2*i)std::this_thread::yield();
+                claim(src[i&3],kFrame);
+                turn.store(2*i+1,std::memory_order_release);
+            }
+        });
+        std::thread caller([&]{
+            for(unsigned i=0;i<K;++i) {
+                while(turn.load(std::memory_order_acquire)!=2*i+1)std::this_thread::yield();
+                const unsigned k=i&3;
+                if(i)copy::endMap(poolA.Get(),i);
+                copy::beginMap(poolA.Get(),regX,sizeof(regX),336,D3D11_MAP_WRITE_DISCARD,i+1,kFrame);
+                copy::copier(baseX,336,addressOf(src[k]),k,1,kFrame);
+                if(heldLocked(addressOf(src[k])))++lost;
+                for(unsigned c=0;c<4;++c){copy::copier(baseX,336,addressOf(clean),(k+1+c)&3,1,kFrame);cleanCopies.fetch_add(1,std::memory_order_relaxed);}
+                if(!heldLocked(addressOf(sentinel)))++wrong;
+                turn.store(2*i+2,std::memory_order_release);
+            }
+        });
+        std::thread churn([&]{
+            while(!stop.load(std::memory_order_relaxed)) {
+                for(auto& n:noise)claim(*n,kFrame);
+                for(auto& n:noise)copy::invalidateEmission(addressOf(*n));
+            }
+        });
+        std::thread lease([&]{
+            for(unsigned i=0;!stop.load(std::memory_order_relaxed);++i) {
+                copy::beginMap(poolY.Get(),regY,sizeof(regY),336,D3D11_MAP_WRITE_DISCARD,i+1,kFrame);
+                copy::copier(baseY,336,addressOf(clean),i&3,1,kFrame);
+                copy::copier(baseY,336,addressOf(clean),(i+1)&3,1,kFrame);
+                copy::endMap(poolY.Get(),i+1);
+                if(!heldLocked(addressOf(sentinel)))++wrong;
+            }
+        });
+        producer.join();caller.join();stop.store(true);churn.join();lease.join();
+        const auto st=copy::stats();
+        std::printf("claim check copier stress: %u rounds, %u lost, %u wrong, %llu joins, %llu copies handed back by the claim check, %llu declined it (%llu clean copies by the caller)\n",
+                    K,lost.load(),wrong.load(),static_cast<unsigned long long>(st.joined),static_cast<unsigned long long>(st.copierPrechecked),
+                    static_cast<unsigned long long>(st.copierPrecheckDeclined),static_cast<unsigned long long>(cleanCopies.load()));
+        check(lost.load()==0 && st.joined==K,"claim check C12: four threads of churn: a claim published before a copy is never missed (every one is taken and joined)");
+        check(wrong.load()==0,"claim check C12: four threads of churn: no clean copy takes a claim, and the sentinel claim is never consumed");
+        copy::invalidateEmission(addressOf(sentinel));
+        check(published(),"claim check C12: four threads of churn: the published state is exact once they stop");
+        copy::reset();
+    }
 }
 
 inline void run(ID3D11Device* device,Check check) {
@@ -432,5 +665,6 @@ inline void run(ID3D11Device* device,Check check) {
         check(published(),"claim check C7: four threads of churn: the snapshot is exact once they stop");
         copy::reset();
     }
+    runCopierCheck(device,check);
 }
 }

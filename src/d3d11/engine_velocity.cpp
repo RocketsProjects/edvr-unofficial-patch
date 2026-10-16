@@ -2252,7 +2252,7 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
                     u(copyStats.mergeCalls),u(copyStats.mergeWithoutClaims),u(copyStats.mergeNodes),
                     u(copyStats.activeClaims),u(copyStats.activePlans));
     {   // How many of those calls never took the mutex (the lock-free exits), so a flight can read the share.
-        char exitLine[600];   // primaryCopy::kExitLineBytes
+        char exitLine[760];   // primaryCopy::kExitLineBytes
         static_assert(sizeof(exitLine) == primaryCopy::kExitLineBytes, "the exit line buffer is the formatter's");
         primaryCopy::formatExitLine(copyStats, exitLine);
         Log::get().note("%s", exitLine);
