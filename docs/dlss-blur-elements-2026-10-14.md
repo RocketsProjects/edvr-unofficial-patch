@@ -226,3 +226,13 @@ where the recorded depth is nearer than the scene's by 5e-7 to 1e-5, never farth
 from the exported z, or a later non-GEQUAL depth pass; test by logging the rasterizer DepthBias/SlopeScaledDepthBias and depth function
 of the keyed draws for slots 220 and 238.
 - ruled out: translucent keyed 5B4D draws overwriting the hull's slot (H-clobber), because no non-owning pixel carries a 5B4D slot.
+**Build attempt stopped, 2026-10-16 (before any code).** Two design premises were false:
+- ruled out: keying 5C1D/820E as PS producers as the join, because the join is a CPU emission from the hooked rigid producers
+  (engine_velocity_emit.h observe/observePrimary into the pool-clone sink) and a PS patch writes no previous pose.
+- ruled out: a replay-registered join, because the only pose source the replay can reach is the co-located hull record (pose-match identity).
+- finding: the shield records pass every structural test but never reach the hooked primary producer 42B4130 (relay 1215, joined 1212,
+  declined 0), so an UNHOOKED producer builds them. The real join needs that producer identified in Elite's exe and hooked into the
+  existing emission sink.
+- finding: 6EAA writes constant alpha 1.0 and is a refraction pass (samples the eye HDR copy at screen UV plus a normal-map ripple),
+  so there is no alpha to transcribe; coverage for 820E would have to be displacement-based, and object motion for refracted content
+  is unproven. 5C1D/C49F is ONE+ONE with constant alpha 1.0, so its coverage floor is on HDR intensity (alpha*colour*cb1[90].y).
