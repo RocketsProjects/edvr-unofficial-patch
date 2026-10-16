@@ -2,15 +2,15 @@
 
 ## Status
 
-State (2026-10-16, round 5 results): the claim regime was MEASURED (Steam log `edvr_gfx_20261016_102211.log`, f4e167db, claim meter on a
-diag branch) and the FIX is BUILT, NOT FLOWN, on `claude/claim-precheck` (not main): clears and merges that find claims live but none in their
-native list are handed back from a lock-free snapshot of the live claim addresses. The meter, from 10:29:32: claim set live 13-21% of a window,
-1.00 emissions a frame, claim-set size ALWAYS 1 (claimed merges 5.3M, clears 1.9M a window), 99.98% of claimed calls touched nothing, lifetime
-p50/p95 6554 us, one rigid record a frame at a new address, Present p50 13.2-14.2 -> 16.4-18.8 ms. Rig: zero-hit calls 0 mutex acquisitions and 0
-allocations (the old code: 2000 and 10000 per 1000+1000 calls); contended 4 threads 1922 -> 91 ns a call pair. Mutants: 15, all killed. Flight
-reads: `lock-free exits` (clear and merge near 100%, `Claim check ... N declined` near 0), the lock lines (merge begin, merge end and clear walk
-n near 0 while claims are live), Present p50 back to 13-14 ms. NOT done: the copier still takes the mutex whenever a claim is live (~3.7M
-acquisitions a window, render thread); the same snapshot would clear it (its own hits are slot ranges). Section "round 5 results".
+State (2026-10-16, round 5 results): the claim regime was MEASURED (log `edvr_gfx_20261016_102211.log`, f4e167db, meter on a diag branch) and the
+claim check is FLOWN OK (diag build `claude/flat-settlement-cpu-6`, log `edvr_gfx_20261016_111653.log`), merged to main on Sean's approval from
+`claude/claim-precheck`: clears and merges that find claims live but none in their native list are handed back from a lock-free snapshot of the live
+claim addresses. The regime (from 10:29:32): claim set live 13-21% of a window, 1.00 emissions a frame, set size ALWAYS 1, 99.98% of 5.3M merges and
+1.9M clears a window touched nothing, Present p50 13.2-14.2 -> 16.4-18.8 ms. Flown (claims live from about 11:36): first window 1.43M clears and 4.1M
+merges took the lock-free check, 0 declined; Present p50 12.3-12.6 -> 12.8-13.1 ms, against a 3-5 ms jump without it. Rig: zero-hit calls 0 mutex
+acquisitions and 0 allocations (old code 2000 and 10000 per 1000+1000 calls); 15 mutants killed. NOT done: the pool copier still takes the mutex whenever
+a claim is live (~3.7M acquisitions a window, render thread, hold 0.1 us); the same snapshot could clear it, with its own argument. Remaining Present
++0.5 ms against the quiet baseline is not attributed. Section "round 5 results".
 State (2026-10-16, results): the observer fix is FLOWN, CONFIRMED and ON MAIN (1ae94885, `claude/engine-motion-observers`): render-thread
 engine motion 427 -> 77 ns a call (about 0.8 ms a frame), job merge and clear down 92%, 100% of calls lock-free, 0 contention. The
 instruments (H1-H4, round 2) are on `claude/flat-settlement-cpu-2`, NOT on main. Round 2 flown (DLSS, 14.6k draws a frame): EDVR render
@@ -409,6 +409,12 @@ rule). x86 hides a weakened memory order from the rig, as for `g_poolView`.
   the slot window missing the last slot (C2/C3), the snapshot never rewritten (C1), unsorted (C1), omitting the plan flag (C6), the read not re-checked (C7).
 - Bench (single thread, one claim live and untouched; ns a call): clear 1 node 69 -> 23, merge begin+end 314 -> 15 (8000 allocations per 1000 calls ->
   0); four threads contending on merge+clear 1922 -> 91 ns a call pair a thread.
+
+### Flown (cpu-6 diag build, Steam, log `edvr_gfx_20261016_111653.log`)
+Claims went live at about 11:36. In the first window 1.43M clears and 4.1M merges took the lock-free check, 0 declined (no plan in flight, no fifth
+claim, no torn read counted). Present p50 went from 12.3-12.6 ms (no claims) to 12.8-13.1 ms (claims live), against 13.2-14.2 -> 16.4-18.8 ms in the
+unfixed flight of the previous session: the 3-5 ms jump is down to about 0.5 ms. What that 0.5 ms is was not measured (the copier's mutex, the
+walks themselves, and the claim-live windows differing in scene are all candidates); the copier is the named next candidate below.
 
 ### What the flight reads, and what is not done
 Per 30 s: `lock-free exits` clear and merge near 100% of calls (they were 80% and 60%); `Claim check ... N clears and M merges` in the millions while claims

@@ -25,6 +25,8 @@
 #include "ui_layer_seed.h"  // the Seeder: the game's depth-stencil at the layer's size
 #include "ui_layer_seed_census.h"
 #include "ui_layer_seed_timing.h"
+#include "sharp_weapons.h"  // fix.sharp_weapons: the weapons layer's source pass, blend states and step bindings
+#include "temporal_shader_bytecode.h"
 #include "draw_state_describe.h"  // viewName, describeBlend/describeDs, shapeOf, dsStateOf
 #include "tonemap_admit.h"  // the tonemap draw's structural admission, shared with the census
 
@@ -70,6 +72,7 @@ namespace edvr {
 
 namespace detail {
 bool g_uiLayerLive = false;
+bool g_uiQualityLive = false;
 bool g_uiLayerWatching = false;
 bool g_uiSeedDiagnostics = false;
 bool g_uiLayerRedirecting = false;
@@ -103,6 +106,14 @@ constexpr uint32_t kCrispHdrMissFrames = 30;
 // ------------------------------------------------------------ configuration
 
 float g_target = 0.0f;     // 0 off, 1.0 (the file's 100), 1.25 (125)
+// fix.sharp_weapons (default on): the weapons fire into its own additive HDR layer, composited after the upscale. INDEPENDENT of
+// fix.ui_quality: g_sharpWeapons is the key, g_weaponsLive the key with everything it needs (a temporal mode, not stood down, not the
+// flat profile). The layer's machinery runs when either half is live (refreshLive); the interface families are taken only while
+// fix.ui_quality's half is (detail::g_uiQualityLive), the weapons fire only while this one is.
+bool g_sharpWeapons = true;
+bool g_weaponsLive = false;
+bool g_weaponsStoodDown = false;  // the weapons path alone (a failure of its own); the HUD and the rest of the layer stay
+SharpBlend g_sharpBlend = SharpBlend::kMatched;  // advanced.sharp_weapons_blend (TEMPORARY)
 bool g_temporal = false;   // a temporal mode is on (the layer's door exists)
 constexpr bool g_jitterAsShipped = true;  // the eye jitter is always as shipped
 bool g_stoodDown = false;
@@ -110,6 +121,9 @@ bool g_crispStoodDown = false;  // the HDR HUD path alone (a failure of its own)
 std::string g_keyText = "?";
 bool g_keyNoted = false;
 bool g_aliasNoted = false;  // the old spelling's note, once a session
+// fix.sharp_weapons' configuration line is printed once per change of what it says.
+bool g_sharpNoted = false, g_sharpNotedOn = false, g_sharpNotedTemporal = false, g_sharpNotedQuality = false;
+SharpBlend g_sharpNotedBlend = SharpBlend::kMatched;
 
 // The layer's size target is fix.ui_quality's value; the HDR HUD layer and
 // the 8-bit layer it tonemaps into share a size by construction (the HDR
@@ -122,7 +136,11 @@ float layerTarget() {
 void refreshLive() {
     // ui_layer_math.h's uiLayerLiveFor: the one statement of "the layer is live", which the VR world route reads
     // through uiLayerLiveForWorldRoute (tools/ui_quality_test pins it equal to the expression it replaced).
-    detail::g_uiLayerLive = uiLayerLiveFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);
+    const bool quality = uiLayerLiveFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);
+    g_weaponsLive = uiLayerWeaponsLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_weaponsStoodDown,
+                                          runtimeFlatProfile());
+    detail::g_uiQualityLive = quality;
+    detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive);
     detail::g_uiLayerCrispOn = detail::g_uiLayerLive && !g_crispStoodDown;
 }
 
@@ -169,6 +187,17 @@ void crispStandDown(const char* why) {
         "cockpit's holo panels, flight HUD, target sprite and holograms are drawn as they always "
         "were (the rest of the layer is unaffected). Turning fix.ui_quality off and on re-arms it.",
         why ? why : "a refusal");
+}
+
+// fix.sharp_weapons' own failure: the weapons layer, its source pass or its re-issue could not be trusted. The weapons fire goes back to
+// the scene exactly as stock; the HUD, the rest of the layer and every other family are unaffected.
+void weaponsStandDown(const char* why) {
+    if (g_weaponsStoodDown) return;
+    g_weaponsStoodDown = true;
+    refreshLive();
+    Log::get().note("sharp weapons: stands down for the rest of the session -- %s. The weapons fire is drawn in the scene as it always was (the "
+                    "rest of the layer is unaffected). Turning fix.sharp_weapons off and on re-arms it.",
+                    why ? why : "a refusal");
 }
 
 void standDown(const char* why) {
@@ -328,6 +357,22 @@ struct Eye {
     // where a publication lands. The stand-down is at kCrispHdrMissFrames.
     uint32_t hdrMissStreak = 0;
 
+    // fix.sharp_weapons' OWN additive HDR layer (R16G16B16A16_FLOAT, the HUD layer's size), separate from the HUD's over-blend layer
+    // above: the weapons fire's light alone (weapons_fire.h), cleared at the first weapons draw of each eye-frame and tonemapped into the
+    // 8-bit layer by the same re-issue of the game's tonemap draw (plain: T(W); matched: T(F_up + W) - T(F_up)). It shares hdrDs, the
+    // seeded depth-stencil (the weapons only test depth).
+    Ptr<ID3D11Texture2D> wTex;
+    Ptr<ID3D11RenderTargetView> wRtv;
+    Ptr<ID3D11ShaderResourceView> wSrv;
+    uint32_t wW = 0, wH = 0;
+    uint64_t wSeq = 0;               // the frame whose weapons draws it holds
+    uint32_t wDraws = 0;
+    const void* wTarget = nullptr;   // the HDR target those draws left (identity)
+    uint64_t wToneSeq = 0;           // the frame the tonemap re-issue ran for (any re-issue: the HUD's runs every frame)
+    uint64_t wPubSeq = 0;            // the last frame a re-issue carried THIS layer's content (weaponsLayerDropped asks it)
+    uint32_t wMissStreak = 0;        // consecutive content-frames no re-issue published
+    uint32_t wOtherTargets = 0;      // this frame's weapons draws made into another HDR target than wTarget (the instrument below)
+
     // The door.
     UiLayerDoorState door;
     const void* temporalOut = nullptr;  // the pass's output (identity), this frame
@@ -380,6 +425,8 @@ struct Draw {
     bool saved = false;    // the game's state is held below: restore it on any exit
     bool counted = false;  // this decision's draw is counted (a fallback re-issue is not)
     bool hdr = false;      // the crisp-HUD half of fix.ui_quality: the draw goes to the HDR HUD layer, not the 8-bit one
+    bool weapons = false;  // fix.sharp_weapons: with hdr, the draw goes to the eye's weapons layer instead of the HUD's
+    uint64_t vsHash = 0;   // the decided draw's vertex shader (the weapons-fire pair table's key)
     bool reissue = false;  // the VR world route's re-issue of the 2D screen (the game's own draw lands in its eye): not a take
     int eye = -1;
     UiLayerFamily family = UiLayerFamily::kNone;
@@ -525,6 +572,11 @@ struct Window {
     uint64_t hdrRedirected = 0, hdrReissued = 0, hdrCoveragePasses = 0, hdrLost = 0;
     uint64_t hdrDrawTimingEligible = 0, hdrDrawTimingDisabled = 0, hdrDrawTimingIssued = 0;
     uint64_t hdrDrawTimingAborted = 0;
+    // fix.sharp_weapons: weapons draws taken into the weapons layer (by pair), layers whose content no re-issue published, and the
+    // eye-frames' composites by kind: the matched difference, the plain add, and the plain add a matched frame fell back to.
+    uint64_t weaponsTaken = 0, weaponsLost = 0, weaponsContentFrames = 0;
+    uint64_t weaponsPair[kWeaponPairCount] = {};
+    uint64_t weaponsEyeMatched = 0, weaponsEyePlain = 0, weaponsEyeFallback = 0;
     uint64_t hdrDeclined[static_cast<size_t>(CrispToneDecline::kCount)] = {};
     // The seed census's counts for the 30 s line (2026-10-13): every issued seed by reason, the same by reason for a layer's second or
     // later seed in its frame (a layer seeded again within one frame), and the passes the seeds planned.
@@ -885,6 +937,67 @@ void noteFamily(UiLayerFamily f, UiLayerDecision d, const char* detail) {
                     detail ? detail : "");
 }
 
+// fix.sharp_weapons: once per weapons-fire pair, the first time the layer decides one of its draws -- which pair, what was decided and the
+// jitter-cancel choice the table gave it (weapons_fire.h; W3 is settled: all three pairs carry the eye's jitter, docs/dlss-blur-elements-2026-10-14.md).
+bool g_weaponPairSeen[kWeaponPairCount] = {};
+void noteWeaponPair(uint64_t vs, uint64_t ps, UiLayerDecision d) {
+    const int i = weaponPairIndex(vs, ps);
+    if (i < 0 || g_weaponPairSeen[i]) return;
+    g_weaponPairSeen[i] = true;
+    Log::get().note("sharp weapons: first %s draw seen (vs %016llX ps %016llX): %s; jitter cancel %s (the table's choice; the eye dump of "
+                    "2026-10-16 showed this pair's matrices carry the eye's jitter, so cancel is right).",
+                    kWeaponPairs[i].name, static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps),
+                    uiLayerDecisionName(d), kWeaponPairs[i].cancelJitter ? "yes" : "NO");
+}
+
+// fix.sharp_weapons, the "layers' content never reached a tonemap" instrument (2026-10-16: 0.5 to 5 percent of the weapon eye-frames of the
+// combat flights, with the HUD layer losing none). The cause is not yet known; the candidates and what settles each:
+//   (a) the tonemap-shaped draw of the eye ran but read a different frame number than the weapons draws carried: the sightings below name the frame
+//       the tonemap saw against the content's;
+//   (b) no tonemap-shaped draw ran for that eye at all in the frame: the sightings hold no entry for it;
+//   (c) the weapons were drawn into a second HDR target the tonemap does not read: wOtherTargets counts them, the sighting names the resource it read;
+//   (d) the tonemap was seen and refused (an outcome other than 'admitted').
+// Every tonemap-shaped draw the admission sees is recorded (a handful a frame); a lost layer prints the last few, newest first, with the eye's state.
+struct ToneSight {
+    uint64_t seq = 0;
+    const void* res = nullptr;  // the first 2D texture the draw samples (the HDR source it was admitted on, or what it read instead)
+    int8_t eye = -1;            // the eye whose content it matched, or -1
+    uint8_t outcome = 0;        // 0 admitted, 1 no eye's content matched it, 2 the 8-bit layer was busy, 3 a second tonemap for the eye
+};
+ToneSight g_toneSights[6];
+uint32_t g_toneSightCount = 0;
+void noteToneSight(uint64_t seq, const void* res, int eye, uint8_t outcome) {
+    ToneSight& t = g_toneSights[g_toneSightCount++ % 6];
+    t.seq = seq;
+    t.res = res;
+    t.eye = static_cast<int8_t>(eye);
+    t.outcome = outcome;
+}
+uint32_t g_lostLines = 0;
+void noteWeaponsLost(int eye, const Eye& e, uint64_t nextSeq) {
+    if (g_lostLines >= 24) return;
+    ++g_lostLines;
+    static const char* const kOutcome[] = {"admitted", "no eye's content matched", "the 8-bit layer was busy", "a second tonemap for the eye"};
+    char sights[900];
+    sights[0] = 0;
+    size_t used = 0;
+    const uint32_t n = g_toneSightCount < 6 ? g_toneSightCount : 6;
+    for (uint32_t i = 0; i < n; ++i) {
+        const ToneSight& t = g_toneSights[(g_toneSightCount - 1 - i) % 6];
+        const int w = _snprintf_s(sights + used, sizeof(sights) - used, _TRUNCATE, "%s[frame %llu, read %p, eye %d, %s]", i ? " " : "",
+                                  static_cast<unsigned long long>(t.seq), t.res, static_cast<int>(t.eye), kOutcome[t.outcome < 4 ? t.outcome : 0]);
+        if (w < 0) break;
+        used += static_cast<size_t>(w);
+    }
+    Log::get().note(
+        "sharp weapons: lost layer %u (of the first 24 lines): the %s eye's weapons content is frame %llu (%u draws, first into %p, %u of them into another "
+        "target) and no tonemap published it; its HUD layer holds frame %llu (%u draws, tonemapped for frame %llu); the next weapons draw is frame %llu; "
+        "the last tonemap-shaped draws seen, newest first: %s.",
+        g_lostLines, eye == 0 ? "left" : "right", static_cast<unsigned long long>(e.wSeq), e.wDraws, e.wTarget, e.wOtherTargets,
+        static_cast<unsigned long long>(e.hdrSeq), e.hdrDraws, static_cast<unsigned long long>(e.hdrToneSeq),
+        static_cast<unsigned long long>(nextSeq), n ? sights : "none yet");
+}
+
 // ------------------------------------------------------------ the layer
 
 bool makeTarget(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT format,
@@ -942,6 +1055,85 @@ bool ensureLayerFor(ID3D11DeviceContext* ctx, int eye) {
     if (!ensureLayer(dev.Get(), e, s.w, s.h, eye)) return false;
     e.basisW = e.door.fullW;
     e.basisH = e.door.fullH;
+    return true;
+}
+
+// fix.sharp_weapons: the scratch S the matched composite's source pass fills with the game's HDR input resampled to the layer's size
+// (F_up), one for both eyes (the passes of an eye-frame run one after another), the source pass's shaders and the blend states.
+struct SharpScratch {
+    Ptr<ID3D11Texture2D> tex;
+    Ptr<ID3D11RenderTargetView> rtv;
+    Ptr<ID3D11ShaderResourceView> srv;
+    uint32_t w = 0, h = 0;
+};
+SharpScratch g_sharpScratch;
+SharpPassStates g_sharpStates;
+ID3D11VertexShader* g_srcVs = nullptr;
+ID3D11PixelShader* g_srcPs = nullptr;
+bool g_srcTried = false;
+
+void compileSharpSourceOnce(ID3D11DeviceContext* ctx) {
+    if ((g_srcVs && g_srcPs) || g_srcTried || !ctx) return;
+    g_srcTried = true;
+    g_srcVs = shaderSwapCreateVs(ctx, kSharpWeaponsSourceVsBytecode, sizeof(kSharpWeaponsSourceVsBytecode), "sharp_weapons_source_vs", "sharp weapons");
+    g_srcPs = shaderSwapCreatePs(ctx, kSharpWeaponsSourcePsBytecode, sizeof(kSharpWeaponsSourcePsBytecode), "sharp_weapons_source_ps", "sharp weapons");
+    if (!g_srcVs || !g_srcPs) {
+        if (g_srcVs) g_srcVs->Release();
+        if (g_srcPs) g_srcPs->Release();
+        g_srcVs = nullptr;
+        g_srcPs = nullptr;
+    }
+}
+
+bool ensureSharpStates(ID3D11DeviceContext* ctx) {
+    if (g_sharpStates.ready()) return true;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    return dev && g_sharpStates.create(dev.Get());
+}
+
+// The scratch at the layer's size (made at the first matched composite, replaced when the layer's size moves).
+bool ensureSharpScratch(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h) {
+    if (g_sharpScratch.tex && g_sharpScratch.w == w && g_sharpScratch.h == h) return true;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    g_sharpScratch = SharpScratch{};
+    if (!dev || !w || !h) return false;
+    if (!makeTarget(dev.Get(), w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, &g_sharpScratch.tex, &g_sharpScratch.rtv, &g_sharpScratch.srv)) {
+        g_sharpScratch = SharpScratch{};
+        return false;
+    }
+    g_sharpScratch.w = w;
+    g_sharpScratch.h = h;
+    Log::get().note("sharp weapons: the scratch for the scene's resampled HDR input (%ux%u, R16G16B16A16_FLOAT, %.1f MB) created -- shared by both "
+                    "eyes; the matched composite needs it.",
+                    w, h, uiLayerMB(uiLayerBytes(w, h, 8)));
+    return true;
+}
+
+// fix.sharp_weapons' weapons layer, at the HUD layer's size (the door's output x the target; 100 when fix.ui_quality is off).
+bool ensureWeaponsLayerFor(ID3D11DeviceContext* ctx, int eye) {
+    Eye& e = g_eye[eye];
+    const UiLayerSize s = uiLayerSize(e.door.fullW, e.door.fullH, layerTarget());
+    if (!s.w || !s.h) return false;
+    if (e.wTex && e.wW == s.w && e.wH == s.h) return true;
+    const bool resized = e.wTex != nullptr;
+    e.wW = e.wH = 0;
+    e.wSeq = 0;
+    e.wDraws = 0;
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    if (!dev || !makeTarget(dev.Get(), s.w, s.h, DXGI_FORMAT_R16G16B16A16_FLOAT, &e.wTex, &e.wRtv, &e.wSrv)) {
+        e.wTex.Reset();
+        e.wRtv.Reset();
+        e.wSrv.Reset();
+        return false;
+    }
+    e.wW = s.w;
+    e.wH = s.h;
+    Log::get().note("sharp weapons: %s eye's weapons layer %s at %ux%u (R16G16B16A16_FLOAT, %.1f MB) -- the weapons fire is drawn into it and "
+                    "composited after the upscale.",
+                    eye == 0 ? "left" : "right", resized ? "re-created" : "created", s.w, s.h, uiLayerMB(uiLayerBytes(s.w, s.h, 8)));
     return true;
 }
 
@@ -1016,7 +1208,7 @@ bool releaseLayers() {
     bool any = false;
     for (Eye& e : g_eye) {
         any = any || e.tex || e.mTex || e.ds.tex || e.dsCopy || e.dsDirect[0].depth || e.dsDirect[1].depth || e.out || e.copy || e.frameSrv || e.frameUav ||
-              e.hdrTex || e.hdrDs.tex;
+              e.hdrTex || e.hdrDs.tex || e.wTex;
         e.coverage.reset();
         e.tex.Reset();
         e.rtv.Reset();
@@ -1043,6 +1235,16 @@ bool releaseLayers() {
         releaseLayerDs(e.hdrDs);
         e.hdrToneSeq = 0;
         e.hdrMissStreak = 0;
+        e.wTex.Reset();
+        e.wRtv.Reset();
+        e.wSrv.Reset();
+        e.wW = e.wH = 0;
+        e.wSeq = 0;
+        e.wDraws = 0;
+        e.wTarget = nullptr;
+        e.wToneSeq = 0;
+        e.wPubSeq = 0;
+        e.wMissStreak = 0;
         e.dsCopy.Reset();
         e.dsCopyDepth.Reset();
         e.dsCopyStencil.Reset();
@@ -1065,6 +1267,37 @@ bool releaseLayers() {
         e.copySrv.Reset();
         e.copyW = e.copyH = 0;
         e.copyFmt = DXGI_FORMAT_UNKNOWN;
+    }
+    if (g_sharpScratch.tex) {
+        any = true;
+        g_sharpScratch = SharpScratch{};
+    }
+    return any;
+}
+
+// fix.ui_quality went off while fix.sharp_weapons is live: the layers only the interface uses (the HUD's HDR layer, the multiply
+// transmittance, the 8-bit layer's own depth-stencil) are let go; the 8-bit layer (the weapons' composite target), the weapons layer and
+// the shared HDR depth-stencil stay. Called at the frame boundary, like releaseLayers.
+bool releaseQualityOnlyLayers() {
+    bool any = false;
+    for (Eye& e : g_eye) {
+        if (!(e.hdrTex || e.mTex || e.ds.tex)) continue;
+        any = true;
+        e.coverage.reset();
+        e.hdrTex.Reset();
+        e.hdrRtv.Reset();
+        e.hdrSrv.Reset();
+        e.hdrW = e.hdrH = 0;
+        e.hdrSeq = 0;
+        e.hdrDraws = 0;
+        e.hdrTarget = nullptr;
+        e.hdrMissStreak = 0;
+        e.mTex.Reset();
+        e.mRtv.Reset();
+        e.mSrv.Reset();
+        e.mW = e.mH = 0;
+        e.mSeq = 0;
+        releaseLayerDs(e.ds);
     }
     return any;
 }
@@ -1632,12 +1865,15 @@ void describeSampler(ID3D11DeviceContext* ctx, UINT slot, char* out, size_t n) {
 // its per-eye-frame clear.
 bool beginInner(ID3D11DeviceContext* ctx, int which) {
     Eye& e = g_eye[g_draw.eye];
+    // fix.sharp_weapons: a weapons-fire draw (g_draw.weapons, always with g_draw.hdr) goes into the eye's OWN additive HDR layer, tested
+    // against the same seeded depth-stencil as the HUD's (it only tests); it is never a multiply, so `which` is 0.
+    const bool wl = g_draw.weapons && which == 0;
     ID3D11RenderTargetView* target =
-        which ? e.mRtv.Get() : (g_draw.hdr ? e.hdrRtv.Get() : e.rtv.Get());
+        which ? e.mRtv.Get() : (wl ? e.wRtv.Get() : (g_draw.hdr ? e.hdrRtv.Get() : e.rtv.Get()));
     if (!target) return false;
     LayerDs& lds = g_draw.hdr ? e.hdrDs : e.ds;
-    const uint32_t layerW = g_draw.hdr ? e.hdrW : e.w;
-    const uint32_t layerH = g_draw.hdr ? e.hdrH : e.h;
+    const uint32_t layerW = wl ? e.wW : (g_draw.hdr ? e.hdrW : e.w);
+    const uint32_t layerH = wl ? e.wH : (g_draw.hdr ? e.hdrH : e.h);
     // The blend at the moment of issue: a verdict's own Begin runs between
     // the decision and here, and the shape must still be the decided one.
     ID3D11BlendState* bs = nullptr;
@@ -1670,7 +1906,31 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         e.chainOpen = false;  // the layer starts with a UI draw: no re-issue's HUD, no chain to follow
         ++g_win.clears;
     }
-    if (which == 0 && g_draw.hdr && e.hdrSeq != g_draw.seq) {
+    if (wl && e.wSeq != g_draw.seq) {
+        if (weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)) {
+            ++g_win.weaponsLost;
+            noteWeaponsLost(g_draw.eye, e, g_draw.seq);
+            // The missing-consumer deadline, as the HUD layer's: content no tonemap re-issue published for a streak of frames says
+            // the consumer is not coming; the weapons fire goes back to the scene (their own stand-down: the HUD is unaffected).
+            if (++e.wMissStreak >= kCrispHdrMissFrames) {
+                char why[200];
+                _snprintf_s(why, _TRUNCATE,
+                            "the weapons layer's content reached no tonemap for %u consecutive frames (the weapons fire was taken but never "
+                            "came back)", kCrispHdrMissFrames);
+                weaponsStandDown(why);
+            }
+        }
+        const int timer = routeBegin(ctx, UiRouteStage::kHdrClear, g_draw.eye, g_draw.seq);
+        vScreenClearRenderTargetViewRaw(ctx, e.wRtv.Get(), kUiLayerClear);
+        routeEnd(ctx, timer);
+        e.wSeq = g_draw.seq;
+        e.wDraws = 0;
+        ++g_win.weaponsContentFrames;
+        e.wOtherTargets = 0;
+        e.wTarget = g_draw.targetRes;
+        ++g_win.clears;
+    }
+    if (which == 0 && g_draw.hdr && !g_draw.weapons && e.hdrSeq != g_draw.seq) {
         if (e.hdrSeq && e.hdrDraws && e.hdrToneSeq != e.hdrSeq) {
             ++g_win.hdrLost;
             // The missing-consumer deadline (review R1): a content-frame no
@@ -1875,7 +2135,13 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     if (!g_draw.counted) {
         g_draw.counted = true;
         ++g_frameTakenDraws;
-        if (g_draw.hdr) {
+        if (g_draw.weapons) {
+            ++e.wDraws;
+            if (e.wTarget != g_draw.targetRes) ++e.wOtherTargets;
+            ++g_win.weaponsTaken;
+            const int pair = weaponPairIndexByVs(g_draw.vsHash);
+            if (pair >= 0) ++g_win.weaponsPair[pair];
+        } else if (g_draw.hdr) {
             ++e.hdrDraws;
             ++g_win.hdrRedirected;
         } else {
@@ -1924,7 +2190,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
             "%ux%u %s target: viewport scale %.4f x %.4f, jitter cancel (%.3f, %.3f) layer "
             "pixels, blend %s with transmittance in alpha.",
             uiLayerFamilyName(g_draw.family), g_draw.eye == 0 ? "left" : "right",
-            g_draw.hdr ? "HDR HUD " : "", layerW, layerH,
+            g_draw.weapons ? "weapons " : (g_draw.hdr ? "HDR HUD " : ""), layerW, layerH,
             g_draw.targetW, g_draw.targetH, viewName(g_tc.view), static_cast<double>(m.ax),
             static_cast<double>(m.ay), static_cast<double>(cx), static_cast<double>(cy),
             uiBlendShapeName(shape));
@@ -2555,7 +2821,7 @@ void onFootGateTick() {
         mapsLayerNotLive(gateFrame);
         return;
     }
-    if (!detail::g_uiLayerLive) {
+    if (!detail::g_uiQualityLive) {
         mapsLayerNotLive(gateFrame);
         return;
     }
@@ -2791,6 +3057,49 @@ std::string sceneLineLayerText(UiLayerFamily family, double frames) {
             static_cast<unsigned long long>(taken), static_cast<double>(taken) / frames,
             static_cast<unsigned long long>(leftTotal), left.empty() ? "" : " (", left.c_str(), left.empty() ? "" : ")");
     return text;
+}
+
+// fix.sharp_weapons' own 30 s line, printed every window the key is on (zeros included, and a "not exercised" form for a window in
+// which no weapons-fire draw reached the layer's decision): the draws a frame the weapons layer took, the draws a frame left in the scene by
+// decision, the blend, and the eye-frames each composite kind served.
+void logSharpWeapons() {
+    if (!g_sharpWeapons || runtimeFlatProfile()) return;
+    const char* blend = sharpBlendName(g_sharpBlend);
+    if (!g_weaponsLive) {
+        Log::get().note("sharp weapons: not live this window (%s), blend %s.",
+                        !g_temporal ? "fix.temporal_aa is off" : "the weapons path stood down for the session", blend);
+        return;
+    }
+    const double frames = g_win.frames ? static_cast<double>(g_win.frames) : 1.0;
+    const size_t fi = static_cast<size_t>(UiLayerFamily::kWeaponsFire);
+    const uint64_t taken = g_win.decided[fi][static_cast<size_t>(UiLayerDecision::kRedirect)];
+    uint64_t leftTotal = 0;
+    std::string reasons;
+    for (size_t d = 1; d < static_cast<size_t>(UiLayerDecision::kCount); ++d) {
+        const uint64_t n = g_win.decided[fi][d];
+        if (!n) continue;
+        leftTotal += n;
+        appendf(reasons, "%s%s %llu", reasons.empty() ? "" : ", ", uiLayerDecisionKey(static_cast<UiLayerDecision>(d)),
+                static_cast<unsigned long long>(n));
+    }
+    if (!taken && !leftTotal) {
+        Log::get().note("sharp weapons: not exercised in this window (no weapons-fire draw reached the layer's decision), blend %s.", blend);
+        return;
+    }
+    std::string pairs;
+    for (size_t i = 0; i < kWeaponPairCount; ++i) {
+        if (g_win.weaponsPair[i])
+            appendf(pairs, "%s%s %llu", pairs.empty() ? "" : ", ", kWeaponPairs[i].name, static_cast<unsigned long long>(g_win.weaponsPair[i]));
+        else
+            appendf(pairs, "%s%s not exercised", pairs.empty() ? "" : ", ", kWeaponPairs[i].name);
+    }
+    Log::get().note(
+        "sharp weapons: %.2f draws a frame in the HDR layer, %.2f a frame left in the scene%s%s%s, blend %s; eye-frames: %llu matched, %llu plain, "
+        "%llu plain after a matched frame fell back, of %llu eye-frames with weapons draws; %llu layers' content never reached a tonemap; draws by pair: %s.",
+        static_cast<double>(taken) / frames, static_cast<double>(leftTotal) / frames, reasons.empty() ? "" : " (", reasons.c_str(),
+        reasons.empty() ? "" : ")", blend, static_cast<unsigned long long>(g_win.weaponsEyeMatched),
+        static_cast<unsigned long long>(g_win.weaponsEyePlain), static_cast<unsigned long long>(g_win.weaponsEyeFallback),
+        static_cast<unsigned long long>(g_win.weaponsContentFrames), static_cast<unsigned long long>(g_win.weaponsLost), pairs.c_str());
 }
 
 void logTotals(double seconds) {
@@ -3051,6 +3360,8 @@ void uiLayerRememberHoloPs(ID3D11PixelShader* shader, uint64_t hash,
 // The crisp take's whole dependency set, established no later than the first
 // HUD take (review R2) -- defined beside the coverage machinery, below.
 bool crispTakeReady(ID3D11DeviceContext* ctx, int eye);
+// fix.sharp_weapons' counterpart: the weapons layer, the 8-bit layer and the blend states the re-issue needs (defined beside it).
+bool weaponsTakeReady(ID3D11DeviceContext* ctx, int eye);
 
 // --------------------------------------------------------------- the API
 
@@ -3085,10 +3396,49 @@ void uiLayerConfigure(Config& cfg) {
         g_stoodDown = false;
         g_crispStoodDown = false;
     }
+    // fix.sharp_weapons (default on) and its TEMPORARY A/B, advanced.sharp_weapons_blend: independent of fix.ui_quality. A live change of the
+    // key re-arms a weapons path that stood itself down.
+    const bool sharp = cfg.getBool("fix.sharp_weapons", true);
+    bool blendKnown = true;
+    const std::string blendText = cfg.getString("advanced.sharp_weapons_blend", "matched");
+    const SharpBlend blend = sharpBlendParse(blendText.c_str(), &blendKnown);
+    if (g_sharpNoted && sharp != g_sharpWeapons) g_weaponsStoodDown = false;
+    g_sharpWeapons = sharp;
+    g_sharpBlend = blend;
     g_keyText = text;
     g_target = target;
     g_temporal = temporal;
     refreshLive();
+    {
+        const bool changedSharp = !g_sharpNoted || sharp != g_sharpNotedOn || blend != g_sharpNotedBlend || temporal != g_sharpNotedTemporal ||
+                                  (target > 0.0f) != g_sharpNotedQuality;
+        if (changedSharp) {
+            g_sharpNoted = true;
+            g_sharpNotedOn = sharp;
+            g_sharpNotedBlend = blend;
+            g_sharpNotedTemporal = temporal;
+            g_sharpNotedQuality = target > 0.0f;
+            if (!blendKnown)
+                Log::get().note("sharp weapons: advanced.sharp_weapons_blend = '%s' is not matched or plain -- matched.", blendText.c_str());
+            if (!sharp) {
+                Log::get().note("sharp weapons: off (fix.sharp_weapons) -- the weapons fire is drawn in the scene as it always was; fix.ui_quality is %s "
+                                "and unaffected.",
+                                target > 0.0f ? "on" : "off");
+            } else if (runtimeFlatProfile()) {
+                Log::get().note("sharp weapons: on, but not in the flat profile (VR only).");
+            } else {
+                Log::get().note(
+                    "sharp weapons: on (fix.sharp_weapons; fix.ui_quality is %s and independent) -- the weapons fire (beams and bolts, multicannon "
+                    "rounds, the shield strike's additive part) is drawn into its own additive HDR layer at the upscaled picture's size and "
+                    "composited after the upscale, %s%s.",
+                    target > 0.0f ? "on" : "off",
+                    blend == SharpBlend::kMatched
+                        ? "by tonemap difference T(F_up + L) - T(F_up) through the game's own tonemap draw (blend matched)"
+                        : "as a plain add of the tonemapped light T(L) (blend plain)",
+                    temporal ? "" : "; it waits: fix.temporal_aa is off, and the layer is composited at that pass's door");
+            }
+        }
+    }
     // The panels follow the same key -- one setting, both halves -- and the
     // instruments with them.
     uiSurfacesSetTarget(target);
@@ -3322,6 +3672,8 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     g_draw.decided = false;
     g_draw.counted = false;
     g_draw.hdr = false;
+    g_draw.weapons = false;
+    g_draw.vsHash = 0;
     g_draw.reissue = false;
     g_draw.holoPsHash = 0; g_draw.holoOriginal = nullptr; g_draw.holoPatched = nullptr;
     g_draw.holoRestoreOk = true;
@@ -3350,6 +3702,8 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     // The VR world route owns this frame's world: the 2D screen composite is re-issued into the layer, not taken
     // (asked for that family alone).
     f.worldRoute = family == UiLayerFamily::kScreen && vrWorldRouteLayerMayTake();
+    // The two keys are independent: the weapons fire is fix.sharp_weapons's, every other family fix.ui_quality's.
+    f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive);
     if (family == UiLayerFamily::kScreen) ++g_win.screenAsked;
     const int kind = uiLayerTargetKind();
     f.eyeTarget = kind != 0;
@@ -3465,7 +3819,9 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
             // crispTakeReady has already stood the path down with the
             // reason. Never take-then-drop.
             f.layerReady =
-                f.crispHdr
+                family == UiLayerFamily::kWeaponsFire
+                    ? weaponsTakeReady(ctx, f.eye)
+                : f.crispHdr
                     ? crispTakeReady(ctx, f.eye)
                     : ensureLayerFor(ctx, f.eye) &&
                           (f.blend != UiBlendShape::kMultiply || ensureMult(ctx, g_eye[f.eye], f.eye));
@@ -3535,6 +3891,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     }
     g_lastDecision = static_cast<int>(d);
     ++g_decisionCount;
+    if (family == UiLayerFamily::kWeaponsFire) noteWeaponPair(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), d);
     if (uiLayerWorldRouteMode(family, f.worldScreen, f.worldRoute)) {
         // The route's mode: never a take. A draw that passed every test is held for the re-issue after the game's
         // own issue (counted when it lands, as a re-issue -- not as "redirected": the layer took nothing from the
@@ -3555,6 +3912,8 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     g_draw.eye = f.eye;
     g_draw.family = family;
     g_draw.hdr = f.crispHdr;
+    g_draw.weapons = family == UiLayerFamily::kWeaponsFire;
+    g_draw.vsHash = bindingShaderHash(BindSlot::Vs);
     g_draw.seq = seq;
     g_draw.targetRes = g_tc.info.resource;
     g_draw.targetW = g_tc.info.a;
@@ -3565,8 +3924,11 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     g_draw.rawDepthWritePotential = dsState.depthEnable && dsState.depthWriteAll;
     // The pass computed the jitter against the eye's submitted region, which
     // is the target (targetMatchesEye above).
-    g_draw.jx = jx;
-    g_draw.jy = jy;
+    // The jitter cancel, from the family's table (weapons_fire.h; default cancel, as for the space dust): a pair whose matrices do not
+    // carry the eye's jitter is drawn with none.
+    const bool cancel = !g_draw.weapons || weaponsFireJitterCancel(g_draw.vsHash);
+    g_draw.jx = cancel ? jx : 0.0f;
+    g_draw.jy = cancel ? jy : 0.0f;
     return true;
 }
 
@@ -3731,6 +4093,11 @@ struct CrispToneSave {
     const void* rtvRes = nullptr;
     uint64_t vs = 0, ps = 0;
     bool active = false;
+    // fix.sharp_weapons: this bracket's plan (weapons_fire.h), the step the caller has issued, what the eye held, whether a matched frame
+    // fell back to the plain add, and whether a step's bind faulted (the frame is then withheld whole).
+    TonePlan plan;
+    uint8_t step = 0;
+    bool hud = false, weapons = false, fellBack = false, faulted = false;
 };
 CrispToneSave g_crispSave;
 FaultBudget g_crispToneBudget("uiLayer.crispTone", 4);
@@ -3801,6 +4168,22 @@ bool crispTakeReady(ID3D11DeviceContext* ctx, int eye) {
     }
     if (!crispCoverageContextReady(ctx)) {
         crispStandDown("no deferred context for the coverage pass");
+        return false;
+    }
+    return true;
+}
+
+bool weaponsTakeReady(ID3D11DeviceContext* ctx, int eye) {
+    if (!ensureWeaponsLayerFor(ctx, eye)) {
+        weaponsStandDown("the weapons layer could not be created");
+        return false;
+    }
+    if (!ensureLayerFor(ctx, eye)) {
+        weaponsStandDown("the eye's 8-bit layer (the tonemap re-issue's target) could not be created");
+        return false;
+    }
+    if (!ensureSharpStates(ctx)) {
+        weaponsStandDown("the tonemap re-issue's blend states could not be created");
         return false;
     }
     return true;
@@ -3935,6 +4318,7 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
     // The frame's sequence (the per-eye jitter is not read here).
     if (!layerDrawJitter(0, &seq, &jx, &jy, &jw, &jh)) return false;
     bool content = false;
+    const void* seenRes = nullptr;  // the first 2D texture this draw samples (for the lost-layer instrument)
     for (UINT s = 0; s < 4 && eye < 0; ++s) {
         Ptr<ID3D11ShaderResourceView> srv;
         ctx->PSGetShaderResources(s, 1, &srv);
@@ -3945,20 +4329,24 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
         Ptr<ID3D11Resource> r;
         srv->GetResource(&r);
         if (!r) continue;
+        if (!seenRes) seenRes = r.Get();
         for (int cand = 0; cand < 2; ++cand) {
             const Eye& c = g_eye[cand];
-            const bool fresh = c.hdrSeq == seq && c.hdrDraws && c.hdrSrv;
+            const bool hudFresh = c.hdrSeq == seq && c.hdrDraws && c.hdrSrv;
+            const bool wFresh = c.wSeq == seq && c.wDraws && c.wSrv;  // fix.sharp_weapons' layer is content too
             // Outstanding = fresh and NOT yet published: already-consumed
             // content (hdrToneSeq == hdrSeq) must not arm the failed-consumer
             // fallback below (review R1's second half).
-            if (fresh && c.hdrToneSeq != c.hdrSeq) content = true;
-            if (eye >= 0 || !fresh || r.Get() != c.hdrTarget) continue;
+            if ((hudFresh && c.hdrToneSeq != c.hdrSeq) || (wFresh && c.wToneSeq != c.wSeq)) content = true;
+            if (eye >= 0 || !(hudFresh || wFresh)) continue;
+            if (!((hudFresh && r.Get() == c.hdrTarget) || (wFresh && r.Get() == c.wTarget))) continue;
             eye = cand;
             hdrSlot = static_cast<int>(s);
             hdrRes = r.Get();
         }
     }
     if (eye < 0) {
+        noteToneSight(seq, seenRes, -1, 1);
         // Outstanding HUD content this frame, but this draw reads no eye's
         // HUD source. Only the eye's OWN tonemap failing to read it is a
         // failed consumer (review R1): the draw must BE the tonemap -- the
@@ -3982,7 +4370,8 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
             if (outEye >= 0 && outEye < 2) {
                 const Eye& c = g_eye[outEye];
                 failedConsumer =
-                    c.hdrSeq == seq && c.hdrDraws && c.hdrSrv && c.hdrToneSeq != c.hdrSeq;
+                    (c.hdrSeq == seq && c.hdrDraws && c.hdrSrv && c.hdrToneSeq != c.hdrSeq) ||
+                    (c.wSeq == seq && c.wDraws && c.wSrv && c.wToneSeq != c.wSeq);
             }
             if (failedConsumer) {
                 // Named once, counted -- and the crisp path stands down to
@@ -3996,13 +4385,16 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
     Eye& e = g_eye[eye];
     // The ordering guards.
     if (e.seq == seq && e.draws) {
+        noteToneSight(seq, seenRes, eye, 2);
         crispToneDecline(CrispToneDecline::kLayerBusy, vs, ps);
         return false;
     }
     if (e.hdrToneSeq == seq) {
+        noteToneSight(seq, seenRes, eye, 3);
         crispToneDecline(CrispToneDecline::kSecondTonemap, vs, ps);
         return false;
     }
+    noteToneSight(seq, seenRes, eye, 0);
     crispArm(eye, seq, hdrSlot, ta.rtvRes, hdrRes, vs, ps);
     return true;
 }
@@ -4040,10 +4432,22 @@ int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* ali
     return say(r.Get() == e.hdrTarget ? "admitted: reads the HUD's HDR target" : "admitted: reads the HUD target's copy"), 1;
 }
 
+// The step the re-issue is on: its HDR source at the admitted slot, its blend over the 8-bit layer (weapons_fire.h's plan; the mapping is
+// sharp_weapons.h's, which the WARP rig runs too). Everything else the game's draw bound stays bound.
+void crispBindStep(ID3D11DeviceContext* ctx, ToneStep step) {
+    Eye& e = g_eye[g_crispSave.eye];
+    const SharpStepBinding b =
+        sharpStepBinding(step, e.hdrSrv.Get(), e.wSrv.Get(), g_sharpScratch.srv.Get(), g_sharpStates);
+    vScreenOMSetBlendStateRaw(ctx, b.blend, g_crispSave.factor, g_crispSave.sampleMask);
+    ID3D11ShaderResourceView* src = b.source;
+    vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(g_crispSave.hdrSlot), 1, &src);
+}
+
 // After the admitted draw's own issue (vscreen's forwardWithVerdict, around
 // its pureDrawReissue): re-issue it once, tonemapping the HDR layer into the
 // 8-bit layer's colour. False -- state untouched, the draw long since run
-// stock -- on any decline.
+// stock -- on any decline. fix.sharp_weapons: the same bracket carries the weapons' steps (weapons_fire.h's plan) -- the caller issues
+// the draw once for this Begin and once more for every true uiLayerCrispToneNext.
 bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
     detail::g_uiLayerCrispPending = false;
     if (!g_crispPending.pending || !ctx) return false;
@@ -4085,8 +4489,10 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
             return;
         }
         // The guards again, at the moment of issue (a frame boundary cannot
-        // have intervened; a nested EDVR pass could have).
-        if (e.hdrSeq != p.seq || !e.hdrDraws || !e.hdrSrv || !e.hdrRtv) {
+        // have intervened; a nested EDVR pass could have). The eye holds the HUD's content, the weapons' content, or both.
+        const bool hudC = e.hdrSeq == p.seq && e.hdrDraws && e.hdrSrv && e.hdrRtv;
+        const bool wpnC = e.wSeq == p.seq && e.wDraws && e.wSrv && e.wRtv;
+        if (!hudC && !wpnC) {
             crispToneDecline(CrispToneDecline::kNoContent, p.vs, p.ps);
             return;
         }
@@ -4098,22 +4504,18 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
             crispToneDecline(CrispToneDecline::kLayerBusy, p.vs, p.ps);
             return;
         }
-        // The 8-bit layer, at the HDR layer's size by construction.
+        // The 8-bit layer, at the HDR layers' size by construction.
         if (!ensureLayerFor(ctx, p.eye) || !e.rtv) {
             crispToneDecline(CrispToneDecline::kLayerFailed, p.vs, p.ps);
             return;
         }
-        if (e.w != e.hdrW || e.h != e.hdrH) {
+        if ((hudC && (e.w != e.hdrW || e.h != e.hdrH)) || (wpnC && (e.w != e.wW || e.h != e.wH))) {
             crispToneDecline(CrispToneDecline::kSizeMismatch, p.vs, p.ps);
             return;
         }
-        // The blend for the re-issue, before anything is bound: disabled,
-        // the colour channels alone written (alpha is the coverage pass's).
-        UiBlendRt rgbOnly;
-        rgbOnly.enable = false;
-        rgbOnly.mask = uiblend::kWriteRgb;
-        ID3D11BlendState* rgbBlend = cachedBlend(ctx, rgbOnly);
-        if (!rgbBlend) {
+        // The blends for the re-issue's steps, before anything is bound: replace, add and subtract over the colour channels alone (the
+        // alpha is the coverage pass's, or the clear's).
+        if (!ensureSharpStates(ctx)) {
             crispToneDecline(CrispToneDecline::kLayerFailed, p.vs, p.ps);
             return;
         }
@@ -4160,12 +4562,17 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         Ptr<ID3D11ShaderResourceView> gameHdr;
         ctx->PSGetShaderResources(static_cast<UINT>(p.hdrSlot), 1, &gameHdr);
         g_crispSave.gameHdrSrv = gameHdr;
-        // Bind: the 8-bit layer, no depth view; the disabled RGB blend; the
-        // full-layer viewport (and scissor rect, if the game's rasterizer
-        // tests one); the HDR layer at the admitted draw's HDR slot.
+        g_crispSave.eye = p.eye;
+        g_crispSave.seq = p.seq;
+        g_crispSave.hdrSlot = p.hdrSlot;
+        g_crispSave.rtvRes = p.rtvRes;
+        g_crispSave.vs = p.vs;
+        g_crispSave.ps = p.ps;
+        g_crispSave.hud = hudC;
+        g_crispSave.weapons = wpnC;
+        // Bind: the 8-bit layer, no depth view; the full-layer viewport (and scissor rect, if the game's rasterizer tests one).
         ID3D11RenderTargetView* target = e.rtv.Get();
         vScreenSetRenderTargetsRaw(ctx, 1, &target, nullptr);
-        vScreenOMSetBlendStateRaw(ctx, rgbBlend, g_crispSave.factor, g_crispSave.sampleMask);
         D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(e.w), static_cast<float>(e.h), 0.0f,
                           1.0f};
         vScreenRSSetViewportsRaw(ctx, 1, &vp);
@@ -4173,14 +4580,26 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
             D3D11_RECT r{0, 0, static_cast<LONG>(e.w), static_cast<LONG>(e.h)};
             ctx->RSSetScissorRects(1, &r);
         }
-        ID3D11ShaderResourceView* hdrSrv = e.hdrSrv.Get();
-        vScreenPSSetShaderResourcesRaw(ctx, static_cast<uint32_t>(p.hdrSlot), 1, &hdrSrv);
-        g_crispSave.eye = p.eye;
-        g_crispSave.seq = p.seq;
-        g_crispSave.hdrSlot = p.hdrSlot;
-        g_crispSave.rtvRes = p.rtvRes;
-        g_crispSave.vs = p.vs;
-        g_crispSave.ps = p.ps;
+        // The plan (weapons_fire.h): the HUD alone is the one replace it always was. With weapons content the matched composite needs
+        // the source pass's shaders, the scratch and the deferred context; a frame that has not got them is composited plain (counted).
+        bool matchedReady = false;
+        if (wpnC && g_sharpBlend == SharpBlend::kMatched) {
+            compileSharpSourceOnce(ctx);
+            matchedReady = g_srcVs && g_srcPs && gameHdr && crispCoverageContextReady(ctx) && ensureSharpScratch(ctx, e.wW, e.wH);
+        }
+        TonePlan plan = sharpTonePlan(hudC, wpnC, g_sharpBlend, matchedReady);
+        if (plan.clearEye) vScreenClearRenderTargetViewRaw(ctx, e.rtv.Get(), kUiLayerClear);
+        bool fellBack = wpnC && g_sharpBlend == SharpBlend::kMatched && !plan.sourcePass;
+        if (plan.sourcePass &&
+            !sharpSourcePass(ctx, g_crispDeferred.Get(), g_srcVs, g_srcPs, g_sharpStates, gameHdr.Get(), g_sharpScratch.rtv.Get(),
+                             e.wRtv.Get(), e.wW, e.wH, vScreenExecuteCommandListRaw)) {
+            plan = sharpTonePlan(hudC, wpnC, SharpBlend::kPlain, false);
+            fellBack = true;
+        }
+        g_crispSave.plan = plan;
+        g_crispSave.step = 0;
+        g_crispSave.fellBack = fellBack;
+        crispBindStep(ctx, plan.steps[0]);
         g_crispSave.routeSlot = routeBegin(ctx, UiRouteStage::kHdrTonemap, p.eye, p.seq);
         g_crispSave.active = true;
         ok = true;
@@ -4216,6 +4635,20 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
     return ok;
 }
 
+// Between the issues of one bracket (fix.sharp_weapons): bind the next step's HDR source and blend and say so; false when the plan is
+// done (the HUD alone is one step, so it always is) or a bind faulted (End then restores and withholds the frame).
+bool uiLayerCrispToneNext(ID3D11DeviceContext* ctx) {
+    if (!g_crispSave.active || !ctx) return false;
+    if (static_cast<unsigned>(g_crispSave.step) + 1u >= g_crispSave.plan.count) return false;
+    ++g_crispSave.step;
+    const bool ran = guardedBudget(g_crispToneBudget, [&] { crispBindStep(ctx, g_crispSave.plan.steps[g_crispSave.step]); });
+    if (!ran) {
+        g_crispSave.faulted = true;
+        return false;
+    }
+    return true;
+}
+
 void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
     if (!g_crispSave.active) return;
     const int eye = g_crispSave.eye;
@@ -4223,6 +4656,8 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
     const int hdrSlot = g_crispSave.hdrSlot;
     const void* rtvRes = g_crispSave.rtvRes;
     const uint64_t vs = g_crispSave.vs, ps = g_crispSave.ps;
+    const TonePlan plan = g_crispSave.plan;
+    const bool hadWeapons = g_crispSave.weapons, fellBack = g_crispSave.fellBack, faulted = g_crispSave.faulted;
     routeEnd(ctx, g_crispSave.routeSlot);
     g_crispSave.routeSlot = -1;
     // Everything the game had, put back through the raw entry points.
@@ -4244,15 +4679,27 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
         crispStandDown("a fault while putting the game's state back after the tonemap re-issue");
     }
     g_crispSave = CrispToneSave{};
-    // The coverage pass: without it the layer's alpha is stale, so a failure
-    // clears the layer (the HUD misses the frame; the picture stays whole).
     Eye& e = g_eye[eye];
-    bool covered = false;
-    const bool ranCover = guarded("uiLayer.crispCoverage", [&] {
-        covered = crispCoveragePass(ctx, e, eye, seq);
-    });
+    if (faulted) {
+        // A step's bind faulted: the 8-bit layer holds part of the frame's light. It is withheld whole (the picture stays the game's), and the
+        // path stands down with the reason.
+        vScreenClearRenderTargetViewRaw(ctx, e.rtv.Get(), kUiLayerClear);
+        crispStandDown("a fault while binding a step of the tonemap re-issue");
+        return;
+    }
+    // The coverage pass: without it the layer's alpha is stale, so a failure
+    // clears the layer (the HUD misses the frame; the picture stays whole). A frame with the weapons' light alone has no HUD alpha to
+    // transfer: its 8-bit layer was cleared to alpha 1 and the weapons added no coverage.
+    bool covered = true;
+    bool ranCover = true;
+    if (plan.coverage) {
+        covered = false;
+        ranCover = guarded("uiLayer.crispCoverage", [&] {
+            covered = crispCoveragePass(ctx, e, eye, seq);
+        });
+    }
     if (ranCover && covered) {
-        ++g_win.hdrCoveragePasses;
+        if (plan.coverage) ++g_win.hdrCoveragePasses;
     } else {
         vScreenClearRenderTargetViewRaw(ctx, e.rtv.Get(), kUiLayerClear);
         if (!g_crispStoodDown) {
@@ -4286,11 +4733,42 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
     e.target = rtvRes;  // the RGBA8 eye the game's tonemap wrote: the FIRST link of the identity
     e.chainOpen = true;
     e.hdrToneSeq = seq;
+    e.wToneSeq = seq;
     if (runtimeFlatProfile()) flatUiTrailNoteReissue(seq, FlatUiTrailReissue::kPublished, 0, seq);
     e.hdrMissStreak = 0;  // a publication landed: the R1 deadline's streak resets
+    if (hadWeapons) {
+        // Stamped ONLY by a bracket that carried the weapons layer's content: the drop test (weaponsLayerDropped) compares it with the content's frame.
+        e.wPubSeq = seq;
+        e.wMissStreak = 0;
+    }
     g_lastRedirectSeq = seq;
     detail::g_uiLayerWatching = true;
     ++g_win.hdrReissued;
+    if (hadWeapons) {
+        // The eye-frame's weapons composite, by kind: the matched difference, the plain add, or the plain add a matched frame fell back to.
+        const bool matched = plan.sourcePass;
+        if (matched) ++g_win.weaponsEyeMatched;
+        else if (fellBack) ++g_win.weaponsEyeFallback;
+        else ++g_win.weaponsEyePlain;
+        static bool engagedNoted[2] = {false, false}, fallbackNoted = false;
+        if (matched && !engagedNoted[0]) {
+            engagedNoted[0] = true;
+            Log::get().note("sharp weapons: the %s eye's weapons light was composited by tonemap difference -- T(F_up + L) - T(F_up) through "
+                            "the game's own tonemap draw (its exposure, LUT and constants), %ux%u, the scene's HDR input resampled to the "
+                            "layer's size by a bilinear filter.",
+                            eye == 0 ? "left" : "right", e.w, e.h);
+        } else if (!matched && !fellBack && !engagedNoted[1]) {
+            engagedNoted[1] = true;
+            Log::get().note("sharp weapons: the %s eye's weapons light was composited by the plain add -- T(L) through the game's own tonemap "
+                            "draw (advanced.sharp_weapons_blend = plain).",
+                            eye == 0 ? "left" : "right");
+        }
+        if (fellBack && !fallbackNoted) {
+            fallbackNoted = true;
+            Log::get().note("sharp weapons: a matched composite fell back to the plain add this frame (the source pass's shaders, the scratch "
+                            "or the deferred context were not available, or the pass failed); counted in the 30 s line.");
+        }
+    }
     if (!crispToneSeenBefore(static_cast<uint8_t>(CrispToneDecline::kCount), vs, ps)) {
         Log::get().note("crisp hud: tonemap re-issue engaged (%s, vs %016llX ps %016llX) -- the %s "
                         "eye's HDR HUD layer (%ux%u) is tonemapped into its 8-bit layer at ps t%d, "
@@ -4318,7 +4796,7 @@ UiLayerWorldStats uiLayerWorldStats() {
 
 bool uiLayerWorldScreenHeld() { return g_screenHeld == 1; }
 
-bool uiLayerLiveForWorldRoute() { return detail::g_uiLayerLive; }
+bool uiLayerLiveForWorldRoute() { return detail::g_uiQualityLive; }
 
 const char* uiLayerNotLiveReason() {
     return uiLayerNotLiveReasonFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);
@@ -4345,7 +4823,7 @@ bool uiLayerWorldReissueBegin(ID3D11DeviceContext* ctx) {
         // Every call below goes through the hooked vtable or a raw entry: vscreen's hooks step aside. The scope is
         // OUTSIDE every guard -- an SEH fault does not unwind a destructor inside one.
         VrWorldInternalScope internal;
-        if (!detail::g_uiLayerLive || uiLayerIssueBlocked()) {
+        if (!detail::g_uiQualityLive || uiLayerIssueBlocked()) {
             why = UiWorldRefuse::kBeginRefused;
         } else if (uiLayerTargetKind() == 0 || g_tc.info.resource != plan.targetRes) {
             // Nothing ran between the decision and here but the game's own draw and its verdict's state.
@@ -4369,6 +4847,7 @@ bool uiLayerWorldReissueBegin(ID3D11DeviceContext* ctx) {
             g_draw.decided = true;
             g_draw.counted = false;
             g_draw.hdr = false;
+            g_draw.weapons = false;
             g_draw.reissue = true;  // the route's: the game's own draw lands in its eye image, this one is not a take
             g_draw.holoPsHash = 0;
             g_draw.holoOriginal = nullptr;
@@ -4475,7 +4954,7 @@ int uiLayerWorldDoorGap(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame)
     if (eye > 1 || !frame) return static_cast<int>(UiWorldDoorGap::kNoLayer);
     const Eye& e = g_eye[eye];
     UiWorldDoorFacts f;
-    f.live = detail::g_uiLayerLive;
+    f.live = detail::g_uiQualityLive;
     f.layerMade = e.srv && e.rtv && e.w && e.h;
     f.holdsContent = e.seq == sequence && e.draws != 0;
     f.alreadyComposited = e.compositedSeq == sequence;
@@ -4579,6 +5058,9 @@ bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForw
         if (g_eye[e].seq == g_lastRedirectSeq && g_eye[e].draws) taken[e] = g_eye[e].target;
     }
     seedWritersCheck(ctx, count, instances, verdict, drawKind);
+    // The after-the-UI take belongs to fix.ui_quality: with it off and fix.sharp_weapons on, the 8-bit layer holds the weapons' light alone
+    // and nothing the game draws later is taken into it. (The seed check above runs: the weapons' seeded depth goes stale all the same.)
+    if (!detail::g_uiQualityLive) return false;
     if (!taken[0] && !taken[1]) return false;
     char kind = 0;
     int takenEye = -1;
@@ -4916,7 +5398,7 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     // ...nor does the VR world route's pending re-issue (a screen draw the game's frame never issued).
     worldReissueReset();
     ++g_win.frames;
-    if (detail::g_uiLayerLive) ++g_win.scene.framesLive;  // the frames the composite census could run in
+    if (detail::g_uiQualityLive) ++g_win.scene.framesLive;  // the frames the composite census could run in
     g_frameTakenDraws = 0;  // the door's emptiness test (uiLayerDoorLayerOnly) counts this frame's takes alone
     // The route's timers read back (the door reads them too).
     routePoll(ctx);
@@ -4950,6 +5432,9 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!detail::g_uiLayerLive && releaseLayers()) {
         Log::get().note("ui quality: layer: not live -- both eyes' layers and composite outputs "
                         "released.");
+    } else if (detail::g_uiLayerLive && !detail::g_uiQualityLive && releaseQualityOnlyLayers()) {
+        Log::get().note("ui quality: layer: fix.ui_quality is off and fix.sharp_weapons on -- the interface's HDR layers, transmittance and depth "
+                        "targets released; the weapons layer and the 8-bit layer it composites through stay.");
     }
     uiSurfacesFrameBoundary();
     const uint64_t now = GetTickCount64();
@@ -4966,6 +5451,7 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
         PeriodicWorkScope timing(g_workTotals, samples);
         logTotals(static_cast<double>(now - g_winStartMs) / 1000.0);
     }
+    logSharpWeapons();
     g_win = Window{};
     g_seedCensus.nextWindow();
     for (RouteStats& r : g_routeStats) {

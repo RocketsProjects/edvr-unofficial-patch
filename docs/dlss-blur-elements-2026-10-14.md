@@ -7,9 +7,17 @@
   See "Design, 2026-10-16: engine motion for the shield strike". Evidence E1-E3 done offline (run 070301): option (b) CLEARED
   with one amendment, the shield records must also be joined (they share the hull's pose but carry no previous pose). H-clobber RULED
   OUT; the hull's 13% stale_slot is open hypothesis H-bias (a depth bias missing from the exported z). E2 (do puffs ride the ship) inconclusive.
-  Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"); count-and-tag hook next.
-- **Weapons fire (2026-10-16): DESIGN ONLY:** the HDR-layer route (the space dust's) for 1F17, 939D and 5C1D; 820E stays. Evidence W1-W5
-  offline first. See "Design, 2026-10-16: weapons fire after the upscale".
+  Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"). A count-and-tag probe
+  (`claude/producer-434d120-probe`) confirmed FUN_14434D470 makes the shield (see the flight notes); the probe and the parked join are NOT on main.
+- **Weapons fire (2026-10-16): MERGED** (`claude/billboards-sharp-weapons`; flown OK in combat as `claude/combat-flight-1`; entries "Built" and
+  "Combat flights"). 1F17, 939D and 5C1D go into the eye's own additive HDR layer, composited after the upscale by tonemap difference; 820E stays.
+  Sean: weapons and shields look much better, beams and tracers are sharp. Key `fix.sharp_weapons` (default on, independent of `fix.ui_quality`).
+  **Temporary key, KEPT by Sean's choice for long-session A/B:** `advanced.sharp_weapons_blend = matched | plain`, the FIRST row of the in-headset menu
+  ("Weapons blend", Performance page, live); he sees no difference between the two live (log edvr_gfx_20261016_095256). When the arc closes ship
+  matched and propose removing the key, quoted, with its generator exception (`MENU_ADVANCED_EXCEPTIONS` in tools\gen_settings_schema.py) and its
+  edvr.ini row. W3 SETTLED: all three pairs carry the eye's jitter (dump 100257), the cancel table says cancel for each. The 0.5 to 5 percent "layers'
+  content never reached a tonemap" was an accounting artifact (one false count per burst end), nothing was dropped; the corrected count
+  ("The never-tonemapped frames: found") is merged but NOT yet flown.
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
   path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
   docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
@@ -304,3 +312,140 @@ model key 2317A8D34F0, stable for 19 frames, render thread); FUN_14434D470 makes
 billboard draw went through a facing transcription (100% swapped); no untranscribed billboard and no B477/E812 drew; 6A19 is a pool mesh,
 not a billboard. Sharp weapons: 1.4-4.7% of weapon eye-frames' layers never reach a tonemap (the HUD layer lost none); the flown build
 cannot locate it. Sean A/B'd plain against matched at 09:54-09:57 and saw no difference; the key stays for long-session A/B.
+
+## Built, 2026-10-16: weapons fire in its own HDR layer (`claude/sharp-weapons`, MERGED, flown OK in combat)
+
+The design above, built. Key `fix.sharp_weapons = on | off` (default on, F8 Performance page "Sharp weapons"), VR only, needs temporal AA on. A
+temporary A/B, `advanced.sharp_weapons_blend = matched | plain` (default matched, hidden), is listed in the Status block and goes when the arc closes.
+
+**What it does.** The three exact pairs 1F17BF54/A75C1DB6 (beams, bolts), 939D01F2/C5DF9CC9 (multicannon) and 5C1D8EF5/C49F999F (the shield strike's
+additive part) are family `weapons fire` (`weapons_fire.h`; `UiLayerFamily::kWeaponsFire`, last in its enum). It is on the HDR branch of
+`uiLayerFamilyFor`, in `uiLayerFamilyTakesHdr`, not in `uiLayerFamilyIsSceneLines` (exempt from the density rule). vscreen.cpp reads the pixel
+shader for these vertex shaders; 820E/6EAA stays in the scene. The draw goes through the space dust's route (seeded depth, GEQUAL/GREATER no write,
+the viewport remap with the jitter cancel), but into the eye's OWN additive HDR layer W (R16G16B16A16_FLOAT, the HUD layer's size), not the HUD's.
+
+**The toggle is independent of `fix.ui_quality`.** `refreshLive()` computes two halves: `quality = uiLayerLiveFor(g_target, ...)` (unchanged, now
+`detail::g_uiQualityLive`) and `g_weaponsLive = uiLayerWeaponsLiveFor(fix.sharp_weapons, temporal, ..., not flat)`. `detail::g_uiLayerLive` (the
+machinery: the door, the HDR tonemap re-issue, the composite) is their union. A family is decided only if its own key is on
+(`uiLayerFamilyEnabled`; new decision `family-off`, tested right after the verdict). The parts that are the interface's stay on the first half: the 2D
+screen and the post-tonemap rules (`uiLayerFamilyOf` returns none for the 8-bit target), the VR world route and the on-foot gate
+(`uiLayerLiveForWorldRoute`), the composite census, the after-UI take (`uiLayerNoteOther` returns after its seed check). With `fix.ui_quality` off the
+layer size is the DLSS output times 1.0, and at the frame boundary the interface's HDR layer, transmittance and depth are released. All four
+combinations are in `tools\sharp_weapons_test` (the family gate, the decisions on every family and on the recorded rows, the two liveness halves).
+
+**A2, the brightness fix (matched).** Per eye-frame with weapons content, the layer re-issues the game's own tonemap draw (its exposure, LUT and b2,
+nothing rebound but the target, the blend and the HDR source) over the 8-bit layer E: clear E to (0,0,0,1); one source pass (`sharp_weapons.h`,
+fullscreen, two targets, the viewport the layer's) writes S = F_up (the tonemap's HDR input resampled to the layer's size by a bilinear made of Loads, so
+the game's sampler is not involved) and adds the same F_up onto W, so W = L + F_up; then tonemap(S) replaces E, and tonemap(W) is drawn with blend
+SUBTRACT (source minus E), which leaves T(F_up + L) - T(F_up) in E (8-bit, clamped at 0); the HUD's tonemap, when the HUD layer has content, is then
+ADDED (ONE, ONE) so it does not erase the weapons. The door's existing composite adds E onto the post-RCAS picture (alpha one, no coverage). `plain` is
+`E = T(W)` with W holding L alone. `sharpTonePlan` is the pure plan (`vscreen.cpp` issues the game's draw once per step through
+`uiLayerCrispToneNext`); a matched frame that has no scratch, shaders or deferred context falls back to plain, counted. S is one scratch for both eyes.
+- **Proof (WARP, `sharp_weapons_test`, a synthetic tonemap with a scalar exposure, a 3D LUT and a compressing curve, so T(F+L) != T(F)+T(L)):** over a lit
+  background the matched composite is within 1/255 of T(F + L), the plain add 71/255 off; over black both are within 1. Mutants of the sequence (the
+  source pass replacing instead of adding, the lit step replacing, the base step missing, the lit step reading the scratch) are off by 44, 71, 71, 71.
+  S is exact to the CPU resample, W within 0.002 of L + F_up. The source pass leaves the immediate context's targets, viewport and shaders as it found
+  them, and the debug layer reports nothing. Needs the game's tonemap to read its HDR source by the vertex stream's UV (its layout is POSITION +
+  TEXCOORD; the HUD's re-issue has flown on the same assumption).
+
+**A1, the watch.** `eye_draw_snapshot.h` watches 1F17BF54, 939D01F2 and 5C1D8EF5, so the next eye dump holds their VS b0/b1/b2. W3 stays OPEN until
+1F17's CB1[41..48] and 939D's and 5C1D's CB0 rows 4-7 are compared with the jittered scene camera's matrix of the same frame. The cancel is read per pair
+from `kWeaponPairs[].cancelJitter` (default true, as the dust): `weaponsFireJitterCancel(vs)` sets `g_draw.jx/jy` to zero for a pair marked false. If a
+pair is unjittered, set its entry false and nothing else.
+
+**Log lines** (all `sharp weapons:`; each has a not-exercised form). Once per change: on or off with the state of `fix.ui_quality`, the blend. First
+sight of each pair: `first <pair> draw seen (vs .. ps ..): <decision>; jitter cancel yes|NO`. Every 30 s: `<K> draws a frame in the HDR layer, <L> a
+frame left in the scene (reasons), blend matched|plain; eye-frames: N matched, N plain, N plain after a matched frame fell back; N layers' content never
+reached a tonemap; draws by pair: ...`, or `not exercised in this window (no weapons-fire draw reached the layer's decision)`, or `not live this window
+(fix.temporal_aa is off ...)`. First composite of each kind, the first fall-back, the scratch and each weapons layer when created.
+
+**Not changed / accepted.** The weapons' light is added to E independently of the HUD's coverage: a translucent HUD over a beam no longer dims it (W1
+accepted that later over-blends no longer dim the beams). The matched difference is made from two 8-bit results, so it carries +-1/255. T(0) is
+taken as 0, as the HUD route does. A failure of the weapons layer stands down the weapons alone (`sharp weapons: stands down`); the missing tonemap
+consumer stands down the shared re-issue, HUD and weapons both.
+
+**Flight (Frontier VR, DLSS K).** Read the log with `python tools\edvr_log.py --target frontier --expect-build HEAD`, then grep `sharp weapons`. Fire
+beams and multicannon over space, a planet and near a star, head still then moving; hit a shield; an eye dump during a burst for W3. Pass: the 30 s
+line at 2 or more a frame while firing with 0 left in the scene, no trails, beams cut by hulls and never over the cockpit, the beam over a planet or
+star as bright as stock (A/B: `advanced.sharp_weapons_blend = plain` is brighter there), the dump's tonemap input without the beams. Repeat with
+`fix.ui_quality = off`, and with `fix.sharp_weapons = off` for the control. Then Sean judges the halo (no bloom in this tier, W2).
+
+## Combat flights, 2026-10-16, and what followed (`claude/combat-flight-2`, MERGED)
+
+**Flown** (build fdb42b63, logs edvr_gfx_20261016_094708 and 095256). Sean: weapons and shields look much better, beams and tracers are sharp. He switched
+`advanced.sharp_weapons_blend` between plain and matched live (the 30 s line shows both kinds of eye-frame in 095256) and sees no difference; he keeps the
+A/B. W3 for 939D: its CB0 rows 4-7 equal the scene's jittered cb1[270..273] bit for bit apart from the translation, so the default cancel is right for it.
+
+**The menu row.** The A/B is the first row of the Performance page, the page the menu opens on: `# ui: Weapons blend | choices matched=Matched, plain=Plain |
+live | menu performance | top` above `#sharp_weapons_blend` in [advanced]. Two changes to tools\gen_settings_schema.py: a `top` token on a ui: line sorts a
+row first on its page (stable, every other row keeps the ini's order), and `MENU_ADVANCED_EXCEPTIONS` (one key, TEMPORARY) lets that [advanced] key carry a
+`menu` token as a Fix-tier row instead of being refused, skipped in the developer tier so it is one row. The menu code is unchanged: it lists the table in
+order. Held by the generator's self-test (three cases) and by `sharp_weapons_test` on the real generated table.
+
+**The never-tonemapped frames: cause OPEN, instrument built.** From the two logs: a weapons layer counted lost when the eye's next weapons draw clears it
+with its content not published (`wToneSeq != wSeq`). 18, 8 and 44 in the three 30 s windows of 094708 (390, 3204 and 1709 eye-frames) and 2, 2, 8, 4, 4, 0
+in 095256. The rate is highest in the beam-only windows (4.6 and 5.5 percent of 390 and 36 eye-frames) and lowest in the multicannon-heavy one (0.25
+percent). The HUD layer, in the same frames, lost none (0 in every window; a re-issue for every eye-frame that had HUD content), and no re-issue decline was counted, so the re-issue
+ran for the eye-frame; "left in the scene" holds only one `no-eye` draw. So a tonemap ran but did not take the weapons content. What the code allows, each
+with its signature: (a) the tonemap read a different frame number than the weapons draws carried (`wFresh`, `wpnC` compare `wSeq` with the tonemap's
+frame); (b) no tonemap-shaped draw ran for that eye; (c) the first weapons draw of the frame went into another HDR target than the one the tonemap reads
+(`wTarget` is the first draw's, and the admission matches the weapons content by it when the HUD layer has none that frame); (d) a refusal. Ruled out: the
+tonemap arriving before the weapons draw (that is `tone-late`, a decision counted in the left-in-the-scene list, which has none), and a second tonemap or a
+busy 8-bit layer (counted declines, none). The instrument: every lost layer prints (the first 24 a session) `sharp weapons: lost layer N`: the eye, the
+content's frame, its draws, the target of the first and how many went into another, the HUD layer's frame and whether it was tonemapped, the next weapons
+draw's frame, and the last six tonemap-shaped draws the admission saw (frame, resource read, eye matched, outcome). Next flight: read those lines; (a)
+shows as a tonemap entry one frame off the content's, (b) as no entry for the eye, (c) as a nonzero "into another target" or a read resource unlike the
+first-draw target. The fix follows the signature (a: the tonemap uses the eye's own frame; b: composite the leftover content at the door; c: match by
+the layer's own target set), with a rig case that fails first.
+
+### The never-tonemapped frames: found (`claude/combat-flight-3`, MERGED, accounting fix NOT FLOWN)
+
+**Cause.** Flight edvr_gfx_20261016_103639 (build a5709ce1), ten `lost layer` lines. Every one has the same shape: a weapons layer holding ONE draw (frame 5675,
+1 draw, first into the eye's own target, 0 into another), the next weapons draw ~200 frames later (frame 5879), and between them the tonemap-shaped draws of
+both eyes admitted every frame (the HUD's re-issue runs every frame). Lost layers 3 and 4 are the same (content 5887, next draw 6678). The count is made at the
+eye's NEXT weapons draw (`beginInner`, when the layer is cleared for the new frame), and compared the content's frame with `wToneSeq`, which every re-issue
+overwrites: by the time a burst's last draw is followed by quiet frames, `wToneSeq` is the latest frame, never the content's, so the next burst's first draw
+counted the previous burst's last draw as lost. One false count per burst end per eye; that is why beam-only windows (many short bursts) showed 4 to 5
+percent and the multicannon-heavy one 0.25. The hypotheses, against the code: (1) a final draw landing after its frame's tonemap is `tone-late`, a decision
+counted in the left-in-the-scene list, which had none; (2) there is no state where publication waits for a later frame: the admission matches the content by
+the eye's own frame and target in the frame it is drawn (`wFresh`), whatever the draw count, and the bracket carried the layer in that same re-issue; (3) the
+frame tag is stamped at the layer's first draw from the eye's own sequence, the one the tonemap reads. A lone final draw was composited in its own frame's
+tonemap all along. No tighter instrument was needed: the lines' own numbers (one draw, a ~200-frame gap, admitted tonemaps in between) show it.
+
+**Fix.** The accounting, not the compositing. A new tag `wPubSeq` is stamped only by a re-issue whose bracket carried the weapons layer's content
+(`uiLayerCrispToneEnd`, `hadWeapons`), and a layer is dropped iff `weaponsLayerDropped(contentFrame, draws, wPubSeq)` (weapons_fire.h). The miss streak
+(30 frames of unpublished content stands the weapons path down) resets only on such a bracket, so a real persistent failure can still reach it, which the
+old unconditional reset made impossible. The 30 s line now prints "of N eye-frames with weapons draws" beside the composites, so the identity
+`matched + plain + fell back == eye-frames with draws - layers lost` can be read off one line. Not changed: the HUD layer's own count
+(`hdrLost`, `hdrToneSeq`) has the same shape of comparison but its layer is drawn every frame, so it never showed; if the HUD is ever drawn in bursts it
+needs the same tag.
+
+**Rig** (`sharp_weapons_test`, `dropTests`): a burst of five three-draw frames and a lone final draw, 200 quiet frames with the tonemap running, then the next
+burst: the lone draw is carried by its own frame's re-issue, the production rule counts 0 lost and the frozen rule 1 (fail-before). Fifty lone draws 30 frames
+apart: production 0, frozen 49. A real drop (content, no re-issue in its frame) counts 1, and so does a re-issue that ran in the content's frame without
+carrying it, which the frozen rule could not see (0). A continuous burst counts 0 by both. Pins with controls: the production test is
+`weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)`, the stamp sits inside `if (hadWeapons)`.
+## Design, 2026-10-16: the shield refraction after the upscale (820E5C13/6EAA86EF), DESIGN ONLY
+
+**What 6EAA computes** (disassembled from edvr_logs\shaders). It sums n = (0,0,1) plus, for each of `cb2[7].w` hits, the t1 normal (x2-1,
+faded by `saturate(0.5*x1.x)`, weighted by `saturate(dot(normalize(hitpos), v1))`), and samples `t0` at `uv_jit + normalize(n).xy*cb2[0].x`,
+where `uv_jit = v0.xy/v0.z*(0.5,-0.5)+0.5` and v0 is the jittered clip position. It writes `x cb1[90].z x cb1[90].y` with alpha 1 (an
+overwrite). In 100257 the frame CB row 90 is (0, 1/256, 256, 0), so the gain is exactly 1 (INFERRED for 820E's PS b1, not captured). No
+tint, fresnel, additive or chromatic term. d is a UV fraction, so it scales to any resolution.
+
+**Commute.** The tonemap 99C2 is one t1 tap, then exposure, LUT and saturation, plus a +-0.5/255 position dither: T(F)(x+d) = T(F(x+d))
+within about 1/255. The break is order: the canopy 8C091FFD, F512712C, 025B4B9F and the puffs 9AEC/9F4B/AFBC/BBAD are drawn after 820E
+unrippled in stock, and a post-DLSS ripple would ripple them.
+
+**Design.** Skip 820E in the scene. Re-issue it unchanged, in-frame, through the HDR layer route (remap, jitter cancel, seeded GEQUAL)
+into a cleared per-eye R32G32 layer D with t0 bound to a 2016² UV ramp, so D holds the game's own `uv_jit + d`. At the door, after RCAS and
+before the E composite: `out = copy(RCAS).Sample(D - jitter_uv)` over D's coverage. Fallback: a DXBC patch writing d to RG16F. Temporary
+A/B: ripple after the upscale, none, stock.
+
+**Alternatives.** The UI resolve bound over 820E's coverage (fallback; softens the whole bubble); the parked join plus displacement coverage
+(wrong for sky; the ripple animation keeps smearing); skipping with no ripple (diagnostic leg only).
+
+**Evidence before shipping.** R1: watch 820E in eye_draw_snapshot (PS b1, PS b2, s0) for the gain, cb2[0].x and the filter. R2: the draws
+after 820E that overlap the bubble (070301, 100257). R3: 820E draws per eye-frame. Rig: `tools\shield_ripple_test` (the game's ps_6EAA on a
+ramp against the analytic uv+d; stock against post-path within 2/255; mutants for the jitter, the y flip, the d scale, the depth seed, the
+copy, the order and a hole).
