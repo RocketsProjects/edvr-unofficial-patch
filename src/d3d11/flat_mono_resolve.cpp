@@ -80,7 +80,7 @@ struct OpticalProbe {
     uint32_t budgets[5]{}; // near-origin inward, large reanchor, other inward, outward, cuts
     uint32_t suppressed[5]{};
     uint32_t heartbeat=0;
-    uint64_t lastHeartbeatPresent=0;
+    uint64_t lastHeartbeatPresent=0,lastHeartbeatProgress=0;
 };
 OpticalProbe& optical=*new OpticalProbe;
 struct OpticalParams {
@@ -166,7 +166,13 @@ void opticalUnavailable(uint64_t frame,const char* why) {
 }
 void opticalHeartbeat(uint64_t presentFrame) {
     if(!optical.lastHeartbeatPresent){optical.lastHeartbeatPresent=presentFrame;return;}
-    if(optical.heartbeat>=12 || presentFrame<optical.lastHeartbeatPresent+2700)return;
+    if(presentFrame<optical.lastHeartbeatPresent+2700)return;
+    const uint64_t progress=optical.events+optical.completed+optical.unavailable+optical.failed;
+    // Startup can spend the twelve no-event lines before a flight begins.
+    // Later candidate/completion progress must still reach the log, at the
+    // same rate limit; unchanged idle state stays quiet after that cap.
+    if(optical.heartbeat>=12 && progress==optical.lastHeartbeatProgress)return;
+    optical.lastHeartbeatProgress=progress;
     optical.lastHeartbeatPresent=presentFrame;++optical.heartbeat;
     unsigned pending=0;for(const auto& job:optical.jobs)pending+=job.pending?1u:0u;
     Log::get().note("flat origin optical heartbeat: present=%llu flat-resolve-frames=%llu events=%llu submitted=%llu completed=%llu pending=%u "

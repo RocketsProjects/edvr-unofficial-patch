@@ -25,6 +25,7 @@ struct FlatOriginWitnessReport {
     bool clockMatch=false;
     float now[3]{}, previous[3]{}, cameraDelta[3]{};
     float medianDelta[3]{}, cameraMinusMedian[3]{};
+    bool worldEdgeValid=false, cameraMinusWorldValid=false;
     float edgeMedian[5][3]{};
     uint16_t edgeCount[5]{},edgeCoherent[5]{};
     float farEdgeMedian[5][3]{};
@@ -278,8 +279,10 @@ inline void FlatOriginWitnessCore::assess(const Event& e,FlatOriginWitnessReport
     }
     // Only the exact -1->0 edge describes this event. Neighbor-edge motion
     // remains raw evidence of a clock/producer offset, not a reanchor label.
-    std::memcpy(r.medianDelta,r.edgeMedian[2],sizeof(r.medianDelta));
-    for(unsigned c=0;c<3;++c)r.cameraMinusMedian[c]=r.cameraDelta[c]-r.medianDelta[c];
+    r.worldEdgeValid=r.edgeCount[2]>0;
+    r.cameraMinusWorldValid=r.worldEdgeValid && r.clockMatch;
+    if(r.worldEdgeValid)std::memcpy(r.medianDelta,r.edgeMedian[2],sizeof(r.medianDelta));
+    if(r.cameraMinusWorldValid)for(unsigned c=0;c<3;++c)r.cameraMinusMedian[c]=r.cameraDelta[c]-r.medianDelta[c];
     r.coherent=r.edgeCoherent[2];
     r.movingOutliers=r.edgeCount[2]-r.edgeCoherent[2];
     if(!r.clockMatch || ownerN<2 || r.farOwners<2 || r.preStable<3 || r.edgeCount[1]<3 || r.edgeCount[2]<3 ||
@@ -319,12 +322,12 @@ inline uint32_t heartbeat=0;
 inline void print(const FlatOriginWitnessReport& r) noexcept {
     const char* verdict=r.verdict==FlatOriginWitnessReport::Verdict::UnchangedRecords?"unchanged-game-record-poses":
         r.verdict==FlatOriginWitnessReport::Verdict::CoherentRecordShift?"coherent-game-record-shift":"inconclusive";
-    Log::get().note("flat origin witness: resolver-frame=%llu engine-at-event=%u sample-frame=%u clocks-match=%u pose-pattern=%s decision-stage=pre-backend planned-kept=%u reanchor-rule=%u planned-reset=%u unavailable=%u reason=%s delta-ms=%.9g camera-now=(%.9g,%.9g,%.9g) camera-previous=(%.9g,%.9g,%.9g) camera-delta=(%.9g,%.9g,%.9g) world-edge(-1>0)=(%.9g,%.9g,%.9g) camera-minus-world=(%.9g,%.9g,%.9g) pre-stable=%u matched-at=%u coherent=%u owners=%u far250m=%u far-owners=%u moving-outliers=%u missing-at=%u quat-changed=%u same-frame=%u",
+    Log::get().note("flat origin witness: resolver-frame=%llu engine-at-event=%u sample-frame=%u clocks-match=%u pose-pattern=%s decision-stage=pre-backend planned-kept=%u reanchor-rule=%u planned-reset=%u unavailable=%u reason=%s delta-ms=%.9g camera-now=(%.9g,%.9g,%.9g) camera-previous=(%.9g,%.9g,%.9g) camera-delta=(%.9g,%.9g,%.9g) world-edge-valid=%u world-edge(-1>0)=(%.9g,%.9g,%.9g) camera-minus-world-valid=%u camera-minus-world=(%.9g,%.9g,%.9g) pre-stable=%u matched-at=%u coherent=%u owners=%u far250m=%u far-owners=%u moving-outliers=%u missing-at=%u quat-changed=%u same-frame=%u",
         static_cast<unsigned long long>(r.resolverFrame),r.engineAtEvent,r.sampleFrame,r.clockMatch?1u:0u,verdict,
         r.jumpKept?1u:0u,r.classifiedReanchor?1u:0u,r.reset?1u:0u,r.unavailable?1u:0u,r.reason,r.deltaMs,
         r.now[0],r.now[1],r.now[2],r.previous[0],r.previous[1],r.previous[2],
-        r.cameraDelta[0],r.cameraDelta[1],r.cameraDelta[2],r.medianDelta[0],r.medianDelta[1],r.medianDelta[2],
-        r.cameraMinusMedian[0],r.cameraMinusMedian[1],r.cameraMinusMedian[2],r.preStable,r.matchedAt,r.coherent,r.owners,r.farRecords,r.farOwners,
+        r.cameraDelta[0],r.cameraDelta[1],r.cameraDelta[2],r.worldEdgeValid?1u:0u,r.medianDelta[0],r.medianDelta[1],r.medianDelta[2],
+        r.cameraMinusWorldValid?1u:0u,r.cameraMinusMedian[0],r.cameraMinusMedian[1],r.cameraMinusMedian[2],r.preStable,r.matchedAt,r.coherent,r.owners,r.farRecords,r.farOwners,
         r.movingOutliers,r.missingAt,r.changedQuat,r.sameFrameChanges);
     Log::get().note("flat origin witness edges: resolver-frame=%llu offsets=-3>-2,-2>-1,-1>0,0>+1,+1>+2 present=%u%u%u%u%u%u count=%u,%u,%u,%u,%u coherent=%u,%u,%u,%u,%u median=(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g) observed=%u,%u,%u,%u,%u,%u occupied=%u,%u,%u,%u,%u,%u collisions=%u,%u,%u,%u,%u,%u skipped-lock=%u; EDVR previous pose is synthesized, not an origin witness",
         static_cast<unsigned long long>(r.resolverFrame),r.hadFrame[0]?1u:0u,r.hadFrame[1]?1u:0u,r.hadFrame[2]?1u:0u,
@@ -344,7 +347,7 @@ inline void print(const FlatOriginWitnessReport& r) noexcept {
         r.farEdgeMedian[2][0],r.farEdgeMedian[2][1],r.farEdgeMedian[2][2],r.farEdgeMedian[3][0],r.farEdgeMedian[3][1],r.farEdgeMedian[3][2],
         r.farEdgeMedian[4][0],r.farEdgeMedian[4][1],r.farEdgeMedian[4][2]);
     for(unsigned i=0;i<r.rowCount;++i){const auto& w=r.rows[i];
-        Log::get().note("flat origin witness record: resolver-frame=%llu record=%p node=%p owner=%p pre-stable=%u distance-m=%.9g present=%02X proven=%02X quat-or-same-tick-changed=%02X primary-path=%02X scale=unit-if-primary-proven/secondary-unread pos(-3,-2,-1,0,+1,+2)=(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)",
+        Log::get().note("flat origin witness record: resolver-frame=%llu record=%p node=%p owner=%p pre-stable=%u distance-m=%.9g present=%02X proven=%02X quat-or-same-tick-changed=%02X primary-path=%02X scale=unit-if-primary-proven/secondary-unread pos(-3,-2,-1,0,+1,+2)=(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)/(%.9g,%.9g,%.9g)",
             static_cast<unsigned long long>(r.resolverFrame),reinterpret_cast<void*>(w.record),reinterpret_cast<void*>(w.node),
             reinterpret_cast<void*>(w.owner),w.preStable?1u:0u,w.distanceM,w.present,w.proven,w.quatChanged,w.primary,
             w.pos[0][0],w.pos[0][1],w.pos[0][2],w.pos[1][0],w.pos[1][1],w.pos[1][2],

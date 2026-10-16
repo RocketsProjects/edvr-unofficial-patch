@@ -28,7 +28,7 @@ inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* conte
         "origin optical: only shared-support exclusive depth fits can favor zero translation");}
 
     const RuntimeProfile previousProfile=runtimeProfileValue();
-    struct Outcome {std::vector<unsigned char> mask,output;std::vector<float> motion;std::string signal;bool score=false;};
+    struct Outcome {std::vector<unsigned char> mask,output;std::vector<float> motion;std::string input,signal;bool score=false;};
     auto run=[&](bool reanchor,bool probe,bool gap=false,bool steady=true,bool foreground=false,bool priorForeground=false)->Outcome {
         flatMonoResolveReset();
         runtimeProfileSet(probe?RuntimeProfile::Flat:RuntimeProfile::LegacyVr);
@@ -57,6 +57,26 @@ inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* conte
         r.f.previousCamera[5][0]=80.f;r.f.camera[5][0]=20.f;
         r.fillZ(.01f);r.setZ(6,0,10,steadygpu::H,.02f);
         const uint64_t eventFrame=r.f.frame;
+        // Header-only CB readback must retain every component, not just the
+        // first/last stores. Keep the scene rows deliberately unlike the
+        // resolver rows to prove which bound buffers the sidecar reads.
+        float sceneNow[277][4]{},scenePrev[277][4]{};
+        std::memcpy(sceneNow+270,r.f.camera,sizeof(r.f.camera));
+        std::memcpy(scenePrev+270,r.f.previousCamera,sizeof(r.f.previousCamera));
+        sceneNow[275][0]=123.25f;sceneNow[275][1]=-45.5f;sceneNow[275][2]=678.125f;
+        scenePrev[275][0]=-912.5f;scenePrev[275][1]=34.25f;scenePrev[275][2]=-56.75f;
+        constexpr uint32_t nowStamp=0x13579BDFu,prevStamp=0x2468ACE0u;
+        std::memcpy(&sceneNow[276][0],&nowStamp,4);std::memcpy(&scenePrev[276][0],&prevStamp,4);
+        D3D11_BUFFER_DESC sceneDesc{};sceneDesc.ByteWidth=sizeof(sceneNow);
+        sceneDesc.Usage=D3D11_USAGE_DEFAULT;sceneDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA sceneInit{};ComPtr<ID3D11Buffer> boundNow,boundPrev;
+        sceneInit.pSysMem=sceneNow;
+        check(SUCCEEDED(device->CreateBuffer(&sceneDesc,&sceneInit,boundNow.GetAddressOf())),
+            "origin optical: distinct scene-now constant buffer created");
+        sceneInit.pSysMem=scenePrev;
+        check(SUCCEEDED(device->CreateBuffer(&sceneDesc,&sceneInit,boundPrev.GetAddressOf())),
+            "origin optical: distinct scene-prev constant buffer created");
+        r.f.engine.sceneNow=boundNow.Get();r.f.engine.scenePrev=boundPrev.Get();
         if(foreground) {
             r.f.foregroundMotion=foregroundView.Get();r.f.foregroundQualified=true;r.f.foregroundFrame=eventFrame;
         }
@@ -71,6 +91,8 @@ inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* conte
         for(unsigned attempt=0;attempt<12;++attempt) {
             for(size_t i=firstLine;i<opticalLines.size();++i) {
                 const std::string marker="frame="+std::to_string(eventFrame)+" ";
+                if(opticalLines[i].find("flat origin optical input:")==0 && opticalLines[i].find(marker)!=std::string::npos)
+                    o.input=opticalLines[i];
                 if(opticalLines[i].find("flat origin optical score:")==0 && opticalLines[i].find(marker)!=std::string::npos) {
                     o.score=true;o.signal=opticalLines[i];break;
                 }
@@ -89,10 +111,38 @@ inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* conte
                 foreground?"origin optical: qualified SDK foreground input refuses unverified prior domain":
                 "origin optical: gap or missing depth names no adjacent previous depth");
         }
+        if(probe && o.score) {
+            check(o.input.find("scene-now=(123.25,-45.5,678.125) scene-prev=(-912.5,34.25,-56.75)")!=std::string::npos &&
+                  o.input.find("stamps="+std::to_string(nowStamp)+"/"+std::to_string(prevStamp))!=std::string::npos,
+                "origin optical: all six raw scene-origin components and both stamps survive GPU readback");
+        }
         return o;
     };
 
-    const Outcome inward=run(false,true),inwardNoProbe=run(false,false);
+    // Present-frame polling is the production drain/heartbeat path. Run its
+    // bounded idle start far above the fixture's resolver frame numbers, then
+    // prove a later scored event gets a fresh aggregate despite that cap.
+    auto heartbeatCount=[&](){size_t n=0;for(const auto& line:opticalLines)
+        if(line.find("flat origin optical heartbeat:")==0)++n;return n;};
+    uint64_t heartbeatPresent=uint64_t(1)<<40;
+    const size_t heartbeatBefore=heartbeatCount();
+    for(unsigned n=0;n<16;++n,heartbeatPresent+=2700)flatMonoResolvePollPixels(context,heartbeatPresent);
+    const size_t heartbeatIdle=heartbeatCount();
+    flatMonoResolvePollPixels(context,heartbeatPresent);heartbeatPresent+=2700;
+    check(heartbeatCount()==heartbeatIdle && heartbeatIdle<=heartbeatBefore+12,
+        "origin optical: unchanged present polling stops after bounded startup heartbeats");
+
+    const Outcome inward=run(false,true);
+    flatMonoResolvePollPixels(context,heartbeatPresent);heartbeatPresent+=2700;
+    const size_t heartbeatAfterEvent=heartbeatCount();
+    check(inward.score && heartbeatAfterEvent==heartbeatIdle+1 &&
+          !opticalLines.empty() && opticalLines.back().find("flat origin optical heartbeat:")==0 &&
+          opticalLines.back().find("no-event=0")!=std::string::npos,
+        "origin optical: scored event reopens aggregate after idle heartbeat cap");
+    flatMonoResolvePollPixels(context,heartbeatPresent);heartbeatPresent+=2700;
+    check(heartbeatCount()==heartbeatAfterEvent,
+        "origin optical: unchanged aggregate stays quiet after the post-event report");
+    const Outcome inwardNoProbe=run(false,false);
     if(!inward.score || inward.signal.find("signal=raw-travel-depth-favored")==std::string::npos)
         std::printf("origin optical inward diagnostic: score=%u %s\n",inward.score?1u:0u,inward.signal.c_str());
     check(inward.score && inward.signal.find("signal=raw-travel-depth-favored")!=std::string::npos,

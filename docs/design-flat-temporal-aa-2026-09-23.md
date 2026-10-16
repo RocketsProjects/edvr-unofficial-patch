@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-16 F1 instrumentation, FLOWN, INCONCLUSIVE:** Steam `172537`, build `3c0516e3`: three large camera cuts; no admitted travel/re-anchor event.
-  Raw poses support rotated coordinate re-expression at frame 43788; all depth scores were refused. F1 OPEN; see "F1 first probe flight" below.
-  Next: straight supercruise out-and-back legs. No new key. Engine-record anchor semantics and VR's dropped 50 m+ translation remain open.
+- **10-16 F1, OPEN:** Steam `173557`, build `3c0516e3`: 31 kept travel steps, 19 classified re-anchors, three independent re-anchor controls.
+  Travel lacked stationary references; repeated return legs did not capture an admitted inward case. See "F1 second probe flight and diagnostic repairs" below.
+  Next: independent world/origin-reset evidence; no blind repeat flight. Probe log repairs BUILT, NOT FLOWN, no new key; VR's dropped 50 m+ translation remains open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -3266,6 +3266,104 @@ before exiting. Supercruise is intended to supply the missing large travel
 steps; the hidden origin means this route cannot guarantee an exact inward
 crossing. Check for actual admitted travel, inward candidates and usable
 independent witnesses before treating another flight as F1 validation.
+
+**2026-10-16: F1 second probe flight and diagnostic repairs.** Steam log
+`edvr_gfx_20261016_173557.log` matches the installed `3c0516e3` DLL, flat DLSS
+at 3840x2160 render/output. It has 11,622 lines after exit. The final recorded
+counters are 31 kept travel steps, 19 classified re-anchors and five camera
+cuts. The Mandalay's normal-space boost speed is about 550 m/s, per Sean.
+
+Three re-anchor controls now have independent native and optical support:
+
+| Frame | Coherent far native records | Shared depth samples | Zero-only / travel-only fits |
+|---|---|---|---|
+| 106015 | 33 | 179 | 177 / 0 |
+| 107795 | 16 | 184 | 111 / 0 |
+| 109826 | 17 | 173 | 38 / 0 |
+
+Their resolver/engine clocks agree; the native records shift about 5 km on the
+exact event edge and remain still on adjacent edges. Camera minus native shift
+leaves 2-3 m of motion, consistent with motion during the frame. This
+calibrates a common coordinate shift; it does not identify all later records as
+static world geometry.
+
+Fast travel supplied 50-115 m steps, but no usable stationary native cohort.
+This is not hook inactivity: the raw observed counts are 1-10, collisions are
+zero, and lock-loss counts stay flat through the examined frames. At 164035 the
+previous stable cohort disappears; surviving poses move with the ship and fail
+the exact-position baseline. At 164459, one surviving record stays
+camera-relative within 0.4 mm across a re-anchor. Treating its shift as an
+independent world shift would manufacture evidence. Optical frames
+164037/164038 have 274 shared samples, but 272 fit both hypotheses; that depth
+cannot discriminate real travel from zero translation.
+
+The closest inward-looking event is 180488: a 90.2 m camera step while 20
+matched near-camera poses remain unchanged. All are within about 66 m; none is
+independently identified static-world geometry. The rotation-row delta is
+1.702, `camera-cut=1`, `planned-reset=1`, and optical scoring is explicitly
+unavailable. It does not exercise the faulty small-rotation
+keep-versus-reanchor decision. No accepted short inward example was retained;
+the reserved inward budget was not exhausted.
+
+- Ruled out: collector saturation explains the missing fast-travel stationary
+  cohort, because the sparse sampled records have no collisions or added lock
+  loss and surviving records track the camera.
+- Ruled out: repeating the out-and-back recipe reliably targets the hidden
+  origin, because the completed route supplies travel and re-anchor controls
+  without an admitted short inward case. Do not spend another flight on the
+  same instruction.
+- Ruled out: the old optical header proves an EN/EB camera mismatch, because
+  disassembly shows four printed origin components were never written. Actual
+  source alignment remains unverified for that build.
+
+The audit found passive diagnostic defects, repaired without changing the
+classifier, rendering, depth scoring thresholds or reset gates:
+
+1. The compiled shader dropped four intermediate byte-address stores in the
+   EN/EB snapshot loop. Fixed offsets now write all six origin components and
+   both stamps; WARP checks distinct nonsymmetric values and exact readback.
+   Scores used separate resolver matrices, so the three optical re-anchor
+   controls remain valid.
+2. The native record format supplied six positions but printed only five. It
+   now prints all six; tests pin six distinct triplets. World-edge and
+   camera-minus-world validity are explicit, including a valid measured zero
+   with only near records and an invalid absent edge.
+3. Twelve startup heartbeats could expire before the first event, hiding later
+   aggregates. Candidate/completion/unavailable/failure progress now permits
+   later summaries at the existing rate limit; unchanged state stays quiet
+   after the idle cap.
+
+Focused CPU and WARP checks pass. The full absolute-path
+`build.bat --wait-lock` passed all gates in 192.6 seconds, including the
+production DLLs, test rigs, installer and receipt. Log:
+`build/rc3-review/f1-probe-repair-full-build.log`. The repaired probes are
+BUILT, NOT FLOWN. These remain temporary flat D3D11 investigation probes
+with no new config key.
+
+Next work is to find an independent engine origin-reset signal or establish
+stationary world ownership for a usable reference. A bounded raw depth replay
+packet could preserve future discriminating samples for offline analysis, but
+cannot recover geometry absent from this flight. Retain the existing
+deterministic 80-to-20 m WARP cases; they demonstrate the classifier ambiguity,
+not the missing game's ground truth. At 550 m/s, a 50 m normal-space step needs
+more than 90.9 ms, leaving little room below the 100 ms cut guard even before
+direction and timing variation. A low-frame-rate normal-space run is therefore
+not a clean replacement test. No classifier fix or third flight is justified by
+this evidence alone.
+
+Code audit: there is no established global origin-reset flag in the current
+hooks. The post-forward admission-store detour in `store_hook.cpp`, and
+`optimized_station.cpp::worldOfRecord`, are the next concrete candidates.
+They already read game-owned world centers/radii, node names and admission
+fields; their current installation and collection gates are station/docked
+specific. A separate bounded passive flat census must first establish
+coverage, persistent admitted far records and actual stationary-world
+provenance. Neither an owner pointer nor `NameClass::kOther` proves that.
+Calibrate against repeatable re-anchor controls and outward travel before
+using a candidate for inward classification. This new census is not yet
+implemented. Existing F10 capture can save adjacent full resolver inputs,
+but this flight recorded none; there are no old pixels to replay. A packet
+containing only the tied optical samples would not add missing evidence.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.

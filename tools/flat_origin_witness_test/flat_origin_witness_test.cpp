@@ -59,6 +59,7 @@ static FlatOriginWitnessReport runCase(bool shift,bool outlier=false){
 static void selfTest(){
     auto inward=runCase(false);
     check(inward.verdict==FlatOriginWitnessReport::Verdict::UnchangedRecords,"80 to 20 inward camera with static game records");
+    check(inward.worldEdgeValid && inward.cameraMinusWorldValid,"measured zero world edge remains valid");
     check(inward.cameraDelta[0]==-60 && inward.edgeMedian[2][0]==0 && inward.cameraMinusMedian[0]==-60,
           "camera -60 and world zero remain separate raw measurements");
     auto reanchor=runCase(true);
@@ -92,7 +93,18 @@ static void selfTest(){
         for(unsigned f=97;f<=102;++f)for(unsigned id=1;id<=5;++id)add(c,f,id,id*100.0f);
         const float now[3]={20,0,0},old[3]={80,0,0};c.event(100,101,now,old,16,true,true,false);
         FlatOriginWitnessReport r;check(c.complete(103,r),"clock-mismatch event completes");
-        check(!r.clockMatch && r.verdict==FlatOriginWitnessReport::Verdict::Inconclusive,"clock mismatch cannot claim a pose pattern");
+        check(!r.clockMatch && r.worldEdgeValid && !r.cameraMinusWorldValid &&
+            r.verdict==FlatOriginWitnessReport::Verdict::Inconclusive,"clock mismatch measures edge but not aligned camera residual");
+    }
+    {
+        FlatOriginWitnessCore c;
+        const float now[3]={20,0,0},old[3]={80,0,0};c.event(100,100,now,old,16,true,true,false);
+        FlatOriginWitnessReport r;check(c.complete(103,r),"no-record event completes");
+        check(!r.worldEdgeValid && !r.cameraMinusWorldValid && r.edgeCount[2]==0,
+            "absent native edge and camera residual remain explicitly invalid");
+        lines.clear();edvr::flat_origin_witness_runtime::print(r);
+        check(!lines.empty() && lines[0].find("world-edge-valid=0")!=std::string::npos &&
+            lines[0].find("camera-minus-world-valid=0")!=std::string::npos,"invalidity reaches actual summary log");
     }
     {
         FlatOriginWitnessCore c;
@@ -138,7 +150,18 @@ static void selfTest(){
         }
         const float now[3]={20,0,0},old[3]={80,0,0};c.event(100,100,now,old,16,true,true,false);
         FlatOriginWitnessReport r;check(c.complete(103,r),"single-owner event completes");
-        check(r.owners==1 && r.verdict==FlatOriginWitnessReport::Verdict::Inconclusive,"one owner is not a static-world cohort");
+        check(r.owners==1 && r.worldEdgeValid && r.cameraMinusWorldValid &&
+            r.verdict==FlatOriginWitnessReport::Verdict::Inconclusive,"measured single-owner edge stays valid but static-world inference is inconclusive");
+    }
+    {
+        FlatOriginWitnessCore c;
+        for(unsigned f=97;f<=102;++f)for(unsigned id=1;id<=5;++id)add(c,f,id,80.0f+id*10.0f);
+        const float now[3]={20,0,0},old[3]={80,0,0};c.event(100,100,now,old,16,true,true,false);
+        FlatOriginWitnessReport r;check(c.complete(103,r),"near-only multi-owner event completes");
+        check(r.owners==5 && r.farRecords==0 && r.edgeCount[2]==5 && r.edgeMedian[2][0]==0 &&
+            r.worldEdgeValid && r.cameraMinusWorldValid && r.cameraMinusMedian[0]==-60 &&
+            r.verdict==FlatOriginWitnessReport::Verdict::Inconclusive,
+            "near-only measured zero edge and camera residual remain valid while static-world inference is inconclusive");
     }
     {
         FlatOriginWitnessCore c;
@@ -170,12 +193,22 @@ static void selfTest(){
     }
     {
         lines.clear();auto report=runCase(true);edvr::flat_origin_witness_runtime::print(report);
-        bool stage=false,farEdges=false;for(const auto& line:lines){
+        bool stage=false,farEdges=false,valid=false;for(const auto& line:lines){
             check(line.size()<1150,"witness log fits the production 1200-byte line buffer");
             if(line.find("decision-stage=pre-backend")!=std::string::npos)stage=true;
             if(line.find("far edges:")!=std::string::npos)farEdges=true;
+            if(line.find("world-edge-valid=1")!=std::string::npos &&
+                line.find("camera-minus-world-valid=1")!=std::string::npos)valid=true;
         }
-        check(stage && farEdges,"decision stage and independent far cohort printed");
+        check(stage && farEdges && valid,"decision stage, measured validity and far cohort printed");
+    }
+    {
+        FlatOriginWitnessReport r;r.rowCount=1;r.rows[0].present=0x3F;
+        for(unsigned i=0;i<6;++i)for(unsigned c=0;c<3;++c)r.rows[0].pos[i][c]=float(10*(i+1)+c+1);
+        lines.clear();edvr::flat_origin_witness_runtime::print(r);
+        bool found=false;for(const auto& line:lines)if(line.find("flat origin witness record:")!=std::string::npos)
+            found=line.find("pos(-3,-2,-1,0,+1,+2)=(11,12,13)/(21,22,23)/(31,32,33)/(41,42,43)/(51,52,53)/(61,62,63)")!=std::string::npos;
+        check(found,"all six distinct triplets survive the formatted record line");
     }
     {
         lines.clear();FlatOriginWitnessReport r;

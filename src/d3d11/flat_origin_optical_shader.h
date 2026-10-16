@@ -100,12 +100,16 @@ void main(uint3 thread:SV_GroupThreadID) {
     GroupMemoryBarrierWithGroupSync();
     if(lane<32)Result.Store(lane*4,counters[lane]);
     if(lane==0) {
-        [unroll]for(uint i=0;i<3;++i) {
-            Result.Store((32+i)*4,asuint(EN[275][i]));
-            Result.Store((35+i)*4,asuint(EB[275][i]));
-        }
-        Result.Store(38*4,asuint(EN[276].x));
-        Result.Store(39*4,asuint(EB[276].x));
+        // Fixed byte offsets keep the compiler from dropping intermediate
+        // stores when it optimizes a loop of ByteAddressBuffer.Store calls.
+        Result.Store(128,asuint(EN[275].x));
+        Result.Store(132,asuint(EN[275].y));
+        Result.Store(136,asuint(EN[275].z));
+        Result.Store(140,asuint(EB[275].x));
+        Result.Store(144,asuint(EB[275].y));
+        Result.Store(148,asuint(EB[275].z));
+        Result.Store(152,asuint(EN[276].x));
+        Result.Store(156,asuint(EB[276].x));
     }
 }
 )HLSL";
