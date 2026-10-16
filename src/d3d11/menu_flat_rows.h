@@ -37,6 +37,7 @@ inline constexpr FlatPageRow kFlatPageRows[] = {
     {"fix", "temporal_aa_model", FlatRowRead::Allowlist},
     {"fix", "render_sharpness",  FlatRowRead::Allowlist},
     {"fix", "ui_quality",        FlatRowRead::Allowlist},
+    {"fix", "sharp_weapons",     FlatRowRead::Allowlist},   // directly under UI quality, as in VR (2026-10-16)
     {"fix", "optimized_stations", FlatRowRead::Allowlist},
 };
 inline constexpr size_t kFlatPageRowCount = sizeof(kFlatPageRows) / sizeof(kFlatPageRows[0]);

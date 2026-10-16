@@ -41,6 +41,7 @@
 #include <DirectXPackedVector.h>
 #include <wrl/client.h>
 
+#include "../../src/d3d11/flat_ui_layer_math.h"
 #include "../../src/d3d11/menu_flat_rows.h"
 #include "../../src/d3d11/menu_schema.h"
 #include "../../src/d3d11/sharp_weapons.h"
@@ -202,12 +203,11 @@ static void keyTests() {
             for (int t = 0; t < 2; ++t) {
                 const float target = q ? 1.0f : 0.0f;
                 const bool quality = uiLayerLiveFor(target, t != 0, true, false);
-                const bool weapons = uiLayerWeaponsLiveFor(s != 0, t != 0, true, false, false);
+                const bool weapons = uiLayerWeaponsLiveFor(s != 0, t != 0, true, false);
                 check(quality == (q && t), "fix.ui_quality's half is live for its key and a temporal mode, whatever fix.sharp_weapons says");
                 check(weapons == (s && t), "fix.sharp_weapons' half is live for its key and a temporal mode, whatever fix.ui_quality says");
                 check(uiLayerMachineryLive(quality, weapons) == ((q || s) && t), "the machinery runs when either half is live");
-                check(!uiLayerWeaponsLiveFor(s != 0, t != 0, true, false, true), "the flat profile never runs the weapons half (VR only)");
-                check(!uiLayerWeaponsLiveFor(s != 0, t != 0, true, true, false), "a stood-down layer is not live for the weapons");
+                check(!uiLayerWeaponsLiveFor(s != 0, t != 0, true, true), "a stood-down layer is not live for the weapons");
             }
         }
     }
@@ -645,7 +645,7 @@ static bool wiredKeys(const std::string& t) {
 // The two halves are computed apart: fix.ui_quality's from its key alone, the weapons' from fix.sharp_weapons alone; the machinery is their union.
 static bool wiredLiveness(const std::string& t) {
     return has(t, "const bool quality = uiLayerLiveFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);") &&
-           has(t, "g_weaponsLive = uiLayerWeaponsLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_weaponsStoodDown,") &&
+           has(t, "g_weaponsLive = uiLayerWeaponsLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_weaponsStoodDown);") &&
            has(t, "detail::g_uiQualityLive = quality;") && has(t, "detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive || g_rippleLive);") &&
            before(t, "const bool quality = uiLayerLiveFor(", "detail::g_uiLayerLive = uiLayerMachineryLive(");
 }
@@ -745,6 +745,60 @@ static void wiringTests() {
     }
     check(wiredIni(ini), "edvr.ini documents fix.sharp_weapons (on | plain | off, with one menu row), no second key and no ripple key");
     check(!wiredIni(replaced(ini, "\nsharp_weapons = on\n", "\nsharp_weapons = off\n")), "control: a key that ships off trips the pin");
+}
+
+// ============================================================================================ the flat profile
+// fix.sharp_weapons covers both profiles (2026-10-16): the flat adapter (flat_ui_layer.cpp) asks the shared decision for the weapons fire and the shield
+// refraction when their half of the layer is live, whatever fix.ui_quality says, leaves the HUD alone when only the weapons are live, runs the tone bracket's
+// steps, and hands the door the fact that the picture is EDVR's resolve. The key is on flat's allow-list and its row sits under UI quality on the flat panel.
+static bool wiredFlat(const std::string& adapter, const std::string& runtimeH, const std::string& keys) {
+    return has(adapter, "if (!flatUiFamilyLive(family, uiLayerQualityLive(), uiLayerWeaponsLive(), uiLayerRippleLive())) return g_lastAsk;") &&
+           before(adapter, "if (!flatUiLayerTakesFamily(family)) return g_lastAsk;", "if (!flatUiFamilyLive(family,") &&
+           before(adapter, "if (!flatUiFamilyLive(family,", "++g_w.asked[fi];") &&
+           has(adapter, "uiLayerComposite(frame, 0, picture.Get(), region, uv, false, treated)") &&
+           has(adapter, "bool flatUiLayerToneNext(ID3D11DeviceContext* ctx) {") && has(adapter, "return uiLayerCrispToneNext(ctx);") &&
+           has(runtimeH, "if (uiTone && flatUiLayerToneBegin(ctx)) { issue(); while (flatUiLayerToneNext(ctx)) issue(); flatUiLayerToneEnd(ctx); }") &&
+           has(keys, "std::strcmp(key, \"fix.sharp_weapons\") == 0");
+}
+static void flatTests() {
+    // The family rule.
+    check(flatUiLayerTakesFamily(UiLayerFamily::kWeaponsFire) && flatUiLayerTakesFamily(UiLayerFamily::kShieldRipple), "the flat adapter takes the weapons fire and the shield ripple");
+    check(flatUiLayerTakesFamily(UiLayerFamily::kFlightHud) && !flatUiLayerTakesFamily(UiLayerFamily::kHoloGeneric) && !flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines) &&
+              !flatUiLayerTakesFamily(UiLayerFamily::kSpaceDust),
+          "...and still only the cockpit HUD families besides (not the holograms, not the scene lines)");
+    // The pairs name their family through the shared rule the flat adapter uses.
+    check(flatUiFamilyOf(kUiVsWeaponBeams, kUiPsWeaponBeams) == UiLayerFamily::kWeaponsFire && flatUiFamilyOf(kUiVsMulticannon, kUiPsMulticannon) == UiLayerFamily::kWeaponsFire &&
+              flatUiFamilyOf(kUiVsShieldStrike, kUiPsShieldStrike) == UiLayerFamily::kWeaponsFire,
+          "flat names the three weapons-fire pairs as the weapons family");
+    check(flatUiFamilyOf(kUiVsShieldRefract, kUiPsShieldRefract) == UiLayerFamily::kShieldRipple, "...and the refraction pair as the shield ripple");
+    check(flatUiFamilyOf(kUiVsWeaponBeams, kUiPsShieldRefract) != UiLayerFamily::kWeaponsFire && flatUiFamilyOf(kUiVsShieldRefract, kUiPsWeaponBeams) != UiLayerFamily::kShieldRipple,
+          "...by the exact pair: a mixed pair is neither");
+    // The three halves are asked separately: every combination.
+    for (int q = 0; q < 2; ++q)
+        for (int w = 0; w < 2; ++w)
+            for (int r = 0; r < 2; ++r) {
+                check(flatUiFamilyLive(UiLayerFamily::kWeaponsFire, q != 0, w != 0, r != 0) == (w != 0), "the weapons fire is asked when the weapons half is live, whatever else says");
+                check(flatUiFamilyLive(UiLayerFamily::kShieldRipple, q != 0, w != 0, r != 0) == (r != 0), "the shield ripple is asked when its half is live, whatever else says");
+                check(flatUiFamilyLive(UiLayerFamily::kFlightHud, q != 0, w != 0, r != 0) == (q != 0), "the HUD families are asked when fix.ui_quality's half is live and not otherwise");
+                check(flatUiFamilyLive(UiLayerFamily::kMapCanvas, q != 0, w != 0, r != 0) == (q != 0), "...the System Map's too");
+            }
+    // The key and its row.
+    check(flatPageHasRow("fix", "sharp_weapons") && !flatPageHasRow("advanced", "sharp_weapons_blend"), "the flat panel has the Sharp weapons row and no Weapons blend row");
+    int quality = -1, sharp = -1;
+    for (size_t i = 0; i < kFlatPageRowCount; ++i) {
+        if (std::strcmp(kFlatPageRows[i].key, "ui_quality") == 0) quality = static_cast<int>(i);
+        if (std::strcmp(kFlatPageRows[i].key, "sharp_weapons") == 0) sharp = static_cast<int>(i);
+    }
+    check(quality >= 0 && sharp == quality + 1, "...directly under UI quality, as in VR");
+    check(sharp >= 0 && kFlatPageRows[sharp].read == FlatRowRead::Allowlist, "...read through the allow-listed getters (flat_profile_keys.h names the key)");
+    const std::string adapter = readFile("src/d3d11/flat_ui_layer.cpp"), runtimeH = readFile("src/d3d11/flat_runtime.h"), keys = readFile("src/common/flat_profile_keys.h");
+    check(adapter.size() > 10000 && runtimeH.size() > 1000 && keys.size() > 500, "the flat sources are readable from the repo root");
+    check(wiredFlat(adapter, runtimeH, keys), "flat: the adapter asks the half that governs the family, the tone bracket runs its steps, the door is told the picture is resolved, the key is allow-listed");
+    check(!wiredFlat(replaced(adapter, "if (!flatUiFamilyLive(family, uiLayerQualityLive(), uiLayerWeaponsLive(), uiLayerRippleLive())) return g_lastAsk;", ""), runtimeH, keys),
+          "control: an adapter that asks the HUD with fix.ui_quality off (or the weapons with them off) trips the pin");
+    check(!wiredFlat(replaced(adapter, "uv, false, treated)", "uv)"), runtimeH, keys), "control: a door never told whether the picture is resolved trips the pin");
+    check(!wiredFlat(adapter, replaced(runtimeH, "while (flatUiLayerToneNext(ctx)) issue(); ", ""), keys), "control: a tone bracket with no steps (the matched composite would be one issue short) trips the pin");
+    check(!wiredFlat(adapter, runtimeH, replaced(keys, "std::strcmp(key, \"fix.sharp_weapons\") == 0 ||", "")), "control: a key flat's gate refuses (getString answers off) trips the pin");
 }
 
 // ============================================================================================ the menu rows
@@ -1446,6 +1500,7 @@ int main(int argc, char** argv) {
         censusTests("tools/sharp_weapons_test/fixtures/census_070029_c3_f0.txt", 4, 2);
         censusTests("tools/sharp_weapons_test/fixtures/census_070029_c4_f0.txt", 4, 0);
         wiringTests();
+        flatTests();
         menuTests();
         dropTests();
         gpuTests();

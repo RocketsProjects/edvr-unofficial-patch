@@ -166,9 +166,9 @@ HOTKEY_PAGE = 'hotkeys'
 # would reach for while wearing the headset. Both are Fix tier: neither is a
 # developer instrument, and neither is hidden behind menu.developer.
 MENU_ROW_SECTIONS = ('fix', 'menu')
-# The flat profile's Debug tab (2026-10-16): [advanced] keys that carry `menu debug` on their ui: line and are rows of the flat F8 panel for everyone (Fix
-# tier), not developer-tier rows. Two flat-only toggles, so VR's developer tier loses nothing by their having no row of their own there. Their page is
-# `debug`, which only the flat panel builds. Any other [advanced] key with a menu token is refused.
+# Exceptions: [advanced] keys that carry a `menu <page>` token on their ui: line and are rows of the in-headset menu for everyone (Fix tier), not
+# developer-tier rows. The flat profile's Debug tab (2026-10-16): two toggles every flat user may reach, labelled debug. Flat-only keys, so VR's
+# developer tier loses nothing by their having no row of their own there. Their page is `debug`, which only the flat panel builds.
 MENU_ADVANCED_EXCEPTIONS = ('advanced.flat_cpu_timing', 'advanced.flat_refusal_view')
 # Settings that were taken off every menu on purpose, and must stay off.
 #

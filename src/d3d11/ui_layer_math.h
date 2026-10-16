@@ -1388,14 +1388,14 @@ inline bool uiLayerLiveFor(float target, bool temporal, bool jitterAsShipped, bo
 // (the layer composites onto the AA output), the jitter as shipped, not stood down, and not the flat profile (VR only). The
 // layer's machinery (the door, the HDR tonemap re-issue, the composite) runs when EITHER half is live; the UI-quality-only parts (the
 // 2D screen, the maps gate, the VR world route, the after-UI take) run on the first alone.
-inline bool uiLayerWeaponsLiveFor(bool sharp, bool temporal, bool jitterAsShipped, bool stoodDown, bool flat) {
-    return sharp && temporal && jitterAsShipped && !stoodDown && !flat;
+inline bool uiLayerWeaponsLiveFor(bool sharp, bool temporal, bool jitterAsShipped, bool stoodDown) {
+    return sharp && temporal && jitterAsShipped && !stoodDown;
 }
 inline bool uiLayerMachineryLive(bool qualityLive, bool weaponsLive) { return qualityLive || weaponsLive; }
-// The shield ripple's half: fix.sharp_weapons is on, a temporal mode is on (the door composites over its output), the jitter as shipped, not stood
-// down (the layer's or the ripple's own), and not the flat profile (VR only). The machinery runs when it is live too (uiLayerMachineryLive of the union).
-inline bool uiLayerRippleLiveFor(bool taking, bool temporal, bool jitterAsShipped, bool stoodDown, bool flat) {
-    return taking && temporal && jitterAsShipped && !stoodDown && !flat;
+// The shield ripple's half: fix.sharp_weapons is on, a temporal mode is on (the door composites over its output), the jitter as shipped, and not stood
+// down (the layer's or the ripple's own). Both profiles. The machinery runs when it is live too (uiLayerMachineryLive of the union).
+inline bool uiLayerRippleLiveFor(bool taking, bool temporal, bool jitterAsShipped, bool stoodDown) {
+    return taking && temporal && jitterAsShipped && !stoodDown;
 }
 inline const char* uiLayerNotLiveReasonFor(float target, bool temporal, bool jitterAsShipped, bool stoodDown) {
     if (!(target > 0.0f)) return "fix.ui_quality is off";

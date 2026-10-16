@@ -146,9 +146,8 @@ void refreshLive() {
     // ui_layer_math.h's uiLayerLiveFor: the one statement of "the layer is live", which the VR world route reads
     // through uiLayerLiveForWorldRoute (tools/ui_quality_test pins it equal to the expression it replaced).
     const bool quality = uiLayerLiveFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);
-    g_weaponsLive = uiLayerWeaponsLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_weaponsStoodDown,
-                                          runtimeFlatProfile());
-    g_rippleLive = uiLayerRippleLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_rippleStoodDown, runtimeFlatProfile());
+    g_weaponsLive = uiLayerWeaponsLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_weaponsStoodDown);
+    g_rippleLive = uiLayerRippleLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_rippleStoodDown);
     detail::g_uiQualityLive = quality;
     detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive || g_rippleLive);
     detail::g_uiLayerCrispOn = detail::g_uiLayerLive && !g_crispStoodDown;
@@ -436,6 +435,11 @@ struct Eye {
     Ptr<ID3D11ShaderResourceView> rcSrv;
     uint32_t rcW = 0, rcH = 0;
     DXGI_FORMAT rcFmt = DXGI_FORMAT_UNKNOWN;
+    // ...and, for a frame that is not EDVR's own (the flat profile's picture), EDVR's copy of it that the ripple rewrites and hands on in its place.
+    Ptr<ID3D11Texture2D> roTex;
+    Ptr<ID3D11UnorderedAccessView> roUav;
+    uint32_t roW = 0, roH = 0;
+    DXGI_FORMAT roFmt = DXGI_FORMAT_UNKNOWN;
 
     // The door.
     UiLayerDoorState door;
@@ -644,8 +648,8 @@ struct Window {
     uint64_t weaponsTaken = 0, weaponsLost = 0, weaponsContentFrames = 0;
     uint64_t weaponsPair[kWeaponPairCount] = {};
     uint64_t weaponsEyeMatched = 0, weaponsEyePlain = 0, weaponsEyeFallback = 0;
-    // The shield ripple: eye-frames the door applied it, and its declines (0 not EDVR's frame, 1 frame format, 2 pieces).
-    uint64_t rippleApplied = 0, rippleDoorDeclined[3] = {};
+    // The shield ripple: eye-frames the door applied it, and its declines (0 reserved, 1 frame format, 2 pieces, 3 a picture the game made itself).
+    uint64_t rippleApplied = 0, rippleDoorDeclined[4] = {};
     uint64_t hdrDeclined[static_cast<size_t>(CrispToneDecline::kCount)] = {};
     // The seed census's counts for the 30 s line (2026-10-13): every issued seed by reason, the same by reason for a layer's second or
     // later seed in its frame (a layer seeded again within one frame), and the passes the seeds planned.
@@ -1342,7 +1346,7 @@ bool releaseLayers() {
         g_sharpScratch = SharpScratch{};
     }
     for (Eye& e : g_eye) {
-        if (e.dTex || e.rcTex) any = true;
+        if (e.dTex || e.rcTex || e.roTex) any = true;
         e.dTex.Reset();
         e.dRtv.Reset();
         e.dSrv.Reset();
@@ -1352,6 +1356,9 @@ bool releaseLayers() {
         e.rcTex.Reset();
         e.rcSrv.Reset();
         e.rcW = e.rcH = 0;
+        e.roTex.Reset();
+        e.roUav.Reset();
+        e.roW = e.roH = 0;
     }
     if (g_rip.rampTex) {
         any = true;
@@ -3185,7 +3192,7 @@ std::string sceneLineLayerText(UiLayerFamily family, double frames) {
 // which no weapons-fire draw reached the layer's decision): the draws a frame the weapons layer took, the draws a frame left in the scene by
 // decision, the blend, and the eye-frames each composite kind served.
 void logSharpWeapons() {
-    if (!g_sharpWeapons || runtimeFlatProfile()) return;
+    if (!g_sharpWeapons) return;
     const char* blend = sharpBlendName(g_sharpBlend);
     if (!g_weaponsLive) {
         Log::get().note("sharp weapons: not live this window (%s), blend %s.",
@@ -3543,9 +3550,7 @@ void uiLayerConfigure(Config& cfg) {
     if (!g_rippleNoted || sharp != g_rippleNotedOn) {
         g_rippleNoted = true;
         g_rippleNotedOn = sharp;
-        if (runtimeFlatProfile()) {
-            Log::get().note("shield ripple: not in the flat profile (VR only).");
-        } else if (!sharp) {
+        if (!sharp) {
             Log::get().note("shield ripple: off with fix.sharp_weapons -- the game's 820E draw stays in the scene as it always was.");
         } else {
             Log::get().note("shield ripple: on with fix.sharp_weapons -- the game's 820E draw is taken out of the scene and re-issued into a displacement layer; the door rewrites "
@@ -3568,8 +3573,6 @@ void uiLayerConfigure(Config& cfg) {
                 Log::get().note("sharp weapons: off (fix.sharp_weapons) -- the weapons fire is drawn in the scene as it always was; fix.ui_quality is %s "
                                 "and unaffected.",
                                 target > 0.0f ? "on" : "off");
-            } else if (runtimeFlatProfile()) {
-                Log::get().note("sharp weapons: on, but not in the flat profile (VR only).");
             } else {
                 Log::get().note(
                     "sharp weapons: on (fix.sharp_weapons; fix.ui_quality is %s and independent) -- the weapons fire (beams and bolts, multicannon "
@@ -4551,19 +4554,23 @@ bool rippleR1Allows(ID3D11DeviceContext* ctx) {
 }
 
 // The door's side: the picture over D's coverage is rewritten from a copy of itself at D - jitter. Called at the top of uiLayerComposite, before the weapons/HUD
-// composite, on the frame the door hands on when that frame is EDVR's own (the RCAS output, or the temporal pass's): in place through its UAV.
-void rippleDoor(Eye& e, uint32_t eye, uint64_t sequence, ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4], bool ownedFrame) {
+// composite. On a frame that is EDVR's own (the RCAS output, or the temporal pass's) it is rewritten in place through its UAV; on any other frame (the flat
+// profile's picture) EDVR's own copy of the frame is made, rewritten, and handed back in `*rewritten` to stand in its place. Only a picture the upscaler made
+// (`resolved`) is read at D minus the jitter: the game's own is not unjittered.
+void rippleDoor(Eye& e, uint32_t eye, uint64_t sequence, ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4], bool ownedFrame, bool resolved,
+                Ptr<ID3D11Texture2D>* rewritten) {
     if (!g_rippleLive || !e.dTex || e.dSeq != sequence || !e.dDraws || e.dAppliedSeq == sequence) return;
     e.dAppliedSeq = sequence;
     const auto decline = [&](int reason) {
         ++g_win.rippleDoorDeclined[reason];
     };
-    if (!ownedFrame) return decline(0);
+    if (!resolved) return decline(3);
     D3D11_TEXTURE2D_DESC fd{};
     frame->GetDesc(&fd);
     const DXGI_FORMAT view = uiLayerFrameView(fd.Format);
-    if (view == DXGI_FORMAT_UNKNOWN || fd.SampleDesc.Count != 1 || fd.ArraySize != 1 || fd.MipLevels != 1 || !(fd.BindFlags & D3D11_BIND_UNORDERED_ACCESS) ||
-        region[2] <= region[0] || region[3] <= region[1] || region[2] > fd.Width || region[3] > fd.Height)
+    if (view == DXGI_FORMAT_UNKNOWN || fd.SampleDesc.Count != 1 || fd.ArraySize != 1 || fd.MipLevels != 1 || (ownedFrame && !(fd.BindFlags & D3D11_BIND_UNORDERED_ACCESS)) ||
+        region[2] <= region[0] || region[3] <= region[1] || region[2] > fd.Width || region[3] > fd.Height ||
+        (!ownedFrame && (region[0] != 0 || region[1] != 0 || region[2] != fd.Width || region[3] != fd.Height)))
         return decline(1);
     Ptr<ID3D11Device> dev;
     frame->GetDevice(&dev);
@@ -4571,19 +4578,38 @@ void rippleDoor(Eye& e, uint32_t eye, uint64_t sequence, ID3D11Texture2D* frame,
     if (dev) dev->GetImmediateContext(&ctx);
     if (!dev || !ctx || !g_rip.cs || !g_rip.cb || !g_rip.lin) return decline(2);
     const uint32_t rw = region[2] - region[0], rh = region[3] - region[1];
-    // The frame's UAV, cached on exactly that resource (the composite's own cache: the same view).
-    if (e.frameUavRes != static_cast<void*>(frame) || !e.frameUav || e.frameUavView != view) {
-        e.frameUav.Reset();
-        e.frameUavRes = nullptr;
-        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
-        ud.Format = view;
-        ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-        if (FAILED(dev->CreateUnorderedAccessView(frame, &ud, &e.frameUav)) || !e.frameUav) {
+    // The UAV the pass writes: the frame's own, cached on exactly that resource (the composite's own cache: the same view), or EDVR's copy of a frame that is not.
+    ID3D11UnorderedAccessView* destUav = nullptr;
+    ID3D11Resource* dest = frame;
+    if (ownedFrame) {
+        if (e.frameUavRes != static_cast<void*>(frame) || !e.frameUav || e.frameUavView != view) {
             e.frameUav.Reset();
-            return decline(2);
+            e.frameUavRes = nullptr;
+            D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+            ud.Format = view;
+            ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+            if (FAILED(dev->CreateUnorderedAccessView(frame, &ud, &e.frameUav)) || !e.frameUav) {
+                e.frameUav.Reset();
+                return decline(2);
+            }
+            e.frameUavRes = frame;
+            e.frameUavView = view;
         }
-        e.frameUavRes = frame;
-        e.frameUavView = view;
+        destUav = e.frameUav.Get();
+    } else {
+        if (!e.roTex || !e.roUav || e.roW != fd.Width || e.roH != fd.Height || e.roFmt != fd.Format) {
+            e.roW = e.roH = 0;
+            if (!makeTex(dev.Get(), fd.Width, fd.Height, fd.Format, view, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, &e.roTex, nullptr, &e.roUav)) {
+                e.roTex.Reset();
+                e.roUav.Reset();
+                return decline(2);
+            }
+            e.roW = fd.Width;
+            e.roH = fd.Height;
+            e.roFmt = fd.Format;
+        }
+        destUav = e.roUav.Get();
+        dest = e.roTex.Get();
     }
     // The copy of the region: the one image the pass reads (so a pixel never reads one it has written).
     if (!e.rcTex || e.rcW != rw || e.rcH != rh || e.rcFmt != fd.Format) {
@@ -4619,6 +4645,7 @@ void rippleDoor(Eye& e, uint32_t eye, uint64_t sequence, ID3D11Texture2D* frame,
     ctx->CSGetSamplers(0, 1, &savedSmp);
     const D3D11_BOX box{region[0], region[1], 0, region[2], region[3], 1};
     ctx->CopySubresourceRegion(e.rcTex.Get(), 0, 0, 0, 0, frame, 0, &box);
+    if (!ownedFrame) ctx->CopyResource(dest, frame);   // the copy the pass rewrites starts as the whole picture
     ID3D11ShaderResourceView* nullSrv[2] = {};
     ID3D11UnorderedAccessView* nullUav = nullptr;
     ctx->CSSetShaderResources(0, 2, nullSrv);
@@ -4630,7 +4657,7 @@ void rippleDoor(Eye& e, uint32_t eye, uint64_t sequence, ID3D11Texture2D* frame,
     ctx->CSSetSamplers(0, 1, &smp);
     ID3D11ShaderResourceView* srvs[2] = {e.rcSrv.Get(), e.dSrv.Get()};
     ctx->CSSetShaderResources(0, 2, srvs);
-    ID3D11UnorderedAccessView* uav = e.frameUav.Get();
+    ID3D11UnorderedAccessView* uav = destUav;
     ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
     ctx->Dispatch((rw + 31) / 32, (rh + 7) / 8, 1);
     ctx->CSSetShaderResources(0, 2, nullSrv);
@@ -4648,12 +4675,14 @@ void rippleDoor(Eye& e, uint32_t eye, uint64_t sequence, ID3D11Texture2D* frame,
     if (savedSmp) savedSmp->Release();
     ++g_win.rippleApplied;
     ++e.dTotalApplied;
+    if (!ownedFrame && rewritten) *rewritten = e.roTex;
     static bool noted[2] = {false, false};
     if (!noted[eye & 1]) {
         noted[eye & 1] = true;
-        Log::get().note("shield ripple: the %s eye's picture (%ux%u) was rewritten over the bubble's coverage -- a copy of the RCAS output read at D minus the jitter "
+        Log::get().note("shield ripple: the %s eye's picture (%ux%u) was rewritten over the bubble's coverage -- a copy of the %s read at D minus the jitter "
                         "(%.6f, %.6f of the render), before the weapons/HUD composite.",
-                        eye == 0 ? "left" : "right", rw, rh, static_cast<double>(p.jitterUv[0]), static_cast<double>(p.jitterUv[1]));
+                        eye == 0 ? "left" : "right", rw, rh, ownedFrame ? "RCAS output, in place" : "picture, in EDVR's own copy of it (a frame that is not EDVR's to rewrite)",
+                        static_cast<double>(p.jitterUv[0]), static_cast<double>(p.jitterUv[1]));
     }
 }
 
@@ -4677,6 +4706,9 @@ void rippleIdleTick() {
             e.rcTex.Reset();
             e.rcSrv.Reset();
             e.rcW = e.rcH = 0;
+            e.roTex.Reset();
+            e.roUav.Reset();
+            e.roW = e.roH = 0;
             ++g_rip.released;
         } else {
             any = true;
@@ -4692,7 +4724,6 @@ void rippleIdleTick() {
 // The 30 s line: 820E draws taken, what was left in the scene and why, frames the door applied the ripple, the R1 state, stand-downs and D's lifetime. Every part
 // has a zero form; a window with no 820E draw says so.
 void logShieldRipple() {
-    if (runtimeFlatProfile()) return;
     if (!g_sharpWeapons) {
         Log::get().note("shield ripple: off with fix.sharp_weapons -- the game's 820E draw stays in the scene; nothing is taken.");
         return;
@@ -4722,11 +4753,11 @@ void logShieldRipple() {
         return;
     }
     Log::get().note(
-        "shield ripple: %.3f 820E draws a frame taken (%llu), %llu left in the scene%s%s%s; the door applied the ripple on %llu eye-frames (declined: %llu not EDVR's frame, "
-        "%llu frame format, %llu pieces); R1 %s (gain %.9g, s0 filter 0x%X); %llu stand-downs; %s.",
+        "shield ripple: %.3f 820E draws a frame taken (%llu), %llu left in the scene%s%s%s; the door applied the ripple on %llu eye-frames (declined: %llu frame format, "
+        "%llu pieces, %llu a picture the game made itself); R1 %s (gain %.9g, s0 filter 0x%X); %llu stand-downs; %s.",
         static_cast<double>(taken) / frames, static_cast<unsigned long long>(taken), static_cast<unsigned long long>(leftTotal), reasons.empty() ? "" : " (",
-        reasons.c_str(), reasons.empty() ? "" : ")", static_cast<unsigned long long>(g_win.rippleApplied), static_cast<unsigned long long>(g_win.rippleDoorDeclined[0]),
-        static_cast<unsigned long long>(g_win.rippleDoorDeclined[1]), static_cast<unsigned long long>(g_win.rippleDoorDeclined[2]), r1,
+        reasons.c_str(), reasons.empty() ? "" : ")", static_cast<unsigned long long>(g_win.rippleApplied), static_cast<unsigned long long>(g_win.rippleDoorDeclined[1]),
+        static_cast<unsigned long long>(g_win.rippleDoorDeclined[2]), static_cast<unsigned long long>(g_win.rippleDoorDeclined[3]), r1,
         static_cast<double>(g_rip.gainZ) * static_cast<double>(g_rip.gainY), g_rip.filter, static_cast<unsigned long long>(g_rip.standDowns), life);
 }
 
@@ -5335,6 +5366,9 @@ UiLayerWorldStats uiLayerWorldStats() {
     return s;
 }
 
+bool uiLayerWeaponsLive() { return g_weaponsLive; }
+bool uiLayerRippleLive() { return g_rippleLive; }
+
 bool uiLayerWorldScreenHeld() { return g_screenHeld == 1; }
 
 bool uiLayerLiveForWorldRoute() { return detail::g_uiQualityLive; }
@@ -5831,15 +5865,26 @@ bool uiLayerDoorFromPass(uint32_t eye) {
 }
 
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
-                                  const uint32_t region[4], const float layerUv[4], bool ownedFrame) {
+                                  const uint32_t region[4], const float layerUv[4], bool ownedFrame, bool resolved) {
     if (eye > 1 || !frame || !region || !layerUv) return nullptr;
     g_seedCensus.door(eye, sequence);
     Eye& e = g_eye[eye];
-    // The shield ripple: the picture is rewritten over the bubble's coverage BEFORE the weapons/HUD composite below (the ripple must not touch them).
-    if (g_rippleLive) guarded("shieldRipple.door", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame); });
-    if (!e.srv || !e.rtv || e.compositedSeq == sequence) return nullptr;
+    // The shield ripple: the picture is rewritten over the bubble's coverage BEFORE the weapons/HUD composite below (the ripple must not touch them). A frame
+    // that is not EDVR's own comes back rewritten in EDVR's copy of it, which stands in for it from here on.
+    Ptr<ID3D11Texture2D> rewritten;
+    if (g_rippleLive) guarded("shieldRipple.door", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame, resolved, &rewritten); });
+    const auto handOn = [&]() -> ID3D11Texture2D* {
+        if (!rewritten) return nullptr;
+        rewritten->AddRef();
+        return rewritten.Get();
+    };
+    if (rewritten) {
+        frame = rewritten.Get();
+        ownedFrame = false;
+    }
+    if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();
     const bool hasUi = e.seq == sequence && e.draws;
-    if (!hasUi) return nullptr;
+    if (!hasUi) return handOn();
     e.compositedSeq = sequence;
     {
         // The eye check: did the UI this layer holds leave the target the
