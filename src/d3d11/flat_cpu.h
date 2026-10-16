@@ -118,6 +118,21 @@ enum Family : unsigned {
     kGameDrawSubst, // the game's own draw call when engine motion substituted it (the game's time, not EDVR's)
     kGameDrawAfter, // the game's own draw call right after a substituted draw (state the driver must revalidate)
     kGameDrawOther, // the game's own draw call, any other
+    // The binding thunks (vscreen.cpp): EDVR's own time in each, the forwarded call apart (2026-10-16 round 2: leg A left about 2.4 ms a frame
+    // unattributed, and these run thousands of times a frame). The VS and PS setters of one kind share a family.
+    kBindShaders,   // VSSetShader, PSSetShader: the hash memo, the binding shadow, the seam arc's bind census
+    kBindResources, // PSSetShaderResources, VSSetShaderResources
+    kBindConstants, // VSSetConstantBuffers, PSSetConstantBuffers
+    kBindTargets,   // OMSetRenderTargets, OMSetRenderTargetsAndUnorderedAccessViews
+    kBindViewport,  // RSSetViewports
+    kBindBlend,     // OMSetBlendState
+    kGameBind,      // the game's own forwarded call inside any of those (the game's time, not EDVR's)
+    // The constructor body after the predicate block, in five blocks (the shell family keeps what none of them holds).
+    kCtorReducer,   // the reducer's neighbourhood: deferred inverse, contract observation, HDR detector, trace, copy admission, bookkeeping
+    kCtorNominate,  // source shape, the naming veto, the untrusted nomination and its logs
+    kCtorDomain,    // source naming, foreground candidates and the explicit-domain classification
+    kCtorCoverage,  // the substitution decision, foreground release and the projection/coverage block
+    kCtorTail,      // the producer bracket, draw capture, projection binding, HDR treatment and the UI layer's decisions
     kInject,        // the camera inject callback (refreshPre / refreshPost): game threads
     kFamilies
 };
@@ -152,6 +167,18 @@ inline constexpr FamilyInfo kInfo[kFamilies] = {
     {"game draw substituted", false, true},
     {"game draw after substituted", false, true},
     {"game draw other", false, true},
+    {"bind thunk shaders", false},
+    {"bind thunk resources", false},
+    {"bind thunk constants", false},
+    {"bind thunk targets", false},
+    {"bind thunk viewport", false},
+    {"bind thunk blend", false},
+    {"game bind calls", false, true},
+    {"ctor reducer block", false},
+    {"ctor nominate block", false},
+    {"ctor domain block", false},
+    {"ctor coverage block", false},
+    {"ctor tail block", false},
     {"camera inject", true},
 };
 constexpr unsigned kCal = kFamilies;   // the calibration cell, never reported
@@ -723,7 +750,7 @@ private:
 // (kFlatLogLineBudget, 1000), no longer the truncation limit less a margin: a line near the cut
 // loses its tail when a figure grows a digit.
 constexpr size_t kLineLimit = 1000;
-constexpr int kMaxLines = 7;
+constexpr int kMaxLines = 9;
 constexpr int kMaxTokens = 96;
 struct Lines {
     char line[kMaxLines][1400];
@@ -943,6 +970,22 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
             callsText(calls, sizeof(calls), static_cast<double>(n) / clocked);
             tk.add(i ? ", " : "; ", "%s%s %s us a call (%s a frame)", i ? "" : "game draw per call: ", kInfo[game[i]].name + (sizeof("game draw ") - 1), per, calls);
         }
+    }
+    // The binding thunks (round 2): the six kinds together, EDVR's own time against the game's forwarded call, per call. Each kind's own figures
+    // are in the family chain above ("bind thunk shaders" and the rest). Calls are per clocked frame, so the per-call figures are exact.
+    if (anyClocked) {
+        const unsigned bind[6] = {kBindShaders, kBindResources, kBindConstants, kBindTargets, kBindViewport, kBindBlend};
+        double bindMs = 0;
+        uint64_t bindCalls = 0;
+        for (unsigned i = 0; i < 6; ++i) { bindMs += r.renderMs[bind[i]]; bindCalls += r.renderCalls[bind[i]]; }
+        char ownNs[24] = "-", gameNs[24] = "-";
+        if (bindCalls) std::snprintf(ownNs, sizeof(ownNs), "%.0f", bindMs * 1e6 / static_cast<double>(bindCalls));
+        if (r.renderCalls[kGameBind]) std::snprintf(gameNs, sizeof(gameNs), "%.0f", r.renderMs[kGameBind] * 1e6 / static_cast<double>(r.renderCalls[kGameBind]));
+        callsText(calls, sizeof(calls), static_cast<double>(bindCalls) / clocked);
+        char gameCalls[32];
+        callsText(gameCalls, sizeof(gameCalls), static_cast<double>(r.renderCalls[kGameBind]) / clocked);
+        tk.add("; ", "bind thunks (render thread, per clocked frame): EDVR %.3f ms over %s calls (%s ns a call), the game's forwarded calls %.3f ms over %s (%s ns a call)",
+               bindMs / clocked, calls, ownNs, r.renderMs[kGameBind] / clocked, gameCalls, gameNs);
     }
     // H4: how each substituted draw ended (flat_engine_runs.h). Counts and D3D calls from every frame, time from the clocked ones. A line of
     // zeros beside a substituted-draw count above means the counting never ran.

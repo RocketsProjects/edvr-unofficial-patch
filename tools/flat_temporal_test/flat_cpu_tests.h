@@ -232,6 +232,10 @@ inline int flatCpuTests() {
             "dispatch shell 0.000 ms (calls 0.0) + ctor lookup block 0.000 ms (calls 0.0) + ctor predicate block 0.000 ms (calls 0.0) + "
             "draw hook remainder 0.000 ms (calls 0.0) + game draw substituted 0.000 ms (calls 0.0) + "
             "game draw after substituted 0.000 ms (calls 0.0) + game draw other 0.000 ms (calls 0.0) + "
+            "bind thunk shaders 0.000 ms (calls 0.0) + bind thunk resources 0.000 ms (calls 0.0) + bind thunk constants 0.000 ms (calls 0.0) + "
+            "bind thunk targets 0.000 ms (calls 0.0) + bind thunk viewport 0.000 ms (calls 0.0) + bind thunk blend 0.000 ms (calls 0.0) + "
+            "game bind calls 0.000 ms (calls 0.0) + ctor reducer block 0.000 ms (calls 0.0) + ctor nominate block 0.000 ms (calls 0.0) + "
+            "ctor domain block 0.000 ms (calls 0.0) + ctor coverage block 0.000 ms (calls 0.0) + ctor tail block 0.000 ms (calls 0.0) + "
             "camera inject 0.000 ms (calls 0.0) + engine motion hooks 0.000 ms (calls 0.0)";
         // The family chain is longer than a log line now: it continues on the next, where the packer drops the " + " it broke at.
         std::string chain = text;
@@ -366,8 +370,9 @@ inline int flatCpuTests() {
         expect(has(text, "draw hook flat branch (render thread, per clocked frame): wall 0.780 ms over 3.0 draws, game draw 0.600 ms, "
                          "EDVR hook cost 0.180 ms (unscoped remainder 0.030 ms)"),
                "the draw hook line: wall, draws a frame, the game's draw, EDVR's hook cost, the unscoped remainder");
-        expect(has(text, "game draw per call: substituted 200.00 us a call (1.0 a frame), after substituted 300.00 us a call (1.0 a frame), "
-                         "other 100.00 us a call (1.0 a frame)"),
+        // (one token a kind: a line may break between two)
+        expect(has(text, "substituted 200.00 us a call (1.0 a frame)") && has(text, "after substituted 300.00 us a call (1.0 a frame)") &&
+                   has(text, "other 100.00 us a call (1.0 a frame)"),
                "the game's draw per call, by what preceded it");
         expect(has(text, "game draw substituted 0.200 ms (calls 1.0)") && has(text, "game draw after substituted 0.300 ms (calls 1.0)") &&
                    has(text, "game draw other 0.100 ms (calls 1.0)"),
@@ -383,8 +388,72 @@ inline int flatCpuTests() {
         flatcpu::formatWindow(e, &el);
         const std::string et = joined(el);
         expect(has(et, "wall 0.000 ms over 0.0 draws, game draw 0.000 ms, EDVR hook cost 0.000 ms (unscoped remainder 0.000 ms)") &&
-                   has(et, "game draw per call: substituted - us a call (0.0 a frame), after substituted - us a call (0.0 a frame), other - us a call (0.0 a frame)"),
+                   has(et, "substituted - us a call (0.0 a frame)") && has(et, "after substituted - us a call (0.0 a frame)") &&
+                   has(et, "other - us a call (0.0 a frame)"),
                "a window with no draw prints dashes for the per-call time, never 0.00, so a dead instrument reads differently from a fast one");
+    }
+    // Round 2: the binding thunks and the constructor's five blocks. Each frame: 1000 binds of four kinds with the game's forwarded call
+    // inside each, and the constructor's blocks run in order with a gap between two of them that stays in the shell.
+    {
+        flatcpu::resetForTest();
+        fake(0);
+        Run run;
+        for (int i = 0; i < 300; ++i) {
+            run.frame(16667, false, [] {
+                for (int b = 0; b < 1000; ++b) {
+                    const unsigned kind = b % 4 == 0 ? flatcpu::kBindShaders : b % 4 == 1 ? flatcpu::kBindResources
+                                                                          : b % 4 == 2 ? flatcpu::kBindConstants : flatcpu::kBindTargets;
+                    flatcpu::Scope thunk(kind);
+                    t_now += 30;
+                    { flatcpu::Scope game(flatcpu::kGameBind); t_now += 20; }
+                    t_now += 10;
+                }
+                { flatcpu::Scope v(flatcpu::kBindViewport); t_now += 5; { flatcpu::Scope g(flatcpu::kGameBind); t_now += 5; } }
+                flatcpu::Scope shell(flatcpu::kDrawCtor);
+                t_now += 100;
+                flatcpu::Scope reducer(flatcpu::kCtorReducer); t_now += 11; reducer.stop();
+                t_now += 7;                                                                // between two blocks: the shell's
+                flatcpu::Scope nominate(flatcpu::kCtorNominate); t_now += 12; nominate.stop();
+                flatcpu::Scope domain(flatcpu::kCtorDomain); t_now += 13; domain.stop();
+                flatcpu::Scope coverage(flatcpu::kCtorCoverage); t_now += 14; coverage.stop();
+                flatcpu::Scope tail(flatcpu::kCtorTail); t_now += 15;
+                { flatcpu::Scope inner(flatcpu::kEngineDraw); t_now += 4; }                 // a family nested in a block comes out of it
+            });
+        }
+        flatcpu::WindowReport r;
+        const bool got = run.census->take(run.now, false, r);
+        const double k = r.renderClockedFrames;
+        expect(got && k > 0, "the bind window closes");
+        expect(nearly(r.renderMs[flatcpu::kBindShaders] / k, 250 * 40 * 0.001) && r.renderCalls[flatcpu::kBindShaders] == 250u * r.renderClockedFrames,
+               "a bind thunk's own time is its 40 ticks, the forwarded call's 20 not in it: 250 shader binds a frame");
+        expect(r.renderCalls[flatcpu::kGameBind] == 1001u * r.renderClockedFrames && nearly(r.renderMs[flatcpu::kGameBind] / k, (1000 * 20 + 5) * 0.001),
+               "the forwarded calls are one family: 20 ticks each, 1001 a frame");
+        expect(nearly(r.renderMs[flatcpu::kCtorReducer] / k, 0.011) && nearly(r.renderMs[flatcpu::kCtorTail] / k, 0.015) &&
+                   nearly(r.renderMs[flatcpu::kEngineDraw] / k, 0.004) && nearly(r.renderMs[flatcpu::kDrawCtor] / k, 0.107),
+               "the blocks are their own ticks, a family nested in a block is subtracted from it, and the gap stays in the shell (100 + 7)");
+        flatcpu::Lines lines;
+        flatcpu::formatWindow(r, &lines);
+        const std::string text = joined(lines);
+        expect(!lines.truncated, "the round-2 tokens fit the lines");
+        expect(has(text, "bind thunk targets 10.000 ms (calls 250)") && has(text, "ctor tail block 0.015 ms (calls 1.0)"),
+               "the families are in the chain under their names");
+        char want[300];
+        std::snprintf(want, sizeof(want),
+                      "bind thunks (render thread, per clocked frame): EDVR 40.005 ms over 1001 calls (%.0f ns a call), the game's forwarded calls "
+                      "20.005 ms over 1001 (%.0f ns a call)", 40.005e6 / 1001.0, 20.005e6 / 1001.0);
+        expect(has(text, want), "the bind line: EDVR's own time, calls and nanoseconds a call against the game's forwarded calls");
+        expect(has(text, "EDVR per frame total 40.181 ms"), "the game's forwarded calls are not in EDVR's total (binds 40.005 + the shell and blocks 0.176)");
+        // An empty window prints dashes for the nanoseconds, never 0.
+        flatcpu::resetForTest();
+        fake(0);
+        Run empty;
+        for (int i = 0; i < 300; ++i) empty.frame(16667, false, {});
+        flatcpu::WindowReport e;
+        empty.census->take(empty.now, false, e);
+        flatcpu::Lines el;
+        flatcpu::formatWindow(e, &el);
+        expect(has(joined(el), "bind thunks (render thread, per clocked frame): EDVR 0.000 ms over 0.0 calls (- ns a call), the game's forwarded calls 0.000 ms over 0.0 (- ns a call)"),
+               "a window with no bind prints dashes for the per-call time");
     }
     // H4: how each substituted draw ended, per frame, from the counts the wrapper hands the census.
     {
@@ -403,16 +472,15 @@ inline int flatCpuTests() {
         flatcpu::Lines lines;
         flatcpu::formatWindow(r, &lines);
         const std::string text = joined(lines);
-        char want[900];
-        std::snprintf(want, sizeof(want),
-                      "engine motion runs (the wrapper's brackets, a frame; the time is the clocked frames'): "
-                      "lazy 2.0 runs/frame (5.0 D3D calls/run, 40.00 us/run, %.3f ms per clocked frame), "
-                      "eager guarded (overlay t3) 0.2 runs/frame (20.0 D3D calls/run, 100.00 us/run, %.3f ms per clocked frame), "
-                      "eager capture armed 0.0 runs/frame (- D3D calls/run, - us/run, 0.000 ms per clocked frame), "
-                      "lazy flushes 0.5 flushes/frame (2.0 D3D calls/flush, 10.00 us/flush, %.3f ms per clocked frame)",
-                      1.2 / K, 0.3 / K, 0.06 / K);
+        // One token a kind (a line may break between two, and the packer drops the separator it broke at): each searched whole.
+        char lazy[200], guard[200], flush[200];
+        std::snprintf(lazy, sizeof(lazy), "lazy 2.0 runs/frame (5.0 D3D calls/run, 40.00 us/run, %.3f ms per clocked frame)", 1.2 / K);
+        std::snprintf(guard, sizeof(guard), "eager guarded (overlay t3) 0.2 runs/frame (20.0 D3D calls/run, 100.00 us/run, %.3f ms per clocked frame)", 0.3 / K);
+        std::snprintf(flush, sizeof(flush), "lazy flushes 0.5 flushes/frame (2.0 D3D calls/flush, 10.00 us/flush, %.3f ms per clocked frame)", 0.06 / K);
         expect(got && K > 0, "the runs window closes with clocked frames");
-        expect(has(text, want), "the engine motion runs line: runs a frame, D3D calls and microseconds per run, the clocked frames' time");
+        expect(has(text, "engine motion runs (the wrapper's brackets, a frame; the time is the clocked frames')") && has(text, lazy) && has(text, guard) &&
+                   has(text, "eager capture armed 0.0 runs/frame (- D3D calls/run, - us/run, 0.000 ms per clocked frame)") && has(text, flush),
+               "the engine motion runs line: runs a frame, D3D calls and microseconds per run, the clocked frames' time");
         expect(r.runs.totalRuns() == 660 && nearly(r.runMs[kRunLazy], 1.2) && nearly(r.flushMs, 0.06), "the window carries the counts and the time in ms");
         // The next window starts from zero: nothing is carried.
         for (int i = 0; i < 300; ++i) run.frame(16667, false, {});

@@ -2,7 +2,15 @@
 
 ## Status
 
-State (2026-10-16): the observer reduction below is PORTED onto current main as `claude/flat-settlement-cpu` (7 commits, clean
+State (2026-10-16, round 2): LEG A FLOWN, THE OBSERVER FIX WORKS: render-thread engine motion 427 -> 77 ns a call (about 0.8 ms a
+frame), job merge and clear down 92%, 100% of calls lock-free, 0 contention. It is on `claude/engine-motion-observers` (the seven
+commits only), pushed for Sean's merge. Round 2 is `claude/flat-settlement-cpu-2` (H1-H4 kept, main merged in): binding thunks
+timed (a), the constructor's remaining bulk in five blocks (b), and the designs for the guarded eager runs (d) and the census's own
+cost (e), section "2026-10-16, round 2". BUILT, NOT FLOWN. Still unattributed after leg A: about 2.4 ms a frame (binding thunks
+are the prime suspect) and about 2.1 ms in the constructor body after the predicates. The guarded eager runs (BBE/DB3E) are 895-974
+runs a frame, 13 D3D calls each, about 0.75 ms: 77% of engine-motion run time. Ruled out by leg A: g_mutex contention
+(0 contended); the observers are recovered (about 0.8 ms), not the rest of the 5.8 ms.
+Earlier state (2026-10-16): the observer reduction below is PORTED onto current main as `claude/flat-settlement-cpu` (7 commits, clean
 cherry-pick, no ADS work), with four more instruments for the settlement CPU cost (H1-H4, section "2026-10-16", the flight plan is
 there). BUILT, NOT FLOWN, NOT MERGED. Question for the flight: which of the 5.8 ms a frame (0.52 in the cockpit; draws 360 -> 10.5k)
 is the thunk's remainder, the constructor's lookup or predicate block, the destructor, g_mutex contention, or the wrapper's guarded
@@ -192,3 +200,102 @@ d3d11.dll to d3d11.dll.edvr-suspended (one rename, hashed before and after; only
 It refuses unless the game is PROVEN stopped, and the DLL is loaded at launch, so each leg of an A/B needs a game restart: suspend,
 launch, fly, quit, resume. Settings, receipts and backups stay. It takes the graphics proxy only, so a d3d11 chain behind it (Sean's
 Epic `real_dll = d3d11_edhm.dll`, 3Dmigoto) is out of the run too: Elite loads Windows' d3d11.dll.
+
+## 2026-10-16, round 2: leg A flown, binding thunks and the constructor body timed, designs for the guarded runs and the census
+
+### Leg A (flown, confirmed)
+Branch `claude/flat-settlement-cpu` (the observer fix and H1-H4) flown flat at a settlement. Render-thread engine motion fell from 427
+to 77 ns a call (about 0.8 ms a frame); job-thread merge and clear fell 92%; 100% of calls took the lock-free path and the contention
+line read 0. The fix alone is `claude/engine-motion-observers` (the seven commits, no instruments), full build green, for Sean to
+merge. Leg A also ranked what is left of the 5.8 ms a frame: about 2.4 ms unattributed (binding thunks the prime suspect), about 2.1 ms
+in the constructor body after the predicate block, and the guarded eager runs (below).
+
+### Round 2 instruments (zero behaviour change, no config key)
+(a) Binding thunks, `vscreen.cpp`. Each of nine thunks takes one scope, in six families split by kind (the VS and PS setters of one
+kind share a family): `bind thunk shaders` (VSSetShader, PSSetShader), `bind thunk resources` (PS and VS SetShaderResources), `bind
+thunk constants` (VS and PS SetConstantBuffers), `bind thunk targets` (OMSetRenderTargets, OMSetRenderTargetsAndUnorderedAccessViews),
+`bind thunk viewport` (RSSetViewports), `bind thunk blend` (OMSetBlendState). The game's forwarded call inside each is a seventh,
+`game bind calls` (kGameBind, kept out of "EDVR per frame total"), so a family is EDVR's own time and the driver call is apart. The
+scopes sit after the `g_flatComputeInternal` early return, so EDVR's own binds are not counted, only the game's: calls a frame are
+the game's binds. They use the census gate (the same one frame in 16) and the same exclusive accounting. The `thunkHits` counters
+are NOT printed: the reclaim pass in vscreen.cpp zeroes them every pass, so they are not a per-window count; the scopes' calls are.
+(b) The constructor body after `predicateBlock.stop()`, in five blocks, chosen by what each does (the shell family keeps what none
+holds, and the copy draw's own work after `if (!copy) return;`, once a frame): `ctor reducer block` (to the Probe return: the deferred
+inverse, the contract observation, HDR detector, trace record, copy admission, bookkeeping; its reducer, trace and HDR scopes come out
+of it), `ctor nominate block` (source shape, `namingVetoed`, the untrusted nomination), `ctor domain block` (source naming, foreground
+candidates, `observeDomainCandidate` and the explicit-domain classification), `ctor coverage block` (the substitution decision,
+foreground release, the projection and coverage block), `ctor tail block` (the producer bracket, draw capture, projection binding,
+HDR treatment, the UI layer's decisions). Five scopes a draw, ended with `Scope::stop()`.
+(c) Cost: about 33 ns a scope on a clocked frame. This round adds 5 scopes per draw and 2 per bind (a thunk and its forwarded call).
+They only run on the one frame in 16 the render thread is clocked on, and the line's own "the clocks cost the render thread about X
+ms a frame" token prices them at that window's rates: read it first, and read the families against it. The packer's worst window is
+now 7 lines of the 9 it holds (kMaxLines 9).
+
+Line formats (examples from the rig's fake data, wrapped here; the real lines are single lines). Families, in the chain as before:
+`... + game draw other 2.000 ms (calls 7400) + bind thunk shaders 0.300 ms (calls 3100) + bind thunk resources 0.400 ms (calls 5200) +
+bind thunk constants 0.250 ms (calls 2600) + bind thunk targets 0.150 ms (calls 900) + bind thunk viewport 0.010 ms (calls 60) + bind
+thunk blend 0.080 ms (calls 800) + game bind calls 0.900 ms (calls 12660) + ctor reducer block 0.300 ms (calls 10500) + ctor nominate
+block 0.200 ms (calls 10500) + ctor domain block 0.500 ms (calls 10500) + ctor coverage block 0.450 ms (calls 10500) + ctor tail block
+0.400 ms (calls 10500) + camera inject ...`, and one summary token: `; bind thunks (render thread, per clocked frame): EDVR 1.190 ms over
+12660 calls (94 ns a call), the game's forwarded calls 0.900 ms over 12660 (71 ns a call)` ("-" for a nanosecond figure with no call).
+If it never ran: every new family reads 0.000 ms (calls 0.0) and the summary reads `EDVR 0.000 ms over 0.0 calls (- ns a call)`; a
+window with draws and no binds is as suspicious as one with binds and no draws.
+Rigs: flat_cpu_tests.h (a bind window with exact per-kind ticks, the forwarded call kept out of both the family and the total, the
+five blocks' accounting with a nested family and a gap that stays in the shell, the dashes of an empty window), the wiring pins in
+flat_temporal_test.cpp (nine thunk scopes, ten forwarded-call scopes, five block scopes and their stops).
+Reading the next flight: (1) `bind thunks` EDVR ms against the 2.4 ms unexplained; if the ns a call is near the clock floor it is
+the volume, not the work. (2) the five ctor blocks against the 2.1 ms; the hot block names the next bisect. (3) `game bind calls` is
+the driver cost EDVR cannot remove but could reduce by not forwarding a redundant bind (not proposed here).
+
+### (d) DESIGN ONLY: why the overlay-guard runs are eager, and whether they can be lazy
+Leg A: 895-974 guarded runs a frame, 13 D3D calls each, about 0.75 ms, 77% of engine-motion run time, about 12.7k D3D calls a frame.
+Why eager (read from the code; `engine_velocity.cpp`: `restore()`, `snapshotOverlayBase`, the guard in `BeforeDraw`,
+`engineVelocityFlatEndDraw`; commit 13b1b8ee, the lazy bracket, and 22fe85d2, the guard): the exact pair BBE58E40/DB3E8D20 (pool
+family draws with depth writes off, `overlayDepthState`) is drawn through a guarded pixel shader that reads a private snapshot of the
+slot target at PS t3 (`e.overlayBase`, one `CopyResource` per group, reused by the group's following overlay draws, a new group after
+an intervening underlay draw or a new frame), so MRT6 gets only the fragments whose owner matches. t3 is the game's own PS SRV slot,
+so the guard binds the private SRV over it for the draw and EndDraw is eager so the game's t3 is back "for its own draw only":
+13b1b8ee's lazy bracket restores before any hooked call that is not a substituted producer draw, but the NEXT substituted producer
+draw does not flush, and its original pixel shader may read the game's t3; a lazily kept private t3 would be sampled by it. That
+is the only recorded reason (commit message: "with ... the overlay guard's private t3 bound, the game's state goes back at once
+after each draw, as before"); the other half of the cost is that `BeforeDraw` flushes the pending run (`flatRestoreLocked`, cause
+kOverlay) at EVERY overlay draw (`if (overlayPair && g_flatPending)`), so each guarded run pays the full bind and the full restore.
+Is a lazy or batched form safe? Yes, with five conditions, each testable in the existing flat_lazy_tests rig:
+ 1. The private t3 may stay bound across consecutive guarded draws only (same guarded PS, same group snapshot). The next draw that is
+    not a guarded draw of the same group restores the game's t3 first: in `BeforeDraw`, when `g_bound.guardSrv3` is set and this
+    draw is not `guardOverlay`, put t3 back (one Set; the Get verify can go because the shadow's generation `srv3Gen` already says
+    whether the game rebound it, and EDVR's own set is under `FlatComputeInternalScope`, which the shadow does not hear).
+ 2. Every flush already restores t3 (`restore()` handles `guardSrv3` first), so every hooked non-producer call, dispatch, clear,
+    copy, resolve, command list, targets-keeping set and Present gives the game its own t3 back, exactly as for MRT6.
+ 3. The kOverlay flush at each overlay draw becomes a flush only when a NEW snapshot is needed (`!e.overlayGroup`): the copy
+    wants the game's bindings (no MRT6 over the slot target, no private t3, `snapshotOverlayBase` refuses a slot target still bound
+    as an output). Within a group no copy is made, so nothing has to be put back.
+ 4. A game rebind of t3 (or of PS, blend, targets) between two guarded draws is seen by generation, as it is for the lazy bracket;
+    the guarded draw then re-binds, and the restore writes back only what is still EDVR's (`srv3Gen` compare, as now).
+ 5. `engineVelocityFlatEndDraw` stops treating `guardSrv3` as eager: `eager = !g_flatLazy` only. The cost: a game Get of t3 (no Get
+    is hooked) between two guarded draws reads the private SRV, the same exposure MRT6 and the derived blend already have in lazy
+    mode and for the same reason (any hooked call restores first).
+Expected: a guarded run costs what a lazy run costs (4 calls with state to bind, about 0 when kept), plus 2 once a group: roughly
+13 -> 1-2 calls a run, about 10k fewer D3D calls a frame and most of the 0.75 ms. NOT claimed: that no pixel changes (the guarded
+pixel shader and the snapshot are untouched, so MRT6 must be bit-identical; the rig's guarded-overlay WARP fixture should compare
+the eager and lazy forms' MRT0-3 and slot target byte for byte, and `flat lazy` already asserts that the overlay counters agree). The
+flight to run first costs nothing: leg B's `eager guarded` line gives us/run and calls/run to compare with `lazy`; implement only if
+`eager guarded` is still tens of us per frame there. Mutants to write with it: keep t3 across a non-guard producer draw (must fail),
+skip the new-snapshot flush, restore without the generation test.
+
+### (e) DESIGN ONLY: the census's own cost, for every flat user
+`the clocks cost the render thread about X ms a frame` is the instrument's own price (leg A: about 0.46 ms a frame, a clocked frame
+about 7 ms at 10.5k draws, hitching one frame in 16, and more with this round's scopes). Where it is gated: the flat runtime's State owns
+`flatcpu::Census census{flatcpu::kRenderPeriod, flatcpu::clocksWanted()}` (flat_runtime.cpp, the member in the census section);
+it runs only while a temporal mode is selected (`s.census.idle()`, called when none is, closes both gates, and then a scope costs
+a load and a compare), and `clocksWanted()` is on under Windows and off under Wine unless `EDVR_FLAT_CPU_CLOCKS` says otherwise
+(flat_cpu.h, `clocksPolicy`). So every flat user with DLSS, FSR, XeSS or TAA pays it. Options, none built:
+ A. An adaptive period: kRenderPeriod 16 while draws a frame are under about 3000, backing off to 64 above it (the price is per
+    clocked frame and grows with draws; a settlement frame is where it hurts and where the figure is least needed once calibrated).
+ B. Off by default outside a diagnostic: clocksWanted() default false, on for `EDVR_FLAT_CPU_CLOCKS=1` or an F8 diagnostics toggle;
+    a user report then needs the toggle, and `edvr_log.py` and the reports' tooling would have to say "census off" (the line already
+    prints `clocks off, no thread clocked` with present p50/p95 and the GPU spans, so the log stays parseable). This needs a quoted
+    key or env decision from Sean (Scope control) and a release-note line.
+ C. Keep the families but drop the per-bind and per-block scopes from the shipped build (compile flag), leaving them for flights.
+Recommendation for later: C for this round's high-count scopes once a flight has named the hot block, then A. B only if A is not
+enough. The always-on part that remains is the gate load and compare per scope (about 1 ns), which is not what the 0.46 ms is.

@@ -5499,6 +5499,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         }
     }
     predicateBlock.stop();
+    flatcpu::Scope reducerBlock(flatcpu::kCtorReducer);   // B1 of the constructor's remaining bulk (flat_cpu.h): to the Probe return
     // A protected HDR suffix can only finish at the HDR consumer. The final
     // LDR copy is never allowed to feed overlay-containing colour to a
     // temporal backend if that consumer was absent or declined.
@@ -5659,6 +5660,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // projection readiness, no source naming or substitution, no resolve. A copy draw the
     // selector selects ends the stand-down at the Present.
     if (s.work == FlatWork::Probe) return;
+    reducerBlock.stop();
+    flatcpu::Scope nominateBlock(flatcpu::kCtorNominate);   // B2: source shape, the naming veto, the untrusted nomination
     // FP16 image intermediates use the same scene-size predicate; their
     // producer admission remains separate from the format-23/26 motion source.
     const bool sceneExtent = flatContractKind(false, k.color, k.depth, k.width, k.height, k.format==9?26:k.format, s.prefix.width, s.prefix.height, false) == kFlatContractScreen;
@@ -5776,6 +5779,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 s.untrusted.failure()?s.untrusted.failure():"none");
         }
     }
+    nominateBlock.stop();
+    flatcpu::Scope domainBlock(flatcpu::kCtorDomain);   // B3: source naming, foreground candidates, the explicit-domain classification
     // A same-depth draw without camera rows is certified at H through the
     // complete scene-source table. It cannot be assigned to a camera bucket.
     const bool foregroundCandidate=d.supported && weaponMotionFamilyVs(k.vs) && k.camera && k.depth &&
@@ -5887,6 +5892,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         s.foreground.worldSource(ctx,s.prefix.frame,s.prefix.sequence,
             static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),
             static_cast<ID3D11DepthStencilView*>(const_cast<void*>(k.dsv)));
+    domainBlock.stop();
+    flatcpu::Scope coverageBlock(flatcpu::kCtorCoverage);   // B4: the substitution decision, foreground release, the projection/coverage block
     // A pool-family draw sees the game's state too, unless it can only continue a run of substituted producer draws (the
     // one whose camera, depth and constants this frame's naming holds) AND nothing below reads the context for it. What
     // the coverage classification asks the context in the ordinary (Upstream) route it answers from the binding shadow
@@ -5972,6 +5979,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             }
         }
     }
+    coverageBlock.stop();
+    flatcpu::Scope tailBlock(flatcpu::kCtorTail);   // B5: the producer bracket, capture, projection binding, HDR treatment, the UI layer
     if (continuesRun) {
         FlatComputeInternalScope guard;
         // Engine motion's draw wrapper, lazy form (engine_velocity.h): the game's render targets saved once per binding, then
@@ -6098,6 +6107,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         // A draw the layer leaves, while it holds this frame's HUD: a write of the depth buffer a seed copied makes it stale.
         if (!uiTake && !copy) flatUiLayerNoteSceneDraw(ctx, count, instances, kind);
     }
+    tailBlock.stop();
     if (!copy) return;
     if (s.hdrTreated) {
         // The frame was treated before the post chain, so nothing here resolves again (the contract observation above

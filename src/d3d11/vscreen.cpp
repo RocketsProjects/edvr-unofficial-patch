@@ -2863,6 +2863,7 @@ void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT 
                                                 ID3D11RenderTargetView* const* rtvs,
                                                 ID3D11DepthStencilView* dsv) {
     if (g_flatComputeInternal) { g_state->realOMSetRenderTargets(self, n, rtvs, dsv); return; }
+    flatcpu::Scope thunk(flatcpu::kBindTargets);   // census (flat_cpu.h): EDVR's own time in this bind thunk, the forwarded call apart
     ++g_state->thunkHits[kHitOmSet];
     if (foreignContext(self)) {
         g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
@@ -2889,7 +2890,7 @@ void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT 
     // The camera-write tags and P3 (the third view): the colour targets bound, after the shadow holds the new views (docs/sky-flicker-2026-10-13.md).
     if (temporalPassWantsFssChrome()) temporalPassNoteOmSet(n);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteOm(self, n, rtvs, dsv);
-    g_state->realOMSetRenderTargets(self, n, rtvs, dsv);
+    { flatcpu::Scope game(flatcpu::kGameBind); g_state->realOMSetRenderTargets(self, n, rtvs, dsv); }
 }
 
 void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
@@ -2899,6 +2900,7 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
                                             ID3D11UnorderedAccessView* const* uavs,
                                             const UINT* counts) {
     if (g_flatComputeInternal) { g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs, counts); return; }
+    flatcpu::Scope thunk(flatcpu::kBindTargets);   // as hookedOMSetRenderTargets
     // A foreign deferred context cannot write the immediate target yet, but
     // an eventual command list or undocumented cross-context path must not
     // silently preserve the protected suffix.
@@ -2932,13 +2934,14 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
         // game's targets, is among the targets those UAV slots must follow. The game's own set first.
         flatRuntimeSubstitution(self, FlatSubstEvent::kKeepTargets);
     }
-    g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs, counts);
+    { flatcpu::Scope game(flatcpu::kGameBind); g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs, counts); }
 }
 
 void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UINT start,
                                                   UINT n,
                                                   ID3D11ShaderResourceView* const* srvs) {
     if (g_flatComputeInternal) { g_state->realPSSetShaderResources(self, start, n, srvs); return; }
+    flatcpu::Scope thunk(flatcpu::kBindResources);   // as hookedOMSetRenderTargets
     ++g_state->thunkHits[kHitPsSrv];
     if (foreignContext(self)) {
         g_state->realPSSetShaderResources(self, start, n, srvs);
@@ -2958,12 +2961,13 @@ void STDMETHODCALLTYPE hookedPSSetShaderResources(ID3D11DeviceContext* self, UIN
                        srvs[i]);
         }
     }
-    g_state->realPSSetShaderResources(self, start, n, srvs);
+    { flatcpu::Scope game(flatcpu::kGameBind); g_state->realPSSetShaderResources(self, start, n, srvs); }
 }
 
 void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UINT start,
                                                   UINT n, ID3D11Buffer* const* bufs) {
     if (g_flatComputeInternal) { g_state->realVSSetConstantBuffers(self, start, n, bufs); return; }
+    flatcpu::Scope thunk(flatcpu::kBindConstants);   // as hookedOMSetRenderTargets
     ++g_state->thunkHits[kHitVsCb];
     if (foreignContext(self)) {
         g_state->realVSSetConstantBuffers(self, start, n, bufs);
@@ -2975,7 +2979,7 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UIN
     if (start <= 1u && 1u - start < n) bindingSet(BindSlot::VsCb1, bufs ? bufs[1u - start] : nullptr);
     if (flatRuntimeActive()) flatRuntimeConstantBuffers(start, n, bufs);
     if (flatTemporalCapturing()) flatTemporalConstantBuffers(false, start, n, bufs);
-    g_state->realVSSetConstantBuffers(self, start, n, bufs);
+    { flatcpu::Scope game(flatcpu::kGameBind); g_state->realVSSetConstantBuffers(self, start, n, bufs); }
 }
 
 void STDMETHODCALLTYPE hookedPSSetConstantBuffers(ID3D11DeviceContext* self, UINT start,
@@ -2988,11 +2992,12 @@ void STDMETHODCALLTYPE hookedPSSetConstantBuffers(ID3D11DeviceContext* self, UIN
         return;
     }
     if (g_flatComputeInternal) { g_state->realPSSetConstantBuffers(self, start, n, bufs); return; }
+    flatcpu::Scope thunk(flatcpu::kBindConstants);   // as hookedOMSetRenderTargets
     // Installed only for flat discovery. Forward exactly once, including
     // foreign contexts and every call outside the bounded capture window.
     if (!foreignContext(self) && flatTemporalCapturing())
         flatTemporalConstantBuffers(true, start, n, bufs);
-    g_state->realPSSetConstantBuffers(self, start, n, bufs);
+    { flatcpu::Scope game(flatcpu::kGameBind); g_state->realPSSetConstantBuffers(self, start, n, bufs); }
 }
 
 // The pool at VS t33 (engine-record velocity's snapshot source). Only a call
@@ -3000,6 +3005,7 @@ void STDMETHODCALLTYPE hookedPSSetConstantBuffers(ID3D11DeviceContext* self, UIN
 void STDMETHODCALLTYPE hookedVSSetShaderResources(ID3D11DeviceContext* self, UINT start, UINT n,
                                                   ID3D11ShaderResourceView* const* srvs) {
     if (g_flatComputeInternal) { g_state->realVSSetShaderResources(self, start, n, srvs); return; }
+    flatcpu::Scope thunk(flatcpu::kBindResources);   // as hookedOMSetRenderTargets
     if (!foreignContext(self) && start <= kEngineVelocityPoolSlot && kEngineVelocityPoolSlot - start < n) {
         // Only engine velocity reads VsSrv33 (draw_fast_path.h): not recorded while the AA is off.
         if (bindShadowsSkipped(g_aaOffDraw.load(std::memory_order_relaxed), engineVelocityLiveNow()))
@@ -3007,7 +3013,7 @@ void STDMETHODCALLTYPE hookedVSSetShaderResources(ID3D11DeviceContext* self, UIN
         else
             bindingSet(BindSlot::VsSrv33, srvs ? srvs[kEngineVelocityPoolSlot - start] : nullptr);
     }
-    g_state->realVSSetShaderResources(self, start, n, srvs);
+    { flatcpu::Scope game(flatcpu::kGameBind); g_state->realVSSetShaderResources(self, start, n, srvs); }
 }
 
 // Every blend-state set bumps the Blend generation: EDVR's own derived state
@@ -3015,6 +3021,7 @@ void STDMETHODCALLTYPE hookedVSSetShaderResources(ID3D11DeviceContext* self, UIN
 void STDMETHODCALLTYPE hookedOMSetBlendState(ID3D11DeviceContext* self, ID3D11BlendState* state,
                                              const FLOAT factor[4], UINT sampleMask) {
     if (g_flatComputeInternal) { g_state->realOMSetBlendState(self, state, factor, sampleMask); return; }
+    flatcpu::Scope thunk(flatcpu::kBindBlend);   // as hookedOMSetRenderTargets
     if (!foreignContext(self)) {
         // Only engine velocity reads Blend (draw_fast_path.h): not recorded while the AA is off.
         if (bindShadowsSkipped(g_aaOffDraw.load(std::memory_order_relaxed), engineVelocityLiveNow()))
@@ -3022,7 +3029,7 @@ void STDMETHODCALLTYPE hookedOMSetBlendState(ID3D11DeviceContext* self, ID3D11Bl
         else
             bindingSet(BindSlot::Blend, state);
     }
-    g_state->realOMSetBlendState(self, state, factor, sampleMask);
+    { flatcpu::Scope game(flatcpu::kGameBind); g_state->realOMSetBlendState(self, state, factor, sampleMask); }
 }
 
 // Everything is unbound. Forget all of it -- this is the one place where
@@ -3066,18 +3073,20 @@ uint64_t shaderHashMemo(State::ShaderMemo& m, void* shader) {
 void STDMETHODCALLTYPE hookedVSSetShader(ID3D11DeviceContext* self, ID3D11VertexShader* vs,
                                          ID3D11ClassInstance* const* ci, UINT n) {
     if (g_flatComputeInternal) { g_state->realVSSetShader(self, vs, ci, n); return; }
+    flatcpu::Scope thunk(flatcpu::kBindShaders);   // as hookedOMSetRenderTargets
     if (!foreignContext(self)) {
         const uint64_t h = shaderHashMemo(g_state->vsMemo, vs);
         bindingSetShader(BindSlot::Vs, vs, h);
         ++g_state->vsSets;
         if (vs && !h) ++g_state->vsSetsNoHash;
     }
-    g_state->realVSSetShader(self, vs, ci, n);
+    { flatcpu::Scope game(flatcpu::kGameBind); g_state->realVSSetShader(self, vs, ci, n); }
 }
 
 void STDMETHODCALLTYPE hookedPSSetShader(ID3D11DeviceContext* self, ID3D11PixelShader* ps,
                                          ID3D11ClassInstance* const* ci, UINT n) {
     if (g_flatComputeInternal) { g_state->realPSSetShader(self, ps, ci, n); return; }
+    flatcpu::Scope thunk(flatcpu::kBindShaders);   // as hookedOMSetRenderTargets
     if (!foreignContext(self)) {
         const uint64_t h = shaderHashMemo(g_state->psMemo, ps);
         bindingSetShader(BindSlot::Ps, ps, h);
@@ -3085,7 +3094,7 @@ void STDMETHODCALLTYPE hookedPSSetShader(ID3D11DeviceContext* self, ID3D11PixelS
         ++g_state->psSets;
         if (ps && !h) ++g_state->psSetsNoHash;
     }
-    g_state->realPSSetShader(self, ps, ci, n);
+    { flatcpu::Scope game(flatcpu::kGameBind); g_state->realPSSetShader(self, ps, ci, n); }
 }
 
 void forgetBindings(State*) { bindingForgetAll(); }
@@ -4619,10 +4628,12 @@ bool viewportIs(const D3D11_VIEWPORT& v, uint32_t w, uint32_t h) {
 void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
                                             const D3D11_VIEWPORT* vps) {
     if (g_flatComputeInternal) { g_state->realRSSetViewports(self, n, vps); return; }
+    flatcpu::Scope thunk(flatcpu::kBindViewport);   // as hookedOMSetRenderTargets
     State* s = g_state;
     if (!foreignContext(self) && flatRuntimeActive()) flatRuntimeViewport(n, vps);
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalViewport(n, vps);
     if (foreignContext(self) || n != 1 || !vps || !fssResActive()) {
+        flatcpu::Scope game(flatcpu::kGameBind);
         s->realRSSetViewports(self, n, vps);
         return;
     }
