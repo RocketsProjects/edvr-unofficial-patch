@@ -64,7 +64,8 @@ MUTATIONS = [
     ("lazy-guard-nonguard-draw-keeps-t3", "if (!guardOverlay && g_bound.guardSrv3) guardRestoreT3(ctx);", "", "flat lazy"),
     ("lazy-guard-flushes-at-every-overlay-draw", " && !(e.overlayGroup && e.overlayBaseSrv)) {\n        ++g_draw.flatFlushBy",
      ") {\n        ++g_draw.flatFlushBy", "guard G5"),
-    ("lazy-guard-ends-eager", "const bool eager = !g_flatLazy;", "const bool eager = !g_flatLazy || g_bound.guardSrv3;", "guard G5"),
+    ("lazy-guard-ends-eager", "    if (!g_flatLazy) {\n        std::lock_guard<std::recursive_mutex> lock(g_mutex);",
+     "    if (!g_flatLazy || g_bound.guardSrv3) {\n        std::lock_guard<std::recursive_mutex> lock(g_mutex);", "guard G5"),
 ]
 CL_FLAGS = ["/nologo", "/O2", "/MT", "/std:c++17", "/EHsc", "/W4", "/DWIN32_LEAN_AND_MEAN", "/DNOMINMAX",
             "/D_CRT_SECURE_NO_WARNINGS", "/DUNICODE", "/D_UNICODE", "/utf-8", "/DEDVR_ENGINE_VELOCITY_RIG",
