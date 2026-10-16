@@ -4,7 +4,9 @@
 
 - **Shield-strike smear (2026-10-16): DESIGN ONLY, nothing built.** The shield's pool meshes (5C1D, 820E) are unkeyed, and they write no
   depth, so the engine path's ownership test rejects them. The design ranks a coverage replay that writes private depth plus the slot first.
-  See "Design, 2026-10-16: engine motion for the shield strike". Evidence E1-E3 there come before any code.
+  See "Design, 2026-10-16: engine motion for the shield strike". Evidence E1-E3 done offline (run 070301): option (b) CLEARED
+  with one amendment, the shield records must also be joined (they share the hull's pose but carry no previous pose). H-clobber RULED
+  OUT; the hull's 13% stale_slot is open hypothesis H-bias (a depth bias missing from the exported z). E2 (do puffs ride the ship) inconclusive.
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
   path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
   docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
@@ -214,3 +216,13 @@ That is a separate change, and needs a flat combat capture.
   translucent keyed draw from writing ES over an owned pixel.
 - **Rig.** `tools\engine_velocity_test` on WARP: an opaque hull record, plus the shield replay over the hull and over the sky. Assert
   per-pixel ownership, a camera path below the floor, and an unchanged hull ES where nothing is replayed.
+**Evidence, 2026-10-16 (run 070301, offline).** E1: the shield slots 157/162 (5C1D) and 119/124 (820E) share the ship's root pose with
+hull records 200/220/241: identical position and per-frame change, 0.903°. They are NOT joined (marker 447BFA77, previous pose =
+current), and the hull records are; so option (b) must also join the shield records (key them as producers, or have the replay register
+its records for the join). Pointing the replay at the co-located joined hull slot instead is the ruled-out "pool slot as identity".
+E2: inconclusive (the effects grow, so centroids are biased); needs a stride-92 vertex-buffer snapshot in the eye-run ledger.
+E3: 0 of D00's 13,258 `stale_slot` pixels carry a 5B4D slot. They are slot 238 (cockpit, 10,775) and slot 220 (target hull, 2,483),
+where the recorded depth is nearer than the scene's by 5e-7 to 1e-5, never farther. Open hypothesis H-bias: a depth bias missing
+from the exported z, or a later non-GEQUAL depth pass; test by logging the rasterizer DepthBias/SlopeScaledDepthBias and depth function
+of the keyed draws for slots 220 and 238.
+- ruled out: translucent keyed 5B4D draws overwriting the hull's slot (H-clobber), because no non-owning pixel carries a 5B4D slot.
