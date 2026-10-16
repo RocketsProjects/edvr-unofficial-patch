@@ -76,6 +76,7 @@ class Config;
 
 namespace detail {
 extern bool g_uiLayerLive;
+extern bool g_uiQualityLive;
 extern bool g_uiLayerWatching;
 extern bool g_uiSeedDiagnostics;
 extern bool g_uiLayerRedirecting;
@@ -91,6 +92,10 @@ extern uint64_t g_uiLayerNamedAt;
 // The draw path's one gate: fix.ui_quality is on, a temporal mode is on, and
 // the layer has not stood down. One load.
 inline bool uiLayerLive() { return detail::g_uiLayerLive; }
+// The layer's machinery runs for fix.ui_quality (the interface families, the 2D screen, the maps gate, the VR world route, the after-UI
+// take) -- the first half of uiLayerLive(), whose second half is fix.sharp_weapons (the weapons fire in its own HDR layer). With
+// fix.ui_quality off and fix.sharp_weapons on, uiLayerLive() is true and this is false: only the weapons fire is taken.
+inline bool uiLayerQualityLive() { return detail::g_uiQualityLive; }
 // A persistent driver restoration fault leaves stock shader state untrusted.
 // Owner-context issues stay suppressed, Begin's fallback included, for the rest
 // of the frame it happened in: uiLayerFrameBoundary then puts back whichever of
@@ -203,6 +208,10 @@ inline bool uiLayerCrispPending() { return detail::g_uiLayerCrispPending; }
 // through the raw entry points, runs the coverage pass (the HDR layer's
 // transmittance into the 8-bit layer's alpha), and marks the layer's frame.
 bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx);
+// After each issue of the admitted draw, between Begin and End (fix.sharp_weapons): true when ANOTHER issue of the same draw follows --
+// the weapons' light and the HUD's are re-issued one after the other into the 8-bit layer, each with its own HDR source and blend. The
+// caller issues the game's draw again for every true. A frame with the HUD alone is one issue, as it always was (this returns false).
+bool uiLayerCrispToneNext(ID3D11DeviceContext* ctx);
 void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx);
 
 // ---- the VR on-foot world route (vr_world_route.h; docs/design-flat-temporal-aa-2026-09-23.md, section 82) ----
