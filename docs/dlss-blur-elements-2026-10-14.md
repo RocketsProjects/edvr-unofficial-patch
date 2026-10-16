@@ -8,6 +8,10 @@
   with one amendment, the shield records must also be joined (they share the hull's pose but carry no previous pose). H-clobber RULED
   OUT; the hull's 13% stale_slot is open hypothesis H-bias (a depth bias missing from the exported z). E2 (do puffs ride the ship) inconclusive.
   Build stopped: the shield records come from an unhooked producer, candidate FUN_14434D470/434D120 (see "Producer hunt"); count-and-tag hook next.
+- **Producer probe (2026-10-16): BUILT, NOT FLOWN** (`claude/producer-434d120-probe`). A count-and-tag hook on FUN_14434D120, no emission, no key.
+  TEMPORARY, to remove when this arc closes: `src\d3d11\producer_probe.h`, the `engine-producer-434d120-probe` entry and `producerObserved` in
+  `kinematic_eval_hook.cpp`, the three rigid `noteRigid` calls, the 30 s line in `engine_velocity.cpp`, the eye-run capture in `object_probe.cpp`,
+  the producer report in `tools\eye_run_ledger.py`, and rig cases P1-P4 in `tools\kinematic_probe_test`. See "Producer probe, 2026-10-16".
 - **Weapons fire (2026-10-16): DESIGN ONLY:** the HDR-layer route (the space dust's) for 1F17, 939D and 5C1D; 820E stays. Evidence W1-W5
   offline first. See "Design, 2026-10-16: weapons fire after the upscale".
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
@@ -249,6 +253,64 @@ FUN_14434D470/434D120 (prologue 48895C2408 48896C2410 4889742418 57 4883EC20). N
 rigid producers' buckets, appended addresses mapped to pool slots in an eye run) before any emission. "139 of 2048 joined" counts pool
 capacity, not a miss rate.
 - ruled out: FUN_14369C9C0 as the shield's producer, because it made 0 calls this session and it copies the model block.
+**Producer probe, 2026-10-16 (built, not flown; branch `claude/producer-434d120-probe`, cut from `claude/billboard-facing` 139a6ff2 plus main).**
+A count-and-tag CodeHook on FUN_14434D120 (RVA 0x434D120): it forwards the call untouched, then records. It writes nothing to the game, adds
+no key, and rides the engine-motion want (`kinematicEvalEmitAttach`, so `fix.temporal_aa` on): its relay gate opens only while engine motion is
+wanted and the patch is verified ours. Install is guarded like 42B3FC0: PE timestamp/size of build 332841, then the exact 20-byte prologue
+(`48 89 5C 24 08  48 89 6C 24 10  48 89 74 24 18  57  48 83 EC 20`, the first instruction exactly five bytes), then a re-read after CodeHook
+patches that must show our E9 plus the stock tail. Any miss stands the probe down alone; the 30 s line then prints the reason in place of counts.
+The callback declares six register/stack parameters and forwards all six, so a stack parameter the decompile missed still reaches the original.
+Hot path: relaxed atomic adds and CAS into fixed tables (no allocation, no lock); the capture buffer is allocated when the eye run arms.
+
+*The 30 s line* (one per summary, in every state, next to the "primary rigid emit" line; window counters flip at each summary):
+
+    engine motion: producer 434D120 probe (hooked, 30 s, 1800 frames): calls 3 (0.0 a frame), 2 distinct buckets (0 lost to a full table); 3 threads [10 11 99], render thread YES, 1 of them also appended for the rigid producers (2 rigid threads); the rigid producers appended to 2 buckets (builder 42B4420 1, direct 4312E00 1, direct 369C9C0 0; 0 lost), 1 of the probe's 2 buckets among them; callers 0x434D741 x3; model block +0x20..+0x9F zero 1, set 1, unreadable 1.
+
+(Illustrative figures; the form is pinned by rig case P3.) The never-fired form is `... calls 0 (0.0 a frame), NEVER FIRED in this window: ...` and
+still reports how many buckets the rigid producers wrote; the stood-down form is `producer 434D120 probe (<reason>): the probe is not running, so
+nothing is counted ...`. "Rigid producers" are 42B4420 (and 42B4130 inside it, by bucket count delta), 4312E00 and 369C9C0, noted where they
+already read `bucket+0x2A4` before and after; "buckets" are the `rcx` of 434D120 and the bucket each rigid call appended to.
+
+*What to read.* (1) Version first: `python tools\edvr_log.py --target frontier --expect-build HEAD --version`, then grep `producer 434D120 probe`.
+(2) No such line at all: the engine-motion summary did not run, so the probe had no chance (not the same as "never fired"). (3) Status other than
+`hooked`: stood down, with the reason (build, a foreign detour on the prologue, CodeHook refusal); `not requested` means engine motion never
+attached it. (4) `hooked`, calls 0 over a window with shield strikes and rigid appends nonzero: 434D120 does not build the shield records;
+the other initializer callers (1431FA800, 143C8F8C0, 143DA1DE0, 143E7AF20, 1443ED820) are next. (5) Calls above 0: `callers` should be
+0x434D741 (the return after the call at 0x1434D73C inside FUN_14434D470); another RVA is another user of 434D120. A model block `zero`
+count matches the offline prediction (the shield and target-anchored records have it zeroed); `set` means these are rigid-style records and
+the candidate is wrong. `threads`: render thread YES would put appends on the render thread; threads shared with the rigid producers say the
+same job threads build both. Buckets shared with the rigid producers say the appended nodes land in lists the rigid emit already walks.
+
+*Slot tagging (eye run).* The node address is not available to the hook (434D120's return value is not known to carry it), and the copier
+maps node source ranges to slots, not the reverse, so the tag is by content. While an eye run's ledger is armed, every call's full 336-byte
+record plus bucket, model key, node key, thread, caller RVA and ledger frame (frames f0-2 to last+1, up to 8192 entries) is kept, and written
+at the ledger's close as `producer434d120_<stamp>.bin` beside `pool_<stamp>_<frame>.bin`. The log says `producer probe: eye run <stamp> armed the
+capture ...` at the key and `producer probe: N records of FUN_14434D120 ...` at the write (N = 0 with status hooked means the producer did
+not run in the window). Then:
+
+    python tools\eye_run_ledger.py <edvr_logs>\pool <HHMMSS> --producer-only
+
+matches each captured record to the pool slots of frames within 3 of its capture frame (at least 80 of 84 words equal, so the engine's own
+prior-pose patch and a late edit do not hide it) and prints each slot with its bucket, model key, node key and caller, marking slots
+157/162/119/124 `<== SHIELD` (change with `--slots`) and ending `shield slots [...]: found [...], missing [...]`. Without `--producer-only`
+the same report prints before the station analysis. If the slot numbers differ in the next run, pass the shield's slots from that run. Caveats:
+a record that changed more than 4 words between the append and the upload will not match (the report would then show it missing, which is
+itself informative: compare a missing slot's pool bytes with the nearest captured record by hand); two identical records match both.
+
+*Rig.* `tools\kinematic_probe_test` (in the build gate): P1 the prologue verdict (stock matches; every one of the 20 bytes flipped is a mismatch;
+a foreign E9 is a mismatch; another PE timestamp or size stands down; our own E9 verifies after install; stock where ours should be is "our patch
+is gone"; a mismatch disables the probe, keeps the reason, counts nothing and prints the stood-down line); P2 the window (counts, distinct
+sets, bucket 0, overlap with the rigid notes, the flip, a full table counting its overflow, four threads x 20000 calls exact); P3 the line in
+counted, never-fired and stood-down/not-requested forms and its worst-case length; P4 the capture (frame window, cap, file header and entry
+layout). `tools\eye_run_ledger.py --self-test` writes a capture file as the DLL does and matches it to a synthetic pool. What the rig cannot
+show: that CodeHook patches the real exe's 0x434D120 and the relay's six-parameter forward is safe there; that is the flight's first check
+(`hooked` in the line, and no crash).
+
+*Trace if it never runs.* Hook never installed because the emit never attached: no `kinematicEvalEmitAttach`, status stays `not requested`, the
+30 s line says so. Prologue or build mismatch: the status is the reason, the gate stays 0, the relay jumps straight to the original. CodeHook
+refuses: its own `engine-producer-434d120-probe` line says why and the status names it. Hooked but the game never calls 434D120: `NEVER FIRED`.
+Hooked and called but gate closed (engine motion detached mid-session): counts stop while the status still says `hooked`; the rigid side
+stops with it, which the line shows.
 ## Design, 2026-10-16: weapons fire after the upscale (the HDR layer route)
 
 Read-only design; no code. The route already exists: the space dust (vs 9BFC7FD2 / ps DBF17257) is an additive, GEQUAL, no-write world

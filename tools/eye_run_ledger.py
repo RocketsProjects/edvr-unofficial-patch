@@ -112,7 +112,44 @@ def self_test():
             pass
         else:
             raise AssertionError("version 9 must not parse")
-    print("eye_run_ledger: self-test ok (v1 24-byte rows, v2 40-byte rows with ps/rt)")
+    # The producer434d120 capture (producer_probe.h): written as the DLL writes it, read back, matched to pool slots.
+    rng = np.random.RandomState(7)
+    raw = rng.randint(0, 256, size=(12, REC)).astype(np.uint8)         # a 12-record pool frame
+    wordsOf = lambda r: raw[r].copy().view('<u4')
+    hit = wordsOf(5).copy(); hit[2] ^= 0x1234                           # slot 5, one word changed after the append (still a match)
+    near = wordsOf(9).copy(); near[:20] ^= 0xFFFF                       # slot 9 with 20 words different: below 80 of 84, no match
+    stray = rng.randint(0, 2 ** 32, size=84, dtype=np.uint64).astype('<u4')   # a record that is in no slot
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, 'producer434d120_070301.bin')
+        with open(p, 'wb') as f:
+            f.write(PRODUCER_HDR.pack(PRODUCER_MAGIC, 1, 376, 4, 2, 98, 121, REC, 0))
+            for fr, w, b in ((100, wordsOf(5).copy(), 0xB1), (101, hit, 0xB1), (101, near, 0xB2), (160, stray, 0xB3)):
+                f.write(PRODUCER_ENTRY.pack(fr, 4242, b, 0xAA, 0xCC, 0x434D741)); f.write(w.tobytes())
+        hdr, entries = load_producer(p)
+        assert hdr == dict(count=4, dropped=2, frame0=98, frame1=121) and len(entries) == 4
+        assert entries[0]['bucket'] == 0xB1 and entries[0]['ret'] == 0x434D741 and np.array_equal(entries[1]['words'], hit)
+        lines = []
+        perSlot = report_producer(p, {100: dict(raw=raw), 101: dict(raw=raw), 160: dict(raw=raw[:0])}, (5, 6), log=lines.append)
+        assert sorted(perSlot) == [5], perSlot                         # the changed word still matches; 20 words off and a stray do not
+        assert len(perSlot[5]) == 2                                    # frames 100 and 101
+        text = "\n".join(lines)
+        assert "slot    5" in text and "SHIELD" in text and "found [5], missing [6]" in text, text
+        # zero records: the report says the producer did not run, and finds nothing
+        empty = os.path.join(tmp, 'producer434d120_000000.bin')
+        with open(empty, 'wb') as f:
+            f.write(PRODUCER_HDR.pack(PRODUCER_MAGIC, 1, 376, 0, 0, 1, 2, REC, 0))
+        lines = []
+        assert report_producer(empty, {}, SHIELD_SLOTS, log=lines.append) == {} and "did not run" in "\n".join(lines)
+        bad = os.path.join(tmp, 'producer_bad.bin')
+        with open(bad, 'wb') as f:
+            f.write(PRODUCER_HDR.pack(b'NOTRIGHT', 1, 376, 0, 0, 0, 0, REC, 0))
+        try:
+            load_producer(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a foreign magic must not parse")
+    print("eye_run_ledger: self-test ok (v1 24-byte rows, v2 40-byte rows with ps/rt, producer434d120 capture matched to pool slots)")
     return 0
 
 
@@ -203,6 +240,69 @@ def fit_axis(p0, p1, ang, axis, mask):
     c = c + u * ((p0[m].mean(0) - c) @ u)
     return u, c, th, m
 
+# producer434d120_<stamp>.bin (src/d3d11/producer_probe.h): the records FUN_14434D120 appended while the eye run was armed. A 40-byte
+# header (magic EDVRP434, version, entryBytes, count, dropped, frame0, frame1, recordBytes, pad), then 376-byte entries: frame u32, tid u32,
+# bucket, modelKey, nodeKey and the caller's RVA (u64 each), and the 336-byte record as the caller built it. TEMPORARY with the probe.
+PRODUCER_MAGIC = b'EDVRP434'
+PRODUCER_HDR = struct.Struct('<8s8I')
+PRODUCER_ENTRY = struct.Struct('<II4Q')
+assert PRODUCER_HDR.size == 40 and PRODUCER_ENTRY.size + REC == 376
+SHIELD_SLOTS = (157, 162, 119, 124)   # the shield strike's pool slots in run 070301
+
+def load_producer(path):
+    """-> (header dict, [entry dict]); each entry's 'words' is the record as 84 uint32."""
+    b = open(path, 'rb').read()
+    magic, ver, entryBytes, count, dropped, frame0, frame1, recBytes, _ = PRODUCER_HDR.unpack(b[:40])
+    if magic != PRODUCER_MAGIC or ver != 1 or entryBytes != 376 or recBytes != REC:
+        raise ValueError(f"{path}: not a version 1 producer capture")
+    entries = []
+    for i in range(count):
+        o = 40 + i * entryBytes
+        frame, tid, bucket, modelKey, nodeKey, ret = PRODUCER_ENTRY.unpack(b[o:o + PRODUCER_ENTRY.size])
+        words = np.frombuffer(b, dtype='<u4', count=REC // 4, offset=o + PRODUCER_ENTRY.size).copy()
+        entries.append(dict(frame=frame, tid=tid, bucket=bucket, modelKey=modelKey, nodeKey=nodeKey, ret=ret, words=words))
+    return dict(count=count, dropped=dropped, frame0=frame0, frame1=frame1), entries
+
+def match_producer(entries, pools, min_words=80, reach=3):
+    """Which pool slots hold the records the producer appended. A record matches a slot when at least min_words of its 84 words are
+    equal (the engine's own prior-pose patch and a late edit change a few words; the rest of a 336-byte record does not move between
+    the append and the upload). Each entry is tried against the pool frames within `reach` of its capture frame.
+    -> {pool frame: {slot: [entries]}}"""
+    out = {}
+    for e in entries:
+        for fr, pool in pools.items():
+            if abs(fr - e['frame']) > reach: continue
+            words = pool['raw'].view('<u4').reshape(-1, REC // 4)
+            eq = (words == e['words']).sum(axis=1)
+            for slot in np.nonzero(eq >= min_words)[0]:
+                out.setdefault(fr, {}).setdefault(int(slot), []).append((e, int(eq[slot])))
+    return out
+
+def report_producer(path, pools, slots, min_words=80, log=print):
+    hdr, entries = load_producer(path)
+    log(f"producer 434D120: {hdr['count']} records captured for frames {hdr['frame0']}..{hdr['frame1']} ({hdr['dropped']} dropped past the buffer)")
+    if not entries:
+        log("  none: the producer did not run in the run's window (or the probe was not hooked: read the 30 s 'producer 434D120 probe' line)")
+        return {}
+    log(f"  {len({e['bucket'] for e in entries})} buckets, {len({e['tid'] for e in entries})} threads, callers "
+        + ", ".join(f"0x{r:X}" for r in sorted({e['ret'] for e in entries})))
+    hit = match_producer(entries, pools, min_words)
+    perSlot = {}
+    for fr in sorted(hit):
+        for slot, items in hit[fr].items():
+            perSlot.setdefault(slot, []).append((fr, items))
+    log(f"  {len(perSlot)} pool slots hold captured records (>= {min_words} of 84 words equal) across {len(hit)} pool frames")
+    for slot in sorted(perSlot):
+        frames = [fr for fr, _ in perSlot[slot]]
+        items = perSlot[slot][0][1]
+        e = items[0][0]
+        mark = "  <== SHIELD" if slot in slots else ""
+        log(f"    slot {slot:>4d}: {len(frames)} frames ({frames[0]}..{frames[-1]}), bucket {e['bucket']:X} model key {e['modelKey']:X} "
+            f"node key {e['nodeKey']:X} caller 0x{e['ret']:X}{mark}")
+    seen = sorted(set(slots) & set(perSlot))
+    log(f"  shield slots {list(slots)}: found {seen}, missing {sorted(set(slots) - set(perSlot))}")
+    return perSlot
+
 def load_aux(path):
     b = open(path, 'rb').read()
     magic, ver, frame, entries, pad = struct.unpack('<8sIIII', b[:24])
@@ -227,6 +327,9 @@ def main():
     ap.add_argument('--pool-vs', help='a file of vertex shader hashes (hex, one a line) that read t33: the pool draws. Without it the '
                                      'ledger flag decides, which only says t33 HELD the pool at the draw -- true of every draw after a '
                                      'pool draw, the game never unbinding it (the run of 2026-09-10 05:37)')
+    ap.add_argument('--slots', default=','.join(str(s) for s in SHIELD_SLOTS),
+                    help='pool slots the producer report flags (default: the shield strike\'s 157,162,119,124)')
+    ap.add_argument('--producer-only', action='store_true', help='print only the producer434d120 report and stop')
     ap.add_argument('--self-test', action='store_true', help='write synthetic version 1 and 2 fixtures to a temp '
                                                            'directory and check the parser against them')
     a = ap.parse_args()
@@ -259,6 +362,15 @@ def main():
         p = os.path.join(a.dir, f'aux_{a.stamp}_{frame}.bin')
         if os.path.exists(p): auxes[frame] = load_aux(p)
     print(f"on disk: {len(pools)} pool frames, {len(insts)} instance streams, {len(bones)} frames of palettes, {len(auxes)} aux files, {sum(len(v) for v in draws.values())} draw rows")
+    pp = os.path.join(a.dir, f'producer434d120_{a.stamp}.bin')
+    if os.path.exists(pp):
+        print()
+        report_producer(pp, pools, tuple(int(s) for s in a.slots.split(',') if s.strip()))
+        print()
+    elif a.producer_only:
+        print(f"no {pp}: the run was armed on a build without the producer probe, or the ledger never wrote")
+    if a.producer_only:
+        return 0
     stride_u32 = max(1, instStride // 4)
 
     def drawn_records(frame):

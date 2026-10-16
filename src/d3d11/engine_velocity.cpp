@@ -36,6 +36,7 @@
 #include "flat_query_cut.h"   // the flat bracket's kept answers, and the sampled check of each
 #include "kinematic_eval_hook.h"
 #include "kinematic_eval_probe.h"
+#include "producer_probe.h"      // the 30 s line of the FUN_14434D120 count-and-tag probe (temporary)
 #include "skin_entity_hook.h"   // F2: the read-only observer of the game's skinning job assembly (identity of skinned characters)
 #include "skin_join_gpu.h"      // F2: the join at the palette chain's dispatch, the pose table, the views the cloned vertex shaders read
 #include "vscreen.h"
@@ -2146,6 +2147,12 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
                     r(g_primaryEmit.itemsJoined),r(g_primaryEmit.itemsMoving),r(g_primaryEmit.itemsMasked),
                     u(attempts>=written?attempts-written:0),r(g_primaryEmit.disagreements),r(g_primaryEmit.locateFailures),
                     r(g_primaryEmit.readFaults),r(g_primaryEmit.writeFaults));
+    {   // The producer probe on FUN_14434D120 (temporary, producer_probe.h): one line a window, in every state (counts, never fired, stood down).
+        char producerLine[1100];   // producer_probe::kLineBytes
+        static_assert(sizeof(producerLine) == producer_probe::kLineBytes, "the producer line buffer is the formatter's");
+        producer_probe::formatLine(producer_probe::takeWindow(), producer_probe::status(), seconds, frames, producerLine);
+        Log::get().note("%s", producerLine);
+    }
     Log::get().note("engine motion: primary private copy cumulative (copier %s, merge %s, clear %s): copier spans %llu, apply successes %llu, "
                     "positive map cache overflow %llu (capacity %u); primary native records are unchanged.",
                     kinematicEvalPoolCopyStatus(),kinematicEvalMergeStatus(),kinematicEvalClearStatus(),r(g_primaryCopyCalls),u(g_primaryApplied),u(g_primaryMapOverflow),kPrimaryPoolResources);

@@ -25,6 +25,9 @@
 // kinematic_eval_probe.obj would mangle clearLocked as private and not
 // resolve (the review harness used this same single-TU pattern).
 #include "../../src/d3d11/kinematic_eval_probe.cpp"
+// The FUN_14434D120 count-and-tag probe's logic (header-only; the hook in kinematic_eval_hook.cpp only reads bytes and calls it).
+#include "../../src/d3d11/producer_probe.h"
+#include <thread>
 
 namespace edvr {
 // Linker stubs: this rig never hooks anything (arm/finish/reset unused).
@@ -342,6 +345,209 @@ void caseDirectBuild() {
                        "\"max_items_per_call\":900}]") != std::string::npos,
           "9: both producers serialize");
 }
+
+// ---- The FUN_14434D120 probe (producer_probe.h; the hook only reads bytes and calls these) -------------------------------------------
+namespace pp = edvr::producer_probe;
+using Bytes = uint8_t[pp::kPrologueBytes];
+constexpr uint32_t kTs = KinematicEvalProbe::kExpectedTimestamp, kSize = KinematicEvalProbe::kExpectedImageSize;
+const char* const kMismatch = "prologue mismatch at RVA 0x434D120";
+
+// P1: the prologue verdict -- match, mismatch (every byte), a foreign patch, the wrong build, our own patch, and the stand-down it drives.
+void caseProducerSignature() {
+    // The bytes as the offline disassembly of build 332841 gives them (an independent copy of the constant under test).
+    const Bytes spec = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10,
+                        0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x20};
+    check(std::memcmp(spec, pp::kPrologue, sizeof(spec)) == 0 && pp::kRva == 0x434D120u, "P1: the verified prologue is the disassembly's 20 bytes at RVA 0x434D120");
+    Bytes got;
+    std::memcpy(got, spec, sizeof(got));
+    check(pp::signatureVerdict(kTs, kSize, kTs, kSize, got, false, 0) == nullptr, "P1: the stock prologue on the right build installs");
+    unsigned mismatches = 0;
+    for (unsigned i = 0; i < pp::kPrologueBytes; ++i) {
+        Bytes bad;
+        std::memcpy(bad, spec, sizeof(bad));
+        bad[i] ^= 0x01;
+        const char* why = pp::signatureVerdict(kTs, kSize, kTs, kSize, bad, false, 0);
+        if (why && std::strcmp(why, kMismatch) == 0) ++mismatches;
+    }
+    check(mismatches == pp::kPrologueBytes, "P1: a changed byte ANYWHERE in the 20 stands the probe down with the RVA named");
+    Bytes foreign;
+    std::memcpy(foreign, spec, sizeof(foreign));
+    foreign[0] = 0xE9; foreign[1] = 0x10; foreign[2] = 0x20; foreign[3] = 0x30; foreign[4] = 0x00;   // someone else's detour (5-byte jmp over the first instruction)
+    const char* why = pp::signatureVerdict(kTs, kSize, kTs, kSize, foreign, false, 0);
+    check(why && std::strcmp(why, kMismatch) == 0, "P1: a foreign E9 detour is a mismatch (never patched over)");
+    why = pp::signatureVerdict(kTs + 1, kSize, kTs, kSize, got, false, 0);
+    check(why && std::strstr(why, "not build 332841"), "P1: another PE timestamp stands down, whatever the bytes");
+    why = pp::signatureVerdict(kTs, kSize + 1, kTs, kSize, got, false, 0);
+    check(why && std::strstr(why, "not build 332841"), "P1: another image size stands down");
+    // Our own patch after install: E9 + rel32 to the relay + the stock tail.
+    Bytes ours;
+    std::memcpy(ours, spec, sizeof(ours));
+    const int32_t rel = 0x01234567;
+    ours[0] = 0xE9;
+    std::memcpy(ours + 1, &rel, 4);
+    check(pp::signatureVerdict(kTs, kSize, kTs, kSize, ours, true, rel) == nullptr, "P1: our own E9 to the relay, stock tail intact, verifies after install");
+    why = pp::signatureVerdict(kTs, kSize, kTs, kSize, ours, true, rel + 1);
+    check(why && std::strcmp(why, kMismatch) == 0, "P1: an E9 to somewhere else is not ours");
+    Bytes tail;
+    std::memcpy(tail, ours, sizeof(tail));
+    tail[12] ^= 0x40;
+    why = pp::signatureVerdict(kTs, kSize, kTs, kSize, tail, true, rel);
+    check(why && std::strcmp(why, kMismatch) == 0, "P1: our E9 over a damaged tail does not verify");
+    why = pp::signatureVerdict(kTs, kSize, kTs, kSize, got, true, rel);
+    check(why && std::strstr(why, "our patch is gone"), "P1: stock bytes where our patch should be: 'our patch is gone'");
+    why = pp::signatureVerdict(kTs, kSize, kTs, kSize, ours, false, 0);
+    check(why && std::strcmp(why, kMismatch) == 0, "P1: before install, an already-patched entry is NOT taken for stock");
+    // The stand-down: the status carries the reason, the probe counts nothing, and its line says so instead of a count.
+    pp::resetAll();
+    check(!pp::enabled() && std::strcmp(pp::status(), "not requested") == 0, "P1: before any attach: disabled, 'not requested'");
+    pp::applyVerdict(kMismatch);
+    check(!pp::enabled() && std::strcmp(pp::status(), kMismatch) == 0, "P1: a mismatch verdict disables the probe and keeps the reason");
+    pp::noteCall(10, 99, 0x1000, 0x434D741, pp::kModelBlockSet);
+    pp::noteRigid(pp::kBuilder, 10, 0x1000);
+    pp::Snapshot s = pp::takeWindow();
+    check(s.calls == 0 && s.buckets == 0 && s.rigidBuckets == 0, "P1: stood down, a call and a rigid note count nothing");
+    char line[pp::kLineBytes];
+    pp::formatLine(s, pp::status(), 30.0, 1800.0, line);
+    check(std::strstr(line, kMismatch) && std::strstr(line, "nothing is counted") && !std::strstr(line, "calls "), "P1: the stood-down line names the reason and shows no counts");
+    pp::applyVerdict(nullptr);
+    check(pp::enabled() && std::strcmp(pp::status(), "hooked") == 0, "P1: a null verdict is 'hooked' and enables the counts");
+    pp::resetAll();
+}
+
+// P2: the window -- counts, distinct sets, overlap, flips, a full table, and four threads at once.
+void caseProducerWindow() {
+    pp::resetAll();
+    pp::applyVerdict(nullptr);
+    for (int i = 0; i < 3; ++i) pp::noteCall(10, 99, 0x1000, 0x434D741, pp::kModelBlockZero);
+    pp::noteCall(11, 99, 0x2000, 0x434D741, pp::kModelBlockSet);
+    pp::noteCall(99, 99, 0x1000, 0x434D800, pp::kUnreadable);   // the render thread, a second caller
+    pp::noteCall(12, 99, 0, 0x434D741, pp::kModelBlockZero);    // bucket 0 is a valid key, not "empty"
+    pp::noteRigid(pp::kBuilder, 10, 0x1000);                    // shared bucket, shared thread
+    pp::noteRigid(pp::kBuilder, 10, 0x1000);
+    pp::noteRigid(pp::kDirect0, 77, 0x3000);
+    pp::noteRigid(pp::kDirect1, 77, 0x4000);
+    pp::Snapshot s = pp::takeWindow();
+    check(s.calls == 6 && s.kinds[pp::kModelBlockZero] == 4 && s.kinds[pp::kModelBlockSet] == 1 && s.kinds[pp::kUnreadable] == 1,
+          "P2: six calls, and the record kinds (zero 4, set 1, unreadable 1) add up");
+    check(s.buckets == 3 && s.threads == 4 && s.renderSeen, "P2: three distinct buckets (0 counts), four threads, the render thread seen");
+    check(s.rigidBuckets == 3 && s.rigidThreads == 2 && s.rigidNotes[pp::kBuilder] == 2 && s.rigidNotes[pp::kDirect0] == 1 && s.rigidNotes[pp::kDirect1] == 1,
+          "P2: the rigid producers' distinct buckets and threads, and their notes per source");
+    check(s.shared == 1 && s.sharedThreads == 1, "P2: one probe bucket (0x1000) and one thread (10) are also the rigid producers'");
+    check(s.callerCountListed == 2 && s.callerRva[0] == 0x434D741 && s.callerCount[0] == 5 && s.callerRva[1] == 0x434D800 && s.callerCount[1] == 1,
+          "P2: callers listed busiest first with their counts");
+    check(s.listedThreadCount == 4 && s.listedThreads[0] == 10 && s.listedThreads[3] == 99, "P2: the thread list is sorted");
+    // The next window starts empty, and a call made after the flip lands in it, not in the one just read.
+    pp::noteCall(10, 99, 0x9000, 0x434D741, pp::kModelBlockZero);
+    pp::Snapshot t = pp::takeWindow();
+    check(t.calls == 1 && t.buckets == 1 && t.rigidBuckets == 0 && t.shared == 0, "P2: the flip: the next window holds only the later call");
+    pp::Snapshot u = pp::takeWindow();
+    check(u.calls == 0 && u.buckets == 0 && u.threads == 0 && !u.renderSeen, "P2: an idle window is empty (the cell cleared on retiring)");
+    // A table that fills counts its overflow instead of looping or corrupting.
+    for (uint64_t b = 1; b <= 1100; ++b) pp::noteCall(10, 99, b << 4, 0x434D741, pp::kModelBlockZero);
+    pp::Snapshot v = pp::takeWindow();
+    check(v.calls == 1100 && v.buckets == 1024 && v.bucketOverflow == 76, "P2: 1100 distinct buckets: 1024 kept, 76 lost to the full table, all 1100 calls counted");
+    // Four threads, the same 64 buckets: nothing lost, nothing double counted.
+    std::vector<std::thread> ts;
+    for (unsigned t2 = 0; t2 < 4; ++t2)
+        ts.emplace_back([t2] {
+            for (uint64_t i = 0; i < 20000; ++i) {
+                pp::noteCall(100 + t2, 1, 0x7000 + (i % 64) * 0x40, 0x434D741, pp::kModelBlockZero);
+                pp::noteRigid(pp::kDirect0, 100 + t2, 0x7000 + (i % 64) * 0x40);
+            }
+        });
+    for (auto& th : ts) th.join();
+    pp::Snapshot w = pp::takeWindow();
+    check(w.calls == 80000 && w.buckets == 64 && w.threads == 4 && w.shared == 64 && w.sharedThreads == 4 && w.rigidNotes[pp::kDirect0] == 80000 &&
+          w.callerCount[0] == 80000, "P2: four threads x 20000 calls: every call counted, 64 buckets and 4 threads exactly, all shared with the rigid notes");
+    pp::resetAll();
+}
+
+// P3: the 30 s line in its three forms -- counts, never fired, stood down -- and the buffer it must fit.
+void caseProducerLine() {
+    pp::resetAll();
+    pp::applyVerdict(nullptr);
+    pp::noteCall(10, 99, 0x1000, 0x434D741, pp::kModelBlockZero);
+    pp::noteCall(11, 99, 0x2000, 0x434D741, pp::kModelBlockSet);
+    pp::noteCall(99, 99, 0x2000, 0x434D741, pp::kUnreadable);
+    pp::noteRigid(pp::kBuilder, 10, 0x1000);
+    pp::noteRigid(pp::kDirect0, 55, 0x5000);
+    char line[pp::kLineBytes];
+    pp::formatLine(pp::takeWindow(), pp::status(), 30.0, 1800.0, line);
+    const std::string counted = line;
+    check(counted.rfind("engine motion: producer 434D120 probe (hooked, 30 s, 1800 frames): calls 3 (0.0 a frame)", 0) == 0, "P3: the line opens with the status, window and calls");
+    check(counted.find(", 2 distinct buckets (0 lost to a full table); 3 threads [10 11 99], render thread YES, 1 of them also appended for the rigid producers (2 rigid threads); ") != std::string::npos,
+          "P3: distinct buckets, the threads listed, the render thread, and the threads shared with the rigid producers");
+    check(counted.find("the rigid producers appended to 2 buckets (builder 42B4420 1, direct 4312E00 1, direct 369C9C0 0; 0 lost), 1 of the probe's 2 buckets among them; callers 0x434D741 x3;") != std::string::npos,
+          "P3: the rigid producers' buckets per source, the overlap, and the callers");
+    check(counted.find("model block +0x20..+0x9F zero 1, set 1, unreadable 1.") != std::string::npos, "P3: the record kinds close the line");
+    // NEVER FIRED: hooked, an idle window. The rigid side is still reported, so a quiet probe is told apart from a quiet game.
+    pp::noteRigid(pp::kBuilder, 10, 0x1000);
+    pp::formatLine(pp::takeWindow(), pp::status(), 30.0, 1800.0, line);
+    const std::string idle = line;
+    std::fprintf(stderr, "[P3 never-fired line] %s\n", line);   // stderr only: the form is on record in the build log
+    check(idle.find("(hooked, 30 s, 1800 frames): calls 0 (0.0 a frame), NEVER FIRED in this window") != std::string::npos && idle.find("distinct") == std::string::npos &&
+          idle.find("appended to 1 buckets this window (builder 42B4420 1, direct 4312E00 0, direct 369C9C0 0)") != std::string::npos,
+          "P3: never fired: 'calls 0', NEVER FIRED, no distinct counts, and the rigid producers' activity beside it");
+    // Stood down, and never requested.
+    pp::formatLine(pp::Snapshot{}, "prologue mismatch at RVA 0x434D120", 30.0, 1800.0, line);
+    check(std::strstr(line, "producer 434D120 probe (prologue mismatch at RVA 0x434D120): the probe is not running, so nothing is counted") != nullptr,
+          "P3: stood down: the reason in the status slot, no counts");
+    pp::formatLine(pp::Snapshot{}, "not requested", 30.0, 1800.0, line);
+    check(std::strstr(line, "probe (not requested): the probe is not running") != nullptr && std::strstr(line, "\"not requested\" means engine motion never attached it") != nullptr,
+          "P3: never requested: the line says so and says what that means");
+    // Worst case: every field at its limit still fits the buffer and ends with its closing full stop (nothing cut off).
+    pp::Snapshot big;
+    big.calls = ~0ull; big.kinds[0] = big.kinds[1] = big.kinds[2] = ~0ull; big.rigidNotes[0] = big.rigidNotes[1] = big.rigidNotes[2] = ~0ull;
+    big.buckets = big.rigidBuckets = big.shared = big.bucketOverflow = big.rigidOverflow = ~0u;
+    big.threads = big.rigidThreads = big.sharedThreads = ~0u;
+    big.renderSeen = true;
+    big.listedThreadCount = pp::kListedThreads;
+    for (unsigned i = 0; i < pp::kListedThreads; ++i) big.listedThreads[i] = 4000000000u + i;
+    big.callerCountListed = pp::kListedCallers;
+    for (unsigned i = 0; i < pp::kListedCallers; ++i) { big.callerRva[i] = 0x7FFFFFFFFFFFull; big.callerCount[i] = ~0ull; }
+    big.callerOverflow = ~0u;
+    pp::formatLine(big, "hooked", 30.0, 1800.0, line);
+    const size_t n = std::strlen(line);
+    check(n > 600 && n < pp::kLineBytes - 1 && line[n - 1] == '.', "P3: the worst-case line fits the buffer with its last sentence whole");
+}
+
+// P4: the eye run's capture -- the frame window, the buffer cap, the file layout the Python reader expects.
+void caseProducerCapture() {
+    pp::resetAll();
+    uint8_t rec[pp::kRecordBytes];
+    for (unsigned i = 0; i < sizeof(rec); ++i) rec[i] = uint8_t(i * 7 + 3);
+    check(!pp::captureOn(), "P4: not capturing before the eye run arms it");
+    pp::noteCapture(1, 2, 3, 4, 5, rec);
+    check(pp::armCapture(10, 20) && pp::captureOn(), "P4: armed for frames 10..20");
+    pp::setFrame(9);  pp::noteCapture(1, 0xB, 0xC, 0xD, 0x434D741, rec);   // before the window
+    pp::setFrame(10); pp::noteCapture(1, 0xB, 0xC, 0xD, 0x434D741, rec);
+    const uint8_t last = rec[335];
+    rec[0] = uint8_t(rec[0] ^ 0xFFu);
+    const uint8_t flipped = rec[0];
+    pp::setFrame(20); pp::noteCapture(2, 0xB2, 0xC2, 0xD2, 0x434D800, rec);
+    pp::setFrame(21); pp::noteCapture(3, 0xB3, 0xC3, 0xD3, 0x434D741, rec);   // after the window
+    pp::CaptureView v = pp::stopCapture();
+    check(!pp::captureOn() && v.header.count == 2 && v.header.dropped == 0 && v.header.frame0 == 10 && v.header.frame1 == 20 &&
+          std::memcmp(v.header.magic, "EDVRP434", 8) == 0 && v.header.version == 1 && v.header.entryBytes == 376 && v.header.recordBytes == 336,
+          "P4: two records inside the window kept, the ones outside dropped silently, header as the reader expects");
+    check(v.entries && v.entries[0].frame == 10 && v.entries[0].tid == 1 && v.entries[0].bucket == 0xB && v.entries[0].modelKey == 0xC &&
+          v.entries[0].nodeKey == 0xD && v.entries[0].ret == 0x434D741 && v.entries[0].record[0] == 3 && v.entries[0].record[335] == last &&
+          v.entries[1].frame == 20 && v.entries[1].record[0] == flipped,
+          "P4: each entry keeps frame, thread, bucket, model key, node key, caller and all 336 record bytes");
+    pp::noteCapture(9, 9, 9, 9, 9, rec);
+    check(pp::stopCapture().header.count == 2, "P4: nothing is kept after the capture stopped");
+    // Re-arm: starts clean. Overfill: the cap holds and the excess is counted, not written.
+    check(pp::armCapture(0, 100), "P4: re-armed");
+    pp::setFrame(50);
+    for (uint32_t i = 0; i < pp::kCaptureCap + 5; ++i) pp::noteCapture(i, i, i, i, i, rec);
+    pp::CaptureView full = pp::stopCapture();
+    check(full.header.count == pp::kCaptureCap && full.header.dropped == 5 && full.entries[pp::kCaptureCap - 1].tid == pp::kCaptureCap - 1,
+          "P4: the buffer holds its cap, the 5 past it are counted as dropped");
+    // The empty capture is still a valid file: zero records means 'the producer did not run', which the reader reports.
+    check(pp::armCapture(1, 2), "P4: armed again");
+    check(pp::stopCapture().header.count == 0, "P4: an armed capture with no calls is a zero-record file");
+    pp::resetAll();
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -360,6 +566,10 @@ int wmain(int argc, wchar_t** argv) {
     casePhysNodes();
     caseBucketItems();
     caseDirectBuild();
+    caseProducerSignature();
+    caseProducerWindow();
+    caseProducerLine();
+    caseProducerCapture();
     std::printf("kinematic_probe_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
