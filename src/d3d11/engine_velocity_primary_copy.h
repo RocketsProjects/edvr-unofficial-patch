@@ -3,6 +3,7 @@
 // copier's source address, never from a pose/content match. Source relocation
 // or reuse must invalidate/transfer its claim before another copier can see it.
 #include "engine_velocity_emit.h"
+#include "engine_velocity_claim_meter.h"   // what the claims look like while live: measurement only (round 5)
 #include "engine_motion_cpu.h"   // the render thread's id (emcpu::g_gate) and the clock, for the lock instrument below
 #include <d3d11.h>
 #include "engine_velocity_primary_copy_shader.h"
@@ -26,7 +27,7 @@ using Microsoft::WRL::ComPtr;
 constexpr uint32_t kWords=84,kBytes=336,kMaxEmissions=16384,kMaxPatches=16384,kMaxPools=32;
 struct Patch { uint32_t slot=0,marker=0; std::array<uint32_t,kWords> native{}; emit::Pose previous{}; };
 static_assert(sizeof(Patch)==364,"GPU structured patch layout");
-struct Emission { Patch patch; uint32_t frame=0; };
+struct Emission { Patch patch; uint32_t frame=0; int64_t born=0; };   // born: the claim meter's clock when it was recorded
 struct Pool {
     ComPtr<ID3D11Buffer> held;
     uintptr_t base=0; uint32_t bytes=0,frame=0;
@@ -48,6 +49,12 @@ struct Stats { ScatterFailure lastScatterFailure=ScatterFailure::None; uint64_t 
 struct MergePlan;
 inline std::mutex g_mutex,g_gpuMutex;
 inline std::unordered_map<uintptr_t,Emission> g_emissions;
+// The claims about to be dropped in bulk (a frame boundary, an overflow, a reset, a failed walk): their lifetimes go to the meter first.
+inline void dropEmissions() noexcept {
+    if(g_emissions.empty())return;
+    const int64_t now=claimmeter::g_clock();
+    for(const auto& e:g_emissions)claimmeter::noteLife(claimmeter::End::Dropped,now-e.second.born);
+}
 inline std::unordered_set<MergePlan*> g_mergePlans;
 inline std::unordered_map<ID3D11Buffer*,Pool> g_pools;
 inline Stats g_stats;
@@ -208,7 +215,9 @@ private:
     static void publish() noexcept {
         const bool emissions=!g_emissions.empty(),claims=emissions || !g_mergePlans.empty();
         const bool claimsChanged=g_claimsLive.load(std::memory_order_relaxed)!=claims || g_emissionsLive.load(std::memory_order_relaxed)!=emissions;
+        const bool emissionsWere=g_emissionsLive.load(std::memory_order_relaxed);
         const auto storeFlags=[&]{
+            if(emissionsWere!=emissions)claimmeter::liveFlip(emissions);   // the claim meter: the set became (non-)empty
             g_claimsLive.store(claims,std::memory_order_release);g_emissionsLive.store(emissions,std::memory_order_release);
         };
         if(!g_poolsDirty){if(claimsChanged)storeFlags();return;}
@@ -269,12 +278,12 @@ private:
 inline emit::Pose current(const uint32_t* r) { return emit::Pose{{r[4],r[5],r[6],r[2],r[3]}}; }
 inline void overflow(uint32_t frame) {
     g_poolsDirty=true;
-    g_overflowFrame=frame;++g_stats.overflows;g_emissions.clear();++g_emissionEpoch;
+    g_overflowFrame=frame;++g_stats.overflows;dropEmissions();g_emissions.clear();++g_emissionEpoch;
     for(auto& entry:g_pools)entry.second.patches.clear();
 }
 inline void invalidateEmission(uintptr_t source) noexcept {
     ClaimLock lock(Caller::Emit);
-    if(source)g_emissions.erase(source);else {g_emissions.clear();++g_emissionEpoch;++g_stats.invalidated;++g_stats.sourceResets;}
+    if(source)g_emissions.erase(source);else {dropEmissions();g_emissions.clear();++g_emissionEpoch;++g_stats.invalidated;++g_stats.sourceResets;}
 }
 inline void invalidateMapped(uintptr_t base) noexcept {
     ClaimLock lock(Caller::Other);g_poolsDirty=true;
@@ -285,7 +294,7 @@ inline void invalidateMapped(uintptr_t base) noexcept {
 inline bool recordEmission(uintptr_t source,const uint32_t native[kWords],const emit::Pose& previous,
                            uint32_t marker,uint32_t frame) noexcept {
     ClaimLock lock(Caller::Emit);
-    if(g_emissionFrame!=frame){g_emissions.clear();g_emissionFrame=frame;++g_emissionEpoch;++g_stats.sourceResets;}
+    if(g_emissionFrame!=frame){dropEmissions();g_emissions.clear();g_emissionFrame=frame;++g_emissionEpoch;++g_stats.sourceResets;}
     if(!source || !native || g_overflowFrame==frame)return false;
     const emit::Pose now=current(native);
     const bool joined=marker==(emit::kJoined^emit::markerHash(now,previous,frame));
@@ -306,8 +315,9 @@ inline bool recordEmission(uintptr_t source,const uint32_t native[kWords],const 
             return true;
         }
         if(g_emissions.size()>=kMaxEmissions){overflow(frame);return false;}
-        Emission e;e.frame=frame;e.patch.marker=marker;e.patch.previous=previous;
+        Emission e;e.frame=frame;e.patch.marker=marker;e.patch.previous=previous;e.born=claimmeter::g_clock();
         std::memcpy(e.patch.native.data(),native,kBytes);g_emissions[source]=e;++g_stats.emissions;
+        claimmeter::noteEmission(source,native,marker,frame,e.born);
         return true;
     } catch(...) {overflow(frame);return false;}
 }
@@ -380,11 +390,12 @@ inline void copier(uintptr_t base,uint32_t stride,uintptr_t source,uint32_t firs
     // Claims are consumed even on a refused copy: an allocator reuse cannot
     // inherit an emission after that source item has been drained.
     if(count>kMaxPatches || !source || source>UINTPTR_MAX-uint64_t(count)*kBytes) {
-        g_emissions.clear();++g_emissionEpoch;++g_stats.declined;return;
+        dropEmissions();g_emissions.clear();++g_emissionEpoch;++g_stats.declined;return;
     }
     for(uint32_t i=0;i<count;++i) {
         auto e=g_emissions.find(source+uintptr_t(i)*kBytes);if(e==g_emissions.end())continue;
         const Emission emission=e->second;g_emissions.erase(e);
+        claimmeter::noteLife(claimmeter::End::Consumed,claimmeter::g_clock()-emission.born);claimmeter::noteSlot(source+uintptr_t(i)*kBytes,firstSlot+i);
         if(!range || !pool->active || !pool->valid || pool->frame!=frame || emission.frame!=frame || g_overflowFrame==frame) {++g_stats.declined;continue;}
         std::array<uint32_t,kWords> src{},dst{};
         if(!emit::read(source+uintptr_t(i)*kBytes,src.data(),kBytes) ||
@@ -455,7 +466,12 @@ inline void formatExitLine(const Stats& s,char (&out)[kExitLineBytes]) noexcept 
                   static_cast<unsigned long long>(s.copiesLockFree),static_cast<unsigned long long>(s.copies),
                   static_cast<unsigned long long>(s.copierNoLeaseLockFree));
 }
-inline void invalidateClaims() {g_emissions.clear();++g_emissionEpoch;++g_stats.declined;++g_stats.mergeFailed;}
+// The claim meter's window, once a summary (the 30 s line). Under the mutex: the entity samples are written by the claim holders.
+inline claimmeter::Window takeClaimWindow() {
+    ClaimLock lock(Caller::Other);
+    return claimmeter::take(claimmeter::g_clock(),g_emissionsLive.load(std::memory_order_relaxed));
+}
+inline void invalidateClaims() {dropEmissions();g_emissions.clear();++g_emissionEpoch;++g_stats.declined;++g_stats.mergeFailed;}
 // 36819D0 frees every list node in this typed336 dictionary. Destination
 // clear precedes a merge of unrelated source collections, so only claims in
 // nodes actually being freed may be revoked on a successful bounded walk.
@@ -471,7 +487,9 @@ template<bool SkipNoClaims> inline void invalidateDictionaryImpl(uintptr_t dicti
     if constexpr(SkipNoClaims) {
         if(g_emissions.empty() && g_mergePlans.empty()){lock.relabel(Caller::ClearSkip);++g_stats.clearNoClaims;return;}   // the flag was stale-true
     }
-    auto fail=[](){g_emissions.clear();++g_emissionEpoch;++g_stats.sourceResets;++g_stats.clearFailed;};
+    const size_t claimsAtWalk=g_emissions.size();   // the claim meter: the set this walk was taken against
+    uint64_t clearedHere=0;
+    auto fail=[](){dropEmissions();g_emissions.clear();++g_emissionEpoch;++g_stats.sourceResets;++g_stats.clearFailed;};
     try {
         uintptr_t buckets=0;uint64_t count=0;
         if(!dictionary || dictionary>UINTPTR_MAX-0x20 ||
@@ -498,10 +516,16 @@ template<bool SkipNoClaims> inline void invalidateDictionaryImpl(uintptr_t dicti
                 entry=nextEntry;
             }
         }
-        addresses.forEach([](uintptr_t address){const auto n=g_emissions.erase(address);g_stats.invalidated+=n;g_stats.clearedClaims+=n;});
+        addresses.forEach([&](uintptr_t address){
+            const auto it=g_emissions.find(address);
+            if(it!=g_emissions.end())claimmeter::noteLife(claimmeter::End::Cleared,claimmeter::g_clock()-it->second.born);
+            const auto n=g_emissions.erase(address);g_stats.invalidated+=n;g_stats.clearedClaims+=n;clearedHere+=n;
+        });
         // A plan owns detached claims between the two native merge callbacks.
         // Drop only plans touching this clear, never unrelated live owners.
-        for(auto* plan:g_mergePlans)for(auto address:plan->addresses)if(addresses.count(address)){plan->invalid=true;break;}
+        bool planHit=false;
+        for(auto* plan:g_mergePlans)for(auto address:plan->addresses)if(addresses.count(address)){plan->invalid=true;planHit=true;break;}
+        if(claimsAtWalk)claimmeter::noteClear(claimsAtWalk,clearedHere||planHit);
     }catch(...){fail();}
 }
 inline void invalidateDictionary(uintptr_t dictionary) noexcept {invalidateDictionaryImpl<true>(dictionary);}
@@ -528,6 +552,7 @@ inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t fr
     ++g_stats.mergeCalls;
     // The flag may be stale-true: the emissions were consumed since it was published. Under the lock the same rule holds.
     if(g_emissions.empty()){++g_stats.mergeWithoutClaims;return mergeNoClaimsToken();}
+    const size_t claimsAtMerge=g_emissions.size();   // the claim meter: the set this merge was taken against
     try {
         uintptr_t dstLinks[2]{},srcLinks[2]{};
         if(!destination || !source || destination==source ||
@@ -535,6 +560,7 @@ inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t fr
         auto plan=std::make_unique<MergePlan>();plan->epoch=g_emissionEpoch;plan->frame=frame;
         if(g_mergePlans.size()>=kMaxPools){invalidateClaims();return nullptr;}
         std::vector<uintptr_t> clear;
+        std::vector<uintptr_t> moved;   // the claims this plan carries to a new address (the claim meter: the rest end here)
         AddressSet visited;
         uintptr_t tail=dstLinks[1],node=srcLinks[0],previous=source;
         uint64_t tailCount=0;
@@ -565,7 +591,7 @@ inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t fr
                 if(native!=claim->second.patch.native)continue;
                 const uintptr_t target=i<fill?tail+emit::kNodeRecords+uintptr_t(tailCount+i)*kBytes:
                     node+emit::kNodeRecords+uintptr_t(i-fill)*kBytes;
-                plan->transfers.push_back({target,claim->second});
+                plan->transfers.push_back({target,claim->second});moved.push_back(old);
             }
             tailCount+=fill;
             if(count==8){if(tail==destination){tail=node;tailCount=8;}}
@@ -573,7 +599,13 @@ inline void* beginMergeOpaque(uintptr_t destination,uintptr_t source,uint32_t fr
             previous=node;node=uintptr_t(header[0]);
         }
         if(srcLinks[1]!=previous){invalidateClaims();return nullptr;}
-        for(uintptr_t address:clear)g_emissions.erase(address);
+        for(uintptr_t address:clear) {
+            const auto it=g_emissions.find(address);
+            if(it==g_emissions.end())continue;
+            if(std::find(moved.begin(),moved.end(),address)==moved.end())claimmeter::noteLife(claimmeter::End::Dropped,claimmeter::g_clock()-it->second.born);
+            g_emissions.erase(it);
+        }
+        claimmeter::noteMerge(claimsAtMerge,!plan->transfers.empty() || g_emissions.size()!=claimsAtMerge);   // a hit: it staged a transfer or erased a claim
         plan->addresses=std::move(clear);g_mergePlans.insert(plan.get());
         ++g_stats.mergePlans;
         return plan.release();

@@ -1110,24 +1110,6 @@ void flatSaveTargets(ID3D11DeviceContext* ctx) {
 // slowPath calls this mid-visit, and the visit goes on to bind MRT6 over the set again. The saved set stays: the
 // context holds it again, and the generations say for how long that stays true. It does not stay past the frame
 // (engineVelocityFlatFrameEnd): a set held that long would keep the game's views alive.
-// The GPU census's pool-family section in the flat profile, timed per RUN (gpu_census.h, RUN sections). A run is what the bracket keeps bound:
-// from the visit that binds EDVR's state to the restore that gives the game's back (flatRestoreLocked), the consecutive substituted draws between.
-// The span opens after the first draw's binds and closes at the restore, before its state calls; each draw adds itself as an issued call. A span
-// around every draw summed to more than the frame (the serialised intervals of a busy GPU; gpu_census.h), a span around the run does not.
-// Owner thread. Left open by an abandon: no context to end it on, and GpuIntervals::poll voids an open interval.
-bool g_gpuRunActive = false, g_gpuRunTimed = false;
-inline void gpuRunBegin(ID3D11DeviceContext* ctx) noexcept {
-    if (g_gpuRunActive) return;
-    g_gpuRunActive = true;
-    g_gpuRunTimed = gpuCensusBegin(ctx, GpuCensusSection::AlteredPoolFamily);
-}
-inline void gpuRunEnd(ID3D11DeviceContext* ctx) noexcept {
-    if (!g_gpuRunActive) return;
-    g_gpuRunActive = false;
-    if (g_gpuRunTimed) gpuCensusEnd(ctx, GpuCensusSection::AlteredPoolFamily);
-    g_gpuRunTimed = false;
-}
-
 void flatRestoreLocked(ID3D11DeviceContext* ctx) {
     gpuRunEnd(ctx);   // the run's GPU span closes before the state goes back
     restore(ctx);
@@ -2296,6 +2278,17 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
         static_assert(sizeof(contentionLine) == primaryCopy::kContentionLineBytes, "the contention line buffer is the formatter's");
         primaryCopy::formatContentionLine(lockWindow, seconds, contentionLine);
         Log::get().note("%s", contentionLine);
+        // The claim meter (engine_velocity_claim_meter.h): how much of the time the claim set is live, how big, how long a claim lives, how often a
+        // claimed call touches one, and the first emissions after a quiet period. Measurement only; each line has a "no claims this window" form.
+        {
+            const auto claimWindow = primaryCopy::takeClaimWindow();
+            char claimLine[1100];   // claimmeter::kClaimLineBytes
+            static_assert(sizeof(claimLine) == claimmeter::kClaimLineBytes, "the claim line buffer is the formatter's");
+            claimmeter::formatClaimLine(claimWindow, freq / 1e6, seconds, double(g_draw.frames), claimLine);
+            Log::get().note("%s", claimLine);
+            claimmeter::formatEntityLine(claimWindow, freq / 1e6, seconds, claimLine);
+            Log::get().note("%s", claimLine);
+        }
     }
     Log::get().note("engine motion: emit (%s) over %.0f s, %.0f frames: FUN_144312E00 calls %llu (%llu appended, %llu pool "
                     "records in all); pool records joined %llu (with motion %llu), masked %llu; masked for: first seen %llu, "

@@ -642,10 +642,118 @@ inline void runLock(ID3D11Device* device,Check check) {
     }
     emcpu::g_gate.store(savedGate);emcpu::g_renderThreadId.store(savedRenderTid);drain();
 }
+// The claim meter (engine_velocity_claim_meter.h): measurement only. Its own scripted clock, apart from the lock instrument's.
+namespace meterclock {
+inline int64_t now=0;inline unsigned reads=0;
+inline int64_t read() noexcept {++reads;return now;}
+}
+inline void runClaimMeter(ID3D11Device* device,Check check) {
+    namespace cm=edvr::claimmeter;
+    const auto savedClock=cm::g_clock;
+    cm::g_clock=&meterclock::read;
+    char line[cm::kClaimLineBytes];
+    auto fresh=[&]{copy::reset();cm::resetForRig();cm::g_quietTicks=5000;meterclock::now=1;cm::take(1,false);meterclock::reads=0;};
+    {   // The never-fired forms: nothing happened, and both lines say so in their own words.
+        fresh();
+        const auto w=cm::take(3001,false);
+        check(w.empty() && w.windowTicks==3000,"claim meter: a window with no claims is empty");
+        cm::formatClaimLine(w,1.0,30.0,100.0,line);
+        check(std::string(line)=="engine motion: primary copy claims (30 s): no claims this window (0 emissions, the claim set never live, 0 claimed merges, 0 claimed clears).",
+              "claim meter: the claims line has a 'no claims this window' form, exactly");
+        cm::formatEntityLine(w,1.0,30.0,line);
+        check(std::string(line)=="engine motion: primary copy claim entities (30 s): no claim began after a quiet period this window (a quiet period is 10 s without an emission).",
+              "claim meter: the entities line has a 'no claim began' form, exactly");
+    }
+    {   // The real entry points, with no claim made, read no clock and count nothing: the lock-free exits stay lock-free and unmetered.
+        fresh();
+        Tree tree(1,1);Destination dst;tree.item(0,0,0)=record(2);
+        for(unsigned i=0;i<1000;++i){copy::invalidateDictionary(tree.ptr());copy::endMergeOpaque(copy::beginMergeOpaque(dst.ptr(),tree.anchor(0),kFrame),true);}
+        check(meterclock::reads==0 && cm::take(100,false).empty(),"claim meter: with no claim made, 2000 clears and merges read no clock and count nothing");
+    }
+    D3D11_BUFFER_DESC d{};d.ByteWidth=2*336;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.StructureByteStride=336;d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> pool;
+    if(device && SUCCEEDED(device->CreateBuffer(&d,nullptr,&pool))) {   // A synthetic claim stream through the real code, with the clock set by hand.
+        fresh();
+        Tree treeA(1,1),treeC(1,1),treeU(1,1);Destination dst;
+        treeA.item(0,0,0)=record(11);treeC.item(0,0,0)=record(12);treeU.item(0,0,0)=record(13);
+        Record b=record(14),mapped[2]={record(0),record(0)};
+        meterclock::now=900;copy::beginMap(pool.Get(),mapped,sizeof(mapped),336,D3D11_MAP_WRITE_DISCARD,1,kFrame);
+        mapped[1]=b;
+        meterclock::now=1000;claim(treeA.item(0,0,0),kFrame);                         // set {a}: live from 1000
+        meterclock::now=1100;claim(b,kFrame);                                          // set {a,b}
+        meterclock::now=1200;copy::endMergeOpaque(copy::beginMergeOpaque(dst.ptr(),treeU.anchor(0),kFrame),true);   // a claimed merge, size 2, touches nothing
+        meterclock::now=1300;copy::invalidateDictionary(treeU.ptr());                  // a claimed clear, size 2, clears nothing
+        meterclock::now=1400;copy::copier(reinterpret_cast<uintptr_t>(mapped),336,addressOf(b),1,1,kFrame);   // b consumed into slot 1, 300 ticks old
+        meterclock::now=1500;copy::invalidateDictionary(treeA.ptr());                  // a claimed clear, size 1, clears a (500 ticks old): the set empties
+        meterclock::now=2000;claim(treeC.item(0,0,0),kFrame);                         // set {c}: live again from 2000
+        meterclock::now=2200;copy::endMergeOpaque(copy::beginMergeOpaque(dst.ptr(),treeC.anchor(0),kFrame),true);   // a claimed merge, size 1, carries c: a hit
+        meterclock::now=2600;claim(b,kFrame+1);                                        // a new frame: the carried claim (born 2000) is dropped, b is claimed again
+        const auto w=cm::take(3001,true);
+        check(w.emissions==4 && w.bursts==1 && w.sampleCount==4,"claim meter: four emissions in one burst, four samples");
+        check(w.mergeSize[0]==1 && w.mergeSize[1]==1 && w.mergeSize[2]==0 && w.mergeSize[3]==0 && w.clearSize[0]==1 && w.clearSize[1]==1 && w.clearSize[2]==0 && w.clearSize[3]==0,
+              "claim meter: claim-set size at claimed calls is bucketed 1 / 2 / 3-4 / 5+");
+        check(w.mergeHits==1 && w.clearHits==1,"claim meter: a merge hit is a staged transfer, a clear hit is a cleared claim; the others are zero-hit");
+        check(w.lifeCount(cm::End::Consumed)==1 && w.life[0][8]==1 && w.lifeCount(cm::End::Cleared)==1 && w.life[1][8]==1 && w.lifeCount(cm::End::Dropped)==1 && w.life[2][9]==1,
+              "claim meter: a claim's lifetime is filed by how it ended: 300 ticks consumed, 500 cleared, 600 dropped at the frame boundary");
+        check(w.liveTicks==1501 && w.flips==3 && w.windowTicks==3000,(std::string("claim meter: the claim set was live 500 + 200 + 801 of 3000 ticks, and became non-empty three times (got ")+
+              std::to_string(w.liveTicks)+" live, "+std::to_string(w.flips)+" flips, "+std::to_string(w.windowTicks)+" window)").c_str());
+        check(w.samples[0].source==addressOf(treeA.item(0,0,0)) && w.samples[0].at==0 && w.samples[1].at==100 && w.samples[2].at==1000 && w.samples[3].at==1600,
+              "claim meter: the samples are the burst's emissions in order, with their offsets");
+        check(w.samples[1].slot==1 && w.samples[0].slot==-1 && w.samples[2].slot==-1,"claim meter: a sample learns its pool slot when the native copy consumes it");
+        uint32_t first[2]={};std::memcpy(first,treeA.item(0,0,0).data(),8);
+        check(w.samples[0].words[0]==first[0] && w.samples[0].words[1]==first[1],"claim meter: a sample carries the native words");
+        cm::formatClaimLine(w,1.0,30.0,100.0,line);
+        check(std::string(line)=="engine motion: primary copy claims (30 s): the claim set was non-empty 50.0% of the window (3 times it became so, 0.03 a frame); "
+                                 "4 emissions (0.04 a frame); claim lifetime in us, the upper edge of a power-of-two bucket: consumed by the native copy p50 512 p95 512 (n 1); "
+                                 "cleared by a dictionary clear p50 512 p95 512 (n 1); dropped at a frame boundary, a reset or a merge p50 1024 p95 1024 (n 1); "
+                                 "claim-set size at claimed merges 1/2/3-4/5+ 1/1/0/0, at claimed clears 1/1/0/0; claimed merges that touched a claim 1 of 2 (50.0%), "
+                                 "claimed clears that cleared one 1 of 2 (50.0%); zero-hit share of claimed calls 50.00%.",
+              "claim meter: the claims line from the synthetic stream, exactly");
+        cm::formatEntityLine(w,1.0,30.0,line);
+        check(std::strstr(line,"1 burst after 10 s quiet this window, the last one's first 4 emissions")!=nullptr && std::strstr(line," #2 f=")!=nullptr &&
+              std::strstr(line,"slot=1")!=nullptr && std::strstr(line,"slot=?")!=nullptr && std::strlen(line)<cm::kClaimLineBytes-1,
+              "claim meter: the entities line names the burst, its emissions, and the slot one was copied into");
+        // A window right after: the set is live across the boundary (b, claimed again), so it is live for all of the next window, and a quiet gap starts a new burst.
+        meterclock::now=3600;claim(treeU.item(0,0,0),kFrame+1);                         // 1000 ticks after the last emission: not quiet
+        auto next=cm::take(4001,true);
+        check(next.liveTicks==1000 && next.windowTicks==1000 && next.emissions==1 && next.bursts==0 && next.sampleCount==1,"claim meter: a window starts where the last ended; a claim set live across it is counted in both");
+        meterclock::now=9000;claim(treeC.item(0,0,0),kFrame+2);                         // 6400 ticks of quiet: a new burst
+        next=cm::take(9001,true);
+        check(next.bursts==1 && next.sampleCount==1 && next.samples[0].at==0,"claim meter: an emission after a quiet period begins a new burst");
+        copy::reset();
+    } else check(false,"claim meter: pool fixture");
+    {   // The burst keeps its first eight: twelve emissions in a row are twelve counted and eight sampled.
+        fresh();
+        std::vector<Record> many;for(unsigned i=0;i<12;++i)many.push_back(record(float(100+i)));
+        for(unsigned i=0;i<12;++i){meterclock::now=1000+i;claim(many[i],kFrame);}
+        const auto w=cm::take(2000,true);
+        check(w.emissions==12 && w.sampleCount==cm::kSampleMax && w.bursts==1 && w.samples[7].frame==kFrame,"claim meter: twelve emissions in a burst are all counted and the first eight sampled");
+        copy::reset();
+    }
+    {   // Text from known windows: only emissions, only merges; and the worst case fits the log line.
+        cm::Window w;w.windowTicks=1000;w.emissions=5;
+        cm::formatClaimLine(w,1.0,30.0,0.0,line);
+        check(std::strstr(line,"non-empty 0.0% of the window (0 times it became so, - a frame); 5 emissions (- a frame)")!=nullptr && std::strstr(line,"consumed by the native copy p50 - p95 - (n 0)")!=nullptr &&
+              std::strstr(line,"zero-hit share of claimed calls -.")!=nullptr,"claim meter: no frames, no claimed calls and no endings print dashes, not zeros or NaN");
+        cm::Window big;big.windowTicks=INT64_MAX;big.liveTicks=INT64_MAX;big.flips=~0ull;big.emissions=~0ull;
+        for(auto& row:big.life)for(auto& v:row)v=~0ull>>8;
+        for(unsigned i=0;i<cm::kSizeBuckets;++i){big.mergeSize[i]=~0ull>>4;big.clearSize[i]=~0ull>>4;}
+        big.mergeHits=~0ull>>4;big.clearHits=~0ull>>4;big.bursts=~0ull;big.sampleCount=cm::kSampleMax;
+        for(auto& s:big.samples){s.source=~0ull;s.frame=~0u;s.at=INT64_MAX;s.slot=2147483647;for(auto& word:s.words)word=~0u;}
+        cm::formatClaimLine(big,0.001,1e9,1.0,line);
+        check(std::strlen(line)<cm::kClaimLineBytes-1 && std::strstr(line,"zero-hit share")!=nullptr,"claim meter: absurd values stay inside the buffer, terminated, with the line whole");
+        cm::formatEntityLine(big,0.001,1e9,line);
+        check(std::strlen(line)<cm::kClaimLineBytes,"claim meter: eight absurd samples stay inside the buffer");
+        cm::formatEntityLine(big,1.0,30.0,line);
+        check(std::strlen(line)<1100,"claim meter: eight full samples fit the 1167-character log line");
+    }
+    cm::g_clock=savedClock;cm::resetForRig();copy::reset();
+}
 inline void run(ID3D11Device* device,Check check) {
     runPlansHoldingNothing(device,check);
     runExitLine(device,check);
     runLock(device,check);
+    runClaimMeter(device,check);
     runCopier(device,check);
     // --- (d) walk equivalence: the production walk and the pre-change walk leave identical state ---
     constexpr Shape shapes[]={

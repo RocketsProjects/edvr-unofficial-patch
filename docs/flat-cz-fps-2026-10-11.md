@@ -2,12 +2,16 @@
 
 ## Status
 
-State (2026-10-16, round 4): BUILT, NOT FLOWN, on `claude/flat-settlement-cpu-4` (not main): the draw class census (the sizing instrument for the
-structural fast path), the pool-family GPU section fixed (timed per RUN of draws: the per-draw spans summed past the frame time), and the lazy
-overlay guard (the group's private t3 stays bound: 12.4 -> 6.2 D3D calls a guarded draw on WARP, pixels byte-identical, mutants killed).
-Round 3 flown: the guard's verification memo saved ~0.04 ms (13 -> 10 calls; the Sets remain), the pair memo cut the tail by 0.19 ms and the
-lookup block by 0.08 ms (both on `claude/flat-guard-pair-memo`, for main). Flight: read `draw classes`, `pool-family draws`, `eager guarded`.
-Sections "2026-10-16, round 3" and "round 4".
+State (2026-10-16, round 5): BUILT, NOT FLOWN, on `claude/flat-settlement-cpu-5` (not main; main 9b305835 merged in). MEASUREMENT ONLY: the claim
+meter (`engine_velocity_claim_meter.h`), two lines per 30 s, `primary copy claims` and `primary copy claim entities`. It answers whether the 09:17
+regime (emissions 0 -> 15,273 in six minutes, every merge and half the clears on the claimed locked path, render engine-motion hooks 0.14 -> 1.06 ms
+a frame; claims legitimate and short-lived) can take a lock-free claim-set pre-check (option 1). DECISION RULE: zero-hit share of claimed calls about
+100% AND the claim set 3 or fewer at claimed calls (5+ near zero): option 1 is CLEARED. A zero-hit share well under 100%, or 5+ common: NOT cleared
+(the hits take the lock anyway); read the lifetime p95 and the entity line for another cut. The entity line names what starts the regime (the first
+8 emissions after 10 s quiet: pose words, pool slot). Section "round 5". Temporary keys: none (no key; always on, one line pair per 30 s).
+State (2026-10-16, round 4): the lazy overlay guard and the run-section GPU timing are FLOWN and ON MAIN (9b305835); the draw class census
+(`draw classes`) is on `claude/flat-settlement-cpu-4` and this branch, not main. Round 3: the pair memo cut the tail 0.19 ms, the lookup 0.08 ms
+(ON MAIN b3386964); the guard memo saved about 0.04 ms. Sections "round 3" and "round 4".
 State (2026-10-16, results): the observer fix is FLOWN, CONFIRMED and ON MAIN (1ae94885, `claude/engine-motion-observers`): render-thread
 engine motion 427 -> 77 ns a call (about 0.8 ms a frame), job merge and clear down 92%, 100% of calls lock-free, 0 contention. The
 instruments (H1-H4, round 2) are on `claude/flat-settlement-cpu-2`, NOT on main. Round 2 flown (DLSS, 14.6k draws a frame): EDVR render
@@ -16,9 +20,6 @@ suspended; the whole gap is the AA path. Section "2026-10-16, results" has the n
 spread thin (about 20 pieces, none above 0.6 ms); the open question is structural (a per-pipeline-state "nothing to do" fast path).
 Ruled out (2026-10-16, round 2): the unscoped binding thunks as the 2.4 ms unexplained (about 7.3k bind calls a frame at about 30 ns net
 is 0.12-0.24 ms); a single hot block in the draw constructor (its 5 blocks hold about 0.85 ms net); g_mutex contention (0 contended).
-Next candidates, unbuilt: the overlay guard reading t3 from the shadow (0.2-0.4 ms); the ctor lookup memo (~0.2); the per-draw UI-layer
-ask memo (0.1-0.2); the census "pool-family draws" GPU timing to price ~1.0 ms; the structural fast path. Designs (d) guarded runs and
-(e) census cost: section "2026-10-16, round 2".
 Earlier state: BUILT on `claude/fps-drops-onfoot-czs-577f5a` (observers, copier, lock lines, flat cpu by part, then the review's fixes), NOT
 FLOWN. A bounded experiment on one of three suspects, plus instruments that say whether it was the right one. NOT the fix: the
 expected gain is about 4-5 ms of a 13-25 ms gap at most, and the per-draw render-thread work (about 8-9 ms a frame) is untouched.
@@ -503,3 +504,57 @@ group reads the private SRV, as a Get already reads MRT6 and the derived blend i
 a fast path blind to t3 (header, by hand) are killed by the t3-rebind sequence (G1), `lazy-guard-nonguard-draw-keeps-t3` by the mixed scene,
 `lazy-guard-flushes-at-every-overlay-draw` and `lazy-guard-ends-eager` by the call shape of a group (G5). What the flight reads: `eager guarded` in
 the runs line is 0.0 runs/frame and the guarded draws are in `lazy`; `engine motion hooks`, `lazy flushes` and the render-thread frame time.
+
+
+## 2026-10-16, round 5: the claim meter (measurement only)
+
+Branch `claude/flat-settlement-cpu-5` (main 9b305835 merged in; BUILT, NOT FLOWN, no behaviour change). Source: the flat flight log
+`edvr_gfx_20261016_090725.log`. From 09:17:43 the claim regime started with no scene change: emissions 0 -> 332 -> 875 -> 3,540 (09:21:13) ->
+15,273 (09:23:43), `joined` equal to emissions, active claims 0 at every sample, cleared claims 0, merge plans about 37M, lock contention 12-14.5%,
+render-thread engine-motion hooks 0.14 -> 1.06 ms a frame. So the claims are legitimate (each is made, then consumed by the native copy) and short-lived,
+but live for most of the job phase, which is where the millions of merge and clear calls are; the cost is the lock and the plan, not the clear walk.
+Option 1 (the best-ranked cut): publish the 1-3 claimed addresses as a seqlock snapshot, walk without the lock, and lock only on a hit. Whether that
+is safe and pays rests on four numbers the log could not give, and the meter takes them.
+
+### What it counts (30 s window, no per-call logging, relaxed atomics under the mutex the claim holders already hold)
+- Live fraction: the share of the window the published emissions flag was true, accumulated at each flip in `ClaimLock::publish`, plus how many times
+  it became non-empty (a merge that carries a claim empties and refills it, so one carried claim counts a flip).
+- Emissions, in total and a frame; claim lifetime from emission to its end, as the upper edge of a power-of-two bucket in us (p50, p95, n): consumed
+  by the native copy, cleared by a dictionary clear, or dropped at a frame boundary, a reset or a merge that did not carry it.
+- Claim-set size at claimed merges and claimed clears, bucketed 1 / 2 / 3-4 / 5+; claimed merges that touched a claim (staged a transfer or erased one)
+  and claimed clears that cleared one; the zero-hit share of the claimed calls together.
+- The entity line: the first 8 emissions after a quiet period (10 s without an emission), each with frame, ms after the first, source address, the pool
+  slot the native copy put it in (? until it has), native words 0-1, the pose words 2-6, the marker and word 77. The last burst in the window is shown.
+Each line has a form for a window with nothing in it. Lines (a claims line, then an entity line), real lines are single lines:
+`engine motion: primary copy claims (30 s): the claim set was non-empty 50.0% of the window (3 times it became so, 0.03 a frame); 4 emissions (0.04 a
+frame); claim lifetime in us, the upper edge of a power-of-two bucket: consumed by the native copy p50 512 p95 512 (n 1); cleared by a dictionary clear
+p50 512 p95 512 (n 1); dropped at a frame boundary, a reset or a merge p50 1024 p95 1024 (n 1); claim-set size at claimed merges 1/2/3-4/5+ 1/1/0/0, at
+claimed clears 1/1/0/0; claimed merges that touched a claim 1 of 2 (50.0%), claimed clears that cleared one 1 of 2 (50.0%); zero-hit share of claimed
+calls 50.00%.`
+`engine motion: primary copy claim entities (30 s): 1 burst after 10 s quiet this window, the last one's first 4 emissions (frame, ms after the first,
+source address, pool slot it was copied into (? = not yet), native words 0 1, pose words 2-6, marker, word 77): #1 f=812 +0.0 ms src=0x1A2B3C00 slot=?
+w=00000001,3F800000 pose=3F800000,00000000,3F800000,00000000,3F800000 m=9C4D2E11 w77=00000000; #2 f=812 +0.1 ms src=0x1A2B3D50 slot=? ...`
+Quiet forms: `no claims this window (0 emissions, the claim set never live, 0 claimed merges, 0 claimed clears).` and `no claim began after a quiet period this
+window (a quiet period is 10 s without an emission).`
+
+### How to read the flight (the decision rule)
+Read the claims line in the windows after 09:17-style onset (emissions in the thousands a window):
+1. Option 1 is cleared if the zero-hit share is about 100% (above about 99%) AND the claim set at claimed calls is 3 or fewer (the 5+ buckets near 0, the
+   1 + 2 + 3-4 buckets nearly all). The pre-check then takes the lock on essentially none of the millions of calls.
+2. Not cleared if the zero-hit share is well under 100% (the hits would take the lock anyway; the saving is capped at the zero-hit share), or the set is
+   often 5+ (the snapshot cannot hold it). Read the lifetime p95 against the job phase and the live fraction: a live fraction near 100% with lifetimes
+   of the order of a frame says the claim is held for the whole job phase, so the lock is held by the idea of a claim, not by a claim.
+3. The entity line is the other question: what is emitted first after a quiet period (the pose words, the pool slot, the source address across bursts)
+   names the entity that starts the regime. A stable slot or source across bursts is one object (a ship or a weapon); a different one each time is not.
+Ruled out for this round: nothing flown. Not measured here: the cost of the lock-free pre-check itself, and a claim a failed merge loses (a claim carried
+by a merge whose plan was then invalidated ends without a lifetime entry).
+
+### Instrument trace
+Counted under `g_mutex` by the code that holds it: `recordEmission` (emission, clock read once, sample), the copier loop (consumed lifetime, slot),
+`invalidateDictionaryImpl`'s walk (cleared lifetime, size, hit), `beginMergeOpaque` (size, hit, dropped lifetimes of claims it did not carry), the bulk
+clears `dropEmissions()` (frame boundary, overflow, failed walk) and `ClaimLock::publish` (live flips). The lock-free exits read no clock and count
+nothing (rig: 2000 clears and merges with no claim, zero clock reads, empty window). If the instrument never ran the claims line reads `no claims this
+window`, which is also what a window with no emissions reads: tell them apart by `primary copy` emissions in the same window and `lock-free exits`.
+Rig (`primary_copy_observer_tests.h`, `runClaimMeter`): the never-fired forms exactly; a synthetic stream through the real entry points with a scripted
+clock (live 500 + 200 + 801 of 3000 ticks, three flips, four emissions, lifetimes 300 consumed / 500 cleared / 600 dropped, sizes 1/1/0/0, one merge hit
+and one clear hit of two, the exact line); the burst keeps its first eight of twelve; dashes for no frames and no claimed calls; absurd values truncate.
