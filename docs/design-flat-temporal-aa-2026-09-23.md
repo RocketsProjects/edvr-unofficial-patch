@@ -52,7 +52,7 @@
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
-- **10-17 RC3 scope fix INSTALLED:** Steam flat rendering commit `c7c14898`, probe off; full build PASS, all three saved copy selections recover in replay. Current authority now gates cancellation. Live nonzero-phase/visible AA validation pending; main unmerged (last entry).
+- **10-17 RC3 scope fix PASS:** Steam flat `c7c14898`, probe off, main-menu and carrier on-foot F7 comparisons visibly fixed. Nonzero phases/history recover with zero stable phase/backend failures; user approved merge (last entry).
 - **10-17 F1 flat PASS:** `942cfeb3`; steadier stationary edges and seven
   normal-space ambiguity resets with clean history recovery. Temporary
   `diag.flat_origin_capture = off`. Exact re-anchor/VR separate.
@@ -17490,3 +17490,38 @@ installer-tool self-test passed twice, including refusal, dry-run, backup
 reference preservation and subsequent install/verify cases. This Python-only
 maintenance was tested separately from the C7 full C++ build. The live receipt
 was archived with its SHA256 unchanged before ordinary flat installation.
+
+## 2026-10-17 — RC3 scope fix live validation PASS; merge approved
+
+Steam `edvr_gfx_20261017_164857.log` verifies rendering commit `c7c14898`,
+build `6AD3FA41`, flat `/novr`, DLSS selected and origin probe off. At measured
+2496x1404 render size and 3840x2160 output, the final-copy route treats the
+frame; HDR's below-output refusal remains expected.
+The adapter is RTX 5090; the installed DLSS DLL file version is 310.9.1.0.
+This is flat D3D11 validation, with no headset or VR runtime involved.
+
+The main-menu F7 comparison runs from 16:50:34.657 off to 16:50:35.189 restored.
+At 16:50:43.828, all 450 resolves have nonzero phase and paired camera rows,
+with 450 history continuations, no row mismatches, no selector receipts and
+no backend failures. The on-foot carrier comparisons restore DLSS at
+16:51:38.600 and 16:51:40.433. At 16:51:53.861, all 450 frames again have
+nonzero phase and history continuation; 449 follow at 16:51:58.859. The treated
+streak later reaches 6,242. The user reports that both scenes appear fixed.
+
+Additional short F7 comparisons also recover. Through 16:53:16, backend
+failures, frame gaps and camera cuts remain zero. The renderer's 17 resets
+comprise 12 requested/history restarts and five isolated origin-ambiguity
+resets with recovery, not a per-frame reset loop. Candidate-local forward
+refusals can still increment counters while independent AA treatment works;
+no sustained selector stand-down or phase-failure loop remains in the tested
+windows.
+
+This closes the observed Steam main-menu/on-foot AA regression. It does not
+certify every shader camera or the two reporters' other GPU/backend setups.
+The user explicitly approved merging the tested fix to main. No further
+flight, capture, setting change or reinstall is needed for that merge.
+
+The final whole-branch `build.bat --wait-lock` also passed all gates in
+143.9 seconds, including the Python installer maintenance and installer
+payload checks. Log: `build/rc3-aa-merge-full.log`; receipt:
+`6edfae70ab67d17b8e21e0095697a6ab07afebaa99d63f4bb7cd961aa9c77893`.
