@@ -54,7 +54,7 @@
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
 - **10-17 F1 stationary PASS:** `942cfeb3` admits nonzero phases with
-  continuous history across F7; visual result pending. Temporary
+  continuous history across F7; edges steadier with DLSS. Temporary
   `diag.flat_origin_capture = off`. Main held; travel/VR unqualified.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
@@ -5212,12 +5212,29 @@ provide evidence beyond the CPU-issued donation count.
   now occur before and after F7.
 
 This qualifies stationary phase admission and history continuity for this Steam
-flat environment. The visible comparison is awaiting the user's report. It does
-not validate real inward travel versus re-anchor behavior or VR. No further
-stationary capture is needed for this arithmetic question. The user was
-explicitly released to quit normally after the log checks; no live read is
-pending. Keep the probe off and main unmerged while deciding the remaining
-validation.
+flat environment. The user reports edges steadier overall when DLSS is restored
+and says the issue appears fixed. This does not validate real inward travel
+versus re-anchor behavior or VR. No further stationary capture is needed for
+this arithmetic question. The user was explicitly released to quit normally
+after the log checks; no live read is pending. Keep the probe off and main
+unmerged while deciding the remaining validation.
+
+The user asks to resume the original F1 validation. Sol checked the live-policy
+predicates against the prior normal-space flight: roughly 5 km origin jumps
+were observed at 15-16 ms there, while multiple-c supercruise left this
+selected camera translation near zero. The phase-bound correction does not
+change that SC camera mapping. No new instrument or build is needed for the
+next control: same Steam flat build, DLSS on, origin probe off; normal-space
+straight travel to 20 km from the station, stopped 10 seconds, straight return
+to about 5 km, stopped another 10 seconds. Keep heading steady on each travel
+leg and assess smear, jumps and prolonged blur. The always-on origin-ambiguity
+event and cumulative counter must show a qualifying reset, followed by resumed
+nonzero phase and accepted history; loss of selected-route treatment makes it
+inconclusive. This is a reset/recovery compatibility test at coordinate jumps.
+At 550 m/s and 90 fps normal travel is about 6.1 m/frame, so it is not a true
+greater-than-50-m/frame travel control. Do not force a low frame rate. The
+synthetic signed inward-travel defect remains covered by the GPU fixtures;
+physical event classification and VR remain unqualified. Main stays held.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
