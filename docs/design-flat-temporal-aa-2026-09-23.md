@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 conservative flat fix, BUILD VERIFIED, NOT FLOWN:** ambiguous origin-absorption cases reset history, while continued history retains travel. Astra finds no further flight prerequisite for this correction; the final full build passed in 247.1 seconds.
-  Temporary `diag.flat_origin_capture = off` controls the F1 captures together; startup-only, restart in flat after changing it. Passive arming uses a pre-admission scene witness finalized at Present. No VR rendering change.
-  Next: Steam flat user validation before merging the branch to main. Exact D-based history preservation and VR per-eye/native/SDK reset propagation remain separate. See latest entries below.
+- **10-17 F1 conservative flat fix, BUILD VERIFIED, NOT FLOWN:** ambiguous origin-absorption cases reset history, while continued history retains travel. Astra finds no further flight prerequisite for the arithmetic correction; the final full build passed in 247.1 seconds.
+  Temporary `diag.flat_origin_capture = off` controls the F1 captures together; startup-only, restart in flat after changing it. Installed/running test build is f121f723. No VR rendering change.
+  Validation blocked: hangar AA stands down before F1 (0/450 treated, missing current H camera for forward lighting). F7 works and Full audit is saved/complete. Next: targeted actual-light camera payload/donor audit before a guarded AA correction. Main stays held; exact D preservation and VR remain separate.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4572,6 +4572,62 @@ The branch is ready for Steam flat validation with diagnostics off. Keep main
 unchanged until the user's validation; exact re-anchor history preservation and
 VR reset propagation remain separate work. Clean-commit DLL promotion and Steam
 installation use the standard tools and preserve existing settings.
+
+**2026-10-17, probe-off Steam validation stopped in the hangar before
+takeoff.** Steam `edvr_gfx_20261017_110505.log` matches installed `f121f723`,
+flat `/novr`, DLSS at 3840x2160. F7 logged AA OFF at 11:07:27.970 and restored
+to DLSS at 11:07:30.491. The hangar windows then had 450 frames, zero treated,
+zero admission/backend steps and `conflicting-hdr-target-or-camera`. Resolver
+calls stayed at 747. This scene did not exercise F1. The same image-copy-source
+refusal occurs in earlier Steam `b195d65d`; exact scene identity across runs is
+unproved.
+
+Ruled out: the AA comparison input failed, because both state changes reached
+the log. Ruled out: this untreated hangar baseline validates the F1 correction,
+because the selector refuses before the resolver. The full build still proves
+the arithmetic policy; visual validation remains blocked. The flight
+instructions should have been preceded by this admission check.
+
+The user requested one existing Full audit with Shift+NumLock while parked.
+`diag.flat_origin_capture` stayed off. The trace wrote three frames, 5132
+events and 2586688 bytes with zero overflow at 11:12:57.450. Both copy samples
+and the 900-frame projection audit completed at 11:13:07.492; the complete
+discovery pass ended at 11:14:57.234. The user was then released to quit
+normally. Full capture rearms existing runtime witnesses, so any treatment
+under the audit must be distinguished from ordinary production validation.
+
+Both copy samples show clean source/destination bad flags but no current
+destination H camera/tone record. That is a concrete failed `imageCopy`
+conjunct, not evidence for exempting a camera-independent source. Current H's
+first writer is VS `8289669D93A18C1D` / PS `C6E6E419DA9F6FAD`; the known
+deferred payload anchor never ran. Thirty-one earlier HDR image continuations
+were accepted, so H was not universally without provenance. HDR-chain replay
+reproduces the refusal on all three trace frames; the generic trace hash check
+mismatches and is not an identical-replay claim. Next: offline Sol RE of this
+producer and its camera/projection lineage before proposing a guarded
+correction. Main remains held; no further flight is requested.
+
+Offline Sol shader analysis narrows the admission gap. The actual first H
+writer is a point/spot light-volume path: VS `8289669D93A18C1D` declares
+CB2[47] and structured t0, using view rows 2..4 and forward clip rows 10..13.
+PS `C6E6E419DA9F6FAD` reconstructs view position from its interpolated ray and
+depth. Neither reads b1. The old fullscreen VS `7E38A6AA1269C901` consumes
+inverse rows 14..16; current donor promotion requires that exact old VS/PS pair
+and inverse recipe. The actual forward recipe is prepared 900 times and
+numerically matches the current primary-forward basis, but does not promote a
+current H camera record. Numeric agreement is not frame authorization.
+
+Ruled out: applying the old inverse-only anchor unchanged to this first writer,
+because its executed projection is the forward recipe. A bounded fix hypothesis
+is to qualify the actual lighting path against a current same-depth scene donor
+with complete CB2 range/binding/write identity and executed projection
+metadata. The saved FTR omits projection payload bytes, and the payload audit
+watches only the old anchor, which never ran. Existing evidence therefore
+diagnoses the missing donation path but does not certify that extension. The
+smallest next data collection is a targeted extension of the existing
+projection audit to capture the actual light CB2 payload and current donor
+association together while parked. No admission exception, source change to AA
+behavior or further flight has been made on this hypothesis.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
