@@ -659,9 +659,11 @@ inline int flatHdrRouteTests() {
         expect(!noCam.select().selected() && noCam.select().reason == FlatMonoReason::NoHdrCamera,
                "H drawn with no camera at all: hdr-camera-not-observed");
         Stream uncertain; uncertain.sceneDraws(2, 2);
-        uncertain.prefix->uncertain = true;
+        flatRuntimeMarkUncertain(*uncertain.prefix,FlatRuntimeUncertainCause::UnknownContext);
         uncertain.toneTrigger();
-        expect(uncertain.select().reason == FlatMonoReason::Truncated, "an uncertain prefix (foreign work, ClearState) is truncated");
+        expect(uncertain.select().reason == FlatMonoReason::Truncated &&
+            uncertain.prefix->firstUncertain.cause==FlatRuntimeUncertainCause::UnknownContext,
+            "HDR trigger retains source uncertainty before the later output copy");
         Stream written; written.sceneDraws(2, 2);
         written.write(written.sc.h);                          // an explicit write into H after its draws: the model marks it bad
         written.toneTrigger();

@@ -974,6 +974,42 @@ void flatRuntimePrefixTests() {
               std::memcmp(selected.camera, fixture.rows, sizeof(selected.camera)) == 0,
               "online native/scaled replay selects current HDR camera including overwritten handoff words");
         check(!flatRuntimeObserve(*prefix, copy).selected(), "second output copy in same prefix is rejected");
+        auto firstCause = std::make_unique<FlatRuntimePrefix>(*beforeCopy);
+        flatRuntimeMarkUncertain(*firstCause,FlatRuntimeUncertainCause::SourceCapacity,
+            MonoFixture::token(0xA1),MonoFixture::token(0xB1),0x11,0x22);
+        const auto firstMark=firstCause->firstUncertain;
+        flatRuntimeMarkUncertain(*firstCause,FlatRuntimeUncertainCause::TargetCapacity,MonoFixture::token(0xA2));
+        check(firstCause->firstUncertain.cause==FlatRuntimeUncertainCause::SourceCapacity &&
+              firstCause->firstUncertain.resource==MonoFixture::token(0xA1) &&
+              firstCause->firstUncertain.related==MonoFixture::token(0xB1) &&
+              firstCause->firstUncertain.q==firstMark.q &&
+              firstCause->firstUncertain.vs==0x11 && firstCause->firstUncertain.ps==0x22 &&
+              flatRuntimeObserve(*firstCause,copy).reason==FlatMonoReason::Truncated,
+              "selector retains the first exact uncertainty witness through refusal");
+        auto nextFrame=std::make_unique<FlatRuntimePrefix>();nextFrame->frame=firstCause->frame+1;
+        check(!nextFrame->uncertain && nextFrame->firstUncertain.cause==FlatRuntimeUncertainCause::None,
+              "new frame clears first selector uncertainty");
+        nextFrame->targetsUsed=128;
+        check(!flatRuntimeTarget(*nextFrame,MonoFixture::token(0xA3)) &&
+              nextFrame->firstUncertain.cause==FlatRuntimeUncertainCause::TargetCapacity &&
+              nextFrame->firstUncertain.resource==MonoFixture::token(0xA3),
+              "target capacity records the actual refused identity");
+        auto sourceFull=std::make_unique<FlatRuntimePrefix>();sourceFull->frame=nextFrame->frame;sourceFull->sourcesUsed=32;
+        FlatRuntimeDraw newSource{};newSource.key=fixture.world[19].key;
+        newSource.supported=true;newSource.key.kind=kFlatContractPool;
+        flatRuntimeObserve(*sourceFull,newSource);
+        check(sourceFull->uncertain && sourceFull->firstUncertain.cause==FlatRuntimeUncertainCause::SourceCapacity &&
+              sourceFull->firstUncertain.resource==newSource.key.depth && sourceFull->sourcesUsed==32,
+              "source capacity records the refused depth without admitting a 33rd source");
+        FlatFailureReceiptWindow receiptBudget{};
+        for(unsigned receipt=0;receipt<8;++receipt)
+            check(receiptBudget.admit()==(receipt<FlatFailureReceiptWindow::kDetailLimit),
+                  "failure receipt detail budget admits only its bounded first failures");
+        check(receiptBudget.seen==8 && receiptBudget.emitted==3 && receiptBudget.suppressed()==5,
+              "failure receipt reports suppressed detail");
+        receiptBudget.reset();
+        check(receiptBudget.admit() && receiptBudget.seen==1 && receiptBudget.suppressed()==0,
+              "next report window reopens failure detail budget");
         auto refusal = [&](auto change, const char* message) {
             auto p = std::make_unique<FlatRuntimePrefix>(*beforeCopy); auto d = copy;
             change(*p, d); check(!flatRuntimeObserve(*p, d).selected(), message);

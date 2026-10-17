@@ -137,6 +137,42 @@ struct FlatRuntimeTarget {
     uint32_t tones = 0;
     FlatRuntimeWitness firstBad{};
 };
+enum class FlatRuntimeUncertainCause : uint8_t {
+    None, MissingTarget, TargetCapacity, ToneUavWrite, SourceUavWrite,
+    ForwardIdentity, DeferredIdentity, FirstPersonDepth, SourceCapacity,
+    DeferredPrepare, DeferredExecution, CameraCapacity, UnknownContext,
+    DeferredBinding, ForeignWork, ForwardRefusal, MultipleCopies, Unspecified, Count
+};
+inline const char* flatRuntimeUncertainName(FlatRuntimeUncertainCause cause) {
+    switch (cause) {
+    case FlatRuntimeUncertainCause::MissingTarget: return "missing-target";
+    case FlatRuntimeUncertainCause::TargetCapacity: return "target-capacity";
+    case FlatRuntimeUncertainCause::ToneUavWrite: return "tone-uav-write";
+    case FlatRuntimeUncertainCause::SourceUavWrite: return "source-uav-write";
+    case FlatRuntimeUncertainCause::ForwardIdentity: return "forward-identity";
+    case FlatRuntimeUncertainCause::DeferredIdentity: return "deferred-identity";
+    case FlatRuntimeUncertainCause::FirstPersonDepth: return "first-person-depth";
+    case FlatRuntimeUncertainCause::SourceCapacity: return "source-capacity";
+    case FlatRuntimeUncertainCause::DeferredPrepare: return "deferred-prepare";
+    case FlatRuntimeUncertainCause::DeferredExecution: return "deferred-execution";
+    case FlatRuntimeUncertainCause::CameraCapacity: return "camera-capacity";
+    case FlatRuntimeUncertainCause::UnknownContext: return "unknown-context";
+    case FlatRuntimeUncertainCause::DeferredBinding: return "deferred-binding";
+    case FlatRuntimeUncertainCause::ForeignWork: return "foreign-work";
+    case FlatRuntimeUncertainCause::ForwardRefusal: return "forward-refusal";
+    case FlatRuntimeUncertainCause::MultipleCopies: return "multiple-output-copies";
+    case FlatRuntimeUncertainCause::Unspecified: return "unspecified-missing-witness";
+    default: return "none";
+    }
+}
+struct FlatRuntimeUncertainWitness {
+    FlatRuntimeUncertainCause cause = FlatRuntimeUncertainCause::None;
+    uint32_t q = 0;
+    const void* resource = nullptr;
+    const void* related = nullptr;
+    uint64_t vs = 0, ps = 0;
+    uint32_t detail = 0;
+};
 struct FlatRuntimePrefix {
     FlatRuntimeTarget targets[128]{};
     FlatContractRecord sources[32]{};
@@ -147,6 +183,7 @@ struct FlatRuntimePrefix {
     const void* output = nullptr;
     uint32_t width = 0, height = 0, format = 0;
     bool uncertain = false;
+    FlatRuntimeUncertainWitness firstUncertain{};
     FlatRuntimeWitness selectedConflict{};
     // The first-person cohort seen so far (FlatRuntimeDraw::firstPersonCohort): the depth it draws into and how many draws. Never
     // part of the contract hash; the copy branch reads it to call the selected frame mixed-camera.
@@ -154,6 +191,19 @@ struct FlatRuntimePrefix {
     uint32_t firstPersonDraws = 0;
     // The draws of a pool family left stock (FlatRuntimeDraw::poolFamilyVs): the selector's FlatMonoFrameInput::unsupportedFamilyDraws.
     uint32_t unsupportedFamilyDraws = 0;
+};
+inline void flatRuntimeMarkUncertain(FlatRuntimePrefix& p, FlatRuntimeUncertainCause cause,
+                                     const void* resource = nullptr, const void* related = nullptr,
+                                     uint64_t vs = 0, uint64_t ps = 0, uint32_t detail = 0) {
+    if (!p.uncertain) p.firstUncertain = {cause, p.sequence, resource, related, vs, ps, detail};
+    p.uncertain = true;
+}
+struct FlatFailureReceiptWindow {
+    static constexpr uint32_t kDetailLimit = 3;
+    uint32_t seen = 0, emitted = 0;
+    bool admit() { ++seen; if (emitted == kDetailLimit) return false; ++emitted; return true; }
+    uint32_t suppressed() const { return seen - emitted; }
+    void reset() { seen = emitted = 0; }
 };
 // Whether the cohort drew into `depth`, the scene depth a selection names: the selected frame is then mixed-camera.
 inline bool flatRuntimeFirstPerson(const FlatRuntimePrefix& p, const void* depth) {
@@ -290,7 +340,11 @@ inline bool flatRuntimeQualifiedLaserSceneCamera(const FlatRuntimePrefix& p,
 }
 inline FlatRuntimeTarget* flatRuntimeTarget(FlatRuntimePrefix& p, const void* resource) {
     for (uint32_t i = 0; i < p.targetsUsed; ++i) if (p.targets[i].resource == resource) return &p.targets[i];
-    if (!resource || p.targetsUsed == 128) { p.uncertain = true; return nullptr; }
+    if (!resource || p.targetsUsed == 128) {
+        flatRuntimeMarkUncertain(p, !resource ? FlatRuntimeUncertainCause::MissingTarget : FlatRuntimeUncertainCause::TargetCapacity,
+                                 resource);
+        return nullptr;
+    }
     auto& t = p.targets[p.targetsUsed++]; t.resource = resource; return &t;
 }
 inline void flatRuntimeWritten(FlatRuntimePrefix& p, const void* resource) {
@@ -352,9 +406,10 @@ inline void flatRuntimeDispatchObserveWritten(FlatRuntimePrefix& p, const void* 
         auto& target = p.targets[i];
         const void* const hdrInput = flat_mono_detail::toneHdrInput(target.tone.key);
         if (target.tones && (target.resource == resource || (hdrInput && hdrInput == resource)))
-            p.uncertain = true;
+            flatRuntimeMarkUncertain(p, FlatRuntimeUncertainCause::ToneUavWrite, resource, target.resource);
     }
-    for (uint32_t i = 0; i < p.sourcesUsed; ++i) if (p.sources[i].key.depth == resource) p.uncertain = true;
+    for (uint32_t i = 0; i < p.sourcesUsed; ++i) if (p.sources[i].key.depth == resource)
+        flatRuntimeMarkUncertain(p, FlatRuntimeUncertainCause::SourceUavWrite, resource, p.sources[i].key.color);
 }
 // Whether the selected frame's contract came through the verified menu HDR copy: the HDR the
 // tone pass reads (`hdr`, the selection's) is the copy's inherited destination. That is the 3D
@@ -383,8 +438,10 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
     const uint32_t q = ++p.sequence;
     // A typed deferred witness cannot simultaneously claim an actual VS b1 camera.
     if((d.forwardHdrVerified&&(d.key.camera||!d.forwardUpstreamPhase))||
-       (d.forwardUpstreamPhase&&!d.forwardHdrVerified)){p.uncertain=true;return out;}
-    if((d.deferredHdrVerified && d.key.camera) || (d.deferredInverseRepaired && !d.deferredHdrVerified)){p.uncertain=true;return out;}
+       (d.forwardUpstreamPhase&&!d.forwardHdrVerified)){
+        flatRuntimeMarkUncertain(p, FlatRuntimeUncertainCause::ForwardIdentity,d.key.color,d.key.depth,d.key.vs,d.key.ps);return out;}
+    if((d.deferredHdrVerified && d.key.camera) || (d.deferredInverseRepaired && !d.deferredHdrVerified)){
+        flatRuntimeMarkUncertain(p, FlatRuntimeUncertainCause::DeferredIdentity,d.key.color,d.key.depth,d.key.vs,d.key.ps);return out;}
     // The draw's record (about 1.2 KB) is made only where it is stored or a witness takes it: most draws
     // only extend their target's record. The camera tests ask the draw directly (flatRuntimeSameCamera,
     // flatRuntimeCameraCurrent), with the record's own answers.
@@ -673,13 +730,15 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         // Not a world source (FlatRuntimeDraw::firstPersonCohort): counted, never a source record. A cohort in two depths is a frame
         // this cannot name the scene of, and refuses as every uncertain frame does.
         if (!p.firstPersonDraws) p.firstPersonDepth = k.depth;
-        else if (p.firstPersonDepth != k.depth) p.uncertain = true;
+        else if (p.firstPersonDepth != k.depth)
+            flatRuntimeMarkUncertain(p, FlatRuntimeUncertainCause::FirstPersonDepth,k.depth,p.firstPersonDepth,k.vs,k.ps);
         ++p.firstPersonDraws;
     } else if (d.supported && k.depth && k.kind == kFlatContractPool) {
         FlatContractRecord* source = nullptr;
         for (uint32_t i = 0; i < p.sourcesUsed; ++i) if (p.sources[i].key.depth == k.depth && flatRuntimeSameCamera(p.sources[i], d)) { source = &p.sources[i]; break; }
         if (!source) {
-            if (p.sourcesUsed == 32) p.uncertain = true;
+            if (p.sourcesUsed == 32)
+                flatRuntimeMarkUncertain(p, FlatRuntimeUncertainCause::SourceCapacity,k.depth,k.color,k.vs,k.ps);
             else p.sources[p.sourcesUsed++] = current();
         } else {
             if (!fullViewport(k, k.width, k.height) || source->key.dsv != k.dsv ||

@@ -47,15 +47,30 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     check(SUCCEEDED(device->CreateBuffer(&desc,&initial,original.GetAddressOf())), "runtime source CB");
     if (!original) return;
     FlatProjectionRuntime runtime;
+    FlatProjectionCopyFailure copyFailure{};
+    float untouched=123;
+    check(!runtime.copyConstants(original.Get(),0,sizeof(untouched),&untouched,&copyFailure) &&
+          copyFailure.kind==FlatProjectionCopyFailureKind::OwnerUnavailable && untouched==123,
+          "copy failure reports absent owner without writing output");
     check(!runtime.observeCreateBuffer(original.Get(),raw), "pre-init creation never mutates bank");
     check(runtime.initialize(base), "runtime owner initialized");
     check(runtime.observeCreateBuffer(original.Get(),raw), "full initial CB captured");
     float copied[16]{};
-    check(runtime.copyConstants(original.Get(),0,sizeof(copied),copied) &&
-          std::memcmp(copied,raw,sizeof(copied))==0,"diagnostic copy uses full current raw shadow");
+    copyFailure={};
+    check(runtime.copyConstants(original.Get(),0,sizeof(copied),copied,&copyFailure) &&
+          std::memcmp(copied,raw,sizeof(copied))==0 && copyFailure.kind==FlatProjectionCopyFailureKind::None,
+          "successful diagnostic copy has no failure detail");
     copied[0]=123;
-    check(!runtime.copyConstants(original.Get(),sizeof(raw)-16,sizeof(copied),copied) &&
-          copied[0]==123,"out-of-range diagnostic copy preserves destination");
+    check(!runtime.copyConstants(original.Get(),sizeof(raw)-16,sizeof(copied),copied,&copyFailure) &&
+          copied[0]==123 && copyFailure.kind==FlatProjectionCopyFailureKind::TrackedRange &&
+          copyFailure.trackedWidth==sizeof(raw) && copyFailure.generation!=0,
+          "tracked range failure preserves output and identifies generation/width");
+    ComPtr<ID3D11Buffer> untracked;
+    check(SUCCEEDED(device->CreateBuffer(&desc,&initial,untracked.GetAddressOf())),"untracked lookup fixture");
+    if(untracked){copied[0]=123;copyFailure={};
+        check(!runtime.copyConstants(untracked.Get(),0,sizeof(copied),copied,&copyFailure) &&
+              copyFailure.kind==FlatProjectionCopyFailureKind::UntrackedNoPrivateCopy && copied[0]==123,
+              "untracked buffer has no private publication and leaves output unchanged");}
     UINT first=0,count=4096;auto* bound=original.Get();
     ctx->VSSetConstantBuffers1(1,1,&bound,&first,&count);
     FlatProjectionRuntimeRequest request{};
@@ -76,7 +91,15 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         ctx->VSGetConstantBuffers1(1,1,seen.GetAddressOf(),&f,&n);
         check(seen.Get()!=original.Get() && f==0 && n==4096,"private binding preserves exact range");
         float actual[sizeof(raw)/sizeof(float)]{};
-        check(runtime.copyConstants(seen.Get(),0,sizeof(actual),actual),"nonzero-phase actual private CB has complete CPU upload certificate");
+        copyFailure={};
+        check(runtime.copyConstants(seen.Get(),0,sizeof(actual),actual,&copyFailure) &&
+              copyFailure.kind==FlatProjectionCopyFailureKind::None,
+              "nonzero-phase actual private CB has complete CPU upload certificate without failure detail");
+        float privateRangeOut=8123;copyFailure={};
+        check(!runtime.copyConstants(seen.Get(),sizeof(raw),4,&privateRangeOut,&copyFailure) &&
+              privateRangeOut==8123 && copyFailure.kind==FlatProjectionCopyFailureKind::PrivateRange &&
+              copyFailure.trackedWidth==sizeof(raw),
+              "live private publication reports its exact range failure");
         auto overlapping=request;overlapping.patches[0].byteOffset+=16;
         check(!runtime.preflight(&overlapping,1,phase,2,false) &&
             runtime.failure().branch && std::strcmp(runtime.failure().branch,"preflight-private-buffer-active")==0,
@@ -89,6 +112,10 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         check(runtime.prepare(nullptr,0,phase,2)==nullptr &&
             !plan->copyUploadedConstants(FlatProjectionStage::Vertex,1,0,sizeof(unchanged),unchanged),
             "global invalidation revokes active plan certificate while preserving uploaded GPU bytes");
+        float privateUnreadyOut=8123;copyFailure={};
+        check(!runtime.copyConstants(seen.Get(),0,4,&privateUnreadyOut,&copyFailure) &&
+              privateUnreadyOut==8123 && copyFailure.kind==FlatProjectionCopyFailureKind::PrivateUnready,
+              "revoked private publication reports unready without writing output");
         D3D11_BUFFER_DESC readDesc{};seen->GetDesc(&readDesc);readDesc.Usage=D3D11_USAGE_STAGING;
         readDesc.BindFlags=0;readDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         ComPtr<ID3D11Buffer> staging;
@@ -165,8 +192,11 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
            failure.patchCount==1 && !failure.inPrepare,
            "missing full write snapshot identifies exact tracked source and cold state");}
     runtime.enableColdReadback(false);
-    check(!runtime.copyConstants(original.Get(),0,sizeof(copied),copied) &&
-          copied[0]==123,"invalidated shadow cannot establish diagnostic camera identity");
+    copyFailure={};
+    check(!runtime.copyConstants(original.Get(),0,sizeof(copied),copied,&copyFailure) &&
+          copied[0]==123 && copyFailure.kind==FlatProjectionCopyFailureKind::ShadowInvalid &&
+          copyFailure.generation!=0,
+          "invalidated shadow reports exact lookup failure without writing output");
     check(runtime.prepare(&request,1,phase,1)==nullptr &&
           runtime.status().last==FlatProjectionRuntimeRefusal::MissingFullWrite,
           "copy or unknown write invalidates private preparation");
@@ -278,8 +308,10 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
             check(mapped.pData!=bounceRequest.real && reinterpret_cast<uintptr_t>(mapped.pData)%64==0,
                   "WARP map bounce gives the observer an aligned cached pointer");
             runtime.observeMap(dynamic.Get(),D3D11_MAP_WRITE_DISCARD,mapped.pData);
-            check(!runtime.copyConstants(dynamic.Get(),0,sizeof(copied),copied),
-                  "mapped transaction cannot publish diagnostic bytes");
+            copied[0]=123;copyFailure={};
+            check(!runtime.copyConstants(dynamic.Get(),0,sizeof(copied),copied,&copyFailure) &&
+                  copyFailure.kind==FlatProjectionCopyFailureKind::ShadowMapping && copied[0]==123,
+                  "mapped transaction reports shadow mapping and cannot publish diagnostic bytes");
             std::memcpy(mapped.pData,raw,sizeof(raw));
             auto bounceLease=bounce->beginUnmap(bounceRequest.resource,bounceRequest.context);
             check(bounceLease.bounced() &&

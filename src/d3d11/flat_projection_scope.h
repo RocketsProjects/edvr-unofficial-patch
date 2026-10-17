@@ -36,6 +36,7 @@ class FlatProjectionRuntime;
 // A refused preparation hides the old replacement until a new complete upload.
 class FlatProjectionPrivateBuffer {
 public:
+    enum class CopyState : uint8_t { OtherBuffer, Unready, Range, Ready };
     ~FlatProjectionPrivateBuffer() { invalidate(); }
     bool initialize(ID3D11DeviceContext1*, ID3D11Buffer* original, uint64_t identityGeneration);
     template<size_t N, size_t W>
@@ -53,6 +54,13 @@ public:
         if(!out || !count || !ready_ || !prepared_ || !prepared_->ready || !uploads_ ||
            buffer!=replacement_.Get() || !scratch_ || offset>width_ || count>width_-offset)return false;
         std::memcpy(out,scratch_.get()+offset,count);return true;
+    }
+    // Failure-only metadata for a bound replacement whose ordinary copy failed.
+    CopyState copyState(ID3D11Buffer* buffer,uint32_t offset,uint32_t count,uint32_t& width) const {
+        if(!buffer || buffer!=replacement_.Get())return CopyState::OtherBuffer;
+        width=width_;
+        if(!ready_ || !prepared_ || !prepared_->ready || !uploads_ || !scratch_)return CopyState::Unready;
+        return offset>width_ || count>width_-offset ? CopyState::Range : CopyState::Ready;
     }
 private:
     bool prepareSnapshot(const FlatProjectionShadowView&, const FlatProjectionPatchRequest*,

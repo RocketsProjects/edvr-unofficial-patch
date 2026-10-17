@@ -52,7 +52,7 @@
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
-- **10-16/17 flat FSR reports:** both capped logs show active treatment; the 10-17 log has recurrent selector truncation, but the crowded on-foot cause is unproven (entries below).
+- **10-16/17 flat FSR reports, receipts BUILT, NOT FLOWN:** both capped logs show active treatment; recurrent selector truncation's on-foot cause remains unproven. Passive selector/projection diagnostics now built with no AA admission change (last entry).
 - **10-17 F1 flat PASS:** `942cfeb3`; steadier stationary edges and seven
   normal-space ambiguity resets with clean history recovery. Temporary
   `diag.flat_origin_capture = off`. Exact re-anchor/VR separate.
@@ -17312,3 +17312,27 @@ binding/range and generation/shadow status, then confirm their failure paths
 emit them before flying. For that flight raise `edvr-flat.ini` `[log] max_mb=128`,
 keep FSR selected, and capture the visible interval. Saved DXBC alone cannot
 distinguish either failure.
+
+## 2026-10-17 — passive flat refusal receipts (built, not flown)
+
+For the rc.2 flat `/novr` RX 9070 XT report at native 3440x1440, we added
+failure-only receipts for the two observed refusal families. On a truncated
+HDR-trigger or output-copy selection, retain the prefix's first uncertainty
+at its source (cause, sequence point, resource and shader identities) and print
+it with the selector route/sequence and target/source/copy counts. On a failed bound projection
+publication lookup, print the actual VS binding, recipe row, buffer and byte
+range, plus whether it was an untracked buffer, an unready/ranged private
+upload, or a tracked shadow with missing/mismatched generation, map, invalid
+contents or range. Each family has its own three-detail-per-five-seconds
+budget; the existing runtime heartbeat shows totals and suppressed details,
+with per-cause counts emitted only for failures. No admission, backend or
+AA rendering decision changes. The full `build.bat --wait-lock` passed all
+gates on 2026-10-17; flight verification remains pending.
+
+The failure detail lines are `flat selector truncation receipt:` (HDR trigger
+or output copy) and `flat foreground projection lookup receipt:`; their
+five-second cause totals append `receipt 5s:`. The existing `flat runtime:`
+heartbeat has `selector-receipts`, `selector-suppressed`,
+`projection-lookups`, and `lookup-suppressed`, so zero activity and exhausted
+detail budgets remain distinguishable. On the next flight, raise
+`edvr-flat.ini` `[log] max_mb=128` and capture the affected interval.
