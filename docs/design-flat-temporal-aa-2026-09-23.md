@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 world-object probe, FLOWN coverage:** Steam `055636`, `f184ae95`: two normal-space re-anchor controls and one transition reset; no qualifying real-travel event despite reported multiple-c SC. F1 remains OPEN.
-  See "F1 station departure and outward-supercruise coverage flight" below. `DockPin1` crosses one re-anchor; stationary provenance is not independently established.
-  No new key or classifier change. Stop repeated laps; inspect SC camera/source mapping before another flight. VR's dropped 50 m+ translation remains open.
+- **10-17 F1, SC camera source CONFIRMED:** selected flat row 275 omits SC ship translation; Steam `055636` has 451 successful history frames/5s with 0 resets and 0.0002623 m max axis step. F1 remains OPEN.
+  See "F1 supercruise camera-source investigation" below. Sol RE found a matrix-change callback, proved for FreeCameraActivity; its connection to normal ship-camera re-anchors is unproved.
+  No new key or classifier change. Next is the notification emitter/ship-camera join offline, not another flight or SCO lap. VR's dropped 50 m+ translation remains open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -3520,6 +3520,107 @@ motion around re-anchors; they do not resolve real inward travel.
   owner. No evidence here shows that more SC speed or SCO would produce the
   missing discriminator. Stop repeated laps; choose the next control from the
   camera/source path before another flight. No classifier change.
+
+**2026-10-17: F1 supercruise camera-source investigation, before another
+flight.** The missing >=50 m events are explained in the selected flat temporal
+camera. Supercruise physical speed does not appear as translation in its b1 row
+275. This was already established for flat in the 2026-10-15 journal of
+`docs/terrain-motion-dispatch-cost-2026-09-17.md`; prescribing the outward SC
+leg before consulting that evidence was a diagnosis error. More speed or SCO is
+not a justified next control.
+
+The new flight confirms the same behavior directly. In build-matched Steam
+`20261017_055636`, the five-second window ending 06:02:07 reports 451 camera
+frames, `step max=0.0002623` m per axis, 451 accepted history frames and zero
+accepted resets. The selected origin is near (-8.556, 11.197, 11.600) m.
+Subsequent steady windows are also below a millimetre per axis; the late steady
+track is near (-1.890, 12.126, -13.509) m. These are successful temporal
+frames, not a lack of draws. There are occasional 13.06 m and 26.16 m axis
+changes, still below the 50 m per-axis history test. The event probe uses the
+>=50 m vector length before the later classifier; this flight recorded only the
+two normal-space re-anchors and the SC-entry reset.
+
+The source path is current-frame-qualified throughout:
+
+1. `flat_temporal_model.h` copies the 96 bytes of VS b1 rows 270..275 from a
+   complete CPU write. `flat_camera_table.h` stamps the frame/write sequence,
+   invalidates an old frame and serves only a current capture.
+2. `flat_mono_frame.h` requires current write epoch, ordered write sequence and
+   matching hash/rows before copying the camera into the selected scene.
+3. `flat_runtime.cpp` copies selected rows into `f.camera`; on an ordinary
+   accepted frame `f.previousCamera` is the previous successful selection. Only
+   an explicit reset substitutes current rows for previous rows.
+   `noteCameraOrigin` records that comparison before `flatMonoResolve`.
+4. `OpticalCandidate` tests row-275 vector displacement before the history
+   classifier. Valid-frame early exits produce explicit unavailable events.
+   Optical scheduling limits are later and do not govern this candidate count.
+
+- Ruled out: resets, repeated resolver refusals or optical logging quotas
+  hiding physical SC movement in the observed non-reset windows, because the
+  camera-origin measurements remain sub-mm across about 450 successful history
+  frames per five seconds, with zero accepted resets and no rising refusals.
+- Ruled out: inferring SC physical velocity from the old `fast-travel kept`
+  label. It names a geometric branch, not measured flight mode or speed. In
+  `20261016_173557` (correct build `3c0516e3`), frames 164037-164039 have 56-73
+  m outward row steps immediately after a 7.5 km reset, but only near-camera
+  records and inconclusive optical fits. The adjacent celestial gate says
+  status unknown. Their physical cause and gameplay mode remain unverified.
+
+The existing planet-motion path explains where visible SC approach motion can
+come from without row 275 carrying ship travel: planet VS b2 constants carry
+camera-relative patch/body placement (`cb2[2]`, `cb2[12]`), with camera
+rotation in b0[9..11]. That shader dataflow and the captured 180540 fixture are
+documented in `terrain-motion-dispatch-cost-2026-09-17.md` and
+`celestial_math.h`. This is body-specific rendering evidence, not a universal
+world-origin reset signal.
+
+F1's arithmetic counterexample still stands: physical inward (80,0,0) to
+(20,0,0) can match the current re-anchor rule. The SC result changes the test
+plan; it does not prove that rule safe. A proper correction needs the actual
+coordinate-frame change, ideally tied to the selected camera's producer, so
+previous camera state can be transformed into the current frame while keeping
+real residual travel. Neither a static-name heuristic nor last-frame velocity
+is sufficient. Binary RE is checking the explicit game origin-change dispatch
+before any new instrument or flight is chosen. **Sol binary RE, read-only, same
+game build.** The installed Steam executable and analyzed binary have SHA-256
+`e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988`, PE
+timestamp 1788384820 and image size 104894464. Ghidra ran with `-noanalysis
+-readOnly`; Capstone independently confirmed the callback instructions.
+Artifacts: `analysis/decomp/f1_origin_20261017/`.
+
+- RVA 0x1091520 takes a FreeCameraActivity and a 16-float affine matrix. It
+  postmultiplies activity matrices +0x70, +0x370 and +0x440 by the supplied
+  matrix, including rotation and translation. +0x370 is a saved activity frame;
+  it is not established as the previous rendered camera. Return value is zero.
+- Thunk 0x102FC00 converts argument 2 into activity = arg2 - 0x168, passes
+  argument 3 as the matrix and tail-jumps to that callback. Its dispatch-table
+  cell is RVA 0x5185548. The activity constructor 0x1060190 initializes this
+  listener, requesting interface token at RVA 0x5F41DE4; resolver 0x529500
+  supplies the interface pointer at activity +0x178.
+- OnEnter 0x10996A0 subscribes via 0x9204C0, and destructor 0x1064800 removes
+  it via 0x2010A0. Registration resolves the dispatcher from listener[2]-0xB0
+  and the high word of listener[0]; 0x7E9C20 appends the listener under a lock,
+  using subscriber collection at RVA 0x5F54690.
+- Geometry/bucket worker constructor 0x430B2A0 requests the same interface
+  token, at worker +0x128, with its listener at +0x120. This establishes a
+  shared notification-interface lineage; it does not prove the same event
+  causes the selected ship camera's normal-space 5 km re-anchors. Token
+  initializer 0x93850 assigns a runtime type ID from counter RVA 0x5E63010;
+  that ID is not a world-origin epoch or a semantic event name.
+
+The next offline query is now specific: follow the worker +0x120 callback and
+that interface's emitter, including the embedded owner component +0x350
+(exposed with its +0xB0 interface by 0x3CAE750). Determine where the broadcast
+matrix comes from and join it to the selected ship-camera origin writer. Do not
+install a FreeCamera-only callback as if it were a universal rebase signal. If
+the join is proved, a passive observer can capture the actual coordinate
+transform. Offline reprojection cases must then keep inward 80-to-20 travel
+when no frame change occurred and preserve the approximately 5 m residual
+travel when a real re-anchor transform is applied. A subsequent normal-space
+calibration flight would verify that observer against the existing world
+records; it should not ask SC speed to produce camera translation. Until the
+emitter/ship-camera join is known, no further flight is justified. No product
+code, game file or analyzed program state was changed by this investigation.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
