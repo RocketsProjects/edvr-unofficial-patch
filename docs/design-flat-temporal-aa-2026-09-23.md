@@ -3581,8 +3581,10 @@ coordinate-frame change, ideally tied to the selected camera's producer, so
 previous camera state can be transformed into the current frame while keeping
 real residual travel. Neither a static-name heuristic nor last-frame velocity
 is sufficient. Binary RE is checking the explicit game origin-change dispatch
-before any new instrument or flight is chosen. **Sol binary RE, read-only, same
-game build.** The installed Steam executable and analyzed binary have SHA-256
+before any new instrument or flight is chosen.
+
+**Sol binary RE, read-only, same game build.** The installed Steam executable
+and analyzed binary have SHA-256
 `e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988`, PE
 timestamp 1788384820 and image size 104894464. Ghidra ran with `-noanalysis
 -readOnly`; Capstone independently confirmed the callback instructions.
