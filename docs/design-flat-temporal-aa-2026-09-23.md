@@ -52,7 +52,7 @@
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
-- **10-17 RC3 scope regression FIX BUILT:** a rejected optional forward candidate globally poisoned the frame using retained `phaseHdr`. Current authority now gates cancellation; all three saved copy selections recover in replay, full build PASS. Live validation pending (last entry).
+- **10-17 RC3 scope fix INSTALLED:** Steam flat rendering commit `c7c14898`, probe off; full build PASS, all three saved copy selections recover in replay. Current authority now gates cancellation. Live nonzero-phase/visible AA validation pending; main unmerged (last entry).
 - **10-17 F1 flat PASS:** `942cfeb3`; steadier stationary edges and seven
   normal-space ambiguity resets with clean history recovery. Temporary
   `diag.flat_origin_capture = off`. Exact re-anchor/VR separate.
@@ -17472,3 +17472,21 @@ rigs, installer payload checks and receipt
 `96218cae9b22f989144746aee1a60308d8290d2c4a594d12316099ca1508f8e5`.
 Console: `build/rc3-aa-candidate-scope-full.log`. Live nonzero-phase/history
 and visible AA validation remain pending; main stays unmerged for that check.
+
+Clean commit `c7c14898` was promoted with `--dll-only --wait-lock` in 34.2
+seconds and installed/verified for Steam flat. Installed product version is
+`v0.20.0-rc.3-1-gc7c14898`; DLSS remains selected and the origin probe remains
+off. Use `edvr_log.py --target steam --expect-build c7c14898` for this test:
+the following Python-only installer maintenance does not change the renderer.
+
+Installation initially stopped on an obsolete October 10 native receipt even
+though the current GUI record and descriptor proved a flat install, with
+matching graphics hashes and no VR components. The install tool now has an
+explicit `--retire-stale-native-receipt` maintenance operation. It verifies
+those facts, validates the old receipt's target and backup paths, rejects an
+EDVR VR runtime, checks for changed evidence and a running game, and archives
+only that receipt with byte verification. Dry runs write nothing. The entire
+installer-tool self-test passed twice, including refusal, dry-run, backup
+reference preservation and subsequent install/verify cases. This Python-only
+maintenance was tested separately from the C7 full C++ build. The live receipt
+was archived with its SHA256 unchanged before ordinary flat installation.
