@@ -207,8 +207,23 @@ bool install(State& s) noexcept {
     return true;
 }
 
+void logPlacedMatrix(unsigned source, unsigned stage, unsigned activity, const char* kind,
+                     const float p[16], bool applicable, bool read) noexcept {
+    if (!applicable) {
+        Log::get().note("flat stationary Placed-matrix[%u,%u,%u] %s N/A (record-null)",
+            source,stage,activity,kind);
+        return;
+    }
+    Log::get().note("flat stationary Placed-matrix[%u,%u,%u] %s read=%u rows=(%.9g %.9g %.9g %.9g | %.9g %.9g %.9g %.9g | %.9g %.9g %.9g %.9g | %.9g %.9g %.9g %.9g)",
+        source,stage,activity,kind,read?1u:0u,
+        p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],
+        p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15]);
+}
+
 void report(State& s, uint64_t frame) noexcept {
     unsigned sourceCount = 0, sourceValid = 0, sourceComplete = 0, refreshCount = 0, mainView = 0;
+    unsigned mainPlaced = 0, mainPlacedIdentity = 0, mainPlacedComplete = 0;
+    unsigned mainPlacedProviders = 0, mainPlacedOverflow = 0;
     unsigned detailRows = 0;
     for (auto& slot : s.sources) if (slot.ready.load(std::memory_order_acquire)) {
         ++sourceCount;
@@ -221,10 +236,20 @@ void report(State& s, uint64_t frame) noexcept {
             slot.snapshot.callerRva == 0x281ACD9) ++mainView;
         if (slot.snapshot.stageCount && slot.snapshot.stages[0].nameRead &&
             std::strcmp(slot.snapshot.stages[0].stackName, "MainView") == 0) {
+            mainPlaced += slot.snapshot.placedSeen;
+            mainPlacedOverflow += slot.snapshot.placedOverflow ? 1u : 0u;
+            for (unsigned j = 0; j < slot.snapshot.placedCount; ++j) {
+                const auto& d = slot.snapshot.placed[j];
+                if (d.identityComplete) ++mainPlacedIdentity;
+                if (d.identityComplete && (!d.record || (d.localRead && d.cacheRead)) &&
+                    d.finalRead && d.poseRereadComplete) ++mainPlacedComplete;
+                if (d.identityComplete && d.providerPresent) ++mainPlacedProviders;
+            }
             detailRows += slot.snapshot.stageCount;
             for (unsigned j = 0; j < slot.snapshot.stageCount; ++j)
                 detailRows += static_cast<unsigned>(slot.snapshot.stages[j].activityCount > stationcam::kActivities ?
                     stationcam::kActivities : slot.snapshot.stages[j].activityCount);
+            detailRows += 5 * slot.snapshot.placedCount;
         }
     }
     for (auto& slot : s.refresh) if (slot.ready.load(std::memory_order_acquire)) ++refreshCount;
@@ -232,18 +257,22 @@ void report(State& s, uint64_t frame) noexcept {
     const bool reportBound = detailRows > kReportRows;
     const bool complete = s.selectedFrame >= s.armFrame && !s.captureRefusal &&
         !s.profileDropped.load(std::memory_order_acquire) && sourceCount && sourceComplete && mainView == 1 && refreshCount &&
+        mainPlaced && mainPlacedIdentity == mainPlaced && !mainPlacedOverflow &&
         !s.sourceOverflow.load(std::memory_order_acquire) && !s.refreshOverflow.load(std::memory_order_acquire) && !reportBound;
     const char* refusal = s.captureRefusal ? s.captureRefusal : !s.selectedFrame ? "selected-scene-never-qualified" :
         !sourceCount ? "renderer-hook-never-ran" : !refreshCount ? "refresh-hook-never-ran" :
         s.sourceOverflow.load() ? "source-bound" : s.refreshOverflow.load() ? "refresh-bound" :
         reportBound ? "report-bound" : mainView == 0 ? "MainView-root-not-observed" :
-        mainView > 1 ? "multiple-MainView-roots" : sourceComplete == 0 ? "topology-incomplete" : "none";
-    Log::get().note("flat stationary camera: %s frame=%llu arm=%llu selected=%llu selected-reset=%u refusal=%s profile-dropped=%u renderer-calls=%llu captured-sources=%llu unique=%u validated=%u complete=%u MainView-root=%u refresh-calls=%llu unique=%u source-overflow=%u refresh-overflow=%u report-rows=%u/%u selected-row275=(%.9g %.9g %.9g); renderer-source topology only, selected GPU donor UNPROVED",
+        mainView > 1 ? "multiple-MainView-roots" : sourceComplete == 0 ? "topology-incomplete" :
+        !mainPlaced ? "Placed-not-observed" : mainPlacedOverflow ? "Placed-bound" :
+        mainPlacedIdentity != mainPlaced ? "Placed-identity-incomplete" : "none";
+    Log::get().note("flat stationary camera: %s frame=%llu arm=%llu selected=%llu selected-reset=%u refusal=%s profile-dropped=%u renderer-calls=%llu captured-sources=%llu unique=%u validated=%u complete=%u MainView-root=%u Placed=%u identity-complete=%u detail-complete=%u provider-present=%u placed-overflow=%u refresh-calls=%llu unique=%u source-overflow=%u refresh-overflow=%u report-rows=%u/%u selected-row275=(%.9g %.9g %.9g); renderer-source topology and Placed identity only, selected GPU donor UNPROVED",
         complete ? "captured" : "refused/incomplete", static_cast<unsigned long long>(frame),
         static_cast<unsigned long long>(s.armFrame), static_cast<unsigned long long>(s.selectedFrame),
         s.selectedReset?1u:0u,refusal,s.profileDropped.load()?1u:0u,
         static_cast<unsigned long long>(s.rendererCalls.load()),
         static_cast<unsigned long long>(s.captures.load()), sourceCount, sourceValid, sourceComplete, mainView,
+        mainPlaced,mainPlacedIdentity,mainPlacedComplete,mainPlacedProviders,mainPlacedOverflow,
         static_cast<unsigned long long>(s.refreshes.load()), refreshCount,
         s.sourceOverflow.load(), s.refreshOverflow.load(),detailRows,kReportRows,
         s.selectedOrigin[0], s.selectedOrigin[1], s.selectedOrigin[2]);
@@ -296,6 +325,47 @@ void report(State& s, uint64_t frame) noexcept {
                     reinterpret_cast<void*>(a.state),a.poseRead?"":"UNKNOWN:",
                     a.pose[12],a.pose[13],a.pose[14],a.nameRead?a.name:"UNKNOWN");
             }
+        }
+        for (unsigned j = 0; j < q.placedCount; ++j) {
+            if (emitted + 5 > kReportRows) break;
+            emitted += 5;
+            const auto& d = q.placed[j];
+            Log::get().note("flat stationary Placed[%u,%u,%u]: A=%p iface=%p E=%s%p P=%s%p P-vt=%s%p/+0x%llX P-slot20=%s%p/+0x%llX identity-complete=%u provider-present=%s%u provider-known=%s%u reason=%s target-ref=%s%p state=%s%d valid5=%s%u valid8=%s%u; P field is sampled parent-provider slot, parent getter called UNKNOWN, cache refreshed UNKNOWN",
+                i,d.stage,d.activity,reinterpret_cast<void*>(d.object),reinterpret_cast<void*>(d.iface),
+                d.recordRead?"":"UNKNOWN:",reinterpret_cast<void*>(d.record),
+                d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.provider),
+                d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.providerVtable),
+                static_cast<unsigned long long>(stationcam::rva(d.providerVtable,s.gameBase.load())),
+                d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.providerFn),
+                static_cast<unsigned long long>(stationcam::rva(d.providerFn,s.gameBase.load())),
+                d.identityComplete?1u:0u,
+                d.identityComplete?"":"UNVALIDATED:",d.providerPresent?1u:0u,
+                d.identityComplete?"":"UNVALIDATED:",d.providerKnown?1u:0u,d.reason,
+                d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.targetRef),
+                d.targetStateRead?"":
+                    d.identityComplete && !d.targetRef?"NULL:":"UNKNOWN:",d.targetState,
+                d.identityComplete && d.validatorKnown?"":"UNKNOWN:",d.valid5?1u:0u,
+                d.identityComplete && d.validatorKnown?"":"UNKNOWN:",d.valid8?1u:0u);
+            Log::get().note("flat stationary Placed-pose[%u,%u,%u]: local=%s(%.7g %.7g %.7g) cache=%s(%.7g %.7g %.7g) final=%s(%.7g %.7g %.7g) finite=%u/%u/%u pose-reread=%u pose-stable=%u cfg=%s%p cfg14=%s%d cfg18=%s%d override-handle=%s%d Q=%s%p Q-vt=%s%p/+0x%llX Q-slot70=%s%p/+0x%llX eligible-at-snapshot=%s%u; override execution UNKNOWN, D adoption UNPROVED",
+                i,d.stage,d.activity,d.localRead?"":"UNKNOWN:",d.local[12],d.local[13],d.local[14],
+                d.cacheRead?"":"UNKNOWN:",d.cache[12],d.cache[13],d.cache[14],
+                d.finalRead?"":"UNKNOWN:",d.final[12],d.final[13],d.final[14],
+                d.localFinite?1u:0u,d.cacheFinite?1u:0u,d.finalFinite?1u:0u,
+                d.poseRereadComplete?1u:0u,d.poseStable?1u:0u,
+                d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.config),
+                d.identityComplete?"":"UNVALIDATED:",d.config14,
+                d.identityComplete?"":"UNVALIDATED:",d.config18,
+                d.identityComplete?"":"UNVALIDATED:",d.overrideHandle,
+                d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.overrideObject),
+                d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.overrideVtable),
+                static_cast<unsigned long long>(stationcam::rva(d.overrideVtable,s.gameBase.load())),
+                d.identityComplete?"":"UNVALIDATED:",reinterpret_cast<void*>(d.overrideFn),
+                static_cast<unsigned long long>(stationcam::rva(d.overrideFn,s.gameBase.load())),
+                d.eligibilityKnown?"":"UNKNOWN:",d.overrideEligible?1u:0u);
+            const bool recordAbsent = d.identityComplete && d.recordRead && !d.record;
+            logPlacedMatrix(i,d.stage,d.activity,"E+20-local",d.local,!recordAbsent,d.localRead);
+            logPlacedMatrix(i,d.stage,d.activity,"E+60-cache",d.cache,!recordAbsent,d.cacheRead);
+            logPlacedMatrix(i,d.stage,d.activity,"A+70-final",d.final,true,d.finalRead);
         }
     }
     for (unsigned i = 0; i < kRefreshSlots; ++i) {

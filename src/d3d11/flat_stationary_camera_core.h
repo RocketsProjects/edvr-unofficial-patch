@@ -11,6 +11,7 @@ namespace edvr { namespace stationcam {
 
 constexpr unsigned kStages = 96; // root and several nested eleven-child stacks
 constexpr unsigned kActivities = 16;
+constexpr unsigned kPlacedDetails = 32;
 constexpr unsigned kNameBytes = 48;
 using Read = bool (*)(void*, uintptr_t, void*, size_t) noexcept;
 
@@ -83,6 +84,23 @@ struct Stage {
     float basePose[16]{}, outputPose[16]{};
     Activity activities[kActivities]{};
 };
+struct PlacedDetail {
+    unsigned stage = 0, activity = 0;
+    uintptr_t iface = 0, object = 0, record = 0, provider = 0;
+    uintptr_t providerVtable = 0, providerFn = 0;
+    uintptr_t config = 0, overrideObject = 0, overrideVtable = 0, overrideFn = 0;
+    uintptr_t targetRef = 0;
+    int32_t overrideHandle = 0, config14 = 0, config18 = 0, targetState = 0;
+    bool identityComplete = false, recordRead = false;
+    bool providerPresent = false, providerKnown = false, overridePresent = false;
+    bool targetStateRead = false, validatorKnown = false, valid5 = false, valid8 = false;
+    bool eligibilityKnown = false, overrideEligible = false;
+    bool localRead = false, cacheRead = false, finalRead = false;
+    bool poseRereadComplete = false, poseStable = false;
+    bool localFinite = false, cacheFinite = false, finalFinite = false;
+    float local[16]{}, cache[16]{}, final[16]{};
+    const char* reason = "none";
+};
 struct Snapshot {
     uintptr_t owner = 0, source = 0, helper = 0, rootChild = 0;
     uint64_t callerRva = 0;
@@ -91,6 +109,9 @@ struct Snapshot {
     bool validSource = false, consistent = true, complete = true;
     const char* failure = "none";
     unsigned stageCount = 0;
+    unsigned placedCount = 0, placedSeen = 0;
+    bool placedOverflow = false;
+    PlacedDetail placed[kPlacedDetails]{};
     Stage stages[kStages]{};
 };
 
@@ -99,6 +120,9 @@ template<class T> inline bool get(Read read, void* context, uintptr_t at, T& val
 }
 inline bool bytes(Read read, void* context, uintptr_t at, void* value, size_t count) noexcept {
     return at != 0 && read(context, at, value, count);
+}
+inline bool spanFits(uintptr_t address, size_t offset, size_t length) noexcept {
+    return address && offset <= UINTPTR_MAX - address && length <= UINTPTR_MAX - (address + offset);
 }
 inline bool finitePose(const float pose[16]) noexcept {
     for (unsigned i = 0; i < 16; ++i) if (!std::isfinite(pose[i])) return false;
@@ -109,6 +133,17 @@ inline bool pose(Read read, void* context, uintptr_t state, float out[16]) noexc
 }
 inline uintptr_t rva(uintptr_t address, uintptr_t base) noexcept {
     return address >= base && address - base < 0x6000000 ? address - base : 0;
+}
+inline bool knownPlacedProvider(uintptr_t base, uintptr_t vtable, uintptr_t fn) noexcept {
+    constexpr uintptr_t known[][2] = {
+        {0x51245B8,0x4899EF4}, {0x5124928,0x1F2370},
+        {0x530B340,0x5293E0}, {0x5355318,0x30B9160},
+        {0x5372368,0xF82590}, {0x5538640,0x5CB1F0},
+        {0x553A8D8,0x3CB93F0}, {0x553AD70,0xF8D000}
+    };
+    const uintptr_t vt = rva(vtable, base), code = rva(fn, base);
+    for (const auto& item : known) if (vt == item[0] && code == item[1]) return true;
+    return false;
 }
 inline bool childGuard(Read read, void* context, uintptr_t base, uintptr_t child) noexcept {
     uintptr_t v0 = 0, v1 = 0;
@@ -180,6 +215,138 @@ inline void activity(Read read, void* context, uintptr_t base, uintptr_t iface, 
     }
 }
 
+// This is a passive snapshot of Placed's parent-provider identities and raw
+// poses. A second read detects identity changes; pose drift is reported on its
+// own because a parked camera can still animate between the two reads.
+inline void placedDetail(Read read, void* context, uintptr_t base, const Activity& a,
+                         unsigned stage, unsigned activityIndex, Snapshot& snapshot) noexcept {
+    if (a.vtable != base + 0x5189EA8) return;
+    ++snapshot.placedSeen;
+    if (snapshot.placedCount == kPlacedDetails) { snapshot.placedOverflow = true; return; }
+    PlacedDetail& d = snapshot.placed[snapshot.placedCount++];
+    d.stage = stage; d.activity = activityIndex; d.iface = a.iface;
+    if (a.iface < 0x20) { d.reason = "object-underflow"; return; }
+    d.object = a.iface - 0x20;
+    if (a.concreteVtable != base + 0x5189E38 || a.stateFn != base + 0x5293E0) {
+        d.reason = "placed-root-guard-refused"; return;
+    }
+    if (!spanFits(d.object, 0x1E8, sizeof(uintptr_t)) ||
+        !spanFits(d.iface, 0x28, sizeof(uintptr_t))) {
+        d.reason = "address-overflow"; return;
+    }
+    uintptr_t objectVtable = 0, ifaceVtable = 0, stateFn = 0;
+    if (!get(read, context, d.object, objectVtable) || objectVtable != base + 0x5189E38 ||
+        !get(read, context, d.iface, ifaceVtable) || ifaceVtable != base + 0x5189EA8 ||
+        !get(read, context, ifaceVtable + 0x28, stateFn) || stateFn != base + 0x5293E0) {
+        d.reason = "placed-guard-read"; return;
+    }
+    if (!get(read, context, d.object + 0x1E8, d.record)) {
+        d.reason = "record-unreadable"; return;
+    }
+    d.recordRead = true;
+    if ((d.record && !spanFits(d.record, 0x60, sizeof(d.cache))) ||
+        !spanFits(d.object, 0x190, sizeof(uintptr_t))) {
+        d.reason = "address-overflow"; return;
+    }
+    if ((d.record && (!get(read, context, d.record + 0x10, d.provider) ||
+        !get(read, context, d.record + 8, d.targetRef))) ||
+        !get(read, context, d.object + 0x10, d.config) ||
+        !get(read, context, d.object + 0x188, d.overrideHandle) ||
+        !get(read, context, d.object + 0x190, d.overrideObject)) {
+        d.reason = "placed-identity-read"; return;
+    }
+    d.providerPresent = d.provider != 0;
+    d.overridePresent = d.overrideObject != 0;
+    if ((d.providerPresent && !spanFits(d.provider, 0, sizeof(uintptr_t))) ||
+        (d.overridePresent && !spanFits(d.overrideObject, 0, sizeof(uintptr_t))) ||
+        (d.config && !spanFits(d.config, 0x18, sizeof(int32_t))) ||
+        (d.targetRef && !spanFits(d.targetRef, 0xC0, sizeof(int32_t)))) {
+        d.reason = "address-overflow"; return;
+    }
+    if (d.providerPresent && (!get(read, context, d.provider, d.providerVtable) ||
+        !spanFits(d.providerVtable, 0x20, sizeof(uintptr_t)) ||
+        !get(read, context, d.providerVtable + 0x20, d.providerFn))) {
+        d.reason = "provider-vtable-read"; return;
+    }
+    if (d.overridePresent && (!get(read, context, d.overrideObject, d.overrideVtable) ||
+        !spanFits(d.overrideVtable, 0x70, sizeof(uintptr_t)) ||
+        !get(read, context, d.overrideVtable + 0x70, d.overrideFn))) {
+        d.reason = "override-vtable-read"; return;
+    }
+    if (!d.config || !get(read, context, d.config + 0x14, d.config14) ||
+        !get(read, context, d.config + 0x18, d.config18)) {
+        d.eligibilityKnown = d.overrideHandle != -1 || !d.overridePresent;
+        d.reason = "config-flags-read"; return;
+    }
+    if (d.targetRef) {
+        if (!get(read, context, d.targetRef + 0xC0, d.targetState)) {
+            d.eligibilityKnown = d.overrideHandle != -1 || !d.overridePresent || d.config14 == 0;
+            d.reason = "target-state-read"; return;
+        }
+        d.targetStateRead = true;
+        d.valid5 = d.targetState >= 5;
+        d.valid8 = d.targetState >= 8;
+    }
+    d.validatorKnown = true; // a read null R is a known false result
+    d.eligibilityKnown = true; // null E/R is a known false valid8 predicate
+    d.overrideEligible = d.overrideHandle == -1 && d.overridePresent && d.config14 != 0 && d.valid8;
+    if (d.record) {
+        d.localRead = bytes(read, context, d.record + 0x20, d.local, sizeof(d.local));
+        d.cacheRead = bytes(read, context, d.record + 0x60, d.cache, sizeof(d.cache));
+    }
+    d.finalRead = bytes(read, context, d.object + 0x70, d.final, sizeof(d.final));
+    d.localFinite = d.localRead && finitePose(d.local);
+    d.cacheFinite = d.cacheRead && finitePose(d.cache);
+    d.finalFinite = d.finalRead && finitePose(d.final);
+
+    uintptr_t objectAgain = 0, ifaceAgain = 0, fnAgain = 0, recordAgain = 0;
+    uintptr_t providerAgain = 0, providerVtableAgain = 0, providerFnAgain = 0;
+    uintptr_t targetAgain = 0, configAgain = 0, overrideAgain = 0;
+    uintptr_t overrideVtableAgain = 0, overrideFnAgain = 0;
+    int32_t handleAgain = 0, config14Again = 0, config18Again = 0, targetStateAgain = 0;
+    if (!get(read, context, d.object, objectAgain) ||
+        !get(read, context, d.iface, ifaceAgain) ||
+        !get(read, context, ifaceVtable + 0x28, fnAgain) ||
+        !get(read, context, d.object + 0x1E8, recordAgain) ||
+        (d.record && (!get(read, context, d.record + 0x10, providerAgain) ||
+            !get(read, context, d.record + 8, targetAgain))) ||
+        !get(read, context, d.object + 0x10, configAgain) ||
+        !get(read, context, d.object + 0x188, handleAgain) ||
+        !get(read, context, d.object + 0x190, overrideAgain) ||
+        !get(read, context, d.config + 0x14, config14Again) ||
+        !get(read, context, d.config + 0x18, config18Again) ||
+        (d.providerPresent && (!get(read, context, d.provider, providerVtableAgain) ||
+            !get(read, context, d.providerVtable + 0x20, providerFnAgain))) ||
+        (d.overridePresent && (!get(read, context, d.overrideObject, overrideVtableAgain) ||
+            !get(read, context, d.overrideVtable + 0x70, overrideFnAgain))) ||
+        (d.targetRef && !get(read, context, d.targetRef + 0xC0, targetStateAgain))) {
+        d.eligibilityKnown = false;
+        d.reason = "identity-reread-failed"; return;
+    }
+    if (objectAgain != objectVtable || ifaceAgain != ifaceVtable || fnAgain != stateFn ||
+        recordAgain != d.record || providerAgain != d.provider || targetAgain != d.targetRef ||
+        configAgain != d.config || handleAgain != d.overrideHandle || overrideAgain != d.overrideObject ||
+        config14Again != d.config14 || config18Again != d.config18 ||
+        (d.providerPresent && (providerVtableAgain != d.providerVtable || providerFnAgain != d.providerFn)) ||
+        (d.overridePresent && (overrideVtableAgain != d.overrideVtable || overrideFnAgain != d.overrideFn)) ||
+        (d.targetRef && targetStateAgain != d.targetState)) {
+        d.eligibilityKnown = false;
+        d.reason = "identity-changed"; return;
+    }
+    d.identityComplete = true;
+    d.providerKnown = d.providerPresent && knownPlacedProvider(base, d.providerVtable, d.providerFn);
+    d.reason = !d.record ? "record-null" : d.providerPresent ? "none" : "provider-null";
+    float localAgain[16]{}, cacheAgain[16]{}, finalAgain[16]{};
+    const bool localAgainRead = !d.record || bytes(read, context, d.record + 0x20, localAgain, sizeof(localAgain));
+    const bool cacheAgainRead = !d.record || bytes(read, context, d.record + 0x60, cacheAgain, sizeof(cacheAgain));
+    const bool finalAgainRead = bytes(read, context, d.object + 0x70, finalAgain, sizeof(finalAgain));
+    d.poseRereadComplete = localAgainRead && cacheAgainRead && finalAgainRead;
+    d.poseStable = (!d.record || (d.localRead && d.cacheRead)) && d.finalRead && d.poseRereadComplete &&
+        (!d.record || std::memcmp(d.local, localAgain, sizeof(d.local)) == 0) &&
+        (!d.record || std::memcmp(d.cache, cacheAgain, sizeof(d.cache)) == 0) &&
+        std::memcmp(d.final, finalAgain, sizeof(d.final)) == 0;
+}
+
 inline void walk(Read read, void* context, uintptr_t base, uintptr_t child, int parent,
                  char edge, Snapshot& out) noexcept {
     if (!childGuard(read, context, base, child)) { fail(out, "child-guard"); return; }
@@ -230,6 +397,7 @@ inline void walk(Read read, void* context, uintptr_t base, uintptr_t child, int 
             fail(out, "activity-pointer-read"); continue;
         }
         activity(read, context, base, iface, stage.activities[j], out);
+        placedDetail(read, context, base, stage.activities[j], index, j, out);
         if (!get(read, context, stage.activityArray + 8 * j, again) || again != iface) {
             out.consistent = false; fail(out, "activity-pointer-changed");
         }

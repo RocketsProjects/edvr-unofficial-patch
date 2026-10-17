@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 temporary stationary capture SUCCEEDED, F1 OPEN:** Steam flat 387288ed, one complete MainView/Location pipeline, no overflow or unknown state/weight getters. No new key or motion/history correction.
-  See "stationary capture identifies Location/Placed" below. First observed nonzero-origin supplier is Placed (concrete vtable +5189E38), followed by Inertial/HeadLook/local effects. Selected GPU donor and producer/frame epoch remain unproved.
-  Next: resolve Placed's actual parent provider and optional post-seed override, then D/adoption/GPU ordering; Sol traced the initial writer. No further flight requested. SC row 275 omits ship travel; VR's dropped 50 m+ translation remains open.
+- **10-17 F1 parent/override capture BUILT, NOT CAPTURED:** extends the successful 387288ed Placed capture with guarded parent/override identities and full poses; no new key or motion/history correction. F1 OPEN.
+  See "passive Placed parent/override identity extension" below. Sol verified raw target checks and predicate; cache refresh/override execution, D adoption/epoch and selected GPU donor remain unproved.
+  Next: Steam flat `/novr`, docked/seated with menus closed for 30 s; inspect the build-matched added identity rows before ending the session. No travel needed. SC row 275 omits ship travel; VR's dropped 50 m+ translation remains open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4039,6 +4039,77 @@ is requested. The next missing observation is those exact parent and override
 identities and branch state. More static candidate annotations cannot select
 the actual runtime provider, and a travel lap would not supply the unrecorded
 fields.
+
+**2026-10-17: passive Placed parent/override identity extension.** The
+successful `387288ed` capture identified Placed as the first observed nonzero
+origin supplier, but did not read its target's actual parent provider or its
+optional later override. This extension adds those read-only identities to the
+existing docked-cockpit one-shot. It adds no game hook, getter invocation,
+write watch, config key, or motion/history correction.
+
+Sol verified the layout against the pinned Steam executable. Only an activity
+with the known interface/concrete Placed vtables and state getter is followed.
+With `A=interface-0x20`, capture reads `E=[A+0x1E8]`, parent `P=[E+0x10]`, P's
+actual vtable and virtual slot 0x20, full local pose at `E+0x20`, cached world
+pose at `E+0x60`, and final Placed pose at `A+0x70`. It also reads the override
+handle `int32[A+0x188]`, pointer `Q=[A+0x190]`, Q's vtable and slot 0x70, and
+config flags at `[A+0x10]+0x14/+0x18`. E is a transform record, not a guessed
+vtable-bearing object.
+
+The target validators can be decoded passively: `R=[E+0x8]`, then signed
+`int32[R+0xC0]>=5` or `>=8`; null R gives false. No game validator, getter,
+reference-copy helper or refcount operation is invoked. The current override
+predicate is handle -1, nonnull Q, nonzero config+0x14 and valid8. Config+0x18
+belongs to a separate orientation branch. Unknown reads produce unknown
+eligibility unless a known false condition already excludes the predicate. Even
+an eligible snapshot does not prove that the optional call ran.
+
+Mutable identity and condition fields are checked again after observation;
+changed or unreadable fields are explicit. Unknown readable provider/override
+classes are retained as useful pointer/RVA evidence. Null/absent differs from
+failed reads. Full pose readability, finite values and byte stability are
+reported separately: a changing docked pose does not erase stable identities or
+establish a frame epoch. The old pipeline topology result is distinct from the
+added identity-capture result, and no-Placed/partial/overflow cases must not
+present the old roster alone as a successful extension.
+
+The extension bounds Placed records at 32 per renderer source. Each adds five
+detail rows: identity/target fields, override/pose metadata, and full 16-float
+local, cache and final matrices. These rows share the existing 1024-row report
+cap. Stable null E, null P or absent Q are complete identity observations, with
+dependent fields marked absent/not applicable; defaults after failed reads are
+UNKNOWN. A changing identity or condition field invalidates the stable
+eligibility classification as well as identity completeness.
+
+Three questions share this one capture: which of the eight known parent
+provider candidates (or a readable unknown implementation) supplies P; whether
+an override exists and the current raw predicate permits it; and whether the
+sampled local/cache/final poses match at the reported read times. No numerical
+pose comparison is treated as evidence of a re-anchor. Sol also confirmed that
+the cache refresh can leave the previous cached pose on an invalid-target early
+return, so cache refresh and parent-getter execution stay UNKNOWN. Override
+execution, D adoption, producer completion/epoch, and selected GPU donor/write
+generation remain unproved.
+
+Capture environment and procedure remain Steam flat `/novr`, existing DLSS
+settings, docked and seated at a station/carrier, menus closed to the normal
+cockpit for 30 seconds without input. The one-shot arms automatically; no F10
+or travel is needed. Report Done and leave the game running until the
+build-matched log and added identity rows have been checked. The shared Steam
+package is maintained through `install_edvr.py --scope both`; live
+`edvr-flat.ini` and `edvr.ini` are preserved.
+
+Validation: the full absolute-path `build.bat --wait-lock` retry passed all
+Python gates, production builds, 170 pooled jobs, six quiet jobs, installer
+checks and receipt generation in 142.7 seconds. The extended stationary-camera
+rig passed; independent Sol review found no remaining contract or safety issue.
+The first full attempt stopped in the unchanged `ui_layer_world_test` with a
+silent exit 1. That same cached executable passed 165 checks separately, and
+the normal full retry passed; the original native failure cause remains unknown
+and no UI test or production change was made for it.
+
+The clean commit's DLL promotion and installed-file hash verification are
+required before handing over the capture. F1 remains OPEN.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
