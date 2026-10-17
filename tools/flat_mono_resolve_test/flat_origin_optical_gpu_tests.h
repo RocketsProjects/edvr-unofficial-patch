@@ -1,5 +1,6 @@
 #pragma once
 #include "../../src/d3d11/flat_origin_optical.h"
+#include "../../src/d3d11/flat_world_witness.h"
 #include "../../src/common/runtime_profile.h"
 
 // A narrow WARP fixture for the *passive* sidecar. The current rows move
@@ -158,6 +159,49 @@ inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* conte
     run(false,true,false,false); // steady depth disabled, no prior image
     run(false,true,false,true,true); // bound SDK foreground: prior image has no ownership mask
     run(false,true,false,true,false,true); // same depth scale: previous foreground, current world-only
+    // Exercise the production resolver's world-event hook and its early-return
+    // RAII path. No game store callbacks are fabricated: absent cohorts must
+    // remain explicitly inconclusive even when the clocks match.
+    auto worldWire=[&](bool invalidSlot) {
+        flatMonoResolveReset();
+        runtimeProfileSet(RuntimeProfile::Flat);
+        steadygpu::Rig r(device,context);
+        r.start(FlatMonoResolveMode::Dlss);
+        r.f.steadyDetail=true;
+        r.f.camera[5][0]=r.f.previousCamera[5][0]=80.f;
+        flatWorldWitnessFrameBoundary(static_cast<uint32_t>(r.f.frame),true,false,false);
+        r.run("origin world wiring: baseline");
+        r.f.reset=false;r.f.previousCamera[5][0]=80.f;r.f.camera[5][0]=20.f;
+        if(invalidSlot)r.f.slot=999;
+        const uint64_t candidate=r.f.frame;
+        flatWorldWitnessFrameBoundary(static_cast<uint32_t>(candidate),true,false,false);
+        const size_t first=worldLines.size();
+        r.run(invalidSlot?"origin world wiring: invalid slot candidate":
+            "origin world wiring: admitted candidate",!invalidSlot);
+        for(uint32_t frame=static_cast<uint32_t>(candidate)+1;frame<=candidate+3;++frame)
+            flatWorldWitnessFrameBoundary(frame,true,false,false);
+        std::string event,coverage;
+        const std::string marker="resolver-frame="+std::to_string(candidate)+" ";
+        for(size_t i=first;i<worldLines.size();++i) {
+            if(worldLines[i].find("flat world witness: resolver-frame=")==0&&
+               worldLines[i].find(marker)!=std::string::npos)event=worldLines[i];
+            if(worldLines[i].find("flat world witness coverage:")==0&&
+               worldLines[i].find(marker)!=std::string::npos)coverage=worldLines[i];
+        }
+        check(!event.empty()&&event.find("engine-at-event="+std::to_string(candidate))!=std::string::npos&&
+              event.find("clocks-match=1 complete=1")!=std::string::npos,
+              "origin world wiring: resolver candidate reaches completed same-clock witness");
+        check(event.find(invalidSlot?"unavailable=1 reason=flat-resolve-invalid-slot":
+              "unavailable=0 reason=")!=std::string::npos,
+              invalidSlot?"origin world wiring: RAII early exit names invalid slot":
+                  "origin world wiring: admitted candidate reaches event API");
+        check(event.find("world-edge-valid=0")!=std::string::npos&&
+              coverage.find("observed=0,0,0,0,0,0")!=std::string::npos,
+              "origin world wiring: no store observations remain an explicit no-cohort result");
+        flatWorldWitnessShutdown();
+    };
+    worldWire(false);
+    worldWire(true);
     runtimeProfileSet(previousProfile);
     flatMonoResolveReset();
     return 0;

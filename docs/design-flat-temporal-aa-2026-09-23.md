@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-16 F1, OPEN:** Steam `173557`, build `3c0516e3`: 31 kept travel steps, 19 classified re-anchors, three independent re-anchor controls.
-  Travel lacked stationary references; repeated return legs did not capture an admitted inward case. See "F1 second probe flight and diagnostic repairs" below.
-  Next: independent world/origin-reset evidence; no blind repeat flight. Probe log repairs BUILT, NOT FLOWN, no new key; VR's dropped 50 m+ translation remains open.
+- **10-16 F1 world-object probe, BUILT, NOT FLOWN:** final full build passed; passive admission-store records complement rig poses. Stationary provenance and F1 remain OPEN.
+  See "F1 passive world-object probe" below. Previous Steam `173557`: 31 kept travel steps, 19 classified re-anchors, three independent re-anchor controls.
+  No new key or classifier change. Next flight first qualifies world coverage and outward travel; no blind inward laps. VR's dropped 50 m+ translation remains open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -3364,6 +3364,109 @@ using a candidate for inward classification. This new census is not yet
 implemented. Existing F10 capture can save adjacent full resolver inputs,
 but this flight recorded none; there are no old pixels to replay. A packet
 containing only the tied optical samples would not add missing evidence.
+
+**2026-10-16: F1 passive world-object probe.** The admission-store observer is
+implemented; the final full build passed and it has not flown. Its purpose is
+to find independently useful world references, rather than infer a re-anchor
+from the ship-attached rig records in the previous flight. It does not change
+the re-anchor rule, camera translation, history resets, culling or backend
+output. There is no new config key. This remains temporary flat D3D11
+investigation code; it has no headset, VR-runtime or DLSS-version requirement.
+The installed test profile is Steam flat DLSS model M at 3840x2160. VR behavior
+remains outside this probe.
+
+The existing `FUN_144312040` admission-store detour retains its strict
+build-332841 PE identity and prologue pins. Flat temporal work can now request
+a separate passive consumer even when optimized stations are disabled or the
+ship is undocked. The original receives the same five arguments and its return
+passes through unchanged. The diagnostic reads after the original returns and
+before an optional station consumer. Flat-only observation cannot invoke
+station culling or write the admission fields. The relay passes directly to the
+original when neither consumer wants it. Installation is serialized on its rare
+path; a flat activation attempts installation once and prints its status,
+rather than retrying a failed allocation on every Present. Existing explicit
+station recomputation can still retry.
+
+| Possibility | New discriminating observations |
+|---|---|
+| Stationary world reference | Persistent admitted record, identified geometry/name, quiet center on normal edges and during real camera travel. A name or far distance alone is insufficient. |
+| Coordinate re-anchor | A calibrated stationary cohort shifts together on the event edge; neighboring edges remain quiet. Camera minus world shift retains physical travel. |
+| Ship-attached or moving record | Center follows camera or changes on neighboring edges. Camera-relative residual and near/far rows expose this without calling it a world reference. |
+| Different coordinate source | Pose, store-style and raw center alternatives disagree or change validity; their independent event-edge medians and raw pairs remain available. |
+| Producer phase, reuse or unavailable evidence | Six-frame window, both clocks, validator/metadata changes, source changes, explicit invalidity and coverage/failure counters expose the gap. |
+
+The guarded reader uses only offsets and math already established by
+`optimized_station.cpp::worldOfRecord`: record pose context, store-style local
+bounds and matrix, and raw center/radius. It also records node/name validator,
+full bounded name, collection owner, view mask and admitted byte. The
+station-private producer cache is not available to this reader and is never
+claimed as source 0. Primary source priority keeps the established behavior,
+including an unusable primary radius; a separately valid store or raw
+alternative still has independent validity. Zero/absent measurements cannot
+become a measured zero by default.
+
+Selection happens before all added game-memory reads. It deduplicates by
+record/frame, seeds the first 32 unique admissions in a small scene, then
+samples the remaining stream at 1/64. A hard cap permits at most 128 read
+attempts per frame. Claim lookup has four bounded probes; hash bits used for
+the tail sampler, collector slot and claim slot are separate. Cap-suppressed
+requests can make the logged request counter exceed 128, but cannot authorize
+additional reads. The fixed collector is eight frames by 256 slots with at most
+16 pending events. Short inward events retain a separate quota and four
+reserved pending slots; ordinary or repeated long re-anchors cannot spend that
+reserve. No per-store log or waiting lock runs in the observer.
+
+The owned Present publishes the core frame before opening the flat store gate.
+Store entry snapshots its frame before calling the original; an observation
+that crosses Present is rejected before added reads. The collector rechecks
+activation/frame after acquiring its nonblocking lock. Reports finish after +2
+has completed and contain -3 through +2 positions, five neighboring-edge
+medians, per-source alternatives, an intersection of far and pre-stable
+records, and weak-identity membership. Clock mismatch invalidates
+camera-relative interpretation even if raw native edges are printed. A reset or
+early resolver exit still registers an explicit event; missing callbacks and a
+refused hook produce coverage rather than a false successful measurement.
+
+Read the bounded summary first, verifying the build with the sanctioned reader:
+
+```text
+python tools\edvr_log.py --target steam --expect-build HEAD --grep "flat world witness:|flat world witness coverage:|store hook:" --tail 16
+```
+
+Then select one reported frame with `--grep "resolver-frame=N"` to inspect
+names, source-specific center/radius pairs, flags and all six raw positions.
+Separate bounded metadata lines preserve six-frame bucket pointers, full 64-bit
+view masks, selected radii, source validity and whether the collection-owner
+read succeeded. A zero owner after a failed read remains explicitly unknown.
+Require matching clocks and inspect weak identities, collisions, cap/claim
+suppression, stale observations and field-validity counts. The first
+activation's hook state can lag one Present; the subsequent hook-status-change
+line must show the real gate state. Owner diversity, `kOther`, radius, a common
+median and distance do not establish static-world provenance.
+
+Before another inward test, a short coverage flight must establish persistent,
+admitted world records, then compare a repeatable normal-space re-anchor
+control with outward fast travel. Qualify actual stationary geometry and source
+consistency; if the store sees only attached records or no useful world cohort,
+stop and use that result to choose another source. Repeating the previous
+inward laps is not the next test. Existing optical/rig probes continue
+alongside this census. No origin-reset flag has been discovered and F1 is not
+closed by adding the observer.
+
+Focused validation covers the actual guarded reader and post-forward dispatch,
+concurrent installation, sparse and hashed-tail sampling through collection,
+source alternatives with an invalid preferred radius, six-frame and clock
+behavior, independent quotas, weak identities, log bounds and no-write dry
+runs. The real WARP resolver path checks both a normal candidate and RAII
+early-exit reporting with an absent world cohort. A sampler-only scratch
+benchmark measured about 8 ns per call with one caller and 136-155 ns with
+eight callers on this machine; it excludes the game forward function and
+guarded field reads and does not establish game performance. The final full
+build passed all gates in 137.2 s: 169 pooled rigs plus six quiet jobs,
+production DLLs, installer resource checks and a matching receipt. Its log is
+`build/rc3-review/f1-world-probe-final-full-build.log`. The new standalone
+gates passed nine witness cases and 33 store checks; worst-case reports stay
+within 861 bytes per line.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.

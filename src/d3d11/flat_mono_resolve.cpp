@@ -22,6 +22,7 @@
 #include "flat_resolve_input_capture.h"
 #include "flat_projection_math.h"
 #include "flat_origin_witness.h"
+#include "flat_world_witness.h"
 #include "flat_origin_optical.h"
 #include "flat_compute_readback.h"
 
@@ -280,6 +281,7 @@ struct OpticalCandidate {
         if(candidate&&!claimed) {
             const char* why=reason&&*reason?*reason:"resolver-exited-before-probe";
             flatOriginWitnessUnavailable(frame.frame,frame.camera[5],frame.previousCamera[5],frame.deltaMs,why);
+            flatWorldWitnessUnavailable(frame.frame,frame.camera[5],frame.previousCamera[5],frame.deltaMs,why);
         }
     }
 };
@@ -1196,6 +1198,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(opticalCandidate.candidate) {
         opticalCandidate.claimed=true;
         flatOriginWitnessEvent(f.frame,f.camera[5],f.previousCamera[5],f.deltaMs,jumpKept,rebaseAbsorbed,reset);
+        flatWorldWitnessEvent(f.frame,f.camera[5],f.previousCamera[5],f.deltaMs,jumpKept,rebaseAbsorbed,reset);
     }
     stats.lastReset=reset;
     const bool engine=f.engine.slots && f.engine.pool && f.engine.sceneNow && f.engine.scenePrev;

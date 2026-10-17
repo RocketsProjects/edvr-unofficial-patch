@@ -44,6 +44,8 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "fss_res.h"
 #include "journal_watch.h"
 #include "optimized_station.h"   // fix.optimized_stations: the sealed-hangar station (install, the frame tick, the store and the sun skip)
+#include "store_hook.h"
+#include "flat_world_witness.h"
 #include "explorer_cam.h"   // explorerCamFrameBoundary (the frame tick) and explorerCamShutdown (the avatar dither-fade global goes back at an unload)
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
@@ -1554,7 +1556,14 @@ void presentFrameBoundary() {
     // Engine-record velocity's clock (the emit table's frame stamps and
     // the per-eye snapshots), the same exactly-once-per-owned-present tick.
     tkEngineVelocityClock.run([] {
-        engineVelocityNotePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
+        const uint32_t frame=static_cast<uint32_t>(g_state->frameCounter);
+        engineVelocityNotePresentFrame(frame);
+        // Publish the diagnostic clock before opening its post-store observer.
+        // This runs even when graphics work stands down, so no-event/refusal
+        // reports and pending six-frame samples cannot silently lose their tick.
+        const bool worldProbe=runtimeFlatProfile() && engineVelocityLiveNow() && !graphicsRuntimeDisabled();
+        flatWorldWitnessFrameBoundary(frame,worldProbe,storeHookReady(),storeHookFlatWorldProbeGateOpen());
+        storeHookSetFlatWorldProbe(worldProbe,frame);
     });
     // The scheduler stack probe's report tick, same call site and the
     // same one-atomic-load-when-off cost.
@@ -3244,6 +3253,8 @@ DeviceCreates deviceCreatesTake() {
 }
 
 void shutdownDeviceHooks() {
+    storeHookSetFlatWorldProbe(false,0);
+    flatWorldWitnessShutdown();
     flatTemporalStop();
     // FreeLibrary teardown can run under the loader lock on another thread.
     // Invalidate timing first, then let each owner release its queries without

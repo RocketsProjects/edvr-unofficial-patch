@@ -54,6 +54,7 @@ std::vector<std::string> firstPersonLines;
 std::vector<std::string> weaponFootprintLines;
 std::vector<std::string> rebaseLines,travelLines;   // "flat resolve origin rebase absorbed:" (the floating origin moved, history kept)
 std::vector<std::string> opticalLines;
+std::vector<std::string> worldLines;
 std::vector<std::string> resolveInputLines;
 uint32_t observedInW=0,observedInH=0,observedOutW=0,observedOutH=0;
 // What the stub backends were handed on the HDR route (section 81): the flag and the formats of the textures it names.
@@ -209,6 +210,7 @@ void Log::note(const char* fmt,...) {
     else if(std::strncmp(line,"flat resolve origin rebase absorbed:",36)==0)rebaseLines.emplace_back(line);
     else if(std::strncmp(line,"flat resolve fast-travel step kept:",35)==0)travelLines.emplace_back(line);
     else if(std::strncmp(line,"flat origin optical",19)==0)opticalLines.emplace_back(line);
+    else if(std::strncmp(line,"flat world witness",18)==0)worldLines.emplace_back(line);
     else if(std::strncmp(line,"flat weapon footprint:",22)==0)weaponFootprintLines.emplace_back(line);
     else if(std::strncmp(line,"flat resolve inputs:",20)==0)resolveInputLines.emplace_back(line);
 }

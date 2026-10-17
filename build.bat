@@ -3177,6 +3177,34 @@ if errorlevel 1 ( echo [edvr] ERROR: flat origin witness test build failed & exi
 "%OBJ%\flatoriginwitness\flat_origin_witness_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_flat_world_witness_test
+echo [edvr] === flat_world_witness_test.exe ===
+REM Passive admission-store world records: bounded reads, source provenance,
+REM six-frame identity/clock coverage and independent event quotas.
+if not exist "%OBJ%\flatworldwitness" mkdir "%OBJ%\flatworldwitness"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\flatworldwitness\\" /Fe"%OBJ%\flatworldwitness\flat_world_witness_test.exe" ^
+    "tools\flat_world_witness_test\flat_world_witness_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: flat world witness test build failed & exit /b 1 )
+"%OBJ%\flatworldwitness\flat_world_witness_test.exe" --dry-run || exit /b 1
+"%OBJ%\flatworldwitness\flat_world_witness_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_flat_world_store_test
+echo [edvr] === flat_world_store_test.exe ===
+REM The shipped guarded reader and post-forward dispatch: unreadable fields,
+REM source alternatives and flat-only observation never invoke station writes.
+if not exist "%OBJ%\flatworldstore" mkdir "%OBJ%\flatworldstore"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\flatworldstore\\" /Fe"%OBJ%\flatworldstore\flat_world_store_test.exe" ^
+    "tools\flat_world_store_test\flat_world_store_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: flat world store test build failed & exit /b 1 )
+"%OBJ%\flatworldstore\flat_world_store_test.exe" --dry-run || exit /b 1
+"%OBJ%\flatworldstore\flat_world_store_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_engine_motion_cpu_test
 echo [edvr] === engine_motion_cpu_test.exe ===
 REM Build gate for engine motion's CPU instrument (src\d3d11\engine_motion_cpu.h,
