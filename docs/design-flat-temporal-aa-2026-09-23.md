@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 operation-bound fix BUILT, NOT FLOWN:** shared engine-rounding
-  certificate; next: stationary Steam flat F7 validation. Temporary
-  `diag.flat_origin_capture = off`. Main held; F1/VR unqualified.
+- **10-17 F1 stationary PASS:** `942cfeb3` admits nonzero phases with
+  continuous history across F7; visual result pending. Temporary
+  `diag.flat_origin_capture = off`. Main held; travel/VR unqualified.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -5175,6 +5175,49 @@ stationary: DLSS for 30 seconds, F7 off for 10 seconds, F7 back on for 30
 seconds, menus closed and no manual Full. Keep the game running until the
 log/live checks finish. Main remains unmerged; AA, F1 travel and VR remain
 unqualified until their relevant validation.
+
+**2026-10-17 operation-derived bound: stationary Steam validation PASS.**
+
+Pinned log `edvr_gfx_20261017_142819.log` matches installed
+`v0.20.0-rc.2-130-g942cfeb3`, PE link 6AD3D9AB. The actual profile is Steam
+flat `/novr`, DLSS 310.9.1.0 at 3840x2160. The user completed the stationary
+hangar F7 comparison with menus closed. Origin probe remains absent/default
+off, main unmerged. Sol independently audited the sanctioned log output; no
+Astra tests or live memory read were needed.
+
+F7 turns AA off at 14:30:32.215 and restores configured DLSS at 14:30:42.339, a
+10.124-second interval. Before F7, the 14:30:09-29 windows already resolve
+449-450 nonzero phases each, with matching row pairs and zero
+skipped/mismatched pairs or accepted resets. After restoration, the first
+window includes the expected bootstrap: two zero-phase resolves, one skipped
+pair and one accepted reset. From 14:30:52 onward, stable windows again resolve
+nonzero phases with row pairs and zero accepted resets. At 14:32:07, the
+renderer has 9,435 calls, 9,432 accepted continuations and an unbroken
+6,502-frame continuation run. Cumulative accepted resets and lost-history
+remain three; frame-gap, invalid-previous-camera, format-change, camera-cut,
+backend-failure and origin-ambiguity resets are zero.
+
+At 14:32:24.751 the forward guard reports 10,868 qualified and CPU-issued
+donations. Phase, origin, view, issue and abandoned refusals remain zero. The
+automatic failure capture is live and awaiting its first phase refusal: 13,914
+primary entries, 10,868 eligible snapshots and zero phase failures. Existing
+startup ownership/overflow/unknown-depth refusals remain, and lineage checks
+continue to refuse other calls without blocking the selected route. No
+admission gate was bypassed. Completed row-resolve/backend/history counters
+provide evidence beyond the CPU-issued donation count.
+
+- Ruled out: the derived bound still produces the old zero-only resolve and
+  repeated rejection/reset loop in this stationary hangar, because nonzero
+  selected-row resolves and thousands of uninterrupted history continuations
+  now occur before and after F7.
+
+This qualifies stationary phase admission and history continuity for this Steam
+flat environment. The visible comparison is awaiting the user's report. It does
+not validate real inward travel versus re-anchor behavior or VR. No further
+stationary capture is needed for this arithmetic question. The user was
+explicitly released to quit normally after the log checks; no live read is
+pending. Keep the probe off and main unmerged while deciding the remaining
+validation.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
