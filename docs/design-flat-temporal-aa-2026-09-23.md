@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 parent/override capture BUILT, NOT CAPTURED:** extends the successful 387288ed Placed capture with guarded parent/override identities and full poses; no new key or motion/history correction. F1 OPEN.
-  See "passive Placed parent/override identity extension" below. Sol verified raw target checks and predicate; cache refresh/override execution, D adoption/epoch and selected GPU donor remain unproved.
-  Next: Steam flat `/novr`, docked/seated with menus closed for 30 s; inspect the build-matched added identity rows before ending the session. No travel needed. SC row 275 omits ship travel; VR's dropped 50 m+ translation remains open.
+- **10-17 F1 parent/override one-shot BLOCKED BEFORE ARM:** correct Steam flat b195d65d and parked Status; renderer image-copy-source refusals starve the post-admission scene callback. No parent/override record yet. F1 OPEN.
+  See "parent/override one-shot blocked before arming" below. Sol proved a guarded typed Root/MainView pool locator; live reader READY, 31 offline cases passed. The old process exited normally before object inspection. D/epoch/GPU claims remain unproved.
+  Next: relaunch Steam flat into the docked cockpit, rediscover PID/base, read the guarded candidate while the game stays open. No travel/install needed; automatic gate still needs repair. SC row 275 omits ship travel; VR's dropped 50 m+ translation remains open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4110,6 +4110,69 @@ and no UI test or production change was made for it.
 
 The clean commit's DLL promotion and installed-file hash verification are
 required before handing over the capture. F1 remains OPEN.
+
+**2026-10-17, 09:02: parent/override one-shot blocked before arming.** Steam
+log `edvr_gfx_20261017_090022.log` matches clean installed
+`v0.20.0-rc.2-113-gb195d65d`, flat `/novr`. The user docked and waited with
+menus closed. There are no arming, capture or Placed-detail records. At
+09:02:48 the waiting line has watcher/gameplay true, advancing Status sample
+1335, docked/seated known true, GuiFocus known zero, but `fresh=1` and
+`qualified-scene-consecutive=1`. The treatment counter is stuck at 10445 while
+`image-copy-source` conflicts reject approximately 1300 draws per five seconds.
+
+Ruled out: a stale DLL or missing parked Status caused this failed arm, because
+the build matches and the raw docked/seated/GuiFocus checks pass. The cause is
+the instrument's treatment-admission dependency: both
+`flatStationaryCameraSelected` calls are after admission, and only that
+callback steps `ParkGate`. The copy path can exit at `flat_runtime.cpp:6269`,
+and the HDR refusal never enters `treatHdr`. Fresh Status polls printed by
+Present do not advance the gate; its reason and counters are stale scene
+observations. Waiting longer cannot supply the missing callback in this
+refused-rendering regime. The renderer conflict itself is a separate issue.
+
+The logged image-copy witnesses have format 9/PS `FCFAD73924BF45B9` and format
+26/PS `DFCBA0EC70B03C9B`, both with no camera. They cannot establish an actual
+camera mismatch or a selected row-275 donor. A future passive scene-candidate
+observation before treatment admission must independently retain current
+camera, menu, depth and ambiguity checks; merely moving a callback or ignoring
+`hdrBad` would not prove that those checks hold in this run. No rendering
+policy or motion correction is changed here.
+
+**Guarded live inspection to avoid another launch.** Sol traced the exact
+RootCameraStack pool from constructor `+0x10855E0`: allocator at executable
+`+0x5F51BF0`, reserved pages at pool+0x30 and ordinary pages at pool+0x40. Both
+chains must be considered. A read-only metadata observation in PID 45044
+(executable base `0x7FF719020000`) found one reserved single-segment page at
+`0x22EBD648000`, total 0x2B00 bytes, 20 slots of stride 0x220 after its
+0x80-byte header, and no ordinary pages. Pool vtable, initialized flag, stride
+and page heads were stable on reread.
+
+The next bounded reader excludes free-list slots, checks Root's three exact
+vtables before names or child pointers, requires a unique MainView name,
+validates all eleven child vtables/backpointers/predecessor links, then follows
+only the known nested/Placed layouts. Pool, page, free-list, Root and Placed
+identities must be reread; changed graphs are partial/refused. This is typed
+pool enumeration, not a heap scan. It uses read-only process access without
+game calls, thread suspension, hooks, refcount operations or writes. A unique
+guarded allocation is still a typed MainView candidate, not an observed
+renderer selection or D/GPU epoch. The process exited normally before object
+inspection; only the pool headers were read. No parent/override identities were
+recovered from that process.
+
+The ignored research reader
+`analysis/decomp/f1_origin_20261017/live_placed_identity_snapshot.py` and its
+test companion are ready. Both Sol review and the root offline run passed all
+31 fake-memory cases, including both page chains, free/page cycles,
+type-before-payload checks, multiple MainViews, signed target-state boundaries,
+null/unknown predicates, changed graphs, nested associations and pose
+drift/readability. It validates the remote PE pin and uses only VM_READ plus
+QUERY_LIMITED_INFORMATION; it emits JSON to stdout. No live object read has yet
+been performed. A new session requires fresh process/module discovery and fresh
+pool metadata; none of PID 45044's object/page/base addresses can be reused.
+
+F1 remains OPEN. No additional flight is requested; inspect the current live
+candidate first, and correct the capture gate separately before relying on
+another automatic one-shot.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
