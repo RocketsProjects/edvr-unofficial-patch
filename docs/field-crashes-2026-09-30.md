@@ -16,19 +16,28 @@ block first.
   asks are in that entry below; no result reported yet.
 - **State (2026-10-17, anonymous reporter):** separate OpenXR/SteamVR
   report on v0.20.0-rc.2, RTX 4080 SUPER 16 GB, 144 Hz, per-eye input
-  1622², output 3244², UI 4055² at quality 125; `fix.temporal_aa=dlss`, model K,
+  1622², output 3244², UI 4055² at quality 125 in the first flight;
+  `fix.temporal_aa=dlss`, model K,
   optimized stations and witchspace stars on, panel curvature 0.2. Driver,
   Windows build and DLSS DLL version unknown. At 11:29:15.331 the game got
   `DEVICE_REMOVED` (`0x887A0005`) and removal reason `DEVICE_HUNG`
   (`0x887A0006`); game fatal-handler breadcrumb followed. Evidence and
   limits are in the dated entry. No C++ fix is supported.
+- **Second flight (2026-10-17):** same release and DLSS, with only
+  `fix.ui_quality` reduced from 125 to 100 (UI layer 3244²). Near a planet,
+  Elite likely reached the same fatal HRESULT path at about 11:45:36.075 local.
+  Raw stack values suggest device loss, but this run has no refused-create
+  line or removal reason: `DEVICE_HUNG` is unconfirmed. Planet patch motion
+  was gated off in completed windows through 11:45:32; the final seconds
+  are unreported. The short sentinel-recovery launch is not a control.
 - **Next for 2026-10-17:** request driver, Windows build, DLSS DLL version,
-  and Event Viewer/Reliability Monitor evidence around 15:29:15 UTC (the
-  reporter's 11:29:15 local). First discriminating test: same release DLLs,
-  resolution, HMD/UI quality and other settings, but `fix.temporal_aa=fsr`.
+  and Event Viewer/Reliability Monitor evidence around 15:29:15 and
+  15:45:36 UTC. First discriminating test: same release DLLs, route,
+  resolution, HMD quality and UI quality 100; switch only
+  `fix.temporal_aa=fsr`.
   Count it as valid only with `temporal aa: fsr 3.1.2 engaged` and the
-  1622²→3244² sizing in the log. A repeat `DEVICE_HUNG` means NGX is not
-  necessary; a clean leg is weak evidence for NGX involvement.
+  1622²→3244² sizing in the log. A repeat of the fatal path with FSR
+  weakens NGX as a necessary cause; one clean leg weakly supports NGX.
 - **Next for 2026-09-30:** request the listed OS/driver and event evidence,
   then follow the floor and staged FSR/DLSS/UI tests below.
 
@@ -218,3 +227,62 @@ and Event Viewer Display/nvlddmkm plus Reliability Monitor LiveKernelEvent
 141/117 at 17 October 11:29:15 local (15:29:15 UTC). The new star fix
 `fd84c7ac` is not a crash fix; launch fixes in `769c1a7f` have an unrelated
 signature.
+
+## 2026-10-17, anonymous reporter: second flight near a planet
+
+Archive `edvr-logs-20261017-114758.zip` is extracted at
+`analysis/planet-crash-2026-10-17-114758`. The flight is graphics log
+`edvr_gfx_20261017_113449.log` with runtime log
+`edvr_openxr_20261017_113452_273_26788.log`. It used the same original
+v0.20.0-rc.2 DLL (PE `6AD165AB`), RTX 4080 SUPER, SteamVR at 144 Hz,
+1622² per-eye input and 3244² output. The only ini change from the first
+bundle was `fix.ui_quality=125` to `100`: the reported UI layer was
+3244² rather than 4055². DLSS preset K remained active; the 11:45:28.640
+price report gives full-frame NGX a 3.74 ms median per stereo pair across
+600 pairs.
+Last reported local VRAM was 7238/15279 MB (47.4%) at 11:45:26.005.
+
+The final breadcrumb, tick 91249218, records `C0000005` writing zero in
+Elite's `+0x34C9322` fatal handler. Proper unwind begins at game offsets
+`+0x48C1CF0`, `+0x489F868`, `+0x5216CC`, then `+0x50F3F9`, `+0x51ECD8`,
+`+0x5928C4`, `+0x200DC2`. The first three unwind frames match the prior flight's
+fatal HRESULT path. Two raw-stack words are `0x887A0005`
+(`DEVICE_REMOVED`) and one is `0x887A0001` (`INVALID_CALL`) in the same
+layout as that flight. Raw stack is circumstantial: this is probably the
+same device-loss/fatal-HRESULT class, but the whole graphics log has no
+`D3D11 REFUSED` line or removal-reason query. The game-device create hooks
+log only intercepted failed creates on the captured device, at most 12
+per session (`device_hook.cpp:901-903,1053-1084,2671-2688`). Absence of
+that line cannot prove the device stayed healthy. In this run, specifically,
+`DEVICE_HUNG` is unknown, as is the failing GPU command.
+
+Anchoring breadcrumb tick 90602640 to the first graphics log line at
+11:34:49.497 places the crash at about 11:45:36.075 local (±20 ms).
+The last luma-probe line reporting DLSS output was 11:45:36.061;
+these readings do not mark the GPU's last progress.
+The runtime's `compositor_unavailable,slot=7` at 15:45:36.083 UTC says
+`PostPresentHandoff` failed, with several possible unavailable-state
+paths (`openvr_compositor.cpp:154-159`, `native_runtime_host.h:1871-1904`);
+it is not a device-removal reason. The last graphics line, 11:45:36.794,
+samples `dbgcore.DLL` during Elite's dump writing, about 719 ms after
+the estimated crash. Its `d3d11.dll` frame is in the exception-filter
+chain (`proxy.cpp:352-374`), not evidence of the initiating render call.
+
+The completed five-second planet patch-motion windows through
+11:45:32.364 were all gated off because Status did not say supercruise:
+no patch capture, records or temporal decision-path-12 pixels in those
+windows (`celestial_motion.cpp:465-470`). The 11:45:20 GPU census also
+prints `planet -`. The final roughly 3.7 seconds have no completed
+five-second report, and these lines say nothing about other planet fixes.
+The reporter described the scene as near a planet; that does not identify
+an active planet-motion pass or a crash cause.
+
+The earlier short graphics log, `edvr_gfx_20261017_113352.log`, says
+`SENTINEL TRIPPED` and disables graphics fixes for that launch. Its runtime
+reports `graphics_unavailable=80004002` and a clean module shutdown; the
+graphics breadcrumb records process exit at tick 90563406. It is neither
+a second crash nor an EDVR-free or FSR control. Reducing UI quality to
+100 did not prevent the fatal path, but FSR has still not been tested.
+Keep UI quality 100 for the next single-change FSR flight described in
+Status. NGX-specific failure, common EDVR motion/UI GPU work, and a
+game/driver/runtime interaction remain open; no C++ fix is supported.
