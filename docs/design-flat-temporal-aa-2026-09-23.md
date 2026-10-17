@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 stationary PASS:** `942cfeb3` admits nonzero phases with
-  continuous history across F7; edges steadier with DLSS. Temporary
-  `diag.flat_origin_capture = off`. Main held; travel/VR unqualified.
+- **10-17 F1 flat PASS:** `942cfeb3`; steadier stationary edges and seven
+  normal-space ambiguity resets with clean history recovery. Temporary
+  `diag.flat_origin_capture = off`. Exact re-anchor/VR separate.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -5235,6 +5235,64 @@ At 550 m/s and 90 fps normal travel is about 6.1 m/frame, so it is not a true
 greater-than-50-m/frame travel control. Do not force a low frame rate. The
 synthetic signed inward-travel defect remains covered by the GPU fixtures;
 physical event classification and VR remain unqualified. Main stays held.
+
+**2026-10-17 conservative flat F1 reset/recovery validation PASS; merge
+authorized.**
+
+The user completed the normal-space 20 km departure and return to 5 km in the
+same Steam flat session, with DLSS on and the origin probe off. Pinned log
+`edvr_gfx_20261017_142819.log` still matches installed `942cfeb3` /
+`v0.20.0-rc.2-130-g942cfeb3`, `/novr`, DLSS 310.9.1.0, 3840x2160. The user
+reports no obvious smearing, sudden jumps or prolonged blur and then explicitly
+authorizes merging this fix to main. Sol independently audited the events and
+their surrounding selected-route windows. No new build, instrumentation or live
+memory read was required for this result.
+
+Seven events at 14:39:07.682, 14:39:16.740, 14:39:25.638, 14:39:36.530,
+14:40:09.920, 14:40:18.909 and 14:40:29.455 log `flat resolve origin ambiguity
+reset`. Camera steps are 4993.926-4998.983 m, with row deltas
+0.000158-0.001745. Origin length falls from 5017-5022 m to 21-25 m. Each event
+adds exactly one to accepted-reset and origin-ambiguity-reset totals; the
+latter runs from zero to seven. Immediate post-event continuation runs are 43,
+128, 227, 147, 291, 382 and 331, growing to 492, 578, 677, 565, 741, 831 and
+774 in the next windows. Enclosing HDR windows fully select, admit, finish the
+backend and restore all 450, 450, 447, 450, 444, 450 and 448 frames
+respectively, with zero declines. Nonzero row resolves retain matching pairs
+and zero skipped/mismatched pairs throughout the measured legs. This
+establishes treatment across the jumps, beyond CPU-issued donations.
+
+At 14:40:58.162, calls are 53,915, accepted continuations 53,808, accepted
+resets 107, origin-ambiguity resets seven, and the final continuation run
+2,499. Backend failure, frame gaps, invalid previous camera and format changes
+remain zero. Phase failures remain zero. The caller's `accepted-reset-5s` field
+is not the final internal reset decision: use the explicit event and renderer
+cumulative counters for ambiguity resets. The selected route may use the older
+anchor outside the hangar; this is not a claim that every jump uses the newly
+admitted forward-light donor.
+
+The 99 requested-reset and lost-history totals predate the measured jumps and
+stay at 99 throughout them; these overlapping counters are not additional F1
+events. Earlier at 14:33, a transient observation-truncation burst coincides
+with requested/lost-history churn, then recovers by 14:33:57. Its underlying
+cause remains unclassified and is a separate coverage/performance caveat. The
+existing camera-cut policy adds one distinct reset at 14:38:45.650, with row
+delta 1.084, before the seven measured ambiguity events. Do not label all 107
+resets as F1 or dismiss the earlier burst as a menu transition.
+
+- Ruled out: the conservative F1 ambiguity reset produces sustained history
+  loss at the measured normal-space origin jumps, because each of seven
+  isolated resets is followed immediately by growing nonzero-phase history,
+  with no visual problem reported.
+
+This validates the conservative flat fix's normal-space reset/recovery
+behavior. Continued history retains the actual camera translation, while
+ambiguous jumps reset rather than erase it. The greater-than-50-m/frame
+physical inward-travel counterexample remains covered by the automated GPU
+fixtures; this 550 m/s flight does not exercise that physical regime. Exact
+history-preserving re-anchor classification and VR reset propagation remain
+separate, unqualified work. The user was explicitly released to quit normally
+after log checks. Preserve `diag.flat_origin_capture` absent/default off. The
+previous main hold is revoked by the user's merge instruction.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
