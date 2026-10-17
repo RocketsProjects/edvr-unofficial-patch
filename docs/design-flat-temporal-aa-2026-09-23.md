@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 temporary stationary capture BUILT, NOT CAPTURED:** automatic renderer-source pipeline snapshot for Steam flat; no new config key or motion/history correction. F1 OPEN.
-  See "passive stationary-cockpit pipeline capture" below. Sol verified the entry/stack layouts; source helper is stack-local. Selected GPU donor and producer/frame epoch remain unproved. SC row 275 omits ship travel.
-  Next: Steam flat `/novr`, docked and seated, close menus to the cockpit for 30 s; inspect the capture and target Sol RE at the actual producer. No test takeoff/SC/SCO lap. VR's dropped 50 m+ translation remains open.
+- **10-17 F1 temporary stationary capture SUCCEEDED, F1 OPEN:** Steam flat 387288ed, one complete MainView/Location pipeline, no overflow or unknown state/weight getters. No new key or motion/history correction.
+  See "stationary capture identifies Location/Placed" below. First observed nonzero-origin supplier is Placed (concrete vtable +5189E38), followed by Inertial/HeadLook/local effects. Selected GPU donor and producer/frame epoch remain unproved.
+  Next: resolve Placed's actual parent provider and optional post-seed override, then D/adoption/GPU ordering; Sol traced the initial writer. No further flight requested. SC row 275 omits ship travel; VR's dropped 50 m+ translation remains open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -3961,6 +3961,84 @@ non-inherited pose producer with Sol. Stationary identity evidence cannot
 validate a shift that never occurred; producer completion versus emitted
 D/copy/upload still needs a proved ordering path or later guarded event
 observation. F1 remains OPEN.
+
+**2026-10-17, 08:20: stationary capture identifies Location/Placed.** Steam
+graphics log `edvr_gfx_20261017_081626.log` matches the clean installed
+`v0.20.0-rc.2-111-g387288ed`, flat `/novr`. At 08:20:22.609 the capture armed
+after 30 consecutive qualified scene frames and two fresh Status samples. At
+08:20:22.633 it reported `captured`, arm/selected frame 103311, report frame
+103312, `refusal=none`: one renderer call, one validated/consistent/complete
+source, one `MainView` root, 193 refresh calls covering two camera addresses,
+and 31/1024 detail rows. Source/refresh overflow and unknown state/weight
+getters were all zero. All 22 reported stages were readable. The capture is
+complete for its source-topology contract; F1 is still OPEN.
+
+The renderer caller is the expected `+0x281ACD9`. Source-before, source-after
+and the stack-local helper copy agree. Following the predecessor chain back
+through the nested `Location` pipeline reaches `Placed`: interface vtable
+`+0x5189EA8`, concrete vtable `+0x5189E38`, getter `+0x5293E0` (state at
+interface+0x10), weight one. Its mode-one stage supplies the first observed
+nonzero origin, `(-2.036564, 333.5496, 329.6747)`, from an inherited zero
+origin. Independent Sol review confirms that `+0x106F8E0` copies the sole
+positive-weight activity state via `+0x1066D80` before checking blend mode;
+mode one does not weaken that origin-supplier conclusion. The downstream active
+stages are `Inertial`, `HeadLook`, then `Shake` and `LocationOffset`, before
+`Location` feeds `MainView`. The captured output is `(-2.036568, 333.5497,
+329.6747)`.
+
+The selected GPU row 275 is `(-2.03656912, 333.549744, 329.674713)`. The first
+refresh camera is numerically close at the printed precision; the second is at
+`(20.13926, 417.3198, 515.5125)`. Matching numbers do not establish pointer
+identity, the selected GPU donor, a copy/upload ordering edge, or epoch
+adoption. The log explicitly leaves those joins UNPROVED. `consistent=1` checks
+the source/helper origin copies and topology guards; it does not make all
+sampled stage poses atomic or prove their producer-completion epoch. The
+printed origin and axis0 do not describe the complete matrix. No frame shift is
+established by this capture, so it cannot test real inward motion versus a
+re-anchor or validate the proposed affine correction.
+
+Ruled out: no active nonzero-origin source is reachable in this captured
+`MainView` chain, because `Location/Placed` supplies the nonzero world origin
+before the later local effects. No further flight is needed to identify that
+producer. The one-shot is already drained; the game may be closed.
+
+**Post-capture Sol RE: Placed's initial pose and unresolved final writer.** The
+constructor `+0x1083900` installs the observed vtables. Let `A` be the concrete
+Placed object (captured interface minus 0x20); its state begins at `A+0x30`,
+pose at `A+0x70`, and origin at `A+0xA0`. Activation `+0x109BFC0` registers
+task handle `A+0x150` against descriptor `+0x5F53C18`. The descriptor's wrapper
+`+0x10303D0` calls update `+0x1075FF0`. This task descriptor is separate from
+the previously traced frame-shift token `+0x5F41DE4`; the examined
+constructor/activation paths do not install that direct listener.
+
+Update refreshes target record `E=[A+0x1E8]` through `+0x3894B60`. That refresh
+computes cached world pose `E+0x60 = local(E+0x20) * parentPose`, with the
+parent obtained through `[E+0x10].vslot0x20` at `+0x3894BF6`. Placed then
+copies the seed into its pose at stores `+0x1076670..+0x1076684`. Target
+initializers `+0x38920A0` and `+0x3892710` resolve this parent interface from
+token `+0x5F02CFC`; the latter also computes local pose as world pose times
+inverse parent. Eight candidate provider vtables exist offline. The capture did
+not record the actual parent pointer/vtable, so none can be selected merely
+from its proximity to the known notification emitter.
+
+There is also a later possible writer. If `int32[A+0x188]==-1`,
+`[A+0x190]!=null`, `int32[[A+0x10]+0x14]!=0`, and the target reference is
+valid, call `+0x10768E5` invokes `[A+0x190].vslot0x70(A+0x30)`, allowing the
+entire state to change after the seed copy. That component's concrete identity
+and whether this branch ran were not captured. Thus the final Placed state is
+the observed downstream origin supplier; equality to `E+0x60` is unproved.
+
+If the actual parent adopts the already traced old-to-new conversion D,
+unchanged local pose gives `L * (P * D) = (L * P) * D`. This supports the
+conditional affine-correction design, but parent physical motion also changes
+P: its pose delta cannot itself identify a re-anchor. The missing evidence is
+the actual parent and optional override identities, their relation to emitted
+D, completion/epoch ordering, and the selected GPU donor/write generation. No
+C++ correction is justified by the current evidence, and no additional flight
+is requested. The next missing observation is those exact parent and override
+identities and branch state. More static candidate annotations cannot select
+the actual runtime provider, and a travel lap would not supply the unrecorded
+fields.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
