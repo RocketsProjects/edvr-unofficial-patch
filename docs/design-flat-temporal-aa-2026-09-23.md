@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-16 F1 world-object probe, BUILT, NOT FLOWN:** final full build passed; passive admission-store records complement rig poses. Stationary provenance and F1 remain OPEN.
-  See "F1 passive world-object probe" below. Previous Steam `173557`: 31 kept travel steps, 19 classified re-anchors, three independent re-anchor controls.
-  No new key or classifier change. Next flight first qualifies world coverage and outward travel; no blind inward laps. VR's dropped 50 m+ translation remains open.
+- **10-17 F1 world-object probe, FLOWN coverage:** Steam `055636`, `f184ae95`: two normal-space re-anchor controls and one transition reset; no qualifying real-travel event despite reported multiple-c SC. F1 remains OPEN.
+  See "F1 station departure and outward-supercruise coverage flight" below. `DockPin1` crosses one re-anchor; stationary provenance is not independently established.
+  No new key or classifier change. Stop repeated laps; inspect SC camera/source mapping before another flight. VR's dropped 50 m+ translation remains open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -3467,6 +3467,59 @@ production DLLs, installer resource checks and a matching receipt. Its log is
 `build/rc3-review/f1-world-probe-final-full-build.log`. The new standalone
 gates passed nine witness cases and 33 store checks; worst-case reports stay
 within 861 bytes per line.
+
+**2026-10-17: F1 station departure and outward-supercruise coverage flight.**
+Steam `edvr_gfx_20261017_055636.log` matches clean `f184ae95`, flat via
+`/novr`, DLSS at 3840x2160. Sean held near the station, boosted away in normal
+space, then flew outward in supercruise for about a minute, reporting multiple
+c. The earlier Frontier/VR launch on `208ea3e8` is excluded as the wrong build.
+
+The store hook and flat gate ran. Through engine frame 78058 there were three
+completed events, zero dropped events, zero read failures, zero cap/claim
+suppression and no frame mismatch. Lock skips and collector collisions remain
+visible; this is a bounded, partial sample, not a census of every object. The
+events have matching resolver/native clocks:
+
+- Frame 49616: normal-space re-anchor rule, 4999.40 m camera step, 16 ms,
+  history kept. World median shift is (-3225.581, -3712.312, 927.850) m;
+  pose/store/raw alternatives all see the large coordinate change. There is no
+  pre-stable far intersection at this event. Camera minus world-median shift is
+  (2.017, 5.040, -1.138) m, about 5.55 m. Interpreting that as physical travel
+  requires the world-reference assumption; it is not measured ship speed.
+- Frame 50576: normal-space re-anchor rule, 4996.91 m camera step, 15 ms,
+  history kept. Two pre-stable far records exist before the event; one survives
+  its crossing edge. `DockPin1` has the same record/node/owner/validator across
+  all six offsets (`present=3F`), source 2, validity FA, admitted 1, constant
+  6.87016582 m selected radius, valid owner reads and view mask 0x300000002.
+  There is no source or metadata change. Its store center shifts (87.199,
+  -4754.488, 1552.316) m; neighboring edges move less than 0.05 m. Camera minus
+  that shift is (-0.381, 5.034, -1.740) m, norm 5.34 m. This supports a large
+  coordinate change with small relative camera travel. Only its store sphere is
+  valid (`source-valid=02`); pose/raw are absent. Its name, stable identity and
+  quiet neighboring edges do not independently establish stationary-world
+  provenance. The conditional relative speed is about 356 m/s if that reference
+  is stationary, not SC telemetry.
+- Frame 51142: rotated camera cut, 47 ms, history reset. World observations
+  fall from 57 on the preceding frame to 9 at the event; no matching world
+  crossing edge survives. `DockPin1` is present only before this transition.
+  This transition cannot discriminate origin shift from real travel.
+
+`Platform` offers store/raw pairs in the two normal-space events, but is not
+pre-stable; neither its moving centers nor agreement between those source
+fields certifies static geometry. Different shift vectors at successive
+re-anchors are expected and are not evidence against a coordinate change. The
+two normal-space controls corroborate that the new hook supplies useful object
+motion around re-anchors; they do not resolve real inward travel.
+
+- Ruled out: treating this multiple-c outward SC leg as a qualifying real >50
+  m-per-frame camera-travel control, because through frame 78058 the only three
+  candidates are the two normal-space re-anchors and the transition reset;
+  there are no kept fast-travel events or real inward candidates.
+- Open: how SC physical motion maps into this selected camera's translation,
+  and how to establish a stationary reference independently of a record name or
+  owner. No evidence here shows that more SC speed or SCO would produce the
+  missing discriminator. Stop repeated laps; choose the next control from the
+  camera/source path before another flight. No classifier change.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
