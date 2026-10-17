@@ -28,6 +28,7 @@
 #include "flat_light_payload_capture_tests.h"
 #include "flat_forward_light_tests.h"
 #include "flat_forward_light_integration_tests.h"
+#include "flat_phase_failure_capture_tests.h"
 #include "flat_negotiated_eval_tests.h"
 #include "flat_standdown_tests.h"
 #include "flat_elite_settings_tests.h"
@@ -3959,6 +3960,7 @@ int main(int argc, char** argv) {
     failures += light_payload_test::run();
     failures += forward_light_test::run();
     failures += forward_light_integration_test::run();
+    failures += flatPhaseFailureCaptureTests();
     {
         const auto readLightSource = [](const char* path) {
             std::ifstream in(path, std::ios::binary);

@@ -105,6 +105,19 @@ inline unsigned run() {
         adapter.find("target.hdrBad=true;target.hdrCamera=false")!=std::string::npos&&
         adapter.find("forwardRevoke(s,0,forward_light::Reason::Ownership)")!=std::string::npos&&
         runtime.find("if(forwardIssue.donated)forwardAttest(s,forwardIssue)")!=std::string::npos,"typed H dependencies revoke without waiting for another light");
+    const auto phaseRuntime=read("src/d3d11/flat_phase_failure_runtime.inl");
+    const auto observation=adapter.find("forwardPhaseObserve(s,d,*domain,*publication,constants,phase,reason)");
+    expect(observation!=std::string::npos&&observation<adapter.find("if(reason!=Reason::None)return refuse(reason);",observation),"first phase failure bytes snapshotted before refusal mutates state");
+    expect(adapter.find("forwardReset(s,s.prefix.frame,f.ownerKnown&&f.upstream!=upstream)")!=std::string::npos&&
+        adapter.find("if(captureLifecycle)forwardPhaseLifecycle(s)")!=std::string::npos,"normal frame reset preserves process capture while real ownership/lifecycle invalidates cohorts");
+    expect(runtime.find("forwardPhaseSelected(s,selected);",runtime.find("if (!flatMonoResolve("))!=std::string::npos&&
+        phaseRuntime.find("phase_failure::selectedCohort(capture.lastSelection,r)")!=std::string::npos&&
+        phaseRuntime.find("domain.source.buffer!=reinterpret_cast<uintptr_t>(selected.sceneConstants)")!=std::string::npos,"successful selected source cohort gates one-pair capture");
+    expect(phaseRuntime.find("copyConstants(")==std::string::npos&&phaseRuntime.find("->Map(")==std::string::npos&&
+        phaseRuntime.find("projectionFrames")==std::string::npos&&phaseRuntime.find("flatOriginCapture")==std::string::npos,"phase receipt only copies previously qualified bytes without GPU reads or capture flags");
+    const auto phaseEmission=phaseRuntime.find("void forwardPhaseReport(");
+    expect(phaseEmission!=std::string::npos&&phaseRuntime.find("flat phase receipt COMPLETE:",phaseEmission)<phaseRuntime.find("c.emitted=true",phaseEmission)&&
+        phaseRuntime.find("c.emitted=true;forwardPhaseRelease(s)",phaseEmission)!=std::string::npos,"receipt completion follows every metadata/payload record and releases retained objects");
     std::printf("forward light integration: %u checks, %u failed\n",checks,failures);return failures;
 }
 }

@@ -1,6 +1,7 @@
 // Production flat-only exact-light adapter; independent of every diagnostic arm.
 // Existing owner-context observers only. No GPU reads, game calls or bindings.
 void forwardRefusal(State&,forward_light::Reason,const void* =nullptr);
+void forwardPhaseLifecycle(State&);
 void forwardRevoke(State& s,uint64_t resource,forward_light::Reason reason) {
     for(auto& a:s.forwardLight.authority)if(a.affected(s.prefix.frame,resource)) {
         a.live=false;
@@ -15,14 +16,17 @@ void forwardMutation(State& s,uint64_t resource,bool forgetSources=true) {
     s.forwardLight.ledger.mutation(resource,forgetSources);
     forwardRevoke(s,resource,forward_light::Reason::MutatedProducer);
 }
-void forwardReset(State& s,uint64_t frame=0) {
+void forwardReset(State& s,uint64_t frame=0,bool captureLifecycle=true) {
+    if(captureLifecycle)forwardPhaseLifecycle(s);
     auto& f=s.forwardLight;forwardRevoke(s,0,forward_light::Reason::Ownership);f.ledger.reset(frame);
+    for(auto& observed:f.phaseObservedDonor)observed={};
     for(auto& a:f.authority)a={};for(auto& h:f.authorityHdr)h.Reset();
     for(auto& h:f.domainHolds)h={};for(auto& h:f.publicationHolds)h={};
 }
 void forwardFrame(State& s) {
     auto& f=s.forwardLight;const bool upstream=flatCameraInjectUpstreamOwns();
-    if(f.ledger.frame!=s.prefix.frame||!f.ownerKnown||f.upstream!=upstream)forwardReset(s,s.prefix.frame);
+    if(f.ledger.frame!=s.prefix.frame||!f.ownerKnown||f.upstream!=upstream)forwardReset(s,s.prefix.frame,f.ownerKnown&&f.upstream!=upstream);
+    f.phaseReceipt.phase(s.prefix.frame,s.phase.currentX,s.phase.currentY,s.phaseWidth,s.phaseHeight);
     f.ownerKnown=true;f.upstream=upstream;
 }
 forward_light::Surface forwardTexture(ID3D11Resource* resource,unsigned mip,unsigned slice,unsigned slices) {
@@ -82,6 +86,7 @@ forward_light::Reason forwardConstants(State& s,unsigned stage,unsigned required
     out.id={reinterpret_cast<uintptr_t>(cb.Get()),before.generation,before.mutationSerial,before.writeGeneration,
         before.bankEpoch,before.writeFrame,first,count,desc.ByteWidth,before.writeSequence,required,hash};return Reason::None;
 }
+#include "flat_phase_failure_runtime.inl"
 void forwardRefusal(State& s,forward_light::Reason why,const void* h) {
     auto& f=s.forwardLight;f.last=why;++f.refused;++f.reasons[static_cast<unsigned>(why)];
     bool owned=h&&s.phaseHdr.Get()==h;
@@ -117,7 +122,8 @@ forward_light::Issue forwardObserveDomain(State& s,const FlatRuntimeDraw& d) {
             issue.raw=raw;issue.vs=k.vs;issue.ps=k.ps;issue.depthWrite=writes;
             issue.phaseX=s.phase.currentX;issue.phaseY=s.phase.currentY;std::memcpy(issue.camera,d.camera,96);
             issue.constants[0]={cb.buffer,cb.before.generation,cb.before.mutation,cb.before.writeGeneration,cb.before.bank,
-                cb.before.writeFrame,cb.first,cb.count,cb.width,cb.before.writeQ,96,static_cast<uint32_t>(flatCameraHash(cb.payload))};}
+                cb.before.writeFrame,cb.first,cb.count,cb.width,cb.before.writeQ,96,static_cast<uint32_t>(flatCameraHash(cb.payload))};
+            if(!f.phaseReceipt.frozen)f.phaseObservedDonor[index]=issue.constants[0];}
     }
     if(auto* domain=f.ledger.domain(raw))if(domain->failure!=Reason::None)forwardRevoke(s,raw.resource,domain->failure);
     if(f.ledger.overflow)forwardRevoke(s,0,Reason::Overflow);
@@ -199,6 +205,7 @@ unsigned forwardConsumer(uint64_t vs,uint64_t ps) {
 forward_light::Issue forwardQualify(State& s,FlatRuntimeDraw& d) {
     using namespace forward_light;Issue issue;auto& f=s.forwardLight;auto& k=d.key;const auto consumer=forwardConsumer(k.vs,k.ps);
     if(!consumer||k.format!=26)return issue;++f.checks;
+    if(consumer==1)f.phaseReceipt.note(flatCameraInjectUpstreamOwns());
     bool first=true,typed=false;for(unsigned i=0;i<s.prefix.targetsUsed;++i)if(s.prefix.targets[i].resource==k.color){first=!s.prefix.targets[i].writes.draws;typed=s.prefix.targets[i].tone.forwardLightCamera;}
     if((!first&&!typed)||(consumer!=1&&!typed))return issue; // old inverse/ordinary H untouched; later recipes cannot establish camera
     const auto refuse=[&](Reason r){forwardRefusal(s,r,k.color);return Issue{};};
@@ -233,7 +240,10 @@ forward_light::Issue forwardQualify(State& s,FlatRuntimeDraw& d) {
     if(std::memcmp(constants[0].bytes+2*16,constants[1].bytes+2*16,3*16)||
        std::memcmp(constants[0].bytes+10*16,constants[1].bytes+10*16,4*16))return refuse(Reason::OriginalChanged);
     FlatProjectionJitter phase;if(!flatProjectionJitter(s.phase.currentX,s.phase.currentY,k.width,k.height,phase))return refuse(Reason::Phase);
-    reason=match(domain->camera,constants[0].bytes,phase);if(reason!=Reason::None)return refuse(reason);
+    reason=match(domain->camera,constants[0].bytes,phase);
+    if(consumer==1&&first&&!f.phaseReceipt.frozen&&(reason==Reason::None||reason==Reason::Phase))
+        forwardPhaseObserve(s,d,*domain,*publication,constants,phase,reason);
+    if(reason!=Reason::None)return refuse(reason);
     issue.kind=Issue::Light;issue.token=publication->token;issue.frame=s.prefix.frame;issue.color=reinterpret_cast<uintptr_t>(k.color);
     issue.q=s.prefix.sequence+1;issue.raw=raw;issue.linear=linear;issue.linearSlot=inputSlot;issue.vs=k.vs;issue.ps=k.ps;
     issue.phaseX=s.phase.currentX;issue.phaseY=s.phase.currentY;
@@ -297,26 +307,29 @@ void forwardBeginIssue(State& s,forward_light::Issue& issue,bool indirect) {
     using namespace forward_light;if(issue.kind==Issue::None)return;FlatComputeInternalScope internal;
     if(indirect||!forwardIssueValid(s,issue)){if(issue.kind==Issue::Converter)s.forwardLight.ledger.abandon(issue.token);else if(issue.kind==Issue::Geometry){forwardMutation(s,issue.raw.resource);forwardRefusal(s,Reason::Issue);}
         else forwardRefusal(s,Reason::Issue,reinterpret_cast<void*>(issue.color));return;}
-    issue.issued=true;if(issue.kind==Issue::Converter)s.forwardLight.ledger.issued(issue.token);
+    issue.issued=true;if(issue.donated)s.forwardLight.phaseReceipt.issue(issue.frame,issue.q);if(issue.kind==Issue::Converter)s.forwardLight.ledger.issued(issue.token);
 }
 void forwardReturn(State& s,forward_light::Issue& issue) {
     using namespace forward_light;if(issue.kind==Issue::None)return;
     FlatComputeInternalScope internal;
     if(issue.issued&&forwardIssueValid(s,issue)) {
         issue.returned=true;if(issue.kind==Issue::Converter)s.forwardLight.ledger.returned(issue.token);
-        else if(issue.donated){++s.forwardLight.accepted;s.forwardLight.last=Reason::None;}
+        else if(issue.donated){s.forwardLight.phaseReceipt.returned(issue.frame,issue.q);++s.forwardLight.accepted;s.forwardLight.last=Reason::None;}
     }else if(issue.kind==Issue::Converter)s.forwardLight.ledger.abandon(issue.token);
     else if(issue.kind==Issue::Geometry){forwardMutation(s,issue.raw.resource);forwardRefusal(s,Reason::Issue);}
     else forwardRefusal(s,Reason::Issue,reinterpret_cast<void*>(issue.color));
 }
 void forwardAbandon(State& s,const forward_light::Issue& issue) {
     using namespace forward_light;if(issue.kind==Issue::None||issue.returned)return;
+    if(issue.donated)s.forwardLight.phaseReceipt.abandon(issue.frame,issue.q);
     if(issue.kind==Issue::Converter)s.forwardLight.ledger.abandon(issue.token);
     else if(issue.kind==Issue::Geometry){forwardMutation(s,issue.raw.resource);forwardRefusal(s,Reason::Abandoned);}
     else forwardRefusal(s,Reason::Abandoned,reinterpret_cast<void*>(issue.color));
 }
 void forwardReport(State& s) {
-    auto& f=s.forwardLight;const uint64_t now=GetTickCount64();if(now-f.lastLog<5000)return;f.lastLog=now;
+    auto& f=s.forwardLight;const uint64_t now=GetTickCount64();if(now-f.lastLog<5000&&!f.phaseReceipt.frozen)return;
+    if(now-f.lastLog<5000&&f.phaseReceipt.emitted)return;f.lastLog=now;
+    forwardPhaseReport(s);
     Log::get().note("flat forward light camera: frame=%llu converters=%llu checks=%llu qualified=%llu CPU-issued-donations=%llu refused=%llu last=%s upstream=%u phase=(%.9g,%.9g) applied=%llu; production exact-pair guard, raw DSV reconstruction, probe flag independent",
         (unsigned long long)s.prefix.frame,(unsigned long long)f.converters,(unsigned long long)f.checks,(unsigned long long)f.qualified,
         (unsigned long long)f.accepted,(unsigned long long)f.refused,forward_light::name(f.last),flatCameraInjectUpstreamOwns()?1u:0u,

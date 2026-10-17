@@ -53,10 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 guard FAILED:** Steam flat `5afe9f4a`; probe off.
-  `diag.flat_origin_capture` stays temporary. Donation works; zero-phase
-  resolves only. Nonzero phases reset history (~148/5s). Sol tracing phase.
-  Main unmerged; no flight yet. F1 travel/VR unqualified.
+- **10-17 F1 guard FAILED; phase capture BUILT, NOT FLOWN.** Temporary
+  `diag.flat_origin_capture = off`. Auto bootstrap/failure pair: flat hangar,
+  menus closed, 30s; no F7/Full. Main unmerged; F1/VR pending.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4955,6 +4954,92 @@ unphased/sign/scale/epoch hypotheses; fitted expected phase with a failing
 residual instead points at the certificate. Only attach camera +0x269/+0x2C0
 mode fields when its actual source identity is proved. Do not use a generic
 last-call camera as the selected camera.
+
+**2026-10-17 targeted phase-failure capture, BUILT, NOT FLOWN.**
+
+Source history does not establish a regression since RC2. The RC2 tag
+`f2b99bdf` already includes `82dbf1b0` (October 13), which restricted inherited
+HDR cameras to the exact 7E38/7CEC inverse-light pair. The hangar's forward
+8289669D/C6E6E419 recipe existed since `ad8b586a` (September 24), but a
+projection recipe alone never supplied inherited HDR camera authority. The
+relevant admission, phase-math and ownership files are unchanged from RC2 to
+current main; the injector gained only a passive capture callback. `44a8ef1a`
+adds a separate forward-camera admission path and an independent phase
+certificate. It exposes the current selected-row failure. Earlier successful
+main-menu or B390/Proton records use different consumers or environments, so
+they do not establish a working RC2 baseline for this exact Steam hangar path.
+Do not date the phase failure from a newly added check.
+
+The authorized diagnostic leaves the production `forward_light::match`
+decision, order and tolerances unchanged. It automatically retains a bounded
+zero-phase snapshot only after its light draw is CPU-issued, returned and
+selected by a successful temporal resolve. The first exact-primary phase
+rejection for the last selected typed HDR/raw-depth/source cohort freezes one
+bootstrap/failure pair. It records a pre-issue rejected candidate; it does not
+claim that the rejected draw is a selected or GPU-executed upload.
+
+Each record retains the original donor96 and both original declared752B VS/PS
+CB2 spans, source/buffer generations, bank/range/write stamps, resource and
+converter association, expected pixel/NDC phase, extents, viewport,
+owner/applied counts, recent requested phases and the first diagnostic
+residual/bound. The independent used-view fit can distinguish several phase
+scenarios without changing qualification. A zero fit can overlap unphased and a
+previous-zero epoch; no unique heuristic diagnosis is claimed.
+
+The process budget is one pair, with eight bounded bootstrap cohorts. Ordinary
+frame resets preserve it. Device/context/work-tier changes invalidate matching
+and release held resources without rearming the budget; frozen receipts survive
+to reporting. Present emits bounded ordinary log chunks before its early exits,
+followed by a final completion marker. The existing sanctioned
+`tools/edvr_log.py --phase-failure` verifies the metadata, record order,
+payload lengths/counts and hashes before reporting a usable pair. Never-called,
+awaiting, cancelled, missing-bootstrap and incomplete output remain
+distinguishable. There is no GPU readback or new config key; the origin probe
+stays absent/default off and manual Full is independent.
+
+Stationary capture needs a fresh Steam flat `/novr` launch with configured
+DLSS, the same docked hangar, menus closed, ship and view still for 30 seconds.
+Do not toggle F7 or arm Shift+NumLock. Report Done and keep the game running
+until the log/optional live checks are explicitly complete. This captures the
+failure; it does not validate the guard, F1 travel or VR. Main stays unmerged.
+
+The protocol distinguishes `sourceWitnessFrame/Q` (retained camera-row witness)
+from the donor identity's observed shadow-write frame/Q, saved at geometry
+observation rather than queried later at the light. Independent review
+confirmed actual CPU-return plus successful temporal selection before bootstrap
+commit, exact last-selected source filtering, lifecycle invalidation without
+process-budget rearm, and completion-marker-before-finished ordering. The new
+capture core tests preserve the production match decision and input bytes,
+exercise independent phase algebra and cohort mismatches, and test
+cancellation, bounded history and lifecycle freeze. The decoder rejects
+missing/duplicate/truncated metadata, unsafe counts before allocation,
+malformed numeric fields, payload corruption, stale associations and cohort
+disagreement. All nine source/test files are LF without BOM. The first
+full-build attempt stopped before C++ on the previous journal Status being 61
+lines including its heading; that documentation block was shortened and its
+real gate passed before rerunning.
+
+The second build attempt compiled the production DLL but stopped at the new CPU
+fixture's `near` lambda, which Windows headers macro-expand. Astra changed only
+that helper and its uses to `phaseValueClose`, preserving
+assertions/tolerances, then compiled and ran the complete focused temporal rig
+successfully: phase algebra 68/0, phase collector 90/0, existing forward core
+166/0, integration 97/0 and light collector 65/0, with final policy PASS. The
+frozen source is undergoing the full build again; no diagnostic DLL is
+installed yet.
+
+User preference for subsequent work: Sol handles test work; consult Astra only
+on diagnostic/RE evidence. The fixture repair above preceded this instruction.
+Root orchestrates the full validation and installation.
+
+The final full build passed every gate in 141.5 seconds: 170 pooled jobs and
+six quiet jobs, production DLLs, test rigs, self-contained installer/resource
+checks and final receipt. Full-build receipt fingerprint:
+193662a4968867cc32a0d31f5b5e17ada97473e0bd6fcada7bdd4cc9aca02b3c. No C++ edit
+follows this successful gate. Commit the validated source, push only the
+feature branch, then run receipt-guarded clean DLL promotion and sanctioned
+Steam installation/verification while preserving both INI files. Main remains
+unmerged and the targeted stationary capture remains unflown.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.

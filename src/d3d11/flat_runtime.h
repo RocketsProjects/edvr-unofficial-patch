@@ -5,6 +5,7 @@
 #include "flat_compute_readback.h"
 #include "flat_projection_scope.h"
 #include "flat_forward_light.h"
+#include "flat_phase_failure_capture.h"
 #include "flat_substitution.h"
 #include "flat_map_bounce.h"
 #include "flat_mutation_diagnostic.h"

@@ -216,7 +216,14 @@ struct LightAuditState {
     struct Write {const void* resource=nullptr;uint64_t frame=0;uint32_t sequence=0;} textureWrites[32]{};
     std::wstring directory;std::vector<std::string> files;bool finalized=true;
 };
+struct ForwardPhaseHold {
+    Ptr<ID3D11Resource> hdr,raw,linear;
+    Ptr<ID3D11Buffer> source,original[2];
+};
 struct ForwardRuntime {
+    phase_failure::Collector phaseReceipt;
+    forward_light::ConstantIdentity phaseObservedDonor[forward_light::kDomains];
+    ForwardPhaseHold phasePending[phase_failure::kSlots],phaseCommitted[phase_failure::kSlots];
     forward_light::Ledger ledger;
     forward_light::Authority authority[forward_light::kPublications];
     Ptr<ID3D11Resource> authorityHdr[forward_light::kPublications];
@@ -6674,6 +6681,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // after a refusal or for a view the pass cannot use this is the resolve's own view; never in place.
     ID3D11ShaderResourceView* replacement = flatSharpenView(ctx, outputView.Get()); ctx->PSSetShaderResources(0, 1, &replacement); replaced = true;
     s.previous = selected; s.previousColor = actualColor; s.havePrevious = s.treated = true; s.temporalAccepted=true;s.lastMs = now; ++s.accepted;
+    forwardPhaseSelected(s,selected);
     s.previousRowsX = f.rowsJitterX; s.previousRowsY = f.rowsJitterY; // the phase the rows now stored in s.previous carry
     s.drawCapture.qualify(s.prefix.frame,selected.depth,selected.hdr,selected.renderWidth,selected.renderHeight);
     s.resetMissingWindow += resetMissing; s.resetGapWindow += resetGap; s.resetDepthWindow += resetDepth;
@@ -6959,6 +6967,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     }
     s.previous = selected; s.previousColor = hdrResource; s.havePrevious = s.treated = s.hdrTreated = s.temporalAccepted = true;
     s.lastMs = now; ++s.accepted; ++s.hdrWindow.treated; s.hdrWindow.lastVerdict = s.reason;
+    forwardPhaseSelected(s,selected);
     s.previousRowsX = f.rowsJitterX; s.previousRowsY = f.rowsJitterY;
     s.drawCapture.qualify(s.prefix.frame, selected.depth, selected.hdr, selected.renderWidth, selected.renderHeight);
     s.resetMissingWindow += resetMissing; s.resetGapWindow += resetGap; s.resetDepthWindow += resetDepth;
