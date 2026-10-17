@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1, exact coordinate conversion PROVED by Sol RE:** emitter computes old-frame -> new-frame D; source/upload pointer association is specified. Selected ship source -> governing frame epoch remains unproved. F1 OPEN.
-  See "F1 coordinate-change emitter and proposed correction" below: preserve inward travel and re-anchor residual with D; independent projection fixtures pass. No product/key change. Selected row 275 omits SC ship travel.
-  Next: build a passive stationary-cockpit pipeline identity capture, finish its producer/frame RE, then validate the correction before a normal-space calibration flight. No takeoff or SC/SCO lap for identity. VR's dropped 50 m+ translation remains open.
+- **10-17 F1 temporary stationary capture BUILT, NOT CAPTURED:** automatic renderer-source pipeline snapshot for Steam flat; no new config key or motion/history correction. F1 OPEN.
+  See "passive stationary-cockpit pipeline capture" below. Sol verified the entry/stack layouts; source helper is stack-local. Selected GPU donor and producer/frame epoch remain unproved. SC row 275 omits ship travel.
+  Next: Steam flat `/novr`, docked and seated, close menus to the cockpit for 30 s; inspect the capture and target Sol RE at the actual producer. No test takeoff/SC/SCO lap. VR's dropped 50 m+ translation remains open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -3859,6 +3859,108 @@ justified. Evidence is in `analysis/decomp/f1_origin_20261017/` and
 `analysis/decomp/f1_ship_writer_20261017/`; the verified image identity is in
 the preceding entry. F1 stays OPEN until the binding and correction are
 validated.
+
+**2026-10-17: passive stationary-cockpit pipeline capture.** Temporary
+instrumentation to identify the first activity that supplies the normal ship
+camera's world pose. The earlier RE establishes the emitted coordinate
+conversion and its input-domain contract; the selected producer's frame
+adoption/order remains open. This capture collects the actual pipeline
+identities for the next targeted Sol RE pass. It does not apply the proposed
+correction or change history classification. No new config key.
+
+**RE correction before coding.** RVA 0x2871D30 receives owner O, source state S
+and helper H. It copies S+0x70 to H+0x30, but caller 0x281ACD4 supplies H as a
+stack-local helper (`RBP+0xB0`). Ruled out: interpreting H-0x20 as a persistent
+camera address, because H is stack storage. The historical S-to-camera wording
+in this journal skipped that distinction. Source/helper equality is evidence of
+this copy only; its downstream association to selected VS b1 remains unproved.
+
+The new observer hooks this verified void, three-pointer function entry and
+calls the original once. It checks the executable PE timestamp/image size and
+exact 15-byte prologue; the installed Steam executable's SHA-256 was
+independently rechecked as
+`e6be8bbe04e6a7ae226d4318945af7f367de13dc5a007a261964d9ba8144e988`.
+Observations use guarded reads of game memory. The hook does no logging,
+allocation or getter invocation and writes only EDVR's capture records. The
+existing camera-refresh hook can separately record camera/context addresses;
+their address/order join to the renderer source is explicitly UNPROVED.
+
+At the renderer source, C=S-0x70 is accepted only after verifying child
+vtables, C's owning provider B, membership among B's eleven stage pointers and
+terminal source identity. B+0x78 is terminal child[10], not a separate dynamic
+selection field. The provider's bounded name identifies `MainView`. The
+snapshot includes all predecessor stages, output/inherited poses, blend mode,
+activity interfaces/vtables/names, weight and state getter RVAs, and
+state/weight values only where their layouts are proven. Nested stacks retain
+their parent/inherited relationships. A known zero-weight nested activity
+retains its roster entry without spending recursive capture space; unknown
+weights remain explicit.
+
+The ordinary state getter 0x5293E0 is decoded as interface+0x10; weight getter
+0x8BE920 reads the known enabled byte. Nested activity vtable 0x51869B0 and
+getter 0x108A98C resolve through provider 0x5186938 to its terminal child
+state; 0x108ADE0 reads its configured weight. Other getters are logged as
+unknown and never called. Cycle, count, depth, capacity, inconsistent topology
+and unreadable memory produce explicit partial/refused results. A pose
+difference is a candidate introduction point, not proof of a world frame or
+physical movement.
+
+**Trigger and evidence.** The automatic arm requires 30 consecutive flat
+selected normal scene frames, a live gameplay journal, known docked/seated
+flags, GuiFocus 0, nonnull current depth, finite row 275 and two advancing
+Status sample counts. The existing profile-gated `journalGameplay()` is
+unchanged; an added diagnostic raw field supplies the flat capture's gameplay
+boundary. Status reads are watcher samples, not independent proof of a new
+pose. Menu/unknown/Station Services cases wait without consuming capture
+records. Qualification is checked again after arming; loss of the qualifying
+scene or a profile change invalidates the capture. Interframe origin motion,
+depth-resource identity and history reset are deliberately excluded from this
+identity gate: a docked source can move or rotate, and current-source validity
+does not depend on temporal history continuity.
+
+The log prefix is `flat stationary camera:`. It distinguishes waiting, armed,
+unavailable/refused, callbacks never seen, partial records and capture results.
+`flat stationary source`, `stage` and `activity` lines name the concrete
+renderer pipeline. `flat stationary refresh` records remain separate. A
+source-topology capture does not certify selected GPU donor identity or a new
+coordinate epoch. Bounds are 16 unique renderer sources, 32 refresh cameras, 96
+stages/source, 16 activities/stage, a 120-frame selected-scene timeout and 1024
+detail rows. Budgets and omissions are reported, including overflow; the
+collector drains only completed records. Success requires exactly one complete
+`MainView` renderer-source topology with separate refresh observations. This is
+one capture per game process, with no F10 dump or hardware write watch. The old
+`advanced.flat_camera_producer_probe` stays off.
+
+Validation: the full `build.bat --wait-lock` passed all Python gates,
+production DLL builds, 170 pooled jobs, six quiet jobs, installer checks and
+receipt generation in 168.0 seconds. The new stationary-camera rig passed.
+Existing HDR and VR geometry checks retain their original policy counts and
+geometry hashes after excluding only the exact passive observer statements;
+negative controls still reject policy and projection changes. No rendering
+correction is included in this capture build.
+
+**Capture procedure, Steam flat.** Launch with `/novr` and the current DLSS
+profile, load the commander and dock at a station/carrier if not already
+docked. Close Station Services and other menus to the normal cockpit, and
+remain docked/seated with no input for 30 seconds. No test takeoff, supercruise
+lap, boost, camera-suite switch or origin shift is needed. Report that the
+cockpit wait is complete; inspect the build-matched log before ending the
+session. A new game process re-arms the one-shot if a repeat becomes necessary.
+
+Environment: Windows x64/D3D11, Steam flat `/novr`, existing DLSS model M and
+3840x2160 output; no VR runtime/headset is involved. The same shared Steam
+package is updated through `tools/install_edvr.py --scope both`, because this
+existing installation already contains both profiles; normal flat-only
+preflight correctly refuses a silent conversion. Live `edvr-flat.ini` and
+`edvr.ini` are preserved. The post-commit DLL promotion and installed-file hash
+verification must pass before the capture instructions are handed over.
+
+Next: use `tools/edvr_log.py --target steam --expect-build <capture-commit>`
+first, then read the stationary capture lines and trace the first actual
+non-inherited pose producer with Sol. Stationary identity evidence cannot
+validate a shift that never occurred; producer completion versus emitted
+D/copy/upload still needs a proved ordering path or later guarded event
+observation. F1 remains OPEN.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.

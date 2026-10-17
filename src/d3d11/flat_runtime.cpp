@@ -16,6 +16,7 @@
 #include "flat_projection_ownership.h"
 #include "flat_camera_probe.h"
 #include "flat_camera_inject.h"
+#include "flat_stationary_camera_capture.h"
 #include "flat_camera_phase.h"
 #include "flat_live_phase.h"
 #include "flat_draw_capture.h"
@@ -3734,6 +3735,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // Present that returns early below (mode off, no device, no swap buffer)
     // can never leave the previous frame's phase injecting.
     flatCameraInjectDisarm();
+    flatStationaryCameraFrame(frame);
     // The camera producer probe's per-Present cadence (config-gated inside).
     flatCameraProducerProbeFrame(frame);
     // Account for the completed frame before mode/resize changes or the next
@@ -6421,6 +6423,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.previousJitterY=f.reset?f.jitterY:s.phase.previousY;
     std::memcpy(f.previousCamera, f.reset ? selected.camera : s.previous.camera, sizeof(f.previousCamera));
     noteCameraOrigin(s, f);
+    flatStationaryCameraSelected(s.prefix.frame, selected.camera, f.reset, f.staticScene, selected.depth);
     // The phase the captured rows carry. Only the injector writes one into the
     // game's own upload, so only an Upstream frame in which an injection landed
     // has any; the resolver removes it from both frames' rows and from the
@@ -6749,6 +6752,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     f.previousJitterY = f.reset ? f.jitterY : s.phase.previousY;
     std::memcpy(f.previousCamera, f.reset ? selected.camera : s.previous.camera, sizeof(f.previousCamera));
     noteCameraOrigin(s, f);
+    flatStationaryCameraSelected(s.prefix.frame, selected.camera, f.reset, f.staticScene, selected.depth);
     const FlatCameraRoute cameraRoute = flatCameraInjectRoute();
     const FlatCameraRowsPhase rowsNow = flatCameraRowsPhase(cameraRoute, s.phase.applied, s.phase.currentX, s.phase.currentY);
     f.rowsJitterX = rowsNow.x; f.rowsJitterY = rowsNow.y;

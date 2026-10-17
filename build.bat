@@ -603,7 +603,7 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
     "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
-    "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" ^
+    "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" "src\d3d11\flat_stationary_camera_capture.cpp" ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" ^
@@ -1670,6 +1670,17 @@ if not exist "%OBJ%\flatcamerastub" mkdir "%OBJ%\flatcamerastub"
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: flat camera stub test build failed & exit /b 1 )
 "%BUILD%\flat_camera_stub_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_flat_stationary_camera_test
+echo [edvr] === flat_stationary_camera_test.exe ===
+if not exist "%OBJ%\flatstationarycamera" mkdir "%OBJ%\flatstationarycamera"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%ROOT%" /Fo"%OBJ%\flatstationarycamera\\" ^
+    /Fe"%BUILD%\flat_stationary_camera_test.exe" "tools\flat_stationary_camera_test\flat_stationary_camera_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat stationary camera test build failed & exit /b 1 )
+"%BUILD%\flat_stationary_camera_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_c2_coexist_test
