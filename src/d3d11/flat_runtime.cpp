@@ -1,3 +1,5 @@
+#include "flat_light_payload_capture.h"
+#include <sstream>
 #include "flat_origin_capture.h"
 #include "flat_runtime.h"
 #include "flat_sdk_bench_probe.h"
@@ -205,6 +207,14 @@ using Camera = CameraTable::Entry;
 struct View {
     void* identity = nullptr; uint32_t generation = 0; ResourceInfo info{};
     Ptr<IUnknown> held;
+};
+struct LightAuditState {
+    lightaudit::Collector collector;
+    uint64_t textureFrame=0;
+    lightaudit::Producer textures[32]{};
+    uint32_t textureCount=0,textureOverflow=0,writeNext=0,writeEvictions=0;
+    struct Write {const void* resource=nullptr;uint64_t frame=0;uint32_t sequence=0;} textureWrites[32]{};
+    std::wstring directory;std::vector<std::string> files;bool finalized=true;
 };
 struct State {
     FlatDrawCapture drawCapture;
@@ -458,6 +468,8 @@ struct State {
     };
     LocalProjectionSample localSamples[2]{};
     FlatHdrProjectionCapture hdrProjectionCapture{};
+    std::unique_ptr<LightAuditState> lightAudit;
+    uint64_t lightAuditGeneration=0;
     struct HdrCaptureWrite { const void* resource = nullptr; uint64_t frame = 0; uint32_t sequence = 0; };
     HdrCaptureWrite hdrCaptureWrites[256]{};
     uint32_t hdrCaptureWriteNext = 0;
@@ -2129,6 +2141,8 @@ void captureHdrProjectionDraw(State& s, const FlatRuntimeDraw& draw) {
         (unsigned long long)s.prefix.frame,c.writers,boundViews);
     if(complete)++c.payloads;
 }
+#include "flat_light_payload_runtime.inl"
+
 void captureHdrProjectionDispatch(State& s) {
     auto& c=s.hdrProjectionCapture;
     if(!s.projectionFrames || !c.armed || !c.target || c.closed || c.exhausted())return;
@@ -2892,6 +2906,7 @@ void applyWork(State& s, FlatWork next) {
         // state ExecuteCommandList leaves it in, so a stale binding never reads as live.
         for (auto& u : s.uavs) u.Reset();
     }
+    if(was!=next)finishLightAudit(s,"cancelled-work-tier");
     if (was != next && was != FlatWork::Paused) {
         // Probe evidence must not survive Paused or become Full preparation
         // readiness. Every departing watched tier drops shadows and plans.
@@ -2997,7 +3012,7 @@ void flatRuntimeResize() {
     // The swap chain or the device went: engine motion's bound state (the game's render targets among it, held by
     // reference) is forgotten without touching a context that may be gone.
     flatRuntimeSubstitution(nullptr, FlatSubstEvent::kResize);
-    auto& s = state(); FlatComputeInternalScope guard; s.drawCapture.cancel("resize-or-stop");
+    auto& s = state(); FlatComputeInternalScope guard; finishLightAudit(s,"cancelled-resize-or-stop"); s.drawCapture.cancel("resize-or-stop");
     overlaySuffixActive.store(false,std::memory_order_release);
     s.overlay.reset();
     s.foreground.reset();
@@ -3820,6 +3835,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // another frame. The next frame's preflight, with its resource creations, runs inside it.
     HdrCrumbFrameEnd routeFrameEnd(hr);
     s.thread = GetCurrentThreadId();
+    lightAuditFrameEnd(s,frame); // drain before AA/device/context early exits
     // The Present edge: the frame window the camera injector may inject in
     // closes here and reopens only once the next frame's phase is chosen, so a
     // Present that returns early below (mode off, no device, no swap buffer)
@@ -3886,6 +3902,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.census.idle();if(s.device || s.output || s.cameras.count())flatRuntimeResize();
         const auto request=projectionAuditRequested.take();
         const bool manual=flatCaptureBulk(request);
+        if(manual)Log::get().note("flat light camera audit: event=arm-refused reason=AA-off-no-watched-camera-shadows pending=0 drained=1");
         if(request==FlatCaptureTier::General)Log::get().note("flat capture general: configured=%s AA=off; bounded desktop discovery only, bulk exporters not armed",mode.c_str());
         if(!manual&&!s.drawPackets.active())return;
         FlatComputeInternalScope internal;Ptr<ID3D11Device> dev;swap->GetDevice(IID_PPV_ARGS(&dev));
@@ -4089,6 +4106,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.traceDumpFrame=0;
     }
     if(s.projectionFrames && --s.projectionFrames==0) {
+        finishLightAudit(s,"audit-expired");
         reportProjection(s,"complete");
     }
     if(!s.deferredFailureArmReported) {
@@ -4108,6 +4126,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         armDrawIngress();
         // A diagnostic asks for everything, refused frames included: the stand-down ends.
         endStandDown(s, frame, "an F10 audit asked for everything");
+        armLightAudit(s,frame);
         witnessRearm();   // the camera-write witness walks stacks again, bounded (flat_witness_bound.h)
         syncEngine();
         flatMonoResolveArmPixels(frame);
@@ -4183,7 +4202,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 0xCAB49794BB439D03ull,0xD56F859BE4781431ull,0x8085AE8DD1906CDCull,
                 0xC49F999F7D3C801Dull,0x6EAA86EFE135B2D4ull};
             for(uint32_t i=0;i<10;++i){captureFlatProbeShader('v',unknownVs[i]);captureFlatProbeShader('p',unknownPs[i]);}
-        } else {s.projection.reset();s.projectionContext.Reset();s.projectionFrames=0;
+        } else {finishLightAudit(s,"arm-refused-projection-unavailable");s.projection.reset();s.projectionContext.Reset();s.projectionFrames=0;
             Log::get().note("flat HDR projection payload: event=unavailable result=arm-refused; allocation/context1/runtime unavailable, no forward payload captured");
             Log::get().note("flat projection: arm refused (allocation/context1/runtime unavailable), raster-phase=0");}
     }
@@ -4788,6 +4807,7 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
                             FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written,
                             const HistoryWriteExtent& extent=HistoryWriteExtent{}) {
+    lightAuditMutation(s,res);
     if(s.projectionFrames && s.hdrProjectionCapture.armed && !s.hdrProjectionCapture.exhausted()) {
         s.hdrProjectionCapture.written(res);
         State::HdrCaptureWrite* write=nullptr;
@@ -5566,6 +5586,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         d.imageSourceCameraIndependentVerified=verifyCameraIndependentImageSource(ctx,d);
         deferredPlan=verifyDeferredHdrCamera(s,d);
         captureCopyProvenance(s,ctx,d);
+        lightPayloadToken=captureLightPayloadBefore(s,d,kind,count,start,base,instances,startInstance);
         captureHdrProjectionDraw(s,d);
     }
     const auto oldTargets = s.prefix.targetsUsed;
@@ -6204,6 +6225,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if(projection->active()) {s.phase.noteApplied();++s.jitterDraws;}
         else refuseDraw(s,"draw-binding-refused");
     }
+    if(lightPayloadToken)lightPayloadPlan=projectionPlan?projectionPlan:deferredPlan;
     // Tripwire, structurally unreachable: a legacy application under Upstream.
     if(projection && projection->active() && flatCameraInjectUpstreamOwns())++s.rows.legacyAppliedUnderUpstream;
     // The HDR route treats at its trigger (key auto, the selection selected): the game's pass that reads H next sees the
@@ -7227,6 +7249,8 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
             state().jitterRefusals>drawPacketJitterBefore?state().jitterReason:
             drawPacketPriority?"observed-priority-pair":"representative-observation");
     }
+    if(lightPayloadToken&&ctx){FlatComputeInternalScope internal;
+        captureLightPreForward(state(),ctx,lightPayloadToken,lightPayloadPlan,indirectArgs!=nullptr);}
     if(!weaponFootprintStarted)return;
     const uint32_t actualStart=(weaponDrawKind=='D'||weaponDrawKind=='N')?
         static_cast<uint32_t>(weaponDrawBase):weaponDrawStart;
@@ -7236,6 +7260,7 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         weaponDrawStartInstance,indirectArgs,indirectOffset);
 }
 void FlatRuntimeDrawScope::endActualDraw() {
+    if(lightPayloadToken&&ctx)captureLightReturned(state(),lightPayloadToken);
     // The game's state back from the layer first, before anything else here reads the context.
     if(uiTaken&&!uiEnded&&ctx){flatUiLayerEnd(ctx);uiEnded=true;}
     if(drawPacket&&ctx){FlatComputeInternalScope internal;state().drawPackets.after(ctx,drawPacket);drawPacketExecuted=true;}
@@ -7270,6 +7295,8 @@ void FlatRuntimeDrawScope::endActualDraw() {
     }
 }
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
+    if(lightPayloadToken&&state().lightAudit){auto& c=state().lightAudit->collector;
+        if(c.open&&c.generation==lightPayloadToken&&!c.sample.drawReturned)c.sample.abandoned=1;}
     if(drawPacketOnly){if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);return;}
     if(ctx && (state().jitterRefusals>drawPacketJitterBefore || state().overlayRefusedWindow>drawPacketOverlayBefore)) {
         auto& s=state();const auto pair=std::make_pair(drawPacketVs,drawPacketPs);

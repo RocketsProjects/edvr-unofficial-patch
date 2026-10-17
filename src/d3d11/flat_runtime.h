@@ -153,7 +153,9 @@ struct FlatRuntimeDrawScope {
     unsigned domainFormat=0;
     unsigned domainWidth=0,domainHeight=0;
     float domainCamera[6][4]{};
-    bool needsActualDraw() const { return drawPacket || domainPlanned || uiTake || uiComposite ||
+    uint64_t lightPayloadToken=0;
+    const FlatProjectionBindingPlan* lightPayloadPlan=nullptr;
+    bool needsActualDraw() const { return lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite ||
                                           flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
                                                                      foregroundPlanned, untrustedPlanned); }
     // After the game's own issue and endActualDraw: the second issues fix.ui_quality's flat layer asks for, each the game's

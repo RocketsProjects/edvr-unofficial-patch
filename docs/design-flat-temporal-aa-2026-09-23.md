@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 conservative flat fix, BUILD VERIFIED, NOT FLOWN:** ambiguous origin-absorption cases reset history, while continued history retains travel. Astra finds no further flight prerequisite for the arithmetic correction; the final full build passed in 247.1 seconds.
-  Temporary `diag.flat_origin_capture = off` controls the F1 captures together; startup-only, restart in flat after changing it. Installed/running test build is f121f723. No VR rendering change.
-  Validation blocked: hangar AA stands down before F1 (0/450 treated, missing current H camera for forward lighting). F7 works and Full audit is saved/complete. Next: targeted actual-light camera payload/donor audit before a guarded AA correction. Main stays held; exact D preservation and VR remain separate.
+- **10-17 F1 arithmetic fix BUILD VERIFIED; targeted hangar audit BUILD VERIFIED:** the actual forward-lighting path lacks current H camera donation; no working baseline for this exact Steam path has been established. Astra reviewed the collector and full gates passed in 202.3 seconds.
+  Temporary `diag.flat_origin_capture = off` stays off. The separate manual Full audit (Shift+NumLock) captures actual VS/PS camera payloads and same-event depth/donor/input lineage without changing rendering admission or VR.
+  Next: one verified Steam flat stationary capture after clean promotion/install verification. Wait for both the payload audit drain and Full discovery completion before quitting. Keep main unmerged pending validation. Exact D-based history preservation and VR propagation remain separate.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4628,6 +4628,63 @@ smallest next data collection is a targeted extension of the existing
 projection audit to capture the actual light CB2 payload and current donor
 association together while parked. No admission exception, source change to AA
 behavior or further flight has been made on this hypothesis.
+
+**2026-10-17, targeted camera-payload audit; regression baseline still open.**
+The same hangar refusal predates the latest F1 correction in the available
+Steam logs. This rules out attributing that refusal to the latest arithmetic
+change alone; it does not exclude an earlier regression or a scene/settings
+coverage difference. Astra traced the destination-camera predicate to 6e9bde74
+(September 24). The later camera-independent source exception retained it, and
+October 13's deferred donor support watches a different shader pair. The actual
+forward-light projection recipe also predates the F1 correction.
+
+Earlier notes record treated hangar frames on Intel B390/Proton with a
+different selected consumer. The available Steam catalog begins October 13; its
+older HDR-treated candidate also has a different consumer and does not
+establish the hangar scene. Neither supplies a known working baseline for this
+exact Steam shader path. The targeted manual capture must therefore establish
+camera ownership before any admission fix; it cannot, by itself, date a
+regression. No admission rule has been relaxed.
+
+The targeted diagnostic extends manual Full (Shift+NumLock), independently of
+`diag.flat_origin_capture = off`. At the actual light-volume VS/PS pair it
+saves each stage's original CB2 range and 752-byte payload with before/after
+CPU-shadow stamps, all retained same-frame donor versions,
+depth/view/subresource identities and observed input producers. A separate
+pre-forward snapshot records actual binding identities and known uploaded
+replacement bytes; expected plan bytes remain separate. Upstream ownership is
+recorded because original means before EDVR's private replacement, not
+necessarily before jitter.
+
+Collection is lazy and bounded: 64 donor versions, 128 HDR writers, 32 relevant
+producer observations, at most four attempts, 91-frame spacing, and an
+independent 900-frame deadline. Two verified record-complete saves may stop it
+early; unknown, stale, overflow and missing producer/range evidence remain
+partial. Rearm, resize, work-tier changes, initialization failure and expiry
+all drain explicitly. The terminal marker reports file completion, never camera
+authorization. Input contents and GPU execution remain uncaptured. Existing
+Full's 120-second discovery completion must also arrive before quitting.
+
+Astra approved the frozen source after checking provenance separation,
+actual-draw callbacks, read-only plan access, startup failure and drain paths.
+The existing test rig gains `--light-payload <file.lca>` for offline
+inspection, with core bounds/serialization/lifecycle, integration and
+binding-plan fixtures in the normal full-build gates. This changes diagnostics
+only; ordinary admission, VR and configuration behavior are unchanged. Any
+treatment during Full describes the audited frame and does not validate
+normal-play recovery or F1.
+
+Validation: the full build and all gates passed in 202.3 seconds, including 170
+pooled jobs, six quiet jobs, production DLLs, the self-contained installer and
+the matching receipt. The collector passed 65 checks. Earlier attempts exposed
+two new fixture defects: a local file-reader helper used outside its scope, and
+a PS2 lookup after the fixture replaced the plan with VS1 only. Astra corrected
+those without weakening the assertions; the focused binding-plan run passed
+before the complete gate. One unrelated runner timeout-classification self-test
+failed, then passed unchanged in isolation and in the final full build. No
+runner fix is included. Next is clean-version promotion, Steam package
+verification with settings preserved, and the stationary manual Full capture;
+main remains held.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.

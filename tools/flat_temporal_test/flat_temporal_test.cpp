@@ -25,6 +25,7 @@
 #include "flat_pixel_capture_tests.h"
 #include "flat_local_reject_tests.h"
 #include "flat_hdr_projection_capture_tests.h"
+#include "flat_light_payload_capture_tests.h"
 #include "flat_negotiated_eval_tests.h"
 #include "flat_standdown_tests.h"
 #include "flat_elite_settings_tests.h"
@@ -3884,6 +3885,7 @@ void testFlatQueryCutWiring() {
 }
 
 int main(int argc, char** argv) {
+    if(argc==3&&!std::strcmp(argv[1],"--light-payload"))return light_payload_test::report(argv[2]);
     if (argc == 3 && std::strcmp(argv[1], "--classify-dir") == 0)
         return flatShaderClassifierSweep(argv[2]);
     if (argc == 3 && std::strcmp(argv[1], "--trace-check") == 0)
@@ -3915,7 +3917,7 @@ int main(int argc, char** argv) {
         return out ? 0 : 1;
     }
     if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) {
-        std::puts("usage: flat_temporal_test --self-test | --classify-dir <dir> | --trace-check <file> | --trace-migrate <dir> | "
+        std::puts("usage: flat_temporal_test --light-payload <file.lca> | --self-test | --classify-dir <dir> | --trace-check <file> | --trace-migrate <dir> | "
                   "--trace-rekey <file|dir> | --trace-chain <file> | --trace-structure <file> | "
                   "--trace-trim <in> <out> <frame[,frame...]>");
         return 2;
@@ -3952,6 +3954,18 @@ int main(int argc, char** argv) {
     failures += flatLivePhaseTests();
     failures += flatLocalRejectTests();
     failures += flatHdrProjectionCaptureTests();
+    failures += light_payload_test::run();
+    {
+        const auto readLightSource = [](const char* path) {
+            std::ifstream in(path, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+        const auto runtime = readLightSource("src/d3d11/flat_runtime.cpp");
+        const auto capture = readLightSource("src/d3d11/flat_light_payload_runtime.inl");
+        const auto scope = readLightSource("src/d3d11/flat_runtime.h");
+        check(!runtime.empty() && !capture.empty() && !scope.empty(), "light payload wiring sources are readable from the repo root");
+        failures += light_payload_test::wiring(runtime, capture, scope);
+    }
     failures += flatNegotiatedEvalTests();
     flatRuntimePrefixTests();
     flatRuntimeImageCopyTests();

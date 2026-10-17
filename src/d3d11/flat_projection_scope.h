@@ -72,9 +72,16 @@ private:
 // Immediate-context owner thread only. A scope atomically validates all inputs
 // before changing any binding, and restores exact buffers AND D3D11.1 ranges.
 // Internal calls bypass observers, leaving their game-binding shadow unchanged.
+struct FlatProjectionDiagnosticBinding {
+    ID3D11Buffer* original=nullptr;ID3D11Buffer* replacement=nullptr;
+    uint64_t revision=0,preparedRevision=0;
+    UINT first=0,count=0;bool ready=false;
+};
 class FlatProjectionBindingPlan {
 public:
     static constexpr size_t kCapacity = 8;
+    // Read-only immediate diagnostic identity; no binding, allocation or upload.
+    bool diagnosticBinding(FlatProjectionStage,UINT slot,FlatProjectionDiagnosticBinding&) const;
     bool initialize(ID3D11DeviceContext1*, const FlatPrivateProjectionBinding*, size_t);
     // After successful uploads into the same resources, refresh only the tokens.
     // Failed preparation or a destroyed private-buffer owner rejects old plans.
