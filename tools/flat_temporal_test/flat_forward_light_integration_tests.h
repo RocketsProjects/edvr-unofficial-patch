@@ -118,6 +118,17 @@ inline unsigned run() {
     const auto phaseEmission=phaseRuntime.find("void forwardPhaseReport(");
     expect(phaseEmission!=std::string::npos&&phaseRuntime.find("flat phase receipt COMPLETE:",phaseEmission)<phaseRuntime.find("c.emitted=true",phaseEmission)&&
         phaseRuntime.find("c.emitted=true;forwardPhaseRelease(s)",phaseEmission)!=std::string::npos,"receipt completion follows every metadata/payload record and releases retained objects");
+    const auto boundCore=read("src/d3d11/flat_forward_light.h"),phaseCore=read("src/d3d11/flat_phase_failure_capture.h");
+    expect(boundCore.find("const auto axis=phaseAxis(cb,r,shift[r])")!=std::string::npos&&
+        phaseCore.find("const auto axis=forward_light::phaseAxis(cb,r,shift[r])")!=std::string::npos,
+        "production and phase receipt share the operation-derived axis certificate");
+    expect(phaseCore.find("flatDeferredFloatBound(24,")==std::string::npos&&
+        phaseCore.find("out.bound=axis.bound")!=std::string::npos,
+        "diagnostic reports the exact production residual bound without a stale copied tolerance");
+    expect(boundCore.find("phaseComponentBound(extra[c],")!=std::string::npos&&
+        boundCore.find("phaseUp(std::abs(double(cb[2+axis][c]))*dotMagnitude)")!=std::string::npos&&
+        boundCore.find("out.nativeScaleLow")!=std::string::npos&&boundCore.find("out.halfHeightHigh")!=std::string::npos,
+        "enlarged component uncertainty is shared by distinguishability and all4 residual columns with native-domain guard");
     std::printf("forward light integration: %u checks, %u failed\n",checks,failures);return failures;
 }
 }

@@ -156,8 +156,111 @@ struct Issue {
 inline bool close(double a,double b,unsigned n=12) {
     return std::abs(a-b)<=flatDeferredFloatBound(n,std::abs(a)+std::abs(b));
 }
+// The engine's centered perspective builder rounds shifted +/-frustum
+// endpoints BEFORE it sums their nearly cancelling center (4F3389..4F3462).
+// This certifies compatibility of the USED net transform, not which camera
+// branch ran. Crop/alternate effects outside this envelope remain refused.
+inline double phaseUp(double x){return std::nextafter(x,std::numeric_limits<double>::infinity());}
+inline double phaseDown(double x){return std::nextafter(x,-std::numeric_limits<double>::infinity());}
+struct PhaseConstruction {
+    double bound=0,denominatorError=0,shiftRatio=0,numeratorError=0,inputBound=0,inputBoundLow=0;
+};
+inline bool phaseConstructionBound(double expected,PhaseConstruction& out) {
+    out={};if(!std::isfinite(expected))return false;
+    if(expected==0)return true; // +/-h, zero center are exact, including signed zero.
+    const double u=std::numeric_limits<float>::epsilon()/2.0;
+    // Injection divides float pixel/float extent; the expected NDC helper
+    // divides in double then rounds to float. D3D11 render extents are exactly
+    // representable as float. Include both division roundings.
+    const double input=phaseUp((2*u*std::abs(expected))/(1-u));
+    const double b=phaseUp(phaseUp(std::abs(expected)+input)/2);
+    if(!(b>=std::numeric_limits<float>::min()&&b<=std::numeric_limits<float>::max()))return false;
+    const double ds=phaseUp(2*u*b),a=phaseUp(2*b*(1+u));
+    // Sterbenz must hold AFTER endpoint rounding, not just for ideal h +/-s.
+    if(!(phaseUp(phaseUp(1+a)*(1+u))<=phaseDown(2*phaseDown(1-a)*(1-u))))return false;
+    const double e=phaseUp(2*u*phaseUp(1+a)),dd=phaseUp(e+phaseUp(u*phaseUp(2+e)));
+    if(!(dd<2))return false;
+    const double numeratorError=phaseUp(2*ds+e);
+    const double quotientNumerator=phaseUp(phaseUp(numeratorError+phaseUp(2*b*dd))+
+        phaseUp(u*phaseUp(4*b+numeratorError)));
+    const double error=phaseUp(quotientNumerator/phaseDown(2-dd));
+    out.bound=phaseUp(error+input);
+    out.denominatorError=dd;out.shiftRatio=a;out.numeratorError=numeratorError;
+    out.inputBound=b;out.inputBoundLow=input<std::abs(expected)?phaseDown(phaseDown(std::abs(expected)-input)/2):0;
+    return std::isfinite(out.bound);
+}
+enum class PhaseAxisStage:uint32_t {Accepted,Condition,Unresolved,Residual};
+struct PhaseAxis {
+    Reason reason=Reason::View;PhaseAxisStage stage=PhaseAxisStage::Condition;
+    double scale=0,coefficientBound=0,lhs=0,rhs=0,residual=0,bound=0;
+    double nativeScaleLow=0,nativeScaleHigh=0,halfHeightLow=0,halfHeightHigh=0;
+    bool resolved=false;int column=-1;
+};
+inline double phaseComponentBound(double construction,double magnitude) {
+    return phaseUp(construction+phaseUp(flatDeferredFloatBound(24,magnitude)));
+}
+inline PhaseAxis phaseAxis(const float (&cb)[47][4],unsigned axis,double expected) {
+    PhaseAxis out;if(axis>=2||!std::isfinite(expected))return out;
+    double normLow=0,normHigh=0,dotMagnitude=0,composition=0,viewMagnitude=0;
+    for(unsigned j=0;j<3;++j){const double r=cb[2+axis][j],w=cb[13][j],f=cb[10+axis][j];
+        if(!std::isfinite(r)||!std::isfinite(w)||!std::isfinite(f))return out;
+        out.scale+=(f-expected*w)*r;normLow=phaseDown(normLow+r*r);normHigh=phaseUp(normHigh+r*r);
+        dotMagnitude=phaseUp(dotMagnitude+std::abs(w*r));viewMagnitude=phaseUp(viewMagnitude+std::abs(r));
+        composition=phaseUp(composition+phaseUp(std::abs(f*r)+phaseUp(std::abs(expected)*std::abs(w*r))));}
+    const double fmin=std::numeric_limits<float>::min(),fmax=std::numeric_limits<float>::max();
+    if(!(out.scale>=fmin&&out.scale<=fmax)||!std::isfinite(out.scale)||!(normLow>0))return out;
+    const float native=static_cast<float>(out.scale),reciprocal=1.0f/native;
+    if(!std::isnormal(native)||!std::isnormal(reciprocal))return out;
+    PhaseConstruction construction;if(!phaseConstructionBound(expected,construction))return out;
+    out.coefficientBound=construction.bound;
+    const double u=std::numeric_limits<float>::epsilon()/2.0,g=flatDeferredFloatBound(24,1);
+    // Outward compatible native-scale interval. Stored R is only approximately
+    // unit: fit=S*||R||^2 + delta*dot(W,R) + composition error, not simply S.
+    const double du=std::numeric_limits<double>::epsilon()/2;
+    const double fitRound=phaseUp((8*du/(1-8*du))*composition);
+    const double compositionUnderflow=phaseUp((24*static_cast<double>(std::numeric_limits<float>::denorm_min()))*viewMagnitude);
+    const double uncertainty=phaseUp(phaseUp(phaseUp(out.coefficientBound*dotMagnitude)+phaseUp(g*composition))+
+        phaseUp(compositionUnderflow+fitRound));
+    out.nativeScaleLow=phaseDown(phaseDown(out.scale-uncertainty)/phaseUp(normHigh*(1+g)));
+    out.nativeScaleHigh=phaseUp(phaseUp(out.scale+uncertainty)/phaseDown(normLow*(1-g)));
+    if(!(out.nativeScaleLow>=fmin&&out.nativeScaleHigh<=fmax))return out;
+    const double dd=construction.denominatorError;
+    out.halfHeightLow=phaseDown(phaseDown(2*(1-u)/out.nativeScaleHigh)/phaseUp(2+dd));
+    out.halfHeightHigh=phaseUp(phaseUp(2*(1+u)/out.nativeScaleLow)/phaseDown(2-dd));
+    const double lo=out.halfHeightLow,hi=out.halfHeightHigh,a=construction.shiftRatio;
+    // Refuse unless the WHOLE compatible interval keeps the modeled native
+    // reciprocal, doubled half-height and rounded endpoints normal/finite.
+    if(!(phaseDown(phaseDown(lo*phaseDown(1-a))*(1-u))>=fmin&&
+         phaseUp(phaseUp(hi*phaseUp(1+a))*(1+u))<=fmax&&phaseUp(2*hi)<=fmax))return out;
+    if(expected!=0){
+        const double b=construction.inputBound,bLow=construction.inputBoundLow;
+        // Shift, cancelled numerator and quotient must remain in the normal
+        // regime used by the relative-error proof. No underflow guesswork.
+        if(!(phaseDown(phaseDown(lo*(2*bLow))*(1-u))>=fmin&&phaseUp(phaseUp(hi*(2*b))*(1+u))<=fmax&&
+             phaseDown(lo*phaseDown(4*bLow-construction.numeratorError))>=fmin&&
+             phaseDown(std::abs(expected)-out.coefficientBound)>=fmin))return out;
+    }
+    out.reason=Reason::Phase;out.stage=PhaseAxisStage::Unresolved;out.resolved=expected==0;
+    double extra[4]{};
+    for(unsigned c=0;c<4;++c){
+        if(!std::isfinite(cb[10+axis][c])||!std::isfinite(cb[13][c])||!std::isfinite(cb[2+axis][c]))return out;
+        // The fitted scale also contains delta*dot(W,R); propagate that
+        // contamination as well as the direct coefficient error, all4columns.
+        extra[c]=expected==0?0:phaseUp(out.coefficientBound*phaseUp(std::abs(double(cb[13][c]))+
+            phaseUp(std::abs(double(cb[2+axis][c]))*dotMagnitude)));
+        if(c<3&&std::abs(expected*cb[13][c])>phaseComponentBound(extra[c],
+            std::abs(double(cb[10+axis][c]))+std::abs(out.scale*cb[2+axis][c])))out.resolved=true;
+    }
+    if(!out.resolved)return out;
+    out.stage=PhaseAxisStage::Residual;
+    for(unsigned c=0;c<4;++c){const double lhs=double(cb[10+axis][c])-expected*cb[13][c],rhs=out.scale*cb[2+axis][c];
+        const double bound=phaseComponentBound(extra[c],std::abs(double(cb[10+axis][c]))+std::abs(expected*cb[13][c])+std::abs(rhs));
+        if(std::abs(lhs-rhs)>bound){out.column=static_cast<int>(c);out.lhs=lhs;out.rhs=rhs;out.residual=lhs-rhs;out.bound=bound;return out;}}
+    out.reason=Reason::None;out.stage=PhaseAxisStage::Accepted;return out;
+}
 // Used view2..4, forward10..13 only. Unused inverse-view6..9 supplies no authority.
-// Scope: centered underlying projection; asymmetric/off-center views refuse.
+// Scope: centered net-transform compatibility. Crop/alternate effects outside
+// the proven arithmetic envelope refuse; no selected camera branch is inferred.
 // The original raster matrix must carry exactly this frame's upstream phase.
 inline Reason match(const unsigned char* cameraBytes,const unsigned char* cbBytes,const FlatProjectionJitter& phase) {
     if(!cameraBytes||!cbBytes||!flat_projection_detail::finite(phase))return Reason::OriginalMissing;
@@ -188,22 +291,7 @@ inline Reason match(const unsigned char* cameraBytes,const unsigned char* cbByte
         double(cb[2][2])*(double(cb[3][0])*cb[4][1]-double(cb[3][1])*cb[4][0]);
     if(!close(determinant,1,32))return Reason::View;
     const double shift[]={phase.ndcX,phase.ndcY};
-    for(unsigned r=0;r<2;++r) {
-        double scale=0;
-        for(unsigned c=0;c<3;++c)scale+=(double(cb[10+r][c])-shift[r]*cb[13][c])*cb[2+r][c];
-        if(!std::isfinite(scale)||scale>std::numeric_limits<float>::max()||scale<std::numeric_limits<float>::min())return Reason::View;
-        const float nativeScale=static_cast<float>(scale),reciprocal=1.0f/nativeScale;
-        if(!(scale>0)||!std::isnormal(nativeScale)||!std::isnormal(reciprocal))return Reason::View;
-        // An expected nonzero raster shift must be distinguishable from no
-        // shift in the actual float matrix. Huge rotated bases can erase it.
-        bool resolved=shift[r]==0;
-        for(unsigned c=0;c<3;++c)if(std::abs(shift[r]*cb[13][c])>
-            flatDeferredFloatBound(24,std::abs(cb[10+r][c])+std::abs(scale*cb[2+r][c])))resolved=true;
-        if(!resolved)return Reason::Phase;
-        for(unsigned c=0;c<4;++c){const double a=double(cb[10+r][c])-shift[r]*cb[13][c],b=scale*cb[2+r][c];
-            const double mag=std::abs(cb[10+r][c])+std::abs(shift[r]*cb[13][c])+std::abs(b);
-            if(std::abs(a-b)>flatDeferredFloatBound(24,mag))return Reason::Phase;}
-    }
+    for(unsigned r=0;r<2;++r){const auto axis=phaseAxis(cb,r,shift[r]);if(axis.reason!=Reason::None)return axis.reason;}
     return Reason::None;
 }
 } } // namespace edvr::forward_light

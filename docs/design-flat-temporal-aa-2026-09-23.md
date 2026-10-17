@@ -53,8 +53,8 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 phase capture VERIFIED:** `2d25730e`; jitter is present. Engine
-  frustum rounding omitted from guard; next: derived-bound fix. Temporary
+- **10-17 F1 operation-bound fix BUILT, NOT FLOWN:** shared engine-rounding
+  certificate; next: stationary Steam flat F7 validation. Temporary
   `diag.flat_origin_capture = off`. Main held; F1/VR unqualified.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
@@ -5120,6 +5120,61 @@ additional capture or flight is needed before implementation. Main remains
 unmerged, and the phase-certificate onset since RC2 remains undated.
 
 For the reviewed ordinary centered branch, u=2^-24 and b=abs(input bound): ds=2*u*b; e=2*u*(1+2*b*(1+u)); dd=e+u*(2+e); B=(2*ds+e+2*b*dd+u*(4*b+2*ds+e))/(2-dd). This assumes finite normal intermediates, h>0, representable2h, |shift|<h/3 for the Sterbenz endpoint sum, and dd<2. The captured b gives B=5.965064809723348e-8 NDC, from the operation scales rather than the measured residual. Include any |2*b-expectedNDC| input-rounding difference. Because the current scale estimator uses dot(F-expected*W,Raxis), propagate phase uncertainty as B*(abs(W[c])+abs(Raxis[c])*sum_j(abs(W[j]*Raxis[j]))) for spatial j=0..2, alongside existing view/composition errors. Apply the same uncertainty to distinguish expected nonzero from zero. This is a proposed correction domain, not a universal bound for optional crop/alternate construction or an implemented policy.
+
+**2026-10-17 operation-derived forward-camera certificate correction.**
+
+The user authorized implementation, Sol RE and tests, and Astra evidence
+consultation only. The captured 2d25730e pair supplies the counterexample; no
+additional pre-fix flight was requested. This changes the exact centered
+Upstream forward-light admission certificate, not the injected phase or the
+temporal backend. The existing source/currentness, converter lineage,
+donor/consumer agreement, used-view, origin and ownership gates remain.
+
+The shared `forward_light::phaseAxis` helper budgets the engine's rounded
+frustum endpoints and center division before final matrix composition. It
+includes input division rounding and propagates the coefficient uncertainty
+through the fitted scale into all four matrix components, including
+translation. Nonzero-versus-zero distinguishability uses the same uncertainty.
+The phase-failure analyzer calls the same helper and reports its exact failed
+component and bound; it no longer carries a separate copy of that policy.
+
+The certificate derives a compatible native-scale interval from the stored view
+norm and composition uncertainty, then a half-height interval. It refuses
+unless the whole interval supports the relative-error model: finite normal
+intermediates, representable doubled half-height and shifted endpoints, a
+rounded-endpoint Sterbenz condition, and normal nonzero shift, canceled
+numerator and quotient. Exact zero has no added absolute phase tolerance.
+Unsupported extremes and phases erased by float rounding refuse. This checks
+the actual used net transform against supported centered arithmetic; it does
+not recover historical hidden camera/crop flags. Off-center effects outside the
+derived envelope refuse.
+
+Independent Sol fixtures use explicit float32 operations to reproduce all four
+bootstrap and all four rejected Y components bit-for-bit, then vary FOV,
+aspect, stored view rotation, origin, extent and both signed phase axes. They
+also challenge missing, reversed, doubled, single-axis and prior phases, stale
+lineage, component corruption and unsupported numeric regimes. Astra consults
+only on the disassembly and arithmetic/domain proof; it does not run or
+implement tests.
+
+Sol's focused CPU rig passed: 9,570 bound checks across 2,016 independent
+engine cameras, forward core 166/0, integration 100/0, phase algebra 68/0,
+collector 90/0 and the complete temporal policy rig. Root reviewed the
+arithmetic and changed regions. Review corrected the lower-normality checks to
+use a separate lower bound on injection magnitude; upper error/overflow bounds
+retain the upper magnitude. No new runtime reads, hooks or config keys.
+
+The full validation build passed in 170.3 seconds, including production DLLs,
+all test rigs, installer checks and the full-build receipt. Receipt identity:
+`e91b11e51dc8b1877b69760589f0c05443aac2ab8f41432375f6b08dc56b0fd0`. Commit the
+tested tree, push the feature branch, then promote the clean DLLs and install
+with the sanctioned tool. The planned Steam flat `/novr` environment is DLSS
+310.9.1.0 at 3840x2160. Preserve both live INIs, with
+`diag.flat_origin_capture` absent/default off. The next validation is
+stationary: DLSS for 30 seconds, F7 off for 10 seconds, F7 back on for 30
+seconds, menus closed and no manual Full. Keep the game running until the
+log/live checks finish. Main remains unmerged; AA, F1 travel and VR remain
+unqualified until their relevant validation.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.

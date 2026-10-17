@@ -10,8 +10,8 @@ struct Analysis {
     double fitted[2]{},scale[2]{},dephasedScale[2]{},lhs=0,rhs=0,residual=0,bound=0;
     bool resolved[2]{};
 };
-// Diagnostic replay only: the production match decision/order/tolerances are
-// untouched. Used R and F fit actual phase independently of expected phase.
+// Diagnostic evidence only. The axis decision and error envelope are shared
+// with production; used R/F still fit actual phase independently of expected.
 inline Analysis analyze(const unsigned char* camera,const unsigned char* bytes,const FlatProjectionJitter& phase) {
     Analysis out;out.reason=forward_light::match(camera,bytes,phase);
     if(!camera||!bytes)return out;
@@ -21,17 +21,11 @@ inline Analysis analyze(const unsigned char* camera,const unsigned char* bytes,c
     for(unsigned r=0;r<2;++r){for(unsigned c=0;c<3;++c){out.fitted[r]+=double(cb[10+r][c])*cb[4][c];out.scale[r]+=double(cb[10+r][c])*cb[2+r][c];out.dephasedScale[r]+=(double(cb[10+r][c])-shift[r]*cb[13][c])*cb[2+r][c];}
         out.fitted[r]=zz>0?out.fitted[r]/zz:std::numeric_limits<double>::quiet_NaN();}
     if(out.reason!=Reason::None&&out.reason!=Reason::Phase)return out;
-    for(unsigned r=0;r<2;++r){const double scale=out.dephasedScale[r];out.axis=static_cast<int>(r);
-        if(!std::isfinite(scale)||scale>std::numeric_limits<float>::max()||scale<std::numeric_limits<float>::min()){out.stage=Stage::Condition;return out;}
-        const float native=static_cast<float>(scale),reciprocal=1.0f/native;
-        if(!(scale>0)||!std::isnormal(native)||!std::isnormal(reciprocal)){out.stage=Stage::Condition;return out;}
-        out.resolved[r]=shift[r]==0;
-        for(unsigned c=0;c<3;++c)if(std::abs(shift[r]*cb[13][c])>flatDeferredFloatBound(24,std::abs(cb[10+r][c])+std::abs(scale*cb[2+r][c])))out.resolved[r]=true;
-        if(!out.resolved[r]){out.stage=Stage::UnresolvedPhase;return out;}
-        for(unsigned c=0;c<4;++c){const double a=double(cb[10+r][c])-shift[r]*cb[13][c],b=scale*cb[2+r][c];
-            const double bound=flatDeferredFloatBound(24,std::abs(cb[10+r][c])+std::abs(shift[r]*cb[13][c])+std::abs(b));
-            if(std::abs(a-b)>bound){out.stage=Stage::PhaseResidual;out.column=static_cast<int>(c);out.lhs=a;out.rhs=b;out.residual=a-b;out.bound=bound;return out;}}
-    }
+    for(unsigned r=0;r<2;++r){const auto axis=forward_light::phaseAxis(cb,r,shift[r]);out.axis=static_cast<int>(r);out.resolved[r]=axis.resolved;
+        if(axis.reason==Reason::None)continue;
+        out.column=axis.column;out.lhs=axis.lhs;out.rhs=axis.rhs;out.residual=axis.residual;out.bound=axis.bound;
+        out.stage=axis.stage==forward_light::PhaseAxisStage::Condition?Stage::Condition:
+            axis.stage==forward_light::PhaseAxisStage::Unresolved?Stage::UnresolvedPhase:Stage::PhaseResidual;return out;}
     out.stage=out.reason==Reason::None?Stage::Accepted:Stage::PriorGate;out.axis=out.column=-1;return out;
 }
 struct Requested {uint64_t epoch=0,frame=0;uint32_t width=0,height=0;float pixel[2]{};};
