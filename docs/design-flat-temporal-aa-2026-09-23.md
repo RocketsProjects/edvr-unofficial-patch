@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 guard FAILED; phase capture BUILT, NOT FLOWN.** Temporary
-  `diag.flat_origin_capture = off`. Auto bootstrap/failure pair: flat hangar,
-  menus closed, 30s; no F7/Full. Main unmerged; F1/VR pending.
+- **10-17 F1 phase capture VERIFIED:** `2d25730e`; jitter is present. Engine
+  frustum rounding omitted from guard; next: derived-bound fix. Temporary
+  `diag.flat_origin_capture = off`. Main held; F1/VR unqualified.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -5040,6 +5040,86 @@ follows this successful gate. Commit the validated source, push only the
 feature branch, then run receipt-guarded clean DLL promotion and sanctioned
 Steam installation/verification while preserving both INI files. Main remains
 unmerged and the targeted stationary capture remains unflown.
+
+**2026-10-17 targeted phase capture VERIFIED: operation error missing from
+certificate.**
+
+The new Steam flat log `edvr_gfx_20261017_140333.log` matches installed
+`2d25730e` / `v0.20.0-rc.2-128-g2d25730e`. The user stayed in the hangar with
+menus closed for 30 seconds, without F7 or manual Full. The sanctioned
+`--phase-failure` decoder returned 0 and verified one manifest and COMPLETE at
+14:05:41.008: two records, 3,200 bytes, 26 chunks, combined hash 6557BA62,
+matched pair, no overflow or truncated/duplicate records. Actual environment is
+Steam `/novr`, DLSS 310.9.1.0, 3840x2160, centered Upstream. The origin probe
+remains absent/default off. This is CPU-candidate evidence, not GPU execution
+or history-success evidence.
+
+The bootstrap at frame 14352/q894 is zero phase, CPU-issued, returned and
+selected. The rejected candidate at frame 14353/q915 has the same
+context/device/H/raw/linear/source cohort, generation 4, bank 2 and range
+0/4096. It was observed before refusal and is correctly marked not issued,
+returned or selected. Original VS and PS used one current 784B buffer, captured
+as the declared 752B spans; their used matrices and donor agree. The first
+unrelated same-depth failure was skipped; this matching pair was not consumed
+by that source. Later status is emitted-pair, with zero evictions, two phase
+failures and one outside-last-selected refusal.
+
+Requested pixel phase is (0,-0.166666657), expected NDC Y 0.00015432098; the
+applied count is 39. Actual fitted Y is 0.0001543074601289187, against
+bootstrap fit 1.097870329526e-12. Jitter reached both original light stages and
+the donor with the correct sign. Axis 1/column 2 fails with residual
+1.3521952185775466e-8 against the old 4.5237755850943205e-10 bound. The phase
+difference is about 1.46e-5 pixel. Ordinary later windows still resolve only
+zero-phase frames and repeatedly lose history, with zero backend failures. The
+diagnostic worked; this does not qualify AA, F1 travel or VR.
+
+- Ruled out: missing jitter, sign-reversed jitter and reuse of the immediately
+  previous zero phase for this rejected candidate, because all three camera
+  payloads contain coherent nonzero phase matching the current request's sign.
+- Ruled out: the discrepancy needs a universal tolerance multiplier. The
+  engine's concrete float endpoint arithmetic supplies an omitted absolute
+  uncertainty before final matrix composition.
+
+Sol pinned the game PE and verified scalar operations in projection builder
+4F2FF0: ordinary centered perspective constructs h, shift=fl(2*h*b),
+lower=fl(-h-shift), upper=fl(h-shift), then center=fl(fl(upper+lower)/
+fl(lower-upper)). Near-cancellation of the two rounded endpoints introduces
+error of order float epsilon even when the resulting center is small. The
+existing guard budgets only final matrix arithmetic. Constants and the
+SUBSS/MULSS/ADDSS/DIVSS/store boundaries were checked; no approximate
+reciprocal or FMA is used in this path.
+
+Explicit float32 replay with one inferred half-height candidate, h bits
+0x3F05B180, gives native scale 1.9148296117782593 and center
+0.00015430746134370565. Using the captured used-view rows, it reproduces all
+four bootstrap and all four rejected CB2 row-11 components bit-for-bit. Eight
+neighboring half-height candidates do not reproduce both. The fitted scale
+1.914830066 differs because the stored view is approximately, rather than
+exactly, orthonormal. The half-height is a constructive explanation, not a
+live-read field; historical selected-camera +0x269/+0x2C0 flags were not
+captured and cannot be recovered from a generic last-call pointer.
+
+The proposed correction must derive and propagate the centered frustum
+coefficient error B through every spatial and translation component, including
+its contamination of the existing dot-product scale estimate. The same
+uncertainty must enter the nonzero-phase distinguishability check. Keep
+lineage, used-view/origin, ownership and absent/wrong-phase refusals. Handle
+normal/overflow/underflow and any supported optional crop explicitly; unproven
+alternate/off-center constructions remain unqualified. Do not choose a
+multiplier from this one sample or make fitted output its own authority.
+
+Evidence artifacts are in ignored
+`analysis/decomp/f1_ship_writer_20261017/phase_failure_2d25730e_20261017_decoded.txt`,
+`phase_projection_roundoff_2d25730e.py` and
+`phase_roundoff_result_2d25730e_20261017.txt` in the main checkout. Astra
+consulted only on diagnostic/RE evidence; no tests, fixture edits or production
+edits were performed for this result. Sol owns further test work. No useful
+live join remained; the user was explicitly released to quit. Next is a
+separately reviewed and tested operation-derived certificate correction; no
+additional capture or flight is needed before implementation. Main remains
+unmerged, and the phase-certificate onset since RC2 remains undated.
+
+For the reviewed ordinary centered branch, u=2^-24 and b=abs(input bound): ds=2*u*b; e=2*u*(1+2*b*(1+u)); dd=e+u*(2+e); B=(2*ds+e+2*b*dd+u*(4*b+2*ds+e))/(2-dd). This assumes finite normal intermediates, h>0, representable2h, |shift|<h/3 for the Sterbenz endpoint sum, and dd<2. The captured b gives B=5.965064809723348e-8 NDC, from the operation scales rather than the measured residual. Include any |2*b-expectedNDC| input-rounding difference. Because the current scale estimator uses dot(F-expected*W,Raxis), propagate phase uncertainty as B*(abs(W[c])+abs(Raxis[c])*sum_j(abs(W[j]*Raxis[j]))) for spatial j=0..2, alongside existing view/composition errors. Apply the same uncertainty to distinguish expected nonzero from zero. This is a proposed correction domain, not a universal bound for optional crop/alternate construction or an implemented policy.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
