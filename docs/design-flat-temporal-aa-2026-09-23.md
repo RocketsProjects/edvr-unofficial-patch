@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1, SC camera source CONFIRMED:** selected flat row 275 omits SC ship translation; Steam `055636` has 451 successful history frames/5s with 0 resets and 0.0002623 m max axis step. F1 remains OPEN.
-  See "F1 supercruise camera-source investigation" below. Sol RE found a matrix-change callback, proved for FreeCameraActivity; its connection to normal ship-camera re-anchors is unproved.
-  No new key or classifier change. Next is the notification emitter/ship-camera join offline, not another flight or SCO lap. VR's dropped 50 m+ translation remains open.
+- **10-17 F1, exact coordinate conversion PROVED by Sol RE:** emitter computes old-frame -> new-frame D; source/upload pointer association is specified. Selected ship source -> governing frame epoch remains unproved. F1 OPEN.
+  See "F1 coordinate-change emitter and proposed correction" below: preserve inward travel and re-anchor residual with D; independent projection fixtures pass. No product/key change. Selected row 275 omits SC ship travel.
+  Next: build a passive stationary-cockpit pipeline identity capture, finish its producer/frame RE, then validate the correction before a normal-space calibration flight. No takeoff or SC/SCO lap for identity. VR's dropped 50 m+ translation remains open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -3623,6 +3623,242 @@ calibration flight would verify that observer against the existing world
 records; it should not ask SC speed to produce camera translation. Until the
 emitter/ship-camera join is known, no further flight is justified. No product
 code, game file or analyzed program state was changed by this investigation.
+
+**2026-10-17: F1 coordinate-change emitter and proposed correction (Sol RE; no
+new flight).** Continued the previous entry on the same verified Steam
+executable. This is a fix proposal with explicit source-binding gates, not a
+shipped classifier change. Product code, live settings and the game
+installation are unchanged. The environment remains Windows x64/D3D11, Steam
+flat `/novr`, DLSS, 3840x2160 output; no headset/runtime dependency is
+established for this flat defect. VR's separate handling of large translation
+is still open.
+
+The emitter's input is an actual coordinate-frame conversion. At RVA 0x3CC0CE0,
+the owner obtains its frame context at +0x5D0 and calls 0x3D00A20 with the
+saved descriptor at context +0x1B0 and a new frame. The calculation goes
+through 0x3CE2640. For equal frame identity and variant, its 0x8C1970 branch
+computes, with row vectors:
+
+```text
+R_D = R_old * transpose(R_new)
+t_D = (t_old - t_new) * transpose(R_new)
+q_new = q_old * R_D + t_D
+```
+
+It then installs the new descriptor, invalidates its caches and broadcasts D
+through 0x3CB35C0. Thus D comes from old/new coordinate descriptors, not camera
+displacement or inferred velocity. The literal 5 km scheduling threshold has
+not been recovered; this proof does not depend on guessing it.
+
+The broadcaster converts double affine data to floats via 0x8B2BD0 and
+dispatches through collections at owner +0x1E0, +0x298, +0x350 and +0x408. The
++0x350 component exposes the notification interface at owner +0x400, token RVA
+0x5F41DE4. The float payload has a 3x3 basis and translation, with **all four W
+components zero**, including element 15. Decode it as affine data; a generic
+inverse of its stored 4x4 is singular. The worker callback 0x42DF410 ->
+0x432C880 multiplies its existing matrix by D, as the FreeCameraActivity
+callback 0x1091520 does for its current/saved poses.
+
+Dispatch 0x7EB5A0 -> 0x25E0B60 -> 0x25CA960 forwards the same matrix. A
+parallel subscriber path uses 0x7FB350 (`SubscriberCollectionJobHandler`) and
+waits through 0x5D6DF0 -> 0x5D6E40 before the broadcaster returns. Callbacks
+can run on workers, but all are complete on return. The stack payload must be
+copied, not retained by pointer. Another producer, 0x3CBBF00, splits large
+transforms into several broadcasts: compose every subevent in order, never
+deduplicate them by render frame. Its input provenance also needs
+qualification; an unproved producer invalidates the epoch association instead
+of being silently ignored or treated as the audited descriptor-change path.
+
+**Camera-source join and its limits.** The owner constructor 0x3CB06A0 resolves
+CameraStackRegister token RVA 0x5F02BF8 into owner +0x560. Each 0x3CC0B70
+update queries that register's slot 0x30 for literal `MainView`. Registry
+0x10881B0 invokes the provider pose getter, RootCameraStack slot 0x28 /
+0x108A9B0, returning selected child C +0xB0; its translation is C +0xE0.
+Function 0x3D00900 preserves this origin pointer and passes it to each frame
+node's slot 0x18.
+
+The normal mono renderer 0x281AC10 obtains provider state S through registry
+lookup and provider slot 0x20 / 0x108A980. This returns C +0x70. Writer
+0x2871D30 copies S +0x70, hence C +0xE0, verbatim into camera +0x50. Activity
+finalization 0x106F8E0 copies the selected activity state into C +0x70 through
+0x1066D80. This establishes a candidate shared origin accessor/layout for the
+frame driver and normal renderer. It does not yet prove that a particular
+cockpit source was transformed by D: actual registry instance, selected
+root/child and view key must match. The renderer key comes from runtime view
+configuration or an override, not a literal `MainView`. A common type token,
+matching float values or camera pointer reuse is insufficient.
+
+There is now an explicit input-domain contract. Registration 0x3CF4AE0 puts
+concrete nodes into the map traversed by 0x3D00900. Their methods 0x3D001F0 and
+0x3D004D0 convert the exact MainView origin p using q=p*K^-1. Cache builder
+0x3CFE640 derives K from the same current descriptor at context +0x1B0 that
+produces D. For the audited same-frame-ID case, no optional B and unchanged
+local node poses, K_new=K_old*D, so invariant local q requires p_new=p_old*D.
+This establishes the consumer's expected frame, beyond a shared pointer or raw
+distance comparison. It does not certify that a camera producer has actually
+transitioned before a particular capture: stale values can still be consumed.
+Producer mutation/order or a certified producer-update epoch is required. The
+optional-B/different-ID branches are not covered by this simple algebra.
+Details: `analysis/decomp/f1_ship_writer_20261017/node_domain.txt`.
+
+The base-state branch is a camera pipeline, not a world-frame descriptor.
+Constructor 0x10855E0 initializes private state at root +0x110 with identity
+poses/zero origins through 0x105EB70 and configures its projection. It links
+eleven children: C0 +0x40 points to root +0x110; C1 +0x40 points to C0 +0x70,
+through C10 +0x40 pointing to C9 +0x70 (0x1085780/0x1085783, advancing at
+0x108578E). An activity can therefore inherit a previous stage's world pose
+while changing only local offsets. The causal trace must identify the first
+world-pose writer and its frame domain, not label the inherited state by the
+last activity's name.
+
+- Ruled out: the HeadLook activity listener at +0x168 is the coordinate-change
+  consumer, because constructor 0x1060810 requests token 0x5F02ADC and callback
+  0x1030DA0 -> 0x107E0D0 takes frame time and updates local head offsets at
+  +0x250/+0x280, rather than consuming D or rewriting world pose +0x70.
+
+The actual Headlook pose task is also verified: OnEnter 0x109A280 registers
+activity +0x150 with descriptor 0x5F532F8. Initializer 0x9E580 puts callback
+cell 0x51856E0 at descriptor-8; wrapper 0x1030DE0 reaches 0x10735B0. That task
+copies [[activity+0x140]+0x40] into activity +0x30 using 0x1066D80, then
+applies local offset +0x250 to the inherited pose at +0x70. Its state getter
+0x5293E0 returns activity +0x30. This proves inheritance, not a new world-frame
+source. Named CameraDefault/ModuleCameraPositioner interfaces are configuration
+interfaces; their +0x28 is a setter, not this activity's state getter.
+
+- Ruled out: 0x1073830 is the Headlook/normal ship producer. Raw callback
+  initialization instead reaches 0x10735B0; the separate 0x1073830 writer is
+  HumanoidCamera (vtable 0x5189430). Do not use it as flat ship evidence.
+
+The sign is positive position. Initializer 0x57B990 binds named `gCameraPos` at
+0x57BA07 and stores its handle at view constants +0x20. Refresh 0x5921F0 calls
+0x598070 with camera +0x50; that setter copies XYZ verbatim. Its separate XOR
+with 0x80000000 constructs negative view translation at context
++0x8C/+0x9C/+0xAC. The historical camera-layout table's "stored negated" claim
+was therefore too broad. Original world shader D99AFDC250D19A3F independently
+subtracts cb1[275] from its object origin before projecting with cb1[270..273];
+this confirms positive-origin semantics in that family, not its identity as
+this flight's selected donor.
+
+Original shader reflection cannot supply the last name-to-register mapping: a
+scan of 2,291 existing blobs found 644 RDEF chunks, none naming `gCameraPos` or
+`gLightingToClipMatrixT`. A capture of the final HDR trigger shader alone does
+not identify the camera donor. Sol instead traced an exact storage-address
+association through the upload:
+
+1. The `gCameraPos` setter 0x598070 obtains its actual CPU destination through
+   0x4FC580, decoding handle +0x0A into an arena/offset. Tag that destination
+   only on a qualified write, together with the source and coordinate epoch.
+2. Uploader 0x501590 decodes the CPU source B from an effect constant-buffer
+   entry using the same arena/offset scheme, then passes B to 0x51B640. Require
+   the tagged origin address to equal B+4400, and the qualified
+   `gLightingToClipMatrixT` address to equal B+4320. This tests actual storage
+   identity at rows 275 and 270, without relying on original reflection names.
+3. Function 0x51B640 receives resource wrapper W. Through 0x51E190 -> 0x50F000
+   it maps actual resource *(W+0x140), subresource W+0x168, using the D3D
+   context reached through transfer.context+0x268. It then memcpy's the source
+   into the returned mapped pointer and unmaps through 0x523190. Match these
+   nested actual Map/Unmap calls to the existing ID3D11Buffer capture and
+   complete CPU write epoch/sequence, then require that buffer to be the
+   selected VS b1.
+
+This statically specifies a pointer-based bridge; it is not a record of runtime
+matches. Metadata must survive deferred upload by storage write generation, not
+refresh-thread TLS. Unknown write acquisition/overlap, arena reuse, stale
+generation, an untracked copy or missing deferred-command replay metadata must
+invalidate provenance. A cached/no-write setter can reuse only a proved live
+storage generation; it must not imply a fresh physical store. All writes that
+could replace the relevant storage must be covered or the association remains
+unknown. Deferred-context execution needs an explicit context/order-aware
+capture seam; finding the immediate Map/Unmap path does not validate replay.
+
+**Proposed correction.** Associate the emitted D with the selected source's
+coordinate epoch and the exact current/previous camera writes. With a verified
+unchanged coordinate epoch, use identity D and preserve travel represented by
+the selected rows; this does not recover SC ship travel absent from them.
+Across a verified D, reconstruct the old-frame point before projecting through
+the previous rows:
+
+```text
+q_new = q_old * R + t
+x_old = (x_now + O_now - t) * inverse3(R) - O_old
+
+// cameraBefore's reconstructed position is scaled by iz = depth / now[3].z:
+positionOld = (position + (O_now - t) * iz) * inverse3(R) - O_old * iz
+
+// For a translation-only D:
+cameraDelta = O_now - O_old - t
+```
+
+Replacing the previous origin with the current origin discards the residual and
+cannot be this correction. For two ordered events, compose R = R1*R2 and t =
+t1*R2+t2. Decode/validate D once per matched event; never invert the packed
+zero-W 4x4 or mutate the game's scene buffers.
+
+The static engine route needs the analogous treatment if its snapshots are
+proved to use D's coordinate domain. This flight's GPU-read EN[275]/EB[275]
+exactly equal selected current/previous camera origins at frames 49616 and
+50576, with adjacent scene stamps. The previous scene snapshot was not already
+rebased there. Correcting only the CPU cached camera would leave static engine
+reprojection using its raw approximately 5 km origin delta. Moved-object
+records have separate current/previous pose transforms and may already account
+for the basis change; celestial motion has its own camera-relative body data.
+Do not blanket-apply D to those routes. Skinned motion also needs its explicit
+coordinate convention checked before correction; an unproved route should
+reset/refuse its history rather than receive a guessed second shift.
+
+A production observer must bind emitter owner/context, registry/root/source,
+camera refresh and the complete CPU b1 write epoch/sequence. Hooking only
+Present or consulting a global "latest transform" cannot distinguish a refresh
+during dispatch, a deferred upload or another view. Reserve event order before
+dispatch; publish completion after the original broadcaster returns; any
+overlap, missing event, unsupported matrix, stale source or unarmed/refused
+hook must be distinguishable from a verified unchanged coordinate epoch.
+Existing `FlatCameraObserver` callbacks currently serve observe-only/VR paths,
+so normal flat provenance requires explicit wiring. Pin signatures to the
+verified executable and retain safe reset/refusal when the proof is
+unavailable. Keep the existing physical camera-cut and frame-gap checks. A
+first implementation can admit only verified translation events in an audited
+descriptor/domain case and reset on other frame changes until those routes are
+proved and tested; the general formula is not permission to accept an unrelated
+camera cut.
+
+Keep observation off the draw hot path: bounded provenance records, no hook
+I/O, and publication alongside existing camera captures. Report armed/seen,
+matched, unknown-write, overlap, overflow and refused counts so an observer
+that never ran cannot look like an unchanged epoch. Generic parameter hooks may
+be frequent; their CPU cost and mutation-path coverage must be measured before
+shipping the design.
+
+**Offline validation.** The independent point-projection prototype
+`reviews/flat_origin_affine_projection.py` (ignored local analysis) was
+executed successfully. It projects known old world points directly,
+independently maps them forward through D, then applies the proposed
+inverse-depth correction. At width 2496 and 90-degree horizontal FOV, a real
+synthetic inward 80->20 m camera move retains -74.88 px; a synthetic -5000 m
+frame shift with +5 m physical camera displacement retains +6.24 px. These are
+controlled fixtures, not a certification of the flight's approximately 5 m
+camera/world-record residual: that record's stationarity is still unproved. A
+90-degree affine case recovers the old point/projection, and ordered split
+transforms agree with their composed transform. These validate the algebra, not
+runtime domain matching or a production shader implementation.
+
+The remaining input is the actual normal cockpit pipeline selection. A minimal
+read-only capture while stationary can record the selected root/child, each
+predecessor stage's activity interface/vtable, weight, +0x28 target/returned
+state, and base-state pointer. Follow the chain to the first activity supplying
+the world pose, then finish its frame-domain and update-order RE. Capturing
+only the final Headlook stage or the menu would not resolve that producer. No
+takeoff, travel or re-anchor is needed for this identity capture; a passive
+capture still needs implementation and build validation.
+
+The correction above is supported by RE and projection math, conditional on
+that final producer/epoch proof. After it, implement/validate the guarded
+association and correction with independent reprojection tests, route checks
+and a full build before one normal-space calibration flight. No SC/SCO lap is
+justified. Evidence is in `analysis/decomp/f1_origin_20261017/` and
+`analysis/decomp/f1_ship_writer_20261017/`; the verified image identity is in
+the preceding entry. F1 stays OPEN until the binding and correction are
+validated.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
