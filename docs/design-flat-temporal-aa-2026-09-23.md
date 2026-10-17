@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 parent/override one-shot BLOCKED BEFORE ARM:** correct Steam flat b195d65d and parked Status; renderer image-copy-source refusals starve the post-admission scene callback. No parent/override record yet. F1 OPEN.
-  See "parent/override one-shot blocked before arming" below. Sol proved a guarded typed Root/MainView pool locator; live reader READY, 31 offline cases passed. The old process exited normally before object inspection. D/epoch/GPU claims remain unproved.
-  Next: relaunch Steam flat into the docked cockpit, rediscover PID/base, read the guarded candidate while the game stays open. No travel/install needed; automatic gate still needs repair. SC row 275 omits ship travel; VR's dropped 50 m+ translation remains open.
+- **10-17 F1 live parent/Q RECOVERED:** correct Steam flat b195d65d, stable guarded MainView candidate. Actual parent 5355318/30B9160 wraps upstream 553A8D8/3CB93F0; Q 5186FC0/108FC00 is present and outer-eligible at snapshot. See "09:19 session" below.
+  Both Sol audits join this upstream type's notification registration to 3CB32B0, which applies the broadcaster's D to both exact getter poses. Q directly writes entity weights; execution and indirect effects remain unknown. Live reads saved and FINISHED; game may close.
+  F1 OPEN: active broadcaster instance, event/cache/render epoch and selected GPU donor remain unproved. Next: offline ordering/provenance RE, then fix the passive admission gate and instrument remaining boundaries together. No flight/install requested; SC row 275 omits ship travel; VR's dropped 50 m+ translation remains open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4173,6 +4173,108 @@ pool metadata; none of PID 45044's object/page/base addresses can be reused.
 F1 remains OPEN. No additional flight is requested; inspect the current live
 candidate first, and correct the capture gate separately before relying on
 another automatic one-shot.
+
+**2026-10-17, 09:19 session: parent/provider and optional override recovered.**
+Steam log `edvr_gfx_20261017_091918.log` matches installed clean
+`v0.20.0-rc.2-113-gb195d65d`, flat `/novr`. The automatic instrument again
+produced no arming/capture/Placed records. The user relaunched into the docked
+cockpit and kept the process alive for the separate guarded live inspection.
+Fresh discovery found PID 38232 and executable base `0x7FF719020000`; the
+previous process's addresses were not reused. All requested live reads are
+finished and saved; the user was explicitly told the game could be closed.
+
+**Saved evidence.** The bounded reader completed with 645 reads / 5165 bytes,
+no issues, unchanged semantic identities and no sampled pose drift. It found
+one reserved page, 20 slots / 16 free, a unique typed MainView Root
+`0x16899484080`, two stacks and one enabled Placed activity. Read-only
+follow-ups also completed with stable before/after associations. The artifacts
+are ignored research files under `analysis/decomp/f1_origin_20261017/`:
+`live_placed_091918.json`, `live_parent_chain_091918.json` and
+`live_upstream_and_override_091918.json`. These preserve the full matrices,
+typed identities, predicates and explicit unknowns. No target function was
+called, no memory was written and no thread was suspended.
+
+The Placed concrete object is `A=0x168994CC080`, record `E=0x168999B9D70`. Its
+actual parent `P=[E+0x10]=0x16899E8D508` has vtable `+0x5355318`, getter
+`+0x30B9160`. This getter is a local-offset wrapper: it calls `U=[P+0x18]`
+through vslot 0x20, forms local times upstream, and returns its cache at
+P+0x98. The live U is `0x168F4631BD8`, vtable `+0x553A8D8`, getter
+`+0x3CB93F0`; its concrete base is B=U-0x58. This selects one actual provider
+family from the earlier candidate list.
+
+For the upstream getter, byte[U+0x410]=1 and config[+0x10]=1 select the U+0x188
+return branch at the snapshot. Both U+0x188 and U+0x278 were readable, finite
+and equal, with origin approximately (-0.0000416, 0.000000477, 0.0000224). P's
+local offset was approximately (-0.00432, 3.32734, 16.87980), and its cached
+origin (-3.32736, 0.00405, -16.87978). Placed's cached E+0x60 and final A+0x70
+matrices were byte-identical, origin approximately (-4.34272, -0.00397,
+-17.72711). Reading a return branch or equal caches does not establish
+execution or freshness.
+
+**Optional override.** Q=`0x168993EE0D8` is present, vtable `+0x5186FC0`, vslot
+0x70 `+0x108FC00`, internal gate vslot 0x68 `+0x108ED20`. Placed's outer
+snapshot predicates pass: handle -1, config14=1, config18=1 and target
+reference `0x168D953E128` has signed state 8. Q's mode at +0x80 is 1; its +0x60
+and +0x68 references both have state 8, and +0x68 is the same reference as
+Placed's target. The optional +0x70 reference is null. Internal virtual
+predicate execution and the actual call remain UNKNOWN. In particular, the
+cached/final equality does not prove that Q ran or was skipped.
+
+Sol's bounded callgraph audit narrows the earlier "override" label: Q's
+examined method populates an entity-keyed weight map in state+0x10, with
+weights in entry+0x8. Its direct accesses affect the header/map at state
++0x10/+0x18/+0x20/+0x28, not the primary pose at state+0x40..0x7F. Indirect
+header callbacks and aliases remain unaudited; this does not rule out all
+transitive effects or prove the runtime branch executed.
+
+**Notification-to-source connection established by RE.** Against the pinned
+game image (SHA256
+`E6BE8BBE04E6A7AE226D4318945AF7F367DE13DC5A007A261964D9BA8144E988`), both Sol
+agents independently verified the following join. Constructor `+0x3CAFC90`
+installs this U at B+0x58, initializes listener B+0x68 and a reference with
+token `+0x5F7B20C` at B+0x70; its resolved event-interface pointer is B+0x78.
+The success path of `+0x3CBADE0` registers B+0x68 via `+0x9204C0` with
+descriptor `+0x5FDD688`. Callback initializer `+0x119F70` stores table
+`+0x5539CC0` at descriptor-0x8. That table points to `+0x3CADCC0`: listener
+arrives in RDX, D in R8, and the wrapper calls `+0x3CB32B0` with
+B=listener-0x68 and D.
+
+`+0x3CB32B0` postmultiplies BOTH exact getter source poses, B+0x1E0=U+0x188 and
+B+0x2D0=U+0x278, by D. Translation follows `origin_new = origin_old * D.linear
++ D.translation`, without a sign flip or inverse in this writer. `+0x3CAE750`
+exposes this token at owner+0x290, the interface of collection owner+0x1E0.
+Broadcaster `+0x3CB35C0` sends the same converted float D to that collection,
+then collections +0x298, +0x350 and +0x408. FreeCam's earlier token
+`+0x5F41DE4` belongs to the third collection: the connection is shared D, not
+token equality. The previously traced same-descriptor-ID producer gives `D =
+Aold * inverse(Anew)`. These are affine matrices; zero W entries preclude a
+generic 4x4 inverse.
+
+This proves a coordinate-conversion writer for the actual observed provider
+type, beyond the earlier unrelated consumer examples. Arithmetic checks of the
+saved matrices support both local/upstream composition links (maximum absolute
+error below 1.4e-6), without proving execution. The live B+0x78 resolved
+interface and active B+0x68 subscription were not sampled: a particular
+broadcaster INSTANCE, the registration success path and any notification
+execution remain unproved. Collection callbacks complete before the broadcaster
+returns, but ordering against Placed refresh, Root copies and the selected GPU
+upload remains open. The compact RE report is
+`analysis/decomp/f1_origin_20261017/actual_placed_parent_notification_result_20261017.txt`.
+
+**Interpretation and next proof.** This is a stable typed MainView candidate,
+not a renderer-observed selection. The snapshot does not establish a selected
+GPU donor, a frame epoch, cache/getter execution or atomic lifetime. The
+automatic gate remains unrepaired. No further travel or stationary capture is
+requested on the basis of these reads. The RE-supported correction direction is
+to associate actual source callbacks and their composed D with downstream
+camera/upload epochs, convert history into the current coordinate domain, and
+retain physical travel as a residual. Ordinary inward travel with identity D
+must survive; a re-anchor plus travel must retain the travel. Unknown or mixed
+epochs cannot justify history reuse. Next prove downstream cache/copy ordering
+and renderer provenance, then repair the passive gate and instrument those
+remaining boundaries together. No motion correction is shipped here. F1 remains
+OPEN, including VR's dropped 50 m+ translation. The installed DLLs remain
+b195d65d; this evidence entry changes documentation only.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
