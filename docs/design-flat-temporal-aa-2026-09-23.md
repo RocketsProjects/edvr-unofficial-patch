@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 arithmetic fix BUILD VERIFIED; targeted hangar audit BUILD VERIFIED:** the actual forward-lighting path lacks current H camera donation; no working baseline for this exact Steam path has been established. Astra reviewed the collector and full gates passed in 202.3 seconds.
-  Temporary `diag.flat_origin_capture = off` stays off. The separate manual Full audit (Shift+NumLock) captures actual VS/PS camera payloads and same-event depth/donor/input lineage without changing rendering admission or VR.
-  Next: one verified Steam flat stationary capture after clean promotion/install verification. Wait for both the payload audit drain and Full discovery completion before quitting. Keep main unmerged pending validation. Exact D-based history preservation and VR propagation remain separate.
+- **10-17 F1 arithmetic fix BUILD VERIFIED; hangar audit CAPTURED/REVIEWED:** installed Steam DLLs b025e8fd supplied complete/current light-camera payloads and a saved raw-depth-to-linear-to-light resource join. Partial flags describe intermediate-copy suffix writes/metadata bounds; the final HDR consumer has no late writes. Astra supports a guarded camera-donation implementation without another pre-fix capture/flight.
+  Temporary `diag.flat_origin_capture = off` stays off. Manual Full is independent of that flag. Both audits completed and the user may quit; remaining work is offline.
+  Next: exact-pair live depth/resource/subresource/version and shader-used camera/donor/phase guards, preserving existing admission/depth checks; positive nonzero-phase and rejection fixtures before ordinary AA and F1 validation. Keep main unmerged pending validation. Exact D-based history preservation and VR propagation remain separate.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4685,6 +4685,86 @@ failed, then passed unchanged in isolation and in the final full build. No
 runner fix is included. Next is clean-version promotion, Steam package
 verification with settings preserved, and the stationary manual Full capture;
 main remains held.
+
+**2026-10-17, 12:26 Steam stationary light-camera audit captured.** The latest
+graphics log, `edvr_gfx_20261017_122417.log`, matches b025e8fd (6AD3B924), flat
+`/novr`, with DLSS selected at 3840x2160. The manual Full arm is 12:26:21.937.
+The payload audit drained at 12:26:25.278 with four verified files, no write
+failures and a verified manifest; separate Full discovery completed at
+12:28:21.944. The user was then explicitly released to quit normally. Further
+work uses saved files only.
+
+All four samples contain complete, stable and current original VS/PS CB2
+payloads, 752 bytes each, from the same 784-byte buffer. Each pre-forward
+observation retains the original binding and bytes; no private plan/clone is
+associated, upstream owner is recorded and phase is zero. Seventeen eligible
+current geometry-camera records pass the recorded range/depth checks. Sol finds
+one unique eligible camera basis/origin, numerically consistent with CB2
+view/inverse-view and projection rows to roughly 1.2e-6 metres. This is camera
+consistency evidence, not authorization by numeric match alone.
+
+The terminal result is `payload-only-or-partial`: later H writes are counted in
+all samples, producer metadata overflows in samples two through four, and
+sample three has seven donor overflow observations. Those limits do not turn
+the saved complete camera payloads into missing bytes. Ruled out: the actual
+light-camera CB2 could not be captured, because all four originals and
+pre-forward copies decoded complete/current/stable. The PS t0 resource has a
+recorded current producer, DEF19B035D5EDEDC/CB95394B50D737D6, and differs from
+the light draw's bound DSV. Its shader performs a depth conversion; the raw
+depth input and producer camera binding still need an identity/version join.
+Sol is exhausting this same Full trace and packet set before requesting any
+additional capture. No admission change or new flight is justified yet.
+
+Offline closure from the same Full capture: DC census frame 1 records depth
+conversion DEF19B035D5EDEDC/CB95394B50D737D6 at DCO1#684 reading @320 and
+writing @319, followed by the actual light pair at #693 reading @331 with DSV
+@97. Interned @320/@97 reference the same raw resource with SRV/DSV formats
+21/20; @319/@331 reference the same R32F linear resource. The sequence lies in
+the first completed-frame span, 12:26:21.969..12:26:22.040, containing sample
+one's 12:26:22.038 completion. That census has no overflow/truncation. It has
+no generation tags, so a runtime guard must reproduce the join with live
+resource/subresource/version checks instead of trusting saved pointer tokens.
+
+FTR5 `flat_trace_12925.bin` contains frames 12922..12924, confirming conversion
+q705/790/713 before light q715/800/723. Its projection/input fields are
+unobserved, so it cannot supply missing CB2 bytes. Existing general packets
+have unrelated CB2 buffers and cannot fill that gap. HDR-chain replay instead
+closes the partial-status question: each frame has a unique known-SRV final HDR
+consumer, no late H writes relative to that consumer and the same camera
+conflict. In sample one the last H writer q878 precedes the consumer q882. The
+audit's 110 later writes occur after the intermediate image copy q741 and
+before the real consumer; they are normal accumulation, not proof of a bad
+frozen light camera. Ruled out: record-complete zero alone invalidates the
+saved camera observations, because the complete current payloads were frozen
+before those later writes and the final-consumer replay has zero late writes.
+Whole-frame immutability is not established by this distinction.
+
+Astra independently reviewed the evidence and supports a conservative
+exact-pair H-camera donation guard without another pre-fix capture or flight.
+Camera proof must use the light shader's consumed view rows 2..4 and forward
+rows 10..13; the unused inverse-view origin is corroboration. Missing
+conversion coefficients do not force another capture if EDVR continues
+reconstructing from independently qualified raw DSV, rather than claiming
+metric equivalence with the linear texture. The runtime guard must verify exact
+shaders/target/depth/viewport, current stable original VS/PS CB2 ranges and
+used transforms, the live raw-depth-to-linear-to-light chain with no
+intervening relevant mutation, coherent current eligible same-depth donors, and
+consumer phase ownership. Ambiguity, unknowns and overflow fail closed.
+Existing admission/depth/write checks remain. These phase-zero manual samples
+justify implementation, not ordinary AA/history or F1 success. Nonzero support
+needs positive algebraic phase fixtures and mismatch/range/stale/origin/input
+negatives before ordinary stationary validation and then F1 travel validation.
+No rendering code changed during this capture analysis; main remains held.
+
+In the overflow-free first sample, solving the shader-used view as O =
+-inverse(R) * t gives (-3.762855775, 2.167933215, -17.727133731). Its maximum
+origin-axis residual against the geometry camera is 9.333184e-7 metres. The
+used forward transform's spatial part matches exactly, with translation
+residual at most 1.089867e-6. These checks use the consumed rows; the unused
+inverse-view fields provide independent corroboration. The bounded evidence
+report is
+`analysis/decomp/f1_ship_writer_20261017/light_payload_result_b025e8fd_20261017.txt`
+in the main checkout.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
