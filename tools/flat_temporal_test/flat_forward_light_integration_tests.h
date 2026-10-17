@@ -37,6 +37,46 @@ inline unsigned run() {
     expect(authority.affected(900,2)&&authority.affected(900,3)&&authority.affected(900,0),"post-donation raw/linear/unknown mutation revokes");
     expect(!authority.affected(901,2)&&!authority.affected(900,4)&&!authority.affected(900,99),"new frame/H accumulation/unrelated MRT preserve authority");
     authority.live=false;expect(!authority.affected(900,2),"revoked authority cannot revive itself");
+    {
+        auto prefix=std::make_unique<FlatRuntimePrefix>();auto& p=*prefix;p.frame=900;
+        const auto h=token(0x4000);auto* target=flatRuntimeTarget(p,h);
+        expect(!flatRuntimeOwnsForwardCamera(p,h),"retained phase H without current donation is candidate-local");
+        target->tone.forwardLightCamera=true;target->tone.key.writeEpoch=899;
+        expect(!flatRuntimeOwnsForwardCamera(p,h),"previous-epoch typed target is not current authority");
+        target->tone.key.writeEpoch=900;
+        expect(flatRuntimeOwnsForwardCamera(p,h),"current reducer forward attestation owns refusal");
+        target->hdrCamera=false;target->hdrBad=true; // forwardRevoke clears these before refusal
+        expect(flatRuntimeOwnsForwardCamera(p,h),"revoked current target retains global cancellation proof");
+        expect(!flatRuntimeOwnsForwardCamera(p,token(0xBAD))&&!flatRuntimeOwnsForwardCamera(p,nullptr),"unrelated and null identities stay local without dereference");
+        ++p.frame;expect(!flatRuntimeOwnsForwardCamera(p,h),"same pointer cannot carry authority into another epoch");
+    }
+    // Captured on-foot ordering: rejected first light, then an ordinary world
+    // camera, then the existing alternate laser camera. Only the old global
+    // candidate-refusal mark changes; mixed-depth donation remains refused.
+    const auto candidateScope=[&](bool retainedIdentityOwns) {
+        auto prefix=std::make_unique<FlatRuntimePrefix>();auto& p=*prefix;
+        p.frame=900;p.width=1920;p.height=1200;p.output=token(0x9000);p.format=26;
+        FlatHdrFrame route;flatHdrBeginFrame(route,p.width,p.height);
+        const auto apply=[&](FlatRuntimeDraw& d){flatRuntimeObserve(p,d);flatHdrObserveDraw(route,d.key,p.sequence,nullptr,false);};
+        auto src=draw(token(0x1000),23,token(0x2000),token(0x2001),1,2);
+        src.key.kind=kFlatContractPool;src.supported=true;camera(src,p.frame,1);apply(src);
+        auto light=draw(token(0x4000),26,token(0x2000),token(0x2001),kVs,kPs);
+        if(retainedIdentityOwns||flatRuntimeOwnsForwardCamera(p,light.key.color))
+            flatRuntimeMarkUncertain(p,FlatRuntimeUncertainCause::ForwardRefusal,light.key.color,nullptr,0,0,static_cast<uint32_t>(Reason::Ambiguous));
+        apply(light);expect(!flatRuntimeOwnsForwardCamera(p,light.key.color),"failed candidate never acquires typed authority");
+        auto ordinary=draw(light.key.color,26,light.key.depth,light.key.dsv,0x68DDDEF04D9894AFull,0x06332CA168B6DA63ull);
+        camera(ordinary,p.frame,p.sequence+1);apply(ordinary);
+        const auto* target=flatRuntimeTarget(p,light.key.color);
+        expect(target->hdrCamera&&!target->tone.forwardLightCamera,"ordinary current H camera establishes independently of failed donation");
+        auto laser=draw(light.key.color,26,light.key.depth,light.key.dsv,0x88DCF1164C640EC3ull,0x494506A63091DF8Cull);
+        camera(laser,p.frame,p.sequence+1,.0675f);apply(laser);
+        auto consumer=draw(token(0x6000),27,nullptr,nullptr,0xF9CFC798F21E9AEAull,0xFEE777E92850B390ull);
+        flatRuntimeObserve(p,consumer);const void* srv[4]={light.key.color,nullptr,nullptr,nullptr};
+        flatHdrObserveDraw(route,consumer.key,p.sequence,srv,true);
+        return flatSelectHdrRoute(p,route,[](uint64_t,uint64_t){return true;}).reason;
+    };
+    expect(candidateScope(true)==FlatMonoReason::Truncated,"retained-H global mark reproduces captured selector stand-down");
+    expect(candidateScope(false)==FlatMonoReason::Selected,"local failed candidate preserves independently valid ordinary-camera selector");
     // Same runtime attestation -> reducer -> inherited H -> image handoff. Its
     // b1 stays null: donor provenance is separate from actual light bindings.
     auto replay=[&](unsigned negative){auto prefix=std::make_unique<FlatRuntimePrefix>();auto& p=*prefix;p.frame=900;
@@ -79,6 +119,13 @@ inline unsigned run() {
     // arms or actual-call early returns would make the pure proof unreachable.
     auto read=[](const char* path){std::ifstream f(path,std::ios::binary);return std::string(std::istreambuf_iterator<char>(f),{});};
     const auto runtime=read("src/d3d11/flat_runtime.cpp"),adapter=read("src/d3d11/flat_forward_light_runtime.inl"),header=read("src/d3d11/flat_runtime.h");
+    const auto refusalStart=adapter.find("void forwardRefusal(State& s,"),refusalEnd=adapter.find("bool forwardActualPair",refusalStart);
+    const auto refusal=adapter.substr(refusalStart,refusalEnd-refusalStart);
+    expect(refusal.find("const bool owned=flatRuntimeOwnsForwardCamera(s.prefix,h);")!=std::string::npos&&
+        refusal.find("phaseHdr")==std::string::npos&&refusal.find("++f.refused")!=std::string::npos&&
+        refusal.find("++f.reasons[")!=std::string::npos&&refusal.find("if(owned){flatRuntimeMarkUncertain")!=std::string::npos&&
+        refusal.find("flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);failPhase")!=std::string::npos,
+        "actual refusal keeps counters and gates global uncertainty trace and phase failure on shared current authority only");
     const auto qualify=runtime.find("const auto lightIssue=forwardQualify(s,d);"),reduce=runtime.find("FlatMonoFrame selected =",qualify);
     const auto recertify=runtime.find("!forwardIssueValid(s,forwardIssue)",qualify);
     expect(qualify!=std::string::npos&&recertify<reduce,"original binding receipt precedes reducer");

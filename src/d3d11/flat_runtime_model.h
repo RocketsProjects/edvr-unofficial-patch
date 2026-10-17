@@ -192,6 +192,19 @@ struct FlatRuntimePrefix {
     // The draws of a pool family left stock (FlatRuntimeDraw::poolFamilyVs): the selector's FlatMonoFrameInput::unsupportedFamilyDraws.
     uint32_t unsupportedFamilyDraws = 0;
 };
+// Only a current reducer attestation makes forward-camera refusal global.
+// Retained phase-planning H identity is not current authority. Keep the tone
+// proof after revocation clears hdrCamera/sets hdrBad, so cancellation still
+// invalidates a frame that already depended on the donated camera.
+inline bool flatRuntimeOwnsForwardCamera(const FlatRuntimePrefix& p, const void* hdr) {
+    if (!hdr || !p.frame) return false;
+    for (uint32_t i = 0; i < p.targetsUsed; ++i) {
+        const auto& t = p.targets[i];
+        if (t.resource == hdr && t.tone.forwardLightCamera && t.tone.key.writeEpoch == p.frame)
+            return true;
+    }
+    return false;
+}
 inline void flatRuntimeMarkUncertain(FlatRuntimePrefix& p, FlatRuntimeUncertainCause cause,
                                      const void* resource = nullptr, const void* related = nullptr,
                                      uint64_t vs = 0, uint64_t ps = 0, uint32_t detail = 0) {

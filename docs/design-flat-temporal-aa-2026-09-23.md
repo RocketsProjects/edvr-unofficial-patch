@@ -52,7 +52,7 @@
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
-- **10-16/17 flat FSR reports, receipts BUILT, NOT FLOWN:** both capped logs show active treatment; recurrent selector truncation's on-foot cause remains unproven. Passive selector/projection diagnostics now built with no AA admission change (last entry).
+- **10-17 RC3 scope regression FIX BUILT:** a rejected optional forward candidate globally poisoned the frame using retained `phaseHdr`. Current authority now gates cancellation; all three saved copy selections recover in replay, full build PASS. Live validation pending (last entry).
 - **10-17 F1 flat PASS:** `942cfeb3`; steadier stationary edges and seven
   normal-space ambiguity resets with clean history recovery. Temporary
   `diag.flat_origin_capture = off`. Exact re-anchor/VR separate.
@@ -17336,3 +17336,139 @@ heartbeat has `selector-receipts`, `selector-suppressed`,
 `projection-lookups`, and `lookup-suppressed`, so zero activity and exhausted
 detail budgets remain distinguishable. On the next flight, raise
 `edvr-flat.ini` `[log] max_mb=128` and capture the affected interval.
+
+## 2026-10-17 — Steam RC3 main-menu AA report
+
+The user reported no visible AA effect on the main menu's 3D ship/hangar
+background, then confirmed AA appeared to work in the loaded station/hangar.
+The running Steam flat `/novr` log is `edvr_gfx_20261017_162438.log` under
+`C:\Steam\steamapps\common\Elite Dangerous\Products\elite-dangerous-odyssey-64\edvr_logs`.
+`edvr_log.py --expect-build HEAD --version` verifies `v0.20.0-rc.3`, build
+`6AD3EB57`. The origin probe remains off. No rendering change or install was
+made for this investigation.
+
+Earlier fully treated windows at 16:26:30–40 were TAA (`on`), following several
+live AA setting changes; they do not establish successful DLSS at that time.
+The setting returned to DLSS at 16:27:05.818. At 16:27:15, all 435 HDR frames
+were refused. The new selector receipts identify `forward-refusal`, detail 5
+(`unknown-depth-writer`), affecting both HDR and output-copy selection. Frame
+16010 records its first uncertainty at prefix q1394, before HDR q1668 and copy
+q1669. Targets 26/128 and sources 1/32 rule out literal table exhaustion for
+that receipt. First VS/PS are zero because the forward-refusal call does not
+pass shader identities. This is a real refusal interval; its exact alignment
+with the user's scene changes still needs a controlled menu sample.
+
+By 16:28:55, DLSS had treated 13,242 frames, with 5,150 consecutive treated
+frames and refusal count unchanged at 4,025. The HDR route was inapplicable at
+2496x1404 below output size, while the final-copy route continued treatment.
+Backend failures remained zero. The user's visible hangar result agrees with
+this recovery.
+
+Ruled out: recurrence of the prior nonzero-phase certificate rejection in
+these windows, because phase failures remained zero and camera row pairing
+succeeded. The RC3 P-B change only skips successful diagnostic receipt payload
+work; its observer does not change rendering qualification.
+
+Open: identify the unknown depth writer and establish whether steady main-menu
+rendering reproducibly refuses. Do not relax depth ownership or raise table
+bounds from this evidence. Next evidence should be a stationary main-menu
+draw/state capture with DLSS left selected; no flight is required.
+
+## 2026-10-17 — RC3 carrier on-foot capture and user bundles
+
+The user then reproduced no visible AA while on foot in the carrier hangar.
+The same Steam RC3 log verifies sustained refusal: at 16:31:20, all 449 frames
+were refused; at 16:31:30, all 450. Both selectors report forward refusal,
+detail 8 (`ambiguous-camera`), below target/source table limits. The guard's
+arithmetic `phase` counter stays zero. The general jitter failure census does
+report `ambiguous-camera` and `compute-source-invalidated`; those are not a
+recurrence of the operation-derived phase-bound rejection.
+
+The user armed Full with Shift+NumLock at 16:31:46. The saved
+`traces/flat_trace_40279.bin` contains three complete frames, 6,612 events,
+peak 2,234 events, no overflow. Six selected draw packets completed. The light
+audit saved four verified payload files and drained at 16:31:50.552, but its
+result is explicitly `payload-only-or-partial`, not record-complete. Discovery
+finished at 16:33:46.847; the user was released from the stationary hold.
+
+Initial causal trace review finds different camera bytes on raw depth
+`254A16228E0`: frame 40276, projection-only `84F6596FAF22CCFA/null` at q580,
+typed origin `7B0DC42D383F694C/0DF03E64DF9DBEF1` at q590, then supported
+`DE545DC8EE4FBB87/E46E3E4832B2FDB0` at q594. These share the same constant
+buffer generation/bank/range. This rules out buffer identity alone as the
+cause of the camera mismatch. The census records depth test enabled and
+write-all for the 7B0D/0DF0 pair (`ds=17wA`); the audit DSV has no read-only
+flag. FTR's depth-write bit is not populated for every draw, so its zeros
+must not be interpreted as proof of read-only depth. Actual GPU execution
+and the safe camera-ownership policy remain separate questions.
+
+The supplied `edvr-logs-20261017-152404.zip` also verifies RC3, AMD RX 9070 XT,
+flat `/novr`, measured native 3440x1440, with EDHM chained. At 15:13:50.310,
+frame 15992, the first causal receipt is unknown writer (detail 5), q2350
+before HDR q2458, targets 20/128 and sources 1/32. All 581 frames at 15:13:58
+and all 535 at 15:15:11 refuse before backend execution. The matching status
+reports docked/in-main-ship, not on foot. Later FSR 3.1.2 treatment succeeds,
+including 509/509 frames at 15:16:11 and a longest treated streak of 14,922.
+Thus this is intermittent admission failure, not a universal backend fault.
+
+The supplied `edvr-logs-20261018-012309.zip` verifies the same RC3 build on
+RTX 3050, flat DLSS, native 1920x1080. It contains only 17 resolves, with no
+backend, arithmetic-phase or origin-ambiguity failures. Unknown writer and
+forward ledger overflow dominate the initial refusal run; ambiguous camera
+is an additional later cause. The initial run precedes minimization, and
+later ambiguity occurs between client-size restoration and the next
+minimization. Zero-sized presents cannot explain away those failures. This
+bundle has no Full sidecars or precise scene marker.
+
+Open: determine whether the new forward-camera guard is refusing an optional
+candidate or revoking authority on which the current output actually depends,
+and identify a safe policy for the captured projection mixture. Do not admit
+mixed depth merely by relaxing equality. The bundles lack the unknown writer's
+shader identity, so they establish a refusal family, not the same offending
+draw. The current saved capture is being audited before another test or fix.
+
+## 2026-10-17 — rejected forward candidate poisons independent AA route
+
+The source audit identifies a narrower scope error than the genuine mixed
+projection refusal. `forwardRefusal` treats `H == phaseHdr` as current
+ownership. `phaseHdr` is a retained phase-planning resource, including after
+history invalidation; it does not prove that this frame donated forward
+camera authority. A rejected first candidate can therefore mark the entire
+prefix uncertain before an independent ordinary camera path is established.
+
+The saved frames contain that independent path. H's first forward-light CB2
+matches camera A's consumed projection fields exactly. Later ordinary H draws
+establish A at q1050/1045/1073. The sole B camera-bearing H draw is the existing
+special laser pair, whose ordinary contract already keeps its camera separate.
+The new forward donation can remain rejected without automatically rejecting
+this independently judged path.
+
+Sol replayed original `flat_trace_40279.bin` and a counterfactual with exactly
+one pre-first-light uncertainty mark removed per frame. No earlier forward
+attestation exists. Every draw, resource write, dispatch write, foreign flag
+and overlay event remains unchanged. Original frames 40276–40278 reject both
+selectors as truncated. All three variants select the final-copy candidate;
+HDR correctly remains inapplicable because 2496x1404 is below 3840x2160 output.
+The existing test executable performed the replay; helper and variant are in
+ignored `build/rc3_onfoot_pre_authority_replay.py` and adjacent outputs.
+
+This confirms selector recovery, not nonzero-phase GPU execution: the trace
+replay does not execute the phase machine. The implementation must keep
+candidate failure reasons and counters, raw-depth ambiguity/unknown-writer
+checks, and strict revocation after a current forward donation. Only the
+retained planning identity must stop acting as current camera ownership.
+No new toggle, shader role or numerical tolerance is justified.
+
+The narrow implementation uses the shared
+`flatRuntimeOwnsForwardCamera(prefix, H)` decision: the current target must
+have a forward-camera attestation stamped with this prefix's frame. It keeps
+the typed tone proof after revocation clears `hdrCamera` and sets `hdrBad`,
+so invalidating an actual donation still cancels the frame. Candidate counters
+remain unconditional. Focused compilation and the complete CPU temporal
+self-test pass, including 114 forward integration checks and the unchanged
+9,570 phase-bound checks. The absolute `build.bat --wait-lock` full build
+passed all gates in 155.5 seconds, including production DLLs, all CPU/GPU
+rigs, installer payload checks and receipt
+`96218cae9b22f989144746aee1a60308d8290d2c4a594d12316099ca1508f8e5`.
+Console: `build/rc3-aa-candidate-scope-full.log`. Live nonzero-phase/history
+and visible AA validation remain pending; main stays unmerged for that check.

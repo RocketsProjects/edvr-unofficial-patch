@@ -89,8 +89,7 @@ forward_light::Reason forwardConstants(State& s,unsigned stage,unsigned required
 #include "flat_phase_failure_runtime.inl"
 void forwardRefusal(State& s,forward_light::Reason why,const void* h) {
     auto& f=s.forwardLight;f.last=why;++f.refused;++f.reasons[static_cast<unsigned>(why)];
-    bool owned=h&&s.phaseHdr.Get()==h;
-    for(unsigned i=0;i<s.prefix.targetsUsed;++i)if(s.prefix.targets[i].resource==h&&s.prefix.targets[i].tone.forwardLightCamera)owned=true;
+    const bool owned=flatRuntimeOwnsForwardCamera(s.prefix,h);
     if(owned){flatRuntimeMarkUncertain(s.prefix,FlatRuntimeUncertainCause::ForwardRefusal,h,nullptr,0,0,static_cast<uint32_t>(why));
         flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);failPhase(s,forward_light::name(why));}
 }
