@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 live parent/Q RECOVERED:** correct Steam flat b195d65d, stable guarded MainView candidate. Actual parent 5355318/30B9160 wraps upstream 553A8D8/3CB93F0; Q 5186FC0/108FC00 is present and outer-eligible at snapshot. See "09:19 session" below.
-  Both Sol audits join this upstream type's notification registration to 3CB32B0, which applies the broadcaster's D to both exact getter poses. Q directly writes entity weights; execution and indirect effects remain unknown. Live reads saved and FINISHED; game may close.
-  F1 OPEN: active broadcaster instance, event/cache/render epoch and selected GPU donor remain unproved. Next: offline ordering/provenance RE, then fix the passive admission gate and instrument remaining boundaries together. No flight/install requested; SC row 275 omits ship travel; VR's dropped 50 m+ translation remains open.
+- **10-17 F1 ordering RE:** actual parent/Q recovered (09:19 entry); Sol proves conditional re-anchor -> camera manager -> renderer-preparation order, plus fenced Placed update before stage finalization. See "offline ordering trace" below; F1 remains OPEN.
+  Renderer helper-to-queue-to-descriptor copies and a separate pass-camera-to-refresh-to-51B640 upload path are traced. Normal provider overwrites use node/context caches; callback time and equal rows cannot certify a rendered coordinate epoch.
+  Next: prove actual event/node/context instances, render handoffs, configured pass-camera association and provenance of ALL contributing selected writes. No new flight/build/install; automatic passive gate remains unrepaired, Steam DLLs remain b195d65d. VR's dropped 50 m+ translation remains open.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4275,6 +4275,169 @@ and renderer provenance, then repair the passive gate and instrument those
 remaining boundaries together. No motion correction is shipped here. F1 remains
 OPEN, including VR's dropped 50 m+ translation. The installed DLLs remain
 b195d65d; this evidence entry changes documentation only.
+
+**2026-10-17, offline ordering trace: camera tasks, renderer snapshots and
+upload identity.** The user requested tracing with Sol before another flight.
+The source tree is based on fbb391a2, and the pinned game image is unchanged.
+This is offline RE plus EDVR source inspection, with no new flight, game
+mutation, rendering correction, build or install. The saved 08:20 renderer
+capture and 09:19 typed-provider snapshot remain separate process observations;
+their pointers and epochs cannot be joined across sessions.
+
+**Verified camera-task order.** On the active camera-manager path, `+0x106C840`
+configures stage priorities and dispatches task collection `+0x5F2D710`.
+`+0x1093D00` gives activities a base priority, computes each stage span as
+max(1, max_activity_cost+1), schedules its finalizer at the last priority of
+that span, then advances the base for the next stage. Placed's cost getter
+returns 1 and priority setter `+0x1094250` sets its update handle A+0x150 to
+the base priority. Thus its update `+0x1075FF0` precedes the same stage's
+finalizer `+0x106F8E0` at least at base+1; later stages follow. The dispatcher
+visits priority groups in order and waits for each subgroup's jobs. This
+establishes conditional update/finalize/downstream order, not the placement of
+a re-anchor notification relative to this dispatch.
+
+**Conditional re-anchor-before-camera phase order.** The D broadcaster waits
+for its collection jobs before returning. The camera manager registers at fixed
+priority 1 in global collection `+0x5F021D0`; the deferred re-anchor callback
+`+0x3CAD960` uses token `+0x5F02B08` and emitter-config priority. For the
+concrete engine-event provider (getter `+0x1F27C0`, interface vtable
+`+0x4DDCAC0`, interface engine+0x1BA0), collection engine+0x1AF0 is dispatched
+by tick `+0x1EAFB0` at call `+0x1EB0F3`, before the later camera-manager
+collection at call `+0x1EB6AA`. Those synchronous phases establish deferred D
+completion before camera task dispatch in that tick, if the emitter resolves
+that exact engine interface and its callback is active. Its resolved event
+interface at owner+0x4F0 was not sampled, and other providers expose the same
+token. Configuration names or token equality cannot prove the actual instance.
+This is a conditional happens-before edge, not a universal same-frame adoption
+claim. Other D producer paths (`+0x3CB9D60`, `+0x3CBBF00`) still require their
+own path identity.
+
+**Normal overwrites and source basis.** The D callback is not the only writer
+of the actual U pose. `+0x3CB3B40` recomputes B+0x1E0 through `+0x3CE1AE0`;
+`+0x3CBE0A0` copies the primary descriptor/pose to the alternate, and further
+node-refresh/conversion paths exist. Descriptor B+0x140 is a 0xA0-byte
+ID/affine-pose/flag structure, not a monotonic basis epoch. The normal
+conversion uses node N=[B+0x470], ctx=[N+0x378] and a cache at
+[ctx+0x388]+0x180*uint32[N+0x384]. Depending on the descriptor flag it uses
+cache+0x80, and it always uses cache+0x100. These derive from the context
+descriptor that `+0x3D00A20` refreshes before broadcasting D. The actual node,
+context equality to the emitter, and coherent cache refresh remain unproved.
+Recording B+0x140 or a callback counter alone cannot certify the output basis.
+
+Within a successful Placed refresh, wrapper P, placement record E and activity
+A are updated sequentially before the stage-copy task. Invalid target-state
+branches can leave stale E+0x60 and must not acquire a new epoch. The observed
+Inertial task `+0x10741A0` copies the current predecessor state before applying
+its cached local offset, conditional on its base pointers being valid; a failed
+base guard can retain old state. This narrows one history concern without
+certifying every configuration of later HeadLook/Shake/LocationOffset stages.
+
+**Camera-manager to renderer preparation.** The camera-manager dispatch at
+`+0x1EB6AA` returns before `+0x1EB6B2` calls `+0x1F1B70`. That function
+initializes a private stack queue and synchronously dispatches global
+`+0x5EFDFF0`. Registration `+0x284B3B0` attaches the renderer listener to that
+same global with descriptor `+0x5F9B638`; initializer `+0xD3B20` installs table
+`+0x52E7028` at descriptor-0x8, leading to `+0x27BC060`. The wrapper's
+G=listener-0xC60 adjustment and the functor's forwarding of this exact queue in
+R8 are verified. Thus active registered callbacks on this engine path have
+camera-manager completion before one renderer source-copy invocation. This
+private queue is not either of `+0x1EA920`'s arenas: there is no `+0x2819D90`
+consumer in `+0x1F1B70`. This closes a preparation-phase edge, not a
+selected-render queue or GPU edge.
+
+**Verified renderer snapshot boundaries.** Callback `+0x27BC060` calls
+`+0x281AC10`, then `+0x34FB370`, then `+0x2889920` with the same output bundle,
+before `+0x281AA50`. The render path chooses among helper bundles; the ordinary
+helper and stereo/auxiliary alternatives must not be conflated. `+0x280F9C0`
+builds a submission packet and passes it to `+0x280F800`. The latter
+immediately copies helper bytes through `+0x59F1A0` into a queued record:
+K=queue+old_count*0x570. It does not retain the helper pointer as ownership of
+the pose. Consumer `+0x2819D90` walks this record layout, and `+0x2819F70`
+copies K into per-view descriptor R+0x240. Coordinator `+0x1EA920` constructs
+queue arenas and invokes that consumer; the producer job argument's exact
+association to those arenas was not established. Matching layouts do not prove
+the same queue instance or producer/consumer generation.
+
+The pass-camera pointer is also explicit. `+0x58F7E0` takes pass P, obtains
+layout=[P+0x108], T=[layout+0x60], and assigns C=[P+0x100] to T+0x158. It also
+assigns that C to T+0x250 when [P+0xD8]==0 or byte[P+0x250]!=0; otherwise that
+alternate pointer can be retained. `+0x58EF90` obtains the same T, then
+`+0x594D90` calls refresh `+0x5921F0` with one of those camera pointers. The
+camera composer uses that input to generate its staging rows. Pass setter
+`+0x598420` receives C and a layout separately; all four pass constructors were
+checked. Some allocate a separate 0x900-byte camera, and others accept an
+externally supplied camera. A copied R helper must not be assumed to be this
+configured C without the intervening association. The staging path resolves
+gCameraPos from C+0x50 without a sign change and composes its clip matrix from
+C+0x20/projection; cache/dirty guards remain part of that path.
+
+These are actual snapshot boundaries. A re-anchor event time, provider pointer,
+arm frame or numerically equal origin cannot by itself identify the coordinate
+state held by an already copied queue/view record. A complete provenance proof
+must follow the particular copied record selected for the scene through
+subsequent camera construction.
+
+**Verified CPU upload-observation endpoint.** In EDVR, `vscreen.cpp` observes
+camera bytes before forwarding Unmap or a full UpdateSubresource.
+`flat_runtime.cpp` records the exact buffer's rows 270..275 with
+`(prefix.frame, ++prefix.sequence)`. `FlatCameraTable` invalidates entries
+across frames, mutations and binding generations; draw observation reads the
+currently bound VS b1 and copies its rows, hash and upload ordinal. The
+selector's `cameraCurrent` / `sameCamera` checks retain current
+write-before-draw order, buffer identity and byte equality. Deferred-camera
+handling keeps the scene donor separately rather than equating it to the
+immediate HDR binding. The mapped-buffer bounce is flushed before the capture;
+its later lease release does not alter these bytes.
+
+These ordinals describe EDVR frame/write order, not engine re-anchor epochs or
+independently verified GPU consumption. The final `FlatMonoFrame` output
+retains buffer identity, rows and hash but drops the exact write ordinal.
+Moreover equal-byte uploads using the same buffer can merge into source records
+that keep only first/last write ordinals. The instrument must preserve per-draw
+write provenance, or prove that ALL contributing writes have the same source
+epoch; choosing an arbitrary endpoint ordinal is insufficient. Deferred donors
+and the immediate HDR write require their separate associations. The
+selected-camera instrument currently receives only frame/rows/reset/scene and
+depth, without the selected b1 or write ordinal. Its renderer snapshot uses
+armFrame as a capture-window guard; its refresh observer is a pre-hook.
+Consequently existing capture records cannot join a D adoption to the actual
+selected upload, even when row 275 matches. The source audit is saved in
+`analysis/decomp/f1_origin_20261017/selected_gpu_endpoint_order_20261017.txt`.
+
+The engine path `+0x4F8C10` calls `+0x501590` before `+0x500040` establishes
+pending constant-buffer bindings. `+0x501590` calls the existing probe's exact
+upload helper `+0x51B640` at `+0x501A3B`. It updates version-like bookkeeping
+after the call without checking its result, although the helper can fail Map.
+That bookkeeping is therefore not a successful-upload receipt; observed
+Map/Unmap or full Update evidence is still required. The bind stage/slot comes
+from compiled-pass metadata, not a universal literal VS b1. That dynamic
+mapping must be joined to the actual observed buffer/write, including auxiliary
+views and reuse, rather than guessed from a staging block's values.
+
+**Remaining proof.** F1 remains OPEN. A callback-only epoch is insufficient:
+normal provider updates can overwrite its cached poses, while renderer records
+retain copies made earlier. Source-basis identity, completion and copy
+generations must survive the actual queue/view/staging path and be attached to
+the selected buffer/write ordinal. Unknown, mixed or stale provenance must
+remain unknown. A same-frame label or a later global event counter cannot
+substitute for that association. No actual race or mixed-epoch flight was
+demonstrated by this offline trace.
+
+The minimal unresolved joins are the actual event-provider/broadcaster/node
+context identities, the source generation adopted by successful activity and
+stage copies, the particular renderer queue/consumer generation and copied R
+helper to configured C camera association, and all contributing selected buffer
+writes. The compact RE reports are
+`analysis/decomp/f1_origin_20261017/render_epoch_order_result_20261017.txt` and
+`analysis/decomp/f1_ship_writer_20261017/downstream_order_20261017.txt`.
+Independent source review accepted the conditional phase/priority/fence proof
+and the CPU endpoint limits; no universal actual-instance or GPU-consumption
+claim follows.
+
+No further flight is requested. The automatic passive gate also still depends
+on treatment admission; repair and end-to-end instrument review are required
+before using another automatic capture. This entry changes documentation only;
+the installed build remains b195d65d.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
