@@ -10,6 +10,7 @@
 // same source buffers it would without the sidecar.
 inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* context) {
     using namespace edvr;
+    originAmbiguityGpuTests(device,context);
     check(flatOriginOpticalCategory(60.f,20,80,false)==0,
         "origin optical: 80 to 20 m inward travel has reserved short-inward quota");
     unsigned spent[5]{};
@@ -148,11 +149,15 @@ inline int originOpticalGpuTests(ID3D11Device* device,ID3D11DeviceContext* conte
         std::printf("origin optical inward diagnostic: score=%u %s\n",inward.score?1u:0u,inward.signal.c_str());
     check(inward.score && inward.signal.find("signal=raw-travel-depth-favored")!=std::string::npos,
         "origin optical: 80 to 20 m inward travel favors unmodified raw translation on shared static depth samples");
+    check(inward.input.find("planned-reset=1 origin-ambiguous=1")!=std::string::npos,
+        "origin optical: the passive input comparison stays alive on a planned ambiguity reset");
     check(inward.mask==inwardNoProbe.mask && inward.motion==inwardNoProbe.motion && inward.output==inwardNoProbe.output,
         "origin optical: passive sidecar changes neither SDK inputs nor final color");
     const Outcome reanchor=run(true,true),reanchorNoProbe=run(true,false);
     check(reanchor.score && reanchor.signal.find("signal=zero-translation-depth-favored")!=std::string::npos,
         "origin optical: same raw camera jump with reexpressed world favors zero translation");
+    check(reanchor.input.find("planned-reset=1 origin-ambiguous=1")!=std::string::npos,
+        "origin optical: identical camera inputs also report reset when depth favors a coordinate change");
     check(reanchor.mask==reanchorNoProbe.mask && reanchor.motion==reanchorNoProbe.motion && reanchor.output==reanchorNoProbe.output,
         "origin optical: reanchor probe leaves motion, mask, and final color unchanged");
     run(false,true,true);  // frame gap, previous depth no longer adjacent

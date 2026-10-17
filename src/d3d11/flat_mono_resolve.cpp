@@ -70,7 +70,7 @@ struct OpticalProbe {
         float now[3]{},before[3]{};
         float step=0,deltaMs=0,previousScale=1;
         UINT width=0,height=0;
-        bool reset=false,reanchor=false,engine=false,foreground=false,untrusted=false;
+        bool reset=false,ambiguous=false,engine=false,foreground=false,untrusted=false;
     } jobs[slots];
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11ComputeShader> shader;
@@ -143,9 +143,9 @@ void opticalPoll(ID3D11DeviceContext* context) {
             static_cast<unsigned long long>(job.frame),static_cast<unsigned>(mh));continue;}
         const uint32_t* c=static_cast<const uint32_t*>(mapped.pData);
         float en[3],eb[3];for(unsigned i=0;i<3;++i){std::memcpy(&en[i],&c[32+i],4);std::memcpy(&eb[i],&c[35+i],4);}
-        Log::get().note("flat origin optical input: frame=%llu prior-frame=%llu decision-stage=pre-backend R=%ux%u step=%.9g ms=%.9g planned-reset=%u planned-reanchor=%u engine=%u fg=%u untrusted=%u "
+        Log::get().note("flat origin optical input: frame=%llu prior-frame=%llu decision-stage=pre-backend R=%ux%u step=%.9g ms=%.9g planned-reset=%u origin-ambiguous=%u engine=%u fg=%u untrusted=%u "
             "cam-now=(%.9g,%.9g,%.9g) cam-prev=(%.9g,%.9g,%.9g) scene-now=(%.9g,%.9g,%.9g) scene-prev=(%.9g,%.9g,%.9g) stamps=%u/%u prev-depth-scale=%.9g",
-            static_cast<unsigned long long>(job.frame),static_cast<unsigned long long>(job.priorFrame),job.width,job.height,job.step,job.deltaMs,job.reset?1u:0u,job.reanchor?1u:0u,
+            static_cast<unsigned long long>(job.frame),static_cast<unsigned long long>(job.priorFrame),job.width,job.height,job.step,job.deltaMs,job.reset?1u:0u,job.ambiguous?1u:0u,
             job.engine?1u:0u,job.foreground?1u:0u,job.untrusted?1u:0u,
             job.now[0],job.now[1],job.now[2],job.before[0],job.before[1],job.before[2],
             en[0],en[1],en[2],eb[0],eb[1],eb[2],c[38],c[39],job.previousScale);
@@ -188,7 +188,7 @@ void opticalHeartbeat(uint64_t presentFrame) {
 void opticalSubmit(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,
     ID3D11ShaderResourceView* previousDepth,uint64_t priorFrame,float previousScale,
     const FlatProjectionJitter& rowsNow,const FlatProjectionJitter& rowsBefore,
-    bool reset,bool reanchor,bool priorWorldOnly) {
+    bool reset,bool ambiguous,bool priorWorldOnly) {
     FlatComputeInternalScope internal;
     ++optical.events;
     double step2=0,prior2=0,now2=0;
@@ -196,7 +196,7 @@ void opticalSubmit(ID3D11Device* device,ID3D11DeviceContext* context,const FlatM
         step2+=d*d;prior2+=double(f.previousCamera[5][i])*f.previousCamera[5][i];
         now2+=double(f.camera[5][i])*f.camera[5][i];}
     const float step=static_cast<float>(std::sqrt(step2));
-    const unsigned category=flatOriginOpticalCategory(step,std::sqrt(now2),std::sqrt(prior2),reset);
+    const unsigned category=flatOriginOpticalCategory(step,std::sqrt(now2),std::sqrt(prior2),reset && !ambiguous);
     constexpr uint32_t cap[5]={12,6,5,4,4};
     if(optical.budgets[category]>=cap[category]) {
         if(++optical.suppressed[category]==1)Log::get().note("flat origin optical: category=%u budget=%u spent; later matching events counted in heartbeat",
@@ -205,7 +205,9 @@ void opticalSubmit(ID3D11Device* device,ID3D11DeviceContext* context,const FlatM
     }
     if(!previousDepth) {++optical.noPrior;opticalUnavailable(f.frame,"no-adjacent-previous-depth");return;}
     if(!f.depth) {opticalUnavailable(f.frame,"no-current-depth");return;}
-    if(reset) {opticalUnavailable(f.frame,"reset-or-prior-domain-unverified");return;}
+    // An ambiguity reset changes the resolver's policy, not the adjacent input
+    // images. Keep the passive comparison alive without reusing that history.
+    if(reset && !ambiguous) {opticalUnavailable(f.frame,"reset-or-prior-domain-unverified");return;}
     if(!f.engine.sceneNow || !f.engine.scenePrev) {opticalUnavailable(f.frame,"source-scene-pair-absent");return;}
     D3D11_BUFFER_DESC sceneNowDesc{},scenePrevDesc{};
     f.engine.sceneNow->GetDesc(&sceneNowDesc);f.engine.scenePrev->GetDesc(&scenePrevDesc);
@@ -246,7 +248,7 @@ void opticalSubmit(ID3D11Device* device,ID3D11DeviceContext* context,const FlatM
     context->CSSetUnorderedAccessViews(0,1,&noOut,nullptr);context->CSSetShaderResources(0,6,noViews);
     context->CopyResource(job.staging.Get(),optical.counts.Get());context->End(job.done.Get());
     job.pending=true;job.frame=f.frame;job.priorFrame=priorFrame;job.width=f.renderWidth;job.height=f.renderHeight;
-    job.step=step;job.deltaMs=f.deltaMs;job.previousScale=previousScale;job.reset=reset;job.reanchor=reanchor;
+    job.step=step;job.deltaMs=f.deltaMs;job.previousScale=previousScale;job.reset=reset;job.ambiguous=ambiguous;
     job.engine=f.engine.sceneNow&&f.engine.scenePrev;job.foreground=f.foregroundMotion!=nullptr;job.untrusted=f.untrustedCameraCoverage!=nullptr;
     for(unsigned i=0;i<3;++i){job.now[i]=f.camera[5][i];job.before[i]=f.previousCamera[5][i];}
     optical.write=(optical.write+1)%OpticalProbe::slots;++optical.submitted;
@@ -367,10 +369,9 @@ FlatMonoResolveStats& stats=*new FlatMonoResolveStats;
 // visible even if ordinary requested resets use their budget first.
 uint32_t resetEventsLogged=0, cameraCutEventsLogged=0;
 constexpr uint32_t kResetEventLogCap=32;
-// The floating origin (row 5 of the camera rows): Elite re-anchors it about every 5 km of travel, and the camera rows do not move with it
-// (docs/design-flat-temporal-aa-2026-09-23.md, the 2026-10-16 entry). A jump of that kind is absorbed, not cut -- unless the frame was a
-// hitch: the one jump on record that was a real world change (460 m, a loading frame) took 153 ms, and a rebase or a travel step never
-// has, so a frame this slow keeps the cut.
+// Preserve the established jump/rotation/hitch thresholds. Camera rows alone
+// cannot distinguish an inward physical step from a coordinate re-anchor;
+// the previously absorbed cases now reset rather than erase translation.
 constexpr float kFlatOriginRebaseMaxFrameMs=100.f;
 constexpr uint32_t kOriginRebaseLogCap=8;
 uint32_t originRebaseLogged=0,travelStepLogged=0;
@@ -1165,8 +1166,8 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     const bool coverageTransition=g.history && untrusted!=g.untrustedCoverageLast;
     const bool invalidPreviousCamera=!cameraValid(f.previousCamera);
     const bool formatChange=g.inputFormat!=colorDesc.Format;
-    // THE FLOATING ORIGIN. Row 5 is the world-rebase origin (cb1[275]); Elite re-anchors it about every 5 km of travel and the camera's
-    // orientation rows do not move with it. stepM is row 5's step this frame (metres), rotDelta the largest element change over rows 0-3.
+    // Row 5 (cb1[275]) may move through travel or a coordinate-frame change.
+    // stepM is its step in metres; rotDelta covers rows 0-3.
     double stepM=0,rotDelta=0,nowLen=0,prevLen=0;
     if(!invalidPreviousCamera) {
         double sq=0,nl=0,pl=0;
@@ -1185,20 +1186,20 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(!requestedReset && !lostHistory && !frameGap && !invalidPreviousCamera && !formatChange) {
         bool axisJump=false;   // the long-standing test: any axis of row 5 moved more than 50 m
         for(unsigned i=0;i<3;++i)if(std::abs(f.camera[5][i]-f.previousCamera[5][i])>50)axisJump=true;
-        // A jump with the rows unmoved keeps its history: the camera did not turn, and the step is either the origin moving or fast travel.
-        // Only a jump the axis test would have cut is handled here, so no frame that kept its history before changes. Rotated rows, or a
-        // hitch frame, still cut. Which of the two it is decides the camera translation (below): a re-anchor's is a coordinate change and
-        // is dropped, as the VR gate drops any jump's; travel's is the camera's real motion and the shader needs it.
+        // Stable rows and a short frame retain the established travel admission.
+        // Its inward-origin subset is ambiguous and resets below. Rotation and
+        // hitch cuts keep their existing conditions.
         originRebase=axisJump && temporalOriginRebase(stepM,rotDelta) && f.deltaMs<kFlatOriginRebaseMaxFrameMs;
         cameraCut=axisJump && !originRebase;
     }
-    const bool reset=requestedReset || lostHistory || frameGap || invalidPreviousCamera || formatChange || cameraCut || coverageTransition;
+    const bool otherReset=requestedReset || lostHistory || frameGap || invalidPreviousCamera || formatChange || cameraCut || coverageTransition;
+    const bool originAmbiguous=originRebase && !otherReset && temporalOriginReanchor(stepM,nowLen,prevLen);
+    const bool reset=otherReset || originAmbiguous;
     const bool jumpKept=originRebase && !reset;
-    const bool rebaseAbsorbed=jumpKept && temporalOriginReanchor(stepM,nowLen,prevLen);   // the origin was re-anchored: zero translation
     if(opticalCandidate.candidate) {
         opticalCandidate.claimed=true;
-        flatOriginWitnessEvent(f.frame,f.camera[5],f.previousCamera[5],f.deltaMs,jumpKept,rebaseAbsorbed,reset);
-        flatWorldWitnessEvent(f.frame,f.camera[5],f.previousCamera[5],f.deltaMs,jumpKept,rebaseAbsorbed,reset);
+        flatOriginWitnessEvent(f.frame,f.camera[5],f.previousCamera[5],f.deltaMs,jumpKept,originAmbiguous,reset);
+        flatWorldWitnessEvent(f.frame,f.camera[5],f.previousCamera[5],f.deltaMs,jumpKept,originAmbiguous,reset);
     }
     stats.lastReset=reset;
     const bool engine=f.engine.slots && f.engine.pool && f.engine.sceneNow && f.engine.scenePrev;
@@ -1279,7 +1280,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(opticalCandidate.candidate) {
         opticalCandidate.opticalDone=true;
         ID3D11ShaderResourceView* prior=g.history && g.lastFrame+1==f.frame && steadyAvailable?g.depth[prevDepthIndex].srv.Get():nullptr;
-        opticalSubmit(device,context,f,prior,g.lastFrame,g.sdkDepthScaleLast,rowsNow,rowsBefore,reset,rebaseAbsorbed,
+        opticalSubmit(device,context,f,prior,g.lastFrame,g.sdkDepthScaleLast,rowsNow,rowsBefore,reset,originAmbiguous,
             g.opticalPriorWorldOnly);
     }
     if(steady && !reset) {if(depthCheck)++g_refusal.checked;else ++g_refusal.skipped;}
@@ -1287,12 +1288,9 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // Not on a reset: there is no previous frame to move from.
     const bool celestialBound=f.celestialRecords!=nullptr && !reset;
     Constants constants{};std::memcpy(constants.camera,f.camera,sizeof(f.camera));
-    // A re-anchor (jumpKept, and the origin landed near the camera: temporalOriginReanchor) reprojects from the previous rows with their
-    // origin moved to this frame's: zero camera translation, orientation change only. Fast travel (a kept jump that is not a re-anchor)
-    // keeps now[5]-old[5], the camera's real motion: 80 m lateral past a surface 1 km away is 99.84 px at 2496 wide, not zero.
-    float previousRows[6][4];std::memcpy(previousRows,f.previousCamera,sizeof(previousRows));
-    if(rebaseAbsorbed)std::memcpy(previousRows[5],f.camera[5],sizeof(previousRows[5]));
-    std::memcpy(constants.previous,reset?f.camera:previousRows,sizeof(previousRows));
+    // Continued history always receives the actual previous origin. Ambiguous
+    // inputs take the existing reset path, which seeds from the current rows.
+    std::memcpy(constants.previous,reset?f.camera:f.previousCamera,sizeof(constants.previous));
     constants.size[0]=f.renderWidth;constants.size[1]=f.renderHeight;constants.size[2]=evalW;constants.size[3]=evalH;
     constants.flags[0]=reset;constants.flags[1]=engine;constants.flags[2]=taa;constants.flags[3]=f.staticScene?1u:(depthCheck?2u:0u);
     constants.route[0]=hdr?1u:0u;constants.route[1]=(hdr&&taa)?1u:0u;
@@ -1439,6 +1437,14 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     g.opticalPriorWorldOnly=flatOriginOpticalPriorDomainSupported(f.foregroundMotion!=nullptr,
         f.untrustedCameraCoverage!=nullptr,f.firstPersonMotion!=nullptr || f.firstPersonStencil!=nullptr);
     if(!taa)g.depthLast=depthIndex;   // the image the next asking frame reads as last frame's depth (0 while no frame asks)
+    if(originAmbiguous) {
+        ++stats.originRebases;stats.lastOriginRebaseM=stepM;
+        if(originRebaseLogged<kOriginRebaseLogCap) {
+            ++originRebaseLogged;
+            Log::get().note("flat resolve origin ambiguity reset: step=%.9g rot-delta=%.9g now-len=%.9g prev-len=%.9g",
+                stepM,rotDelta,nowLen,prevLen);
+        }
+    }
     if(reset) {
         ++stats.acceptedResets;stats.currentContinueRun=0;
         if(requestedReset)++stats.requestedResets;
@@ -1460,7 +1466,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
                 "requested=%u lost=%u gap=%u invalid-prev-camera=%u format=%u camera-cut=%u "
                 "delta-ms=%.9g now=(%.9g,%.9g,%.9g) previous=(%.9g,%.9g,%.9g) "
                 "origin-delta=(%.9g,%.9g,%.9g) max-matrix-delta=%.9g "
-                "jitter-now=(%.9g,%.9g) jitter-previous=(%.9g,%.9g) event=%u/%u sdk-depth-transition=%u "
+                "jitter-now=(%.9g,%.9g) jitter-previous=(%.9g,%.9g) event=%u/%u sdk-depth-transition=%u origin-ambiguous=%u "
                 "prev-step=%.9g rot-delta=%.9g now-len=%.9g prev-len=%.9g",
                 static_cast<unsigned long long>(f.frame),modeName,f.renderWidth,f.renderHeight,f.outputWidth,f.outputHeight,
                 requestedReset?1u:0u,lostHistory?1u:0u,frameGap?1u:0u,invalidPreviousCamera?1u:0u,
@@ -1470,18 +1476,11 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
                 f.camera[5][0]-f.previousCamera[5][0],
                 f.camera[5][1]-f.previousCamera[5][1],
                 f.camera[5][2]-f.previousCamera[5][2],maxMatrixDelta,
-                f.jitterX,f.jitterY,f.previousJitterX,f.previousJitterY,logged,kResetEventLogCap,depthConventionTransition?1u:0u,
+                f.jitterX,f.jitterY,f.previousJitterX,f.previousJitterY,logged,kResetEventLogCap,depthConventionTransition?1u:0u,originAmbiguous?1u:0u,
                 precedingStepM,rotDelta,nowLen,prevLen);
         }
     } else {
-        if(rebaseAbsorbed) {
-            ++stats.originRebases;stats.lastOriginRebaseM=stepM;
-            if(originRebaseLogged<kOriginRebaseLogCap) {
-                ++originRebaseLogged;
-                Log::get().note("flat resolve origin rebase absorbed: step=%.9g rot-delta=%.9g now-len=%.9g prev-len=%.9g",
-                    stepM,rotDelta,nowLen,prevLen);
-            }
-        } else if(jumpKept) {
+        if(jumpKept) {
             // Fast travel: history kept, the real translation stays in the camera term.
             ++stats.travelSteps;
             if(travelStepLogged<kOriginRebaseLogCap) {

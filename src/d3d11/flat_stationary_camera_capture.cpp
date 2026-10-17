@@ -57,7 +57,7 @@ struct RefreshSlot {
     float origin[4]{};
     bool originRead = false;
 };
-enum class Phase : uint8_t { Waiting, Ready, Capturing, Done, Refused };
+enum class Phase : uint8_t { Waiting, Capturing, Done, Refused };
 struct State {
     CodeHook hook;
     uint8_t* relay = nullptr; // held for process lifetime after install
@@ -71,11 +71,14 @@ struct State {
     SourceSlot sources[kSourceSlots];
     RefreshSlot refresh[kRefreshSlots];
     Phase phase = Phase::Waiting; // Present thread only
-    uint64_t armFrame = 0, closingFrame = 0, selectedFrame = 0, lastSelectedFrame = 0;
+    uint64_t armFrame = 0, closingFrame = 0, witnessFrame = 0, lastWitnessFrame = 0, lastRejectedFrame = 0;
+    uint64_t selectedFrame = 0, lastSelectedFrame = 0;
     uint64_t lastNoteMs = 0;
-    stationcam::ParkGate park;
+    stationcam::SceneFrameGate scene;
     float selectedOrigin[3]{};
-    const char* waitReason = "no accepted scene frame";
+    float witnessOrigin[3]{};
+    const char* waitReason = "no passive scene witness";
+    const char* sceneRefusal = "no-trigger-or-camera-witness";
     const char* captureRefusal = nullptr;
     bool selectedReset = true;
 };
@@ -255,26 +258,27 @@ void report(State& s, uint64_t frame) noexcept {
     for (auto& slot : s.refresh) if (slot.ready.load(std::memory_order_acquire)) ++refreshCount;
     detailRows += refreshCount;
     const bool reportBound = detailRows > kReportRows;
-    const bool complete = s.selectedFrame >= s.armFrame && !s.captureRefusal &&
+    const bool complete = s.witnessFrame >= s.armFrame && !s.captureRefusal &&
         !s.profileDropped.load(std::memory_order_acquire) && sourceCount && sourceComplete && mainView == 1 && refreshCount &&
         mainPlaced && mainPlacedIdentity == mainPlaced && !mainPlacedOverflow &&
         !s.sourceOverflow.load(std::memory_order_acquire) && !s.refreshOverflow.load(std::memory_order_acquire) && !reportBound;
-    const char* refusal = s.captureRefusal ? s.captureRefusal : !s.selectedFrame ? "selected-scene-never-qualified" :
+    const char* refusal = s.captureRefusal ? s.captureRefusal : !s.witnessFrame ? "passive-scene-never-qualified" :
         !sourceCount ? "renderer-hook-never-ran" : !refreshCount ? "refresh-hook-never-ran" :
         s.sourceOverflow.load() ? "source-bound" : s.refreshOverflow.load() ? "refresh-bound" :
         reportBound ? "report-bound" : mainView == 0 ? "MainView-root-not-observed" :
         mainView > 1 ? "multiple-MainView-roots" : sourceComplete == 0 ? "topology-incomplete" :
         !mainPlaced ? "Placed-not-observed" : mainPlacedOverflow ? "Placed-bound" :
         mainPlacedIdentity != mainPlaced ? "Placed-identity-incomplete" : "none";
-    Log::get().note("flat stationary camera: %s frame=%llu arm=%llu selected=%llu selected-reset=%u refusal=%s profile-dropped=%u renderer-calls=%llu captured-sources=%llu unique=%u validated=%u complete=%u MainView-root=%u Placed=%u identity-complete=%u detail-complete=%u provider-present=%u placed-overflow=%u refresh-calls=%llu unique=%u source-overflow=%u refresh-overflow=%u report-rows=%u/%u selected-row275=(%.9g %.9g %.9g); renderer-source topology and Placed identity only, selected GPU donor UNPROVED",
+    Log::get().note("flat stationary camera: %s frame=%llu arm=%llu passive-scene=%llu selected=%llu selected-requested-reset-known=%u selected-requested-reset=%u refusal=%s scene-refusal=%s profile-dropped=%u renderer-calls=%llu captured-sources=%llu unique=%u validated=%u complete=%u MainView-root=%u Placed=%u identity-complete=%u detail-complete=%u provider-present=%u placed-overflow=%u refresh-calls=%llu unique=%u source-overflow=%u refresh-overflow=%u report-rows=%u/%u passive-row275=(%.9g %.9g %.9g) selected-row275=(%.9g %.9g %.9g); renderer-source topology and Placed identity only, selected GPU donor UNPROVED",
         complete ? "captured" : "refused/incomplete", static_cast<unsigned long long>(frame),
-        static_cast<unsigned long long>(s.armFrame), static_cast<unsigned long long>(s.selectedFrame),
-        s.selectedReset?1u:0u,refusal,s.profileDropped.load()?1u:0u,
+        static_cast<unsigned long long>(s.armFrame), static_cast<unsigned long long>(s.witnessFrame), static_cast<unsigned long long>(s.selectedFrame),
+        s.selectedFrame?1u:0u,s.selectedReset?1u:0u,refusal,s.sceneRefusal,s.profileDropped.load()?1u:0u,
         static_cast<unsigned long long>(s.rendererCalls.load()),
         static_cast<unsigned long long>(s.captures.load()), sourceCount, sourceValid, sourceComplete, mainView,
         mainPlaced,mainPlacedIdentity,mainPlacedComplete,mainPlacedProviders,mainPlacedOverflow,
         static_cast<unsigned long long>(s.refreshes.load()), refreshCount,
         s.sourceOverflow.load(), s.refreshOverflow.load(),detailRows,kReportRows,
+        s.witnessOrigin[0], s.witnessOrigin[1], s.witnessOrigin[2],
         s.selectedOrigin[0], s.selectedOrigin[1], s.selectedOrigin[2]);
     unsigned emitted = 0;
     for (unsigned i = 0; i < kSourceSlots; ++i) {
@@ -392,11 +396,33 @@ void flatStationaryCameraFrame(uint64_t completedFrame) noexcept {
     }
     State& s = *state;
     const uint64_t now = GetTickCount64();
+    // This is the completed prefix frame, before flat_runtime assigns
+    // prefix.frame = completedFrame + 1. Qualify its final witness with the
+    // current journal snapshot; callbacks never advance the arming FSM.
+    const JournalRawStatus raw = journalRawStatus();
+    stationcam::CompletedScene completed;
+    if ((s.phase == Phase::Waiting || s.phase == Phase::Capturing) && !s.closingFrame) {
+        stationcam::ParkInput input;
+        input.active = raw.active; input.gameplay = raw.gameplay; input.statusSamples = raw.statusSamples;
+        input.guiKnown = raw.guiKnown; input.gui = raw.gui;
+        input.dockedKnown = journalStatusDockedKnown(); input.docked = journalStatusDocked();
+        input.seatedKnown = journalStatusSeatedKnown(); input.seated = journalStatusSeated();
+        completed = s.scene.finish(completedFrame, input);
+        if (!completed.processed) return;
+        s.sceneRefusal = completed.sceneRefusal;
+    }
     if (s.phase == Phase::Capturing) {
         if (s.profileDropped.load(std::memory_order_acquire) && !s.captureRefusal) s.captureRefusal = "profile-switched-during-capture";
-        if (completedFrame > s.armFrame + kCaptureFrames && !s.selectedFrame && !s.captureRefusal)
-            s.captureRefusal = "selected-scene-timeout";
-        if (!s.closingFrame && (s.captureRefusal || s.selectedFrame >= s.armFrame || completedFrame > s.armFrame + kCaptureFrames)) {
+        if (!s.closingFrame && completedFrame >= s.armFrame) {
+            if (!completed.qualified && !s.captureRefusal)
+                s.captureRefusal = std::strcmp(completed.sceneRefusal, "no-trigger-or-camera-witness") == 0 ?
+                    "post-arm-no-passive-scene-witness" : "post-arm-parked-scene-gate-lost";
+            if (completed.qualified && !s.captureRefusal && !s.witnessFrame) {
+                s.witnessFrame = completedFrame;
+                for (unsigned i = 0; i < 3; ++i) s.witnessOrigin[i] = completed.origin[i];
+            }
+        }
+        if (!s.closingFrame && (s.captureRefusal || s.witnessFrame >= s.armFrame || completedFrame > s.armFrame + kCaptureFrames)) {
             s.gate.store(0, std::memory_order_release);
             s.closingFrame = completedFrame;
         }
@@ -407,7 +433,7 @@ void flatStationaryCameraFrame(uint64_t completedFrame) noexcept {
         }
         return;
     }
-    if (s.phase == Phase::Ready) {
+    if (s.phase == Phase::Waiting && completed.ready && completed.qualified) {
         if (!install(s)) {
             s.phase = Phase::Refused;
             Log::get().note("flat stationary camera: refused before arm: %s", s.waitReason);
@@ -416,62 +442,54 @@ void flatStationaryCameraFrame(uint64_t completedFrame) noexcept {
         s.armFrame = completedFrame + 1;
         s.gate.store(1, std::memory_order_release);
         s.phase = Phase::Capturing;
-        Log::get().note("flat stationary camera: armed automatically for parked cockpit candidate after %u consecutive qualified-scene frames and %u fresh Status samples; arm-frame=%llu; bounded one-shot source/refresh capture",
-            s.park.stable,s.park.fresh,static_cast<unsigned long long>(s.armFrame));
+        Log::get().note("flat stationary camera: armed automatically for parked cockpit passive-scene candidate after %u consecutive qualified-scene frames and %u fresh Status samples; arm-frame=%llu; selected GPU donor unproved; bounded one-shot source/refresh capture",
+            s.scene.park.stable,s.scene.park.fresh,static_cast<unsigned long long>(s.armFrame));
         return;
     }
     if (s.phase != Phase::Waiting || now - s.lastNoteMs < 5000) return;
     s.lastNoteMs = now;
-    const JournalRawStatus raw = journalRawStatus();
-    Log::get().note("flat stationary camera: waiting: %s; watcher=%u gameplay=%u status-samples=%u fresh=%u docked=%u/%u seated=%u/%u gui=%u/%u qualified-scene-consecutive=%u; no capture budget consumed",
-        s.park.reason,raw.active?1u:0u,raw.gameplay?1u:0u,raw.statusSamples,s.park.fresh,
+    Log::get().note("flat stationary camera: waiting: %s; scene-refusal=%s witness-frame=%llu selected-frame=%llu watcher=%u gameplay=%u status-samples=%u fresh=%u docked=%u/%u seated=%u/%u gui=%u/%u qualified-scene-consecutive=%u; no capture budget consumed",
+        s.scene.park.reason,s.sceneRefusal,static_cast<unsigned long long>(s.lastWitnessFrame),static_cast<unsigned long long>(s.lastSelectedFrame),raw.active?1u:0u,raw.gameplay?1u:0u,raw.statusSamples,s.scene.park.fresh,
         journalStatusDockedKnown()?1u:0u,journalStatusDocked()?1u:0u,
         journalStatusSeatedKnown()?1u:0u,journalStatusSeated()?1u:0u,
-        raw.guiKnown?1u:0u,raw.gui,s.park.stable);
+        raw.guiKnown?1u:0u,raw.gui,s.scene.park.stable);
+}
+
+void flatStationaryCameraSceneCandidate(uint64_t frame, const float camera[6][4],
+                                        const void* depth) noexcept {
+    if (!runtimeFlatProfile()) return;
+    State* state = stateOrNull();
+    if (!state) return;
+    State& s = *state;
+    if (s.phase != Phase::Waiting && s.phase != Phase::Capturing) return;
+    if (s.closingFrame) return;
+    if (s.scene.candidate(frame, camera ? camera[5] : nullptr, reinterpret_cast<uintptr_t>(depth)))
+        s.lastWitnessFrame = frame;
+}
+
+void flatStationaryCameraSceneRejected(uint64_t frame, const char* reason) noexcept {
+    if (!runtimeFlatProfile()) return;
+    State* state = stateOrNull();
+    if (!state) return;
+    State& s = *state;
+    if (s.phase != Phase::Waiting && s.phase != Phase::Capturing) return;
+    if (s.closingFrame) return;
+    if (s.scene.reject(frame, reason)) s.lastRejectedFrame = frame;
 }
 
 void flatStationaryCameraSelected(uint64_t frame, const float camera[6][4], bool reset,
-                                  bool menuContract, const void* depth) noexcept {
-    if (!runtimeFlatProfile() || !camera) return;
+                                   bool menuContract, const void* depth) noexcept {
+    if (!runtimeFlatProfile() || !camera || !depth || menuContract) return;
     State* state = stateOrNull();
     if (!state) return;
     State& s = *state;
     if (s.lastSelectedFrame == frame) return;
     s.lastSelectedFrame = frame;
-    if (s.phase == Phase::Capturing) {
-        if (frame >= s.armFrame && s.selectedFrame == 0) {
-            const JournalRawStatus raw = journalRawStatus();
-            stationcam::ParkInput current;
-            current.active = raw.active; current.gameplay = raw.gameplay;
-            current.guiKnown = raw.guiKnown; current.gui = raw.gui;
-            current.dockedKnown = journalStatusDockedKnown(); current.docked = journalStatusDocked();
-            current.seatedKnown = journalStatusSeatedKnown(); current.seated = journalStatusSeated();
-            current.selected = true; current.menu = menuContract; current.reset = reset;
-            current.depth = reinterpret_cast<uintptr_t>(depth);
-            for (unsigned i = 0; i < 3; ++i) current.origin[i] = camera[5][i];
-            const bool stillParked = stationcam::qualifiedScene(current);
-            if (!stillParked) {
-                s.captureRefusal = "post-arm-parked-scene-gate-lost";
-                s.gate.store(0, std::memory_order_release);
-                return;
-            }
-            s.selectedFrame = frame;
-            for (unsigned i = 0; i < 3; ++i) s.selectedOrigin[i] = camera[5][i];
-            s.selectedReset = reset;
-        }
-        return;
+    if (s.phase == Phase::Capturing && frame >= s.armFrame && !s.selectedFrame) {
+        s.selectedFrame = frame;
+        for (unsigned i = 0; i < 3; ++i) s.selectedOrigin[i] = camera[5][i];
+        s.selectedReset = reset;
     }
-    if (s.phase != Phase::Waiting) return;
-    const JournalRawStatus raw = journalRawStatus();
-    stationcam::ParkInput input;
-    input.active = raw.active; input.gameplay = raw.gameplay; input.statusSamples = raw.statusSamples;
-    input.guiKnown = raw.guiKnown; input.gui = raw.gui;
-    input.dockedKnown = journalStatusDockedKnown(); input.docked = journalStatusDocked();
-    input.seatedKnown = journalStatusSeatedKnown(); input.seated = journalStatusSeated();
-    input.selected = true; input.menu = menuContract; input.reset = reset;
-    input.frame = frame; input.depth = reinterpret_cast<uintptr_t>(depth);
-    for (unsigned i = 0; i < 3; ++i) input.origin[i] = camera[5][i];
-    if (s.park.step(input)) s.phase = Phase::Ready;
 }
 
 void flatStationaryCameraRefresh(uintptr_t camera, uintptr_t ctx, uint64_t callNo,

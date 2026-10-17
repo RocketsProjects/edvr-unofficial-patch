@@ -17,6 +17,7 @@
 #include "flat_camera_probe.h"
 #include "flat_camera_inject.h"
 #include "flat_stationary_camera_capture.h"
+#include "flat_stationary_camera_core.h"
 #include "flat_camera_phase.h"
 #include "flat_live_phase.h"
 #include "flat_draw_capture.h"
@@ -589,6 +590,7 @@ struct State {
     FlatHdrKey hdrKey = FlatHdrKey::Off;
     bool hdrKeyRead = false;
     FlatHdrFrame hdr{};              // this frame's detector state, reset at the Present that starts the frame
+    stationcam::SceneWitnesses passiveScene{}; // diagnostic H camera/layout census, independent of treatment
     FlatHdrWindow hdrWindow{};       // the 5 s window of the census token
     FlatHdrSteps hdrStepsSeen{};     // the resolver's cumulative step counts at the last window (the window prints the difference)
     FlatHdrLatch hdrLatch{};         // three treated frames with late writes turn the route off until the key flips
@@ -631,6 +633,27 @@ struct State {
     bool censusHooked = false;                    // the resolver's span hooks are installed
     bool crumbGateRead = false;                   // the HDR route's breadcrumbs gate has been set from the DXMT markers (once, first)
 };
+
+static void observePassiveSceneDraw(State& s, const FlatRuntimeDraw& d) {
+    const auto& k = d.key;
+    if (!k.color) return;
+    const bool candidate = flatHdrFindCandidate(s.hdr, k.color) != nullptr;
+    if (!candidate && !flatHdrCandidateDraw(k, s.hdr.outputWidth, s.hdr.outputHeight)) return;
+    stationcam::SceneDraw sample;
+    sample.color = reinterpret_cast<uintptr_t>(k.color);
+    sample.rtv = reinterpret_cast<uintptr_t>(k.rtv);
+    sample.depth = reinterpret_cast<uintptr_t>(k.depth);
+    sample.dsv = reinterpret_cast<uintptr_t>(k.dsv);
+    sample.b1 = reinterpret_cast<uintptr_t>(k.b1);
+    sample.format = k.format; sample.width = k.width; sample.height = k.height;
+    sample.depthWidth = k.depthWidth; sample.depthHeight = k.depthHeight;
+    sample.depthFormat = k.depthFormat;
+    sample.cameraHash = k.cameraHash; sample.camera = k.camera ? d.camera : nullptr;
+    sample.viewport = flat_mono_detail::hdrViewport(k, k.width, k.height);
+    sample.cameraCurrent = !k.camera || flatRuntimeCameraCurrent(d, s.prefix.sequence, s.prefix.frame);
+    sample.overlayProtected = d.overlayProtected;
+    s.passiveScene.observe(sample, candidate);
+}
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
 // THE MAP FOCUS (2026-10-10). Status.json's GuiFocus 6 is the Galaxy Map, 7 the System Map, 8 the Orrery. The flat runtime reads the
@@ -3020,7 +3043,7 @@ void flatRuntimeResize() {
     s.observing = false; s.covFrameLocallyRefused = false;
     // The HDR route's per-frame detector state names resources of the old device; the key, the latch and the
     // census window are the session's and stay.
-    flatHdrBeginFrame(s.hdr, 0, 0); s.hdrTreated = false;
+    flatHdrBeginFrame(s.hdr, 0, 0); s.passiveScene.reset(); s.hdrTreated = false;
     g_sceneSizes.store(0, std::memory_order_release);
     s.prefix = FlatRuntimePrefix{}; s.context.Reset(); s.device.Reset(); s.thread = 0; s.viewportCount = 0;
 }
@@ -3459,7 +3482,71 @@ static bool nameSourceFree(State& s, const FlatMonoFrame& sel) {
     s.frameSourceFree=true;
     return true;
 }
+static void passiveSceneAtHdrTrigger(State& s) {
+    using namespace flat_mono_detail;
+    const auto reject = [&](const char* reason) {
+        flatStationaryCameraSceneRejected(s.prefix.frame, reason);
+    };
+    if (!s.hdr.triggered || !s.hdr.trigger.srvKnown || s.hdr.trigger.srvSlot >= 4 ||
+        s.hdr.trigger.ambiguous || s.hdr.candidateOverflow || s.passiveScene.overflow ||
+        s.prefix.uncertain) { reject("passive-trigger-ambiguous-or-unknown"); return; }
+    const auto* candidate = flatHdrFindCandidate(s.hdr, s.hdr.trigger.hdr);
+    const auto* seen = s.passiveScene.find(reinterpret_cast<uintptr_t>(s.hdr.trigger.hdr));
+    if (!candidate || !seen || !seen->draws) { reject("passive-H-not-observed"); return; }
+    if (seen->bad) { reject(seen->reason); return; }
+    const FlatRuntimeTarget* target = nullptr;
+    for (uint32_t i = 0; i < s.prefix.targetsUsed; ++i)
+        if (s.prefix.targets[i].resource == s.hdr.trigger.hdr) { target = &s.prefix.targets[i]; break; }
+    if (!target || !target->writes.draws || !target->hdrCamera) {
+        reject("passive-H-no-current-camera-record"); return;
+    }
+    if (target->menuInherited || flatFrameThroughMenuCopy(s.prefix, target->resource)) {
+        reject("passive-H-menu-inherited"); return;
+    }
+    if (target->hdrLayoutChanged || (target->hdrBad &&
+        target->firstBad.cause != FlatRuntimeConflict::ImageCopySource)) {
+        reject("passive-H-nonimage-conflict"); return;
+    }
+    const auto& w = target->writes;
+    const auto& tone = target->tone;
+    if (w.key.format != 26 || !w.key.rtv || !w.key.depth || !w.key.dsv || !w.key.depthFormat ||
+        !ordered(w) || !ordered(tone) || w.last >= s.hdr.trigger.sequence ||
+        tone.last >= s.hdr.trigger.sequence || !cameraCurrent(tone, s.prefix.frame) ||
+        !tone.key.camera || tone.key.format != 26 ||
+        !w.key.width || !w.key.height || w.key.depthWidth != w.key.width ||
+        w.key.depthHeight != w.key.height || !hdrViewport(w.key, w.key.width, w.key.height)) {
+        reject("passive-H-stale-or-invalid-camera-layout"); return;
+    }
+    if (seen->rtv != reinterpret_cast<uintptr_t>(w.key.rtv) ||
+        seen->depth != reinterpret_cast<uintptr_t>(w.key.depth) ||
+        seen->dsv != reinterpret_cast<uintptr_t>(w.key.dsv) ||
+        seen->width != w.key.width || seen->height != w.key.height ||
+        seen->depthFormat != w.key.depthFormat ||
+        candidate->draws != seen->draws || candidate->lastSeq >= s.hdr.trigger.sequence) {
+        reject("passive-H-record-disagrees-with-draws"); return;
+    }
+    if (!s.prefix.width || !s.prefix.height ||
+        !flatUniformScale(w.key.width, w.key.height, s.prefix.width, s.prefix.height) ||
+        uint64_t(w.key.width) * 2 < s.prefix.width || uint64_t(w.key.height) * 2 < s.prefix.height ||
+        uint64_t(w.key.width) > uint64_t(s.prefix.width) * 2 ||
+        uint64_t(w.key.height) > uint64_t(s.prefix.height) * 2) {
+        reject("passive-H-extent-outside-scene-band"); return;
+    }
+    if (seen->cameraSeen && (seen->b1 != reinterpret_cast<uintptr_t>(cameraIdentity(tone)) ||
+        seen->cameraHash != tone.key.cameraHash ||
+        std::memcmp(seen->camera, tone.camera, sizeof(seen->camera)) != 0)) {
+        reject("passive-H-camera-disagrees-with-record"); return;
+    }
+    if (!seen->cameraSeen && !tone.deferredCamera) {
+        reject("passive-H-no-draw-camera"); return;
+    }
+    float camera[6][4]{};
+    if (!cameraShape(tone.camera, camera)) { reject("passive-H-camera-shape-invalid"); return; }
+    flatStationaryCameraSceneCandidate(s.prefix.frame, camera, w.key.depth);
+}
+
 static void hdrSelectAtTrigger(State& s) {
+    passiveSceneAtHdrTrigger(s);
     const bool witnessEligible=overlayOpen(s) && s.overlay.markedDraws()!=0;
     if(witnessEligible)++s.sourceWitnessEligibleWindow;
     const bool witnessSample=witnessEligible && flatHdrShouldSampleAmbiguousSource(
@@ -4239,7 +4326,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.namingVetoedThisFrame=false;
     } else s.namingVetoStreak=0;
     s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;s.frameSourceFree=false;
-    flatHdrBeginFrame(s.hdr, d.Width, d.Height); s.hdrTreated = false;
+    flatHdrBeginFrame(s.hdr, d.Width, d.Height); s.passiveScene.reset(); s.hdrTreated = false;
     s.observingQualifiedHandoff = false;
     s.drawCapture.begin(frame+1,s.phaseDepth.Get(),s.phaseWidth,s.phaseHeight);
     foreignWork.store(false, std::memory_order_release);
@@ -4493,7 +4580,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             static_cast<unsigned long long>(s.resetDepthWindow), static_cast<unsigned long long>(s.resetColorWindow),
             static_cast<unsigned long long>(s.resetExtentWindow), static_cast<unsigned long long>(s.presentNotOkWindow));
         const auto renderer = flatMonoResolveStats();
-        Log::get().note("flat runtime renderer cumulative: calls=%llu init=%llu context-change=%llu allocations=%llu full-reset=%llu invalidations=%llu accepted-reset=%llu accepted-continue=%llu requested-reset=%llu lost-history=%llu frame-gap=%llu invalid-prev-camera=%llu format-change=%llu camera-cut=%llu backend-failure=%llu continue-run=%llu longest-continue-run=%llu hdr-resolves=%llu hdr-spatial=%llu origin-rebases-absorbed=%llu last-rebase-m=%.1f fast-travel-steps-kept=%llu",
+        Log::get().note("flat runtime renderer cumulative: calls=%llu init=%llu context-change=%llu allocations=%llu full-reset=%llu invalidations=%llu accepted-reset=%llu accepted-continue=%llu requested-reset=%llu lost-history=%llu frame-gap=%llu invalid-prev-camera=%llu format-change=%llu camera-cut=%llu backend-failure=%llu continue-run=%llu longest-continue-run=%llu hdr-resolves=%llu hdr-spatial=%llu origin-ambiguity-resets=%llu last-origin-ambiguity-reset-m=%.1f fast-travel-steps-kept=%llu",
             static_cast<unsigned long long>(renderer.calls), static_cast<unsigned long long>(renderer.initializations),
             static_cast<unsigned long long>(renderer.contextPointerMismatches), static_cast<unsigned long long>(renderer.allocations),
             static_cast<unsigned long long>(renderer.fullResets), static_cast<unsigned long long>(renderer.invalidations),
@@ -4721,6 +4808,7 @@ static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
     }
     { flatcpu::Scope trace(flatcpu::kTrace); flatTraceMark(s.traceRing, kFlatTraceEventWriteResource, res); }
     flatRuntimeWritten(s.prefix, res);
+    s.passiveScene.explicitWrite(reinterpret_cast<uintptr_t>(res));
     flatHdrObserveExplicitWrite(s.hdr, res);   // a write into the HDR target after the route's trigger is counted
     if (auto* c = camera(res, false)) s.cameras.invalidate(*c);
     if (s.projection) { flatcpu::Scope shadows(flatcpu::kShadows); s.projection->invalidate(res); }
@@ -5219,6 +5307,7 @@ bool flatOffscreenTry(State& s, ID3D11DeviceContext* context, const FlatOffscree
     {
         flatcpu::Scope hdrScope(flatcpu::kHdrRoute);   // could-consume was false: the detector may count a candidate draw but cannot fire
         flatHdrObserveDraw(s.hdr, k, s.prefix.sequence, nullptr, false);
+        observePassiveSceneDraw(s, d);
     }
     {
         flatcpu::Scope trace(flatcpu::kTrace);
@@ -5678,6 +5767,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             hdrSrvKnown = true;
         }
         hdrTrigger = flatHdrObserveDraw(s.hdr, k, s.prefix.sequence, hdrSrvKnown ? hdrSrv : nullptr, hdrSrvKnown);
+        observePassiveSceneDraw(s, d);
     }
     {
         flatcpu::Scope trace(flatcpu::kTrace);

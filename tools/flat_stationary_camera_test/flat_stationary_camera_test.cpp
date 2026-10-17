@@ -149,7 +149,14 @@ bool testGate() {
     ParkGate gate;
     ParkInput in;
     in.active = in.gameplay = in.dockedKnown = in.docked = in.seatedKnown = in.seated = in.guiKnown = true;
-    in.selected = true; in.depth = 0xABC; in.origin[0] = 100;
+    in.sceneWitness = true; in.depth = 0xABC; in.origin[0] = 100;
+    // Parked journal facts alone cannot arm the one-shot capture.
+    in.sceneWitness = false;
+    for (unsigned frame = 1; frame <= 60; ++frame) {
+        in.frame = frame; in.statusSamples = frame;
+        if (gate.step(in) || gate.stable || gate.fresh) return false;
+    }
+    in.sceneWitness = true;
     // A menu can keep stale docked/seated flags for hundreds of frames. It
     // cannot spend the freshness/stability budget.
     in.menu = true;
@@ -174,6 +181,183 @@ bool testGate() {
     in.frame = 563; in.origin[0] = std::numeric_limits<float>::quiet_NaN();
     if (gate.step(in) || gate.stable || gate.fresh) return false;
     return true;
+}
+
+ParkInput parkedInput(uint64_t frame, uint32_t samples) {
+    ParkInput in;
+    in.active = in.gameplay = in.dockedKnown = in.docked = in.seatedKnown = in.seated = in.guiKnown = true;
+    in.frame = frame; in.statusSamples = samples;
+    return in;
+}
+bool sceneCheck(bool passed, const char* name) {
+    if (!passed) std::fprintf(stderr, "completed scene gate: %s failed\n", name);
+    return passed;
+}
+bool warmSceneGate(SceneFrameGate& gate) {
+    const float origin[3] = {1, 2, 3};
+    for (unsigned frame = 1; frame <= 29; ++frame) {
+        gate.candidate(frame, origin, 0xABC);
+        const auto out = gate.finish(frame, parkedInput(frame, 10 + (frame >= 10) + (frame >= 20)));
+        if (!out.processed || !out.qualified || out.ready) return false;
+    }
+    return gate.park.stable == 29 && gate.park.fresh == 2;
+}
+bool testCompletedSceneGate() {
+    const float origin[3] = {1, 2, 3};
+    SceneFrameGate happy;
+    if (!sceneCheck(warmSceneGate(happy), "29 good frames and two new samples")) return false;
+    happy.candidate(30, origin, 0xABC);
+    happy.candidate(30, origin, 0xABC);
+    if (!sceneCheck(happy.park.stable == 29, "callbacks cannot advance readiness")) return false;
+    auto out = happy.finish(30, parkedInput(30, 12));
+    if (!sceneCheck(out.processed && out.qualified && out.ready && happy.park.stable == 30 &&
+                    happy.park.fresh == 2, "30-frame happy path")) return false;
+    out = happy.finish(30, parkedInput(30, 13));
+    if (!sceneCheck(!out.processed && happy.park.stable == 30 && happy.park.fresh == 2,
+                    "repeated Present cannot count another sample")) return false;
+
+    SceneFrameGate late;
+    if (!warmSceneGate(late)) return false;
+    late.candidate(30, origin, 0xABC);
+    late.reject(30, "late-camera-conflict");
+    out = late.finish(30, parkedInput(30, 12));
+    if (!sceneCheck(!out.ready && !out.qualified && late.park.stable == 0 && late.park.fresh == 0 &&
+                    std::strcmp(out.sceneRefusal, "late-camera-conflict") == 0,
+                    "candidate then reject on 30th frame")) return false;
+
+    SceneFrameGate early;
+    if (!warmSceneGate(early)) return false;
+    early.reject(30, "first-camera-conflict");
+    early.candidate(30, origin, 0xABC);
+    early.candidate(30, origin, 0xABC);
+    out = early.finish(30, parkedInput(30, 12));
+    if (!sceneCheck(!out.ready && !out.qualified && !early.park.stable && !early.park.fresh &&
+                    std::strcmp(out.sceneRefusal, "first-camera-conflict") == 0,
+                    "candidate cannot rescue rejection")) return false;
+
+    SceneFrameGate missing;
+    if (!warmSceneGate(missing)) return false;
+    out = missing.finish(30, parkedInput(30, 12));
+    if (!sceneCheck(!out.qualified && !out.ready && !missing.park.stable && !missing.park.fresh &&
+                    std::strcmp(out.sceneRefusal, "no-trigger-or-camera-witness") == 0,
+                    "missing observer after 29 frames resets both budgets")) return false;
+    for (unsigned frame = 31; frame <= 65; ++frame) {
+        missing.candidate(frame, origin, 0xABC);
+        out = missing.finish(frame, parkedInput(frame, 12));
+        if (!sceneCheck(!out.ready && !missing.park.fresh, "stale status after observer gap cannot arm")) return false;
+    }
+    missing.candidate(66, origin, 0xABC);
+    out = missing.finish(66, parkedInput(66, 13));
+    if (!sceneCheck(!out.ready && missing.park.fresh == 1, "first new post-gap sample")) return false;
+    missing.candidate(67, origin, 0xABC);
+    out = missing.finish(67, parkedInput(67, 14));
+    if (!sceneCheck(out.ready && missing.park.fresh == 2, "two fresh samples after gap")) return false;
+
+    SceneFrameGate skipped;
+    if (!warmSceneGate(skipped)) return false;
+    skipped.candidate(32, origin, 0xABC);
+    out = skipped.finish(32, parkedInput(32, 12));
+    if (!sceneCheck(!out.ready && skipped.park.stable == 1 && !skipped.park.fresh,
+                    "skipped Present gap resets freshness")) return false;
+
+    // Same production helper supplies Capturing's qualified/refusal verdict.
+    // A provisional post-arm witness must not survive a late rejection.
+    happy.candidate(31, origin, 0xABC);
+    happy.reject(31, "post-arm-conflict");
+    out = happy.finish(31, parkedInput(31, 12));
+    if (!sceneCheck(!out.qualified && !out.ready &&
+                    std::strcmp(out.sceneRefusal, "post-arm-conflict") == 0,
+                    "post-arm valid then reject")) return false;
+    SceneFrameGate captureMissing;
+    if (!warmSceneGate(captureMissing)) return false;
+    captureMissing.candidate(30, origin, 0xABC);
+    if (!captureMissing.finish(30, parkedInput(30, 12)).ready) return false;
+    out = captureMissing.finish(31, parkedInput(31, 12));
+    if (!sceneCheck(!out.qualified && !out.ready && !captureMissing.park.fresh,
+                    "missing capture-frame witness")) return false;
+
+    SceneFrameGate journal;
+    if (!warmSceneGate(journal)) return false;
+    journal.candidate(30, origin, 0xABC);
+    auto menu = parkedInput(30, 12); menu.gui = 6;
+    out = journal.finish(30, menu);
+    if (!sceneCheck(!out.qualified && !out.ready && !journal.park.stable && !journal.park.fresh,
+                    "current Present journal vetoes earlier candidate")) return false;
+    if (!sceneCheck(!journal.candidate(30, origin, 0xABC) && !journal.reject(30, "too-late"),
+                    "completed frame callbacks cannot alter finalized gate")) return false;
+
+    SceneFrameGate nullCandidate;
+    nullCandidate.candidate(1, origin, 0xABC);
+    nullCandidate.candidate(1, nullptr, 0xABC);
+    out = nullCandidate.finish(1, parkedInput(1, 12));
+    if (!sceneCheck(!out.qualified && std::strcmp(out.sceneRefusal, "scene-origin-nonfinite") == 0,
+                    "null repeat vetoes prior candidate")) return false;
+
+    SceneFrameGate invalid;
+    invalid.candidate(1, origin, 0);
+    invalid.candidate(1, origin, 0xABC);
+    out = invalid.finish(1, parkedInput(1, 12));
+    if (!sceneCheck(!out.qualified && std::strcmp(out.sceneRefusal, "no-scene-depth") == 0,
+                    "valid repeat cannot hide invalid candidate")) return false;
+    return true;
+}
+
+bool testPassiveSceneWitness() {
+    SceneWitnesses census;
+    float camera[6][4]{};
+    camera[0][0] = camera[1][1] = camera[2][2] = 1;
+    SceneDraw draw;
+    draw.color = 0x100; draw.rtv = 0x110; draw.depth = 0x120; draw.dsv = 0x130;
+    draw.b1 = 0x140; draw.format = 26; draw.width = draw.depthWidth = 1920;
+    draw.height = draw.depthHeight = 1080; draw.depthFormat = 45;
+    draw.cameraHash = 0x42; draw.camera = reinterpret_cast<const unsigned char*>(camera);
+    draw.viewport = draw.cameraCurrent = true;
+    census.observe(draw, true);
+    const SceneTarget* target = census.find(draw.color);
+    if (!target || target->bad || !target->cameraSeen || target->draws != 1) return false;
+    // An image-copy-source refusal is external to this diagnostic census.
+    // Its camera remains usable only if all actual H writes agree.
+    census.observe(draw, true);
+    target = census.find(draw.color);
+    if (!target || target->bad || target->draws != 2) return false;
+    SceneDraw mixed = draw; float other[6][4]{};
+    std::memcpy(other, camera, sizeof(other)); other[5][0] = 1;
+    mixed.camera = reinterpret_cast<const unsigned char*>(other);
+    census.observe(mixed, true);
+    if (!census.find(draw.color)->bad ||
+        std::strcmp(census.find(draw.color)->reason, "scene-camera-mixed") != 0) return false;
+    census.reset();
+    SceneDraw stale = draw; stale.cameraCurrent = false;
+    census.observe(stale, true);
+    if (!census.find(draw.color)->bad) return false;
+    census.reset();
+    SceneDraw overlay = draw; overlay.overlayProtected = true;
+    census.observe(overlay, true);
+    if (!census.find(draw.color)->bad) return false;
+    census.reset();
+    census.observe(draw, true);
+    SceneDraw depth = draw; depth.depth = 0x200;
+    census.observe(depth, true);
+    if (!census.find(draw.color)->bad) return false;
+    census.reset();
+    census.observe(draw, true);
+    census.explicitWrite(draw.color);
+    if (!census.find(draw.color)->bad ||
+        std::strcmp(census.find(draw.color)->reason, "scene-explicit-resource-write") != 0) return false;
+    census.reset();
+    SceneDraw viewport = draw; viewport.viewport = false;
+    census.observe(viewport, true);
+    if (!census.find(draw.color)->bad) return false;
+    census.reset();
+    SceneDraw missing = draw; missing.camera = nullptr;
+    census.observe(missing, true);
+    if (!census.find(draw.color) || census.find(draw.color)->cameraSeen) return false;
+    census.reset();
+    for (unsigned i = 0; i < kSceneTargets + 1; ++i) {
+        SceneDraw d = draw; d.color += i;
+        census.observe(d, true);
+    }
+    return census.overflow;
 }
 
 bool testCapture() {
@@ -392,12 +576,16 @@ bool testReportMarkers() {
         source.find("detail-complete=%u") != std::string::npos &&
         source.find("placed-overflow=%u") != std::string::npos &&
         source.find("flat stationary Placed-matrix[") != std::string::npos &&
+        source.find("passive-scene-never-qualified") != std::string::npos &&
+        source.find("post-arm-no-passive-scene-witness") != std::string::npos &&
+        source.find("passive-scene=%llu selected=%llu") != std::string::npos &&
+        source.find("refusal=%s scene-refusal=%s") != std::string::npos &&
         source.find("selected GPU donor UNPROVED") != std::string::npos;
 }
 
 int main(int argc, char** argv) {
     if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
-    if (!testGate() || !testCapture() || !testPlaced() || !testReportMarkers()) {
+    if (!testGate() || !testCompletedSceneGate() || !testPassiveSceneWitness() || !testCapture() || !testPlaced() || !testReportMarkers()) {
         std::fprintf(stderr, "flat stationary camera test failed\n"); return 1;
     }
     std::puts("flat stationary camera test passed");

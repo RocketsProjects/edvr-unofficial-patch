@@ -19,7 +19,7 @@ struct ParkInput {
     bool active = false, gameplay = false, dockedKnown = false, docked = false;
     bool seatedKnown = false, seated = false, guiKnown = false;
     uint32_t gui = 0, statusSamples = 0;
-    bool selected = false, menu = false, reset = false; // reset is metadata; current rows remain valid
+    bool sceneWitness = false, menu = false, reset = false; // reset is metadata; current rows remain valid
     uint64_t frame = 0;
     uintptr_t depth = 0;
     float origin[3]{};
@@ -27,7 +27,7 @@ struct ParkInput {
 inline bool qualifiedScene(const ParkInput& in) noexcept {
     if (!in.active || !in.gameplay || !in.dockedKnown || !in.docked ||
         !in.seatedKnown || !in.seated || !in.guiKnown || in.gui != 0 ||
-        !in.selected || in.menu || !in.depth) return false;
+        !in.sceneWitness || in.menu || !in.depth) return false;
     for (unsigned i = 0; i < 3; ++i) if (!std::isfinite(in.origin[i])) return false;
     return true;
 }
@@ -35,7 +35,7 @@ struct ParkGate {
     uint64_t lastFrame = 0;
     uint32_t lastSample = 0, fresh = 0, stable = 0;
     bool sampled = false;
-    const char* reason = "no accepted scene frame";
+    const char* reason = "no passive scene witness";
     bool step(const ParkInput& in) noexcept {
         const bool good = qualifiedScene(in);
         if (!good) {
@@ -45,9 +45,15 @@ struct ParkGate {
                 !in.dockedKnown ? "docked-unknown" : !in.docked ? "not-docked" :
                 !in.seatedKnown ? "seated-unknown" : !in.seated ? "not-seated" :
                 !in.guiKnown ? "GuiFocus-unknown" : in.gui != 0 ? "GuiFocus-not-gameplay" :
-                !in.selected ? "no-selected-scene" : in.menu ? "menu-scene-contract" :
-                !in.depth ? "no-selected-depth" : "selected-origin-nonfinite";
+                !in.sceneWitness ? "no-passive-scene-witness" : in.menu ? "menu-scene-contract" :
+                !in.depth ? "no-scene-depth" : "scene-origin-nonfinite";
             return false;
+        }
+        // A missed completed frame loses both budgets. Fresh samples from
+        // before an observer gap must not qualify a later parked scene.
+        if (lastFrame && lastFrame + 1 != in.frame) {
+            stable = fresh = 0;
+            lastSample = in.statusSamples; sampled = true;
         }
         if (!sampled) { lastSample = in.statusSamples; sampled = true; }
         else if (in.statusSamples != lastSample) {
@@ -60,6 +66,140 @@ struct ParkGate {
         reason = fresh < 2 ? "waiting-for-two-fresh-Status-samples" :
             stable < 30 ? "waiting-for-30-qualified-scene-frames" : "qualified";
         return fresh >= 2 && stable >= 30;
+    }
+};
+
+// Present finalizes a frame once. Callbacks only accumulate evidence;
+// rejection dominates every candidate in the same frame, in either order.
+struct CompletedScene {
+    bool processed = false, qualified = false, ready = false;
+    const char* sceneRefusal = "no-trigger-or-camera-witness";
+    float origin[3]{};
+};
+struct SceneFrameGate {
+    ParkGate park;
+    uint64_t pendingFrame = 0, completedFrame = 0;
+    bool pending = false, candidateSeen = false, rejected = false, completed = false;
+    uintptr_t depth = 0;
+    float origin[3]{};
+    const char* refusal = "none";
+
+    bool acceptFrame(uint64_t frame) noexcept {
+        if ((completed && frame <= completedFrame) || (pending && frame < pendingFrame)) return false;
+        if (!pending || frame != pendingFrame) {
+            pending = true; pendingFrame = frame;
+            candidateSeen = rejected = false; depth = 0; refusal = "none";
+        }
+        return true;
+    }
+    bool candidate(uint64_t frame, const float point[3], uintptr_t sceneDepth) noexcept {
+        if (!acceptFrame(frame)) return false;
+        // Repeated callbacks cannot rescue a rejected frame or hide an invalid
+        // first witness behind a later valid one.
+        bool finite = point != nullptr;
+        if (point) for (unsigned i = 0; i < 3; ++i) finite = finite && std::isfinite(point[i]);
+        if (!finite || !sceneDepth) {
+            rejected = true; refusal = !finite ? "scene-origin-nonfinite" : "no-scene-depth";
+        }
+        if (!candidateSeen && point) {
+            for (unsigned i = 0; i < 3; ++i) origin[i] = point[i];
+            depth = sceneDepth;
+        }
+        candidateSeen = true;
+        return true;
+    }
+    bool reject(uint64_t frame, const char* reason) noexcept {
+        if (!acceptFrame(frame)) return false;
+        if (!rejected) refusal = reason ? reason : "passive-scene-unknown";
+        rejected = true;
+        return true;
+    }
+    CompletedScene finish(uint64_t frame, ParkInput input) noexcept {
+        CompletedScene result;
+        if (completed && frame <= completedFrame) return result;
+        completed = true; completedFrame = frame; result.processed = true;
+        const bool current = pending && pendingFrame == frame;
+        input.frame = frame;
+        input.sceneWitness = current && candidateSeen && !rejected;
+        input.depth = input.sceneWitness ? depth : 0;
+        if (input.sceneWitness) {
+            for (unsigned i = 0; i < 3; ++i) input.origin[i] = result.origin[i] = origin[i];
+            result.sceneRefusal = "none";
+        } else if (current && rejected) result.sceneRefusal = refusal;
+        result.qualified = qualifiedScene(input);
+        // Missing witnesses execute the same reset as explicit bad frames.
+        result.ready = park.step(input);
+        if (current) pending = false;
+        return result;
+    }
+};
+
+// Independent, passive summary of writes to each observed H candidate. The
+// renderer's firstBad retains only one conflict, so it cannot certify that a
+// later camera or layout conflict did not follow an image-source refusal.
+constexpr unsigned kSceneTargets = 4;
+struct SceneDraw {
+    uintptr_t color = 0, rtv = 0, depth = 0, dsv = 0, b1 = 0;
+    uint32_t format = 0, width = 0, height = 0, depthWidth = 0, depthHeight = 0, depthFormat = 0;
+    uint64_t cameraHash = 0;
+    const unsigned char* camera = nullptr;
+    bool viewport = false, cameraCurrent = false, overlayProtected = false;
+};
+struct SceneTarget {
+    uintptr_t color = 0, rtv = 0, depth = 0, dsv = 0, b1 = 0;
+    uint32_t width = 0, height = 0, depthFormat = 0, draws = 0;
+    uint64_t cameraHash = 0;
+    unsigned char camera[6 * 4 * sizeof(float)]{};
+    bool cameraSeen = false, bad = false;
+    const char* reason = "none";
+    void observe(const SceneDraw& d) noexcept {
+        ++draws;
+        if (bad) return;
+        if (d.overlayProtected) { bad = true; reason = "scene-overlay-branch-unproven"; return; }
+        if (d.format != 26 || !d.rtv || !d.depth || !d.dsv || !d.depthFormat ||
+            !d.width || !d.height || d.depthWidth != d.width || d.depthHeight != d.height ||
+            !d.viewport) { bad = true; reason = "scene-layout-or-viewport"; return; }
+        if (draws == 1) {
+            rtv = d.rtv; depth = d.depth; dsv = d.dsv;
+            width = d.width; height = d.height; depthFormat = d.depthFormat;
+        } else if (rtv != d.rtv || depth != d.depth || dsv != d.dsv ||
+                   width != d.width || height != d.height || depthFormat != d.depthFormat) {
+            bad = true; reason = "scene-layout-changed"; return;
+        }
+        if (!d.camera) return;
+        if (!d.cameraCurrent || !d.b1) { bad = true; reason = "scene-camera-stale"; return; }
+        if (!cameraSeen) {
+            cameraSeen = true; b1 = d.b1; cameraHash = d.cameraHash;
+            std::memcpy(camera, d.camera, sizeof(camera));
+        } else if (b1 != d.b1 || cameraHash != d.cameraHash ||
+                   std::memcmp(camera, d.camera, sizeof(camera)) != 0) {
+            bad = true; reason = "scene-camera-mixed";
+        }
+    }
+};
+struct SceneWitnesses {
+    SceneTarget targets[kSceneTargets]{};
+    unsigned used = 0;
+    bool overflow = false;
+    void reset() noexcept { *this = SceneWitnesses{}; }
+    const SceneTarget* find(uintptr_t color) const noexcept {
+        for (unsigned i = 0; i < used; ++i) if (targets[i].color == color) return &targets[i];
+        return nullptr;
+    }
+    void observe(const SceneDraw& d, bool hdrCandidate) noexcept {
+        if (!d.color) return;
+        SceneTarget* target = nullptr;
+        for (unsigned i = 0; i < used; ++i) if (targets[i].color == d.color) { target = &targets[i]; break; }
+        if (!target && hdrCandidate) {
+            if (used == kSceneTargets) { overflow = true; return; }
+            target = &targets[used++]; target->color = d.color;
+        }
+        if (target) target->observe(d);
+    }
+    void explicitWrite(uintptr_t color) noexcept {
+        for (unsigned i = 0; i < used; ++i) if (targets[i].color == color) {
+            targets[i].bad = true; targets[i].reason = "scene-explicit-resource-write";
+        }
     }
 };
 

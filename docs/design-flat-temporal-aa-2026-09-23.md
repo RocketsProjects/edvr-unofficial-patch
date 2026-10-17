@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 ordering RE:** actual parent/Q recovered (09:19 entry); Sol proves conditional re-anchor -> camera manager -> renderer-preparation order, plus fenced Placed update before stage finalization. See "offline ordering trace" below; F1 remains OPEN.
-  Renderer helper-to-queue-to-descriptor copies and a separate pass-camera-to-refresh-to-51B640 upload path are traced. Normal provider overwrites use node/context caches; callback time and equal rows cannot certify a rendered coordinate epoch.
-  Next: prove actual event/node/context instances, render handoffs, configured pass-camera association and provenance of ALL contributing selected writes. No new flight/build/install; automatic passive gate remains unrepaired, Steam DLLs remain b195d65d. VR's dropped 50 m+ translation remains open.
+- **10-17 F1 conservative flat fix, BUILD VERIFIED, NOT FLOWN:** Astra finds no additional flight needed: ambiguous origin-absorption cases reset history, while continued history retains travel. Full build and all gates passed in 151 seconds; see latest Astra entry below.
+  Sol pins the actual H-to-owned-camera writer. Passive arming uses a guarded pre-admission scene witness, finalized at Present with rejection dominance and missing-frame freshness reset. No treatment-policy or VR rendering change.
+  Exact D-based history preservation and VR per-eye/native/SDK reset propagation remain separate; shared RE helps that work. Steam deployment follows the clean-commit promotion gates. No new config key or flight request.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4438,6 +4438,96 @@ No further flight is requested. The automatic passive gate also still depends
 on treatment admission; repair and end-to-end instrument review are required
 before using another automatic capture. This entry changes documentation only;
 the installed build remains b195d65d.
+
+**2026-10-17, Astra evidence review: conservative flat F1 correction without
+another flight.** The independent Astra 6 review distinguishes the existing
+destructive-translation defect from exact history-preserving re-anchor
+correction. Another flight is not necessary evidence for the first fix. The
+production arithmetic, shader and existing WARP fixtures already establish that
+old origin (80,0,0), new origin (20,0,0), unchanged rows and a short frame can
+keep history while replacing the old origin, erasing real 60 m travel. At width
+2496, 90-degree horizontal projection and 1000 m depth, this removes 74.88
+pixels of lateral motion.
+
+The same input pair permits D.translation=0 with -60 m physical travel,
+D.translation=-60 m with no physical travel, or D.translation=-65 m with +5 m
+physical travel. Camera positions alone cannot choose among them. The chosen
+correctness policy is to reset history in cases previously classified for
+origin absorption and retain the real camera translation on every frame that
+continues history. Accepted outward travel and the existing eligibility
+thresholds remain intact. A reset uses current-frame output and starts fresh
+history; it does not guess which physical interpretation occurred.
+
+Ruled out: the missing D/source/upload lineage prevents any F1 correction,
+because refusing uncertified history removes the arithmetic defect without
+classifying the discontinuity. That lineage remains necessary to keep history
+through a genuine re-anchor while retaining simultaneous physical travel. The
+conservative policy trades accumulation on ambiguous frames for correctness;
+repeated ambiguity can reduce temporal AA quality. It is not a universal
+re-anchor detector and does not promise uninterrupted inward history.
+
+**Scope.** This correction is for the flat resolver. The shared game-engine RE
+also helps VR, but VR has its own camera gate, canted-eye conversion, both-eye
+history and native/SDK reset paths. Its existing 50 m translation drop remains
+a separate integration problem. Neither this flat policy nor the flat passive
+capture certifies VR eye/upload provenance. The user was told that VR needs
+separate reset-propagation fixtures. No VR rendering change is included here.
+
+**Additional Sol RE.** Writer `+0x2871B50` resolves the configured pass and
+owned camera C, calls `+0x59F1A0(C+0x20,H)` at `+0x2871BB3`, then continues
+camera finalization. Constructor tracing confirms that pass's camera ownership.
+This closes the concrete H-to-C copy implementation; the live H's association
+with consumed R+0x240 remains unproved. The new hook contract is
+`analysis/decomp/f1_origin_20261017/passive_provenance_hook_contract_20261017.txt`.
+The complete provenance-probe design is saved separately. Broad hook
+implementation is deferred while the conservative correctness fix is validated.
+
+**Passive arming repair.** The existing one-shot now gets a separate scene
+witness before treatment admission. A bounded four-H census includes every
+relevant draw and explicit target write. The candidate must have a current
+camera and consistent bound RTV/depth/DSV, viewport, extent, trigger and menu
+facts. It can survive an image-copy-source treatment refusal, while actual
+camera ambiguity, layout/depth changes, stale/unknown data and overflow refuse
+it. A candidate remains diagnostic evidence; actual selected-donor metadata is
+reported separately and remains absent when no donor was admitted.
+
+The arm still needs 30 consecutive qualified scene frames and two progressing
+Status samples, plus the raw parked-cockpit conditions. Missing/rejected
+witnesses and post-arm loss have explicit reasons. Collector shutdown drains
+completed callbacks before the report. No current camera or callback means
+incomplete/refused, and waiting consumes no capture budget. Treatment admission
+and rendering policy are unchanged. This gate repair has no new config key;
+existing diagnostic keys and hook owners are preserved.
+
+Qualification is finalized at the completed Present boundary using current
+journal conditions. Rejection dominates every candidate in the same frame,
+including an invalid/null repeated candidate; a provisional callback cannot arm
+the capture. Missing/skipped observer frames clear both stability and
+fresh-Status credit. Repeated callbacks or Present calls cannot advance the
+gate twice. These are production-core regression cases, including loss during
+the capture frame. The first gate implementation failed this state-machine
+review and was corrected by the next Sol tier before validation.
+
+The Astra review is
+`analysis/decomp/f1_origin_20261017/f1_astra_evidence_review_20261017.txt`.
+The independent Astra source review approved the conservative policy and
+corrected passive gate. Full validation passed in 151.0 seconds: Python
+self-tests, production DLLs, 170 pooled jobs and six quiet jobs, self-contained
+installer/resource checks and the full-build receipt. The first attempt exposed
+two fixture setup errors, an unconditional-failure XeSS mock and unsupported
+HDR input format; both were repaired without changing production guards. The
+final fixtures observe the real mask-less XeSS interface, check complete
+current output images on resets and retain signed travel, boundary,
+engine-record, jitter/foreground and history-recovery assertions. The
+stationary gate regression rig also passed.
+
+F1's destructive translation replacement is closed for the flat resolver by
+refusing ambiguous history. Exact re-anchor history preservation and VR reset
+propagation remain separate work. No new flight is required before this
+correctness fix; a later flight would check visual compatibility or measure the
+separate history-preserving design. Clean-commit DLL promotion and verified
+Steam deployment use the standard build and install tools, preserving the
+existing settings.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
