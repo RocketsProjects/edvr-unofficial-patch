@@ -52,7 +52,7 @@
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
-- **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
+- **10-16/17 flat FSR reports:** both capped logs show active treatment; the 10-17 log has recurrent selector truncation, but the crowded on-foot cause is unproven (entries below).
 - **10-17 F1 flat PASS:** `942cfeb3`; steadier stationary edges and seven
   normal-space ambiguity resets with clean history recovery. Temporary
   `diag.flat_origin_capture = off`. Exact re-anchor/VR separate.
@@ -17263,3 +17263,52 @@ Next: ask the reporter to set `edvr-flat.ini` `[log] max_mb=128`, restart, and r
 Press NumLock while FSR has no visible effect inside the Operation, then again after
 leaving if it remains ineffective; note both times and bundle promptly. A normal-scene
 capture with FSR working would provide the comparison. Keep FSR selected for captures.
+
+## 2026-10-17 — crowded on-foot instance FSR report
+
+Archive `edvr_logs\reports\20261017-133430`; sender reports ~20 commanders in an
+instance and strange visuals mainly on foot; no confirmed FSR shutdown. Flat `/novr`,
+scope both/EDHM; rc.2 `6AD165AB`, RX 9070 XT, FSR3 3.1.2, native R=E=D=3440x1440;
+FSR init/history succeeded.
+
+At 12:43:22–12:43:37, four windows declined all HDR triggers as `blank-scene`
+(476–599/window; backend=0), recovering at 12:43:42. Another burst at 12:44:07–12:44:12
+declined 352 and 512, then recovered at 12:44:17. At 13:20:08 FSR treated
+188/195 HDR triggers (backend=188), with 7 spatial fallbacks; at 13:20:13
+FSR treated 202/218 (backend=202), with 16 spatial fallbacks.
+The route stayed `auto`/FSR, with no SDK shutdown or backend failure before the cap.
+
+The selector logged `relevant-observations-truncated` for 5,501
+frames across 37 five-second windows, mainly 12:45:17–12:47:52 (up to 200
+refusals/window), with short bursts through 13:04:22. Treatment resumed between
+bursts and remained active later. This selector reason covers a per-frame
+uncertain prefix or multiple output copies, as well as fixed tables of 128
+targets and 32 source records; it does not by itself prove capacity exhaustion.
+The prefix resets each watched frame. Fresh main retains the rc.2 truncation
+decision and those table bounds. Discriminate with the actual source/target
+counts, copy count and first uncertainty cause in an affected frame. The
+foreground-contract refusal below totals only 37 captured frames; its late
+cluster is separate from the larger earlier truncation burst.
+
+At 13:20:13 phase guard: `foreign phase missing bound projection publication` for VS
+`CFCA8FFC6B058630` / PS `8A08FF781272C5F6` (cap=4, overflow=0); known recipe: B0 row 4 ForwardDp4.
+`copyConstants=false`: no readable 64-byte projection CPU publication; bound range passed.
+The log cannot distinguish an untracked buffer from a missing/invalid generation.
+Unknown pairs: 40/64; no overflow.
+
+Fresh main includes `942cfeb3`'s forward-light-camera frustum-rounding fix for other
+exact VS/PS pairs, not CFCA. This guard is separate; the fix does not establish a cure.
+
+The graphics log capped at 13:20:13. The 13:34:27 vertex-resync close line and
+breadcrumbs show the process continued, leaving ~14 minutes without treatment data.
+The crowded on-foot cause remains unproven.
+
+Next: add and verify passive, failure-only receipts before requesting another
+diagnosis flight. NumLock general gives shader/state/routing and a two-frame
+draw census, but does not expose the selector's first `uncertain` cause and
+target/source/copy counts, or CFCA's bound VS b0 CPU-shadow/private-buffer
+lookup at the failing draw. Record those two witnesses, including actual
+binding/range and generation/shadow status, then confirm their failure paths
+emit them before flying. For that flight raise `edvr-flat.ini` `[log] max_mb=128`,
+keep FSR selected, and capture the visible interval. Saved DXBC alone cannot
+distinguish either failure.
