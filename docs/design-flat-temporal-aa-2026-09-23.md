@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 arithmetic fix BUILD VERIFIED; hangar audit CAPTURED/REVIEWED:** installed Steam DLLs b025e8fd supplied complete/current light-camera payloads and a saved raw-depth-to-linear-to-light resource join. Partial flags describe intermediate-copy suffix writes/metadata bounds; the final HDR consumer has no late writes. Astra supports a guarded camera-donation implementation without another pre-fix capture/flight.
-  Temporary `diag.flat_origin_capture = off` stays off. Manual Full is independent of that flag. Both audits completed and the user may quit; remaining work is offline.
-  Next: exact-pair live depth/resource/subresource/version and shader-used camera/donor/phase guards, preserving existing admission/depth checks; positive nonzero-phase and rejection fixtures before ordinary AA and F1 validation. Keep main unmerged pending validation. Exact D-based history preservation and VR propagation remain separate.
+- **10-17 F1 arithmetic fix / guarded hangar admission BUILD VERIFIED; VALIDATION PENDING:** the new exact-pair centered-Upstream adapter proves current original light camera, same-depth geometry and returned raw/linear input-output association; existing raw-depth/admission checks and VR/legacy coverage remain. Astra review, focused tests and all full-build gates passed (206.9 seconds).
+  Temporary `diag.flat_origin_capture = off` stays off. Production guard work is independent of that latch and manual Full. Normal nonzero-jitter/history and F1 behavior remain unqualified.
+  Next: after clean promotion/Steam verification, fresh flat stationary baseline 30 s, F7 off 10 s, restore DLSS 30 s; keep the capture hotkey unused and leave the game running for log checks. Keep main unmerged pending validation. Exact D-based history preservation and VR propagation remain separate.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4765,6 +4765,111 @@ inverse-view fields provide independent corroboration. The bounded evidence
 report is
 `analysis/decomp/f1_ship_writer_20261017/light_payload_result_b025e8fd_20261017.txt`
 in the main checkout.
+
+**2026-10-17, guarded forward-light admission implementation.** The user
+authorized the guarded fix, a full build and Steam flat install, with the F1
+probe off and main held until validation. The supported new coverage is the
+captured Upstream camera path, flat 3840x2160 with installed DLSS
+FileVersion/ProductVersion 310,9,1,0. No VR runtime, headset or per-eye target
+participates in this flat test. Existing legacy/inverse-anchor behavior stays
+intact; the new forward adapter explicitly refuses unqualified ownership modes.
+The new path introduces no config key.
+
+The admission proof must come from shader-used view rows 2..4 and forward rows
+10..13, actual current original bindings, independently qualified geometry/raw
+depth, and a live exact conversion/output/light-input identity chain. Canonical
+world camera remains separate from the light draw's actual B1 binding.
+Converter and light evidence must survive only a known real issue, expire on
+mode/frame/mutation gaps, and invalidate authority if abandoned. Probe-off
+ordinary rendering must reach every new production hook without a manual Full
+arm.
+
+Existing upstream ownership is a mode flag, not a per-upload phase receipt. The
+new mathematical phase check removes the expected raster offset from the used
+forward rows and verifies the remainder against the independently used view
+axes, including translation. This restricts the new adapter to the centered
+underlying projection established in the saved capture. All four saved samples
+pass the phase-zero shape check without threshold changes. Algebraic positive
+plus/minus-phase fixtures and consistently-unphased-at-nonzero rejection are
+required before a full build; ordinary nonzero treatment still requires
+validation.
+
+Saved raw-DSV writer enumeration found 176 writes in 11 groups, including seven
+draws outside the old preferred pool. RE establishes narrow camera/depth roles
+for exact 989E043933A369AB/BD43EB1E0AAEFC7A and
+7B0DC42D383F694C/0DF03E64DF9DBEF1; these consume origin row 275 then canonical
+clip rows. Exact 84F6596FAF22CCFA with null PS uses canonical clip rows
+270..273 on camera-relative input. It can establish projection-domain
+consistency, never an independent absolute origin. These roles add no
+motion-source authority. Unknown relevant depth writers, incoherent cameras,
+stale data and capacity losses must refuse. Later known light consumers need
+their actual stage-specific ranges and depth slots checked; 24DE/1A53 reads
+linear depth at PS1 and declares 49 PS CB2 rows rather than the first pass's
+47. No guard may silently borrow the first pass's layout.
+
+Frozen implementation review: the new production adapter is independent of the
+F1 diagnostic latch and manual Full. It carries a separate typed original-CB2
+witness through the reducer/frame/trace, preserving the actual light B1
+identity and a separate qualified scene donor. The original inverse-anchor
+witness remains 112 bytes; the new forward witness requires its complete
+752-byte range. Later light consumers use their actual stage spans, including
+the 784-byte PS variant. Existing motion shader replacements are recognized
+only through held original/clone identities with owning-context and generation
+checks. No replacement is bound by this new admission adapter.
+
+The runtime keeps eight relevant depth-domain records and eight actual-returned
+converter associations, with sticky writer coherence and explicit cancellation.
+Saved trace census finds one eligible raw domain and one converter before first
+light in each of the three captured frames, so these bounds fit without
+widening them. Every actual selected-depth writer is covered by a supported or
+narrowly audited camera/depth role. Bound MRT/UAV writes, source mutations,
+observation gaps, ownership/phase changes and abandoned draws invalidate the
+relevant evidence. Post-donation raw/linear dependency changes revoke H
+authority through replay-visible uncertainty; normal subsequent H accumulation
+is preserved.
+
+The converter token means a CPU-returned exact-shader raw-input/linear-output
+association. It does not claim all texels refreshed, a GPU completion receipt
+or linear-depth metric equivalence. Saved packets do retain identical converter
+VB data across the interval: an oversized triangle with stride 20 and topology
+5, with no intervening tracked VB write or uncertainty. The converter's
+unsampled culling state is not inferred from neighboring packets. Supported
+conventional culling, solid raster, effective scissor/depth state, viewport,
+sample mask, predication and extra-stage restrictions are checked without
+forcing an unobserved NONE-only mode.
+
+Astra approved the final frozen source and independently compiled/ran the
+existing focused temporal rig: 166 core checks, 92 integration checks and the
+existing 65 light-capture checks passed, with the complete policy self-test
+green. Tests include independent algebraic positive/negative phase projection,
+captured float-bit matrices, unresolved float-phase/conditioning, proper
+rotation, typed roles, stale/range/lineage/mutation/cancellation, ownership and
+trace authority. One old capture callback assertion needed a function-bounded
+grammar repair; token removal and disabled-token mutants now verify that the
+assertion remains effective. All 15 changed source/test files preserve LF and
+no BOM. The full production build is running; no new DLL has been installed
+yet.
+
+The full production build passed all gates in 206.9 seconds: 170 pooled jobs,
+six quiet jobs, production DLLs, the self-contained installer and the final
+receipt. The full rig output confirms 166 core, 92 integration and 65
+light-capture checks with zero failures. The receipt matches the guarded-fix
+input tree. No further C++ change follows this gate; clean-version promotion
+and sanctioned Steam verification are next. Main received an unrelated
+documentation-only update, de9fb439, during this work; importing that into the
+feature branch preserves the validated compiled inputs and does not merge the
+guarded fix to main.
+
+Ordinary stationary validation must use a fresh Steam flat launch with DLSS and
+the same docked hangar view, probe off, menus closed and no manual Full arm.
+Wait 30 seconds, press F7 once for 10 seconds off, then press F7 once to
+restore DLSS and wait another 30 seconds. Report any change in fine edges,
+shimmer, blur or doubled edges, then leave the game running for log
+verification. Success needs normal `flat forward light camera`
+qualified/CPU-issued donations, stable AA/backend/history treatment under
+nonzero phase, and correct off/on transitions. A phase-zero capture or unit
+pass alone is not this validation. Main remains held; F1 travel validation is
+still separate.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.

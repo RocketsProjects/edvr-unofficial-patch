@@ -216,7 +216,21 @@ struct LightAuditState {
     struct Write {const void* resource=nullptr;uint64_t frame=0;uint32_t sequence=0;} textureWrites[32]{};
     std::wstring directory;std::vector<std::string> files;bool finalized=true;
 };
+struct ForwardRuntime {
+    forward_light::Ledger ledger;
+    forward_light::Authority authority[forward_light::kPublications];
+    Ptr<ID3D11Resource> authorityHdr[forward_light::kPublications];
+    bool ownerKnown=false,upstream=false;
+    struct DomainHold {Ptr<ID3D11Resource> raw;Ptr<ID3D11DepthStencilView> view;Ptr<ID3D11Buffer> buffer;};
+    DomainHold domainHolds[forward_light::kDomains];
+    struct PublicationHold {Ptr<ID3D11Resource> raw,linear;Ptr<ID3D11ShaderResourceView> input;Ptr<ID3D11RenderTargetView> target;};
+    PublicationHold publicationHolds[forward_light::kPublications];
+    uint64_t converters=0,checks=0,qualified=0,accepted=0,refused=0,lastLog=0;
+    uint64_t reasons[static_cast<unsigned>(forward_light::Reason::Count)]{};
+    forward_light::Reason last=forward_light::Reason::Never;
+};
 struct State {
+    ForwardRuntime forwardLight;
     FlatDrawCapture drawCapture;
     FlatDrawPacketCapture drawPackets;
     std::map<std::pair<uint64_t,uint64_t>,uint64_t> drawPacketRefusedPairs;
@@ -2142,6 +2156,7 @@ void captureHdrProjectionDraw(State& s, const FlatRuntimeDraw& draw) {
     if(complete)++c.payloads;
 }
 #include "flat_light_payload_runtime.inl"
+#include "flat_forward_light_runtime.inl"
 
 void captureHdrProjectionDispatch(State& s) {
     auto& c=s.hdrProjectionCapture;
@@ -2906,7 +2921,7 @@ void applyWork(State& s, FlatWork next) {
         // state ExecuteCommandList leaves it in, so a stale binding never reads as live.
         for (auto& u : s.uavs) u.Reset();
     }
-    if(was!=next)finishLightAudit(s,"cancelled-work-tier");
+    if(was!=next){forwardReset(s);finishLightAudit(s,"cancelled-work-tier");}
     if (was != next && was != FlatWork::Paused) {
         // Probe evidence must not survive Paused or become Full preparation
         // readiness. Every departing watched tier drops shadows and plans.
@@ -3012,7 +3027,7 @@ void flatRuntimeResize() {
     // The swap chain or the device went: engine motion's bound state (the game's render targets among it, held by
     // reference) is forgotten without touching a context that may be gone.
     flatRuntimeSubstitution(nullptr, FlatSubstEvent::kResize);
-    auto& s = state(); FlatComputeInternalScope guard; finishLightAudit(s,"cancelled-resize-or-stop"); s.drawCapture.cancel("resize-or-stop");
+    auto& s = state(); FlatComputeInternalScope guard; forwardReset(s); finishLightAudit(s,"cancelled-resize-or-stop"); s.drawCapture.cancel("resize-or-stop");
     overlaySuffixActive.store(false,std::memory_order_release);
     s.overlay.reset();
     s.foreground.reset();
@@ -3835,6 +3850,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // another frame. The next frame's preflight, with its resource creations, runs inside it.
     HdrCrumbFrameEnd routeFrameEnd(hr);
     s.thread = GetCurrentThreadId();
+    forwardReport(s); // ordinary production guard, independent of manual Full/probe
     lightAuditFrameEnd(s,frame); // drain before AA/device/context early exits
     // The Present edge: the frame window the camera injector may inject in
     // closes here and reopens only once the next frame's phase is chosen, so a
@@ -4782,6 +4798,7 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
         }
     }
     for (const auto& u : s.uavs) if (u) {
+        forwardMutation(s,reinterpret_cast<uintptr_t>(u.Get()));
         if(s.hdrProjectionCapture.target && u.Get()==s.hdrProjectionCapture.depth)
             s.hdrProjectionCapture.written(u.Get());
         if(s.engine!=FlatMonoResolveMode::Taa) {
@@ -4807,6 +4824,7 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
                             FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written,
                             const HistoryWriteExtent& extent=HistoryWriteExtent{}) {
+    forwardMutation(s,reinterpret_cast<uintptr_t>(res));
     lightAuditMutation(s,res);
     if(s.projectionFrames && s.hdrProjectionCapture.armed && !s.hdrProjectionCapture.exhausted()) {
         s.hdrProjectionCapture.written(res);
@@ -5581,6 +5599,9 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         // The exact-shader verifications: each returns at once unless this draw is the copy it
         // names, and then reads the pipeline back from the context (shader, targets, view, viewport).
         flatcpu::Scope checks(flatcpu::kCopyChecks);
+        forwardIssue=forwardBefore(s,d,kind,count,start,instances,startInstance);
+        const auto lightIssue=forwardQualify(s,d);
+        if(lightIssue.kind!=forward_light::Issue::None)forwardIssue=lightIssue;
         d.hdrCopyVerified=verifyHdrCopy(ctx,d);
         d.menuHdrCopyVerified=verifyMenuHdrCopy(ctx,d);
         d.imageSourceCameraIndependentVerified=verifyCameraIndependentImageSource(ctx,d);
@@ -5755,12 +5776,20 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);
         }
     }
+    // Typed light authority reaches the reducer only while its actual original
+    // bindings are still certified. Upstream owns phase: no new private bind.
+    if(forwardIssue.kind==forward_light::Issue::Light&&!forwardIssueValid(s,forwardIssue)) {
+        d.forwardHdrVerified=d.forwardUpstreamPhase=false;
+        forwardRefusal(s,forward_light::Reason::Issue,k.color);
+        forwardIssue={};
+    }
     FlatMonoFrame selected = [&]() -> FlatMonoFrame {
         flatcpu::Scope reduce(flatcpu::kReduce);   // the reducer: the online prefix model and the selector
         return copy
             ? flatRuntimeObserveContract(s.prefix, d, s.traceContract)
             : flatRuntimeObserve(s.prefix, d);
     }();
+    if(forwardIssue.donated)forwardAttest(s,forwardIssue);
     if(d.overlayProtected && !s.overlayFailureNoted) {
         bool admitted=false;
         for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
@@ -7249,6 +7278,7 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
             state().jitterRefusals>drawPacketJitterBefore?state().jitterReason:
             drawPacketPriority?"observed-priority-pair":"representative-observation");
     }
+    if(forwardIssue.kind!=forward_light::Issue::None&&ctx)forwardBeginIssue(state(),forwardIssue,indirectArgs!=nullptr);
     if(lightPayloadToken&&ctx){FlatComputeInternalScope internal;
         captureLightPreForward(state(),ctx,lightPayloadToken,lightPayloadPlan,indirectArgs!=nullptr);}
     if(!weaponFootprintStarted)return;
@@ -7260,6 +7290,7 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         weaponDrawStartInstance,indirectArgs,indirectOffset);
 }
 void FlatRuntimeDrawScope::endActualDraw() {
+    if(forwardIssue.kind!=forward_light::Issue::None&&ctx)forwardReturn(state(),forwardIssue);
     if(lightPayloadToken&&ctx)captureLightReturned(state(),lightPayloadToken);
     // The game's state back from the layer first, before anything else here reads the context.
     if(uiTaken&&!uiEnded&&ctx){flatUiLayerEnd(ctx);uiEnded=true;}
@@ -7295,6 +7326,7 @@ void FlatRuntimeDrawScope::endActualDraw() {
     }
 }
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
+    if(forwardIssue.kind!=forward_light::Issue::None)forwardAbandon(state(),forwardIssue);
     if(lightPayloadToken&&state().lightAudit){auto& c=state().lightAudit->collector;
         if(c.open&&c.generation==lightPayloadToken&&!c.sample.drawReturned)c.sample.abandoned=1;}
     if(drawPacketOnly){if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);return;}

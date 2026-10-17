@@ -1,6 +1,7 @@
 #pragma once
 #include "flat_mono_frame.h"
 #include "flat_deferred_camera.h"
+#include "flat_forward_light.h"
 #include <optional>
 
 namespace edvr {
@@ -36,6 +37,8 @@ struct FlatRuntimeDraw {
     bool imageSourceCameraIndependentVerified = false;
     // Verified actual deferred shader/range/original CB2 relation; FTR keeps
     // this distinct from HasCamera. camera[] then holds the canonical donor.
+    bool forwardHdrVerified = false;
+    bool forwardUpstreamPhase = false; // independent used-view phase certified
     bool deferredHdrVerified = false;
     bool deferredInverseRepaired = false; // executed clone certified and bound, original metadata unchanged
     // Set only by the runtime, whose key.cameraHash is the camera table's flatCameraHash of these very
@@ -220,6 +223,31 @@ inline bool flatRuntimeQualifiedDeferredCamera(const FlatRuntimePrefix& p,const 
         projection.copied==kFlatDeferredCameraBytes && projection.hash && projection.writeEpoch==p.frame &&
         projection.writeSeq && projection.writeSeq<=q;
 }
+// Runtime's exact-resource/used-transform attestation has its own type. An
+// inherited scene identity never pretends the light actually bound VS b1.
+inline const FlatContractRecord* flatRuntimeForwardDonor(const FlatRuntimePrefix& p,
+        const FlatContractObservation& k,uint32_t q) {
+    if(p.uncertain||k.vs!=forward_light::kVs||k.ps!=forward_light::kPs||k.format!=26||
+       !k.depth||!k.dsv||!k.color||!k.rtv||!flat_mono_detail::fullViewport(k,k.width,k.height))return nullptr;
+    const FlatContractRecord* donor=nullptr;
+    for(unsigned i=0;i<p.sourcesUsed;++i){const auto& r=p.sources[i];if(r.key.depth!=k.depth)continue;
+        if(r.key.kind!=kFlatContractPool||!r.key.color||!r.key.rtv||r.key.dsv!=k.dsv||
+           r.key.width!=k.width||r.key.height!=k.height||r.key.depthWidth!=k.width||r.key.depthHeight!=k.height||
+           r.key.depthFormat!=k.depthFormat||!flat_mono_detail::fullViewport(r.key,k.width,k.height)||
+           !flat_mono_detail::cameraCurrent(r,p.frame)||r.last>=q)return nullptr;
+        if(donor&&(donor->key.b1!=r.key.b1||donor->key.cameraHash!=r.key.cameraHash||
+                   std::memcmp(donor->camera,r.camera,kFlatCameraBytes)))return nullptr;
+        donor=&r;
+    }return donor;
+}
+inline bool flatRuntimeQualifiedForwardCamera(const FlatRuntimePrefix& p,const FlatRuntimeTarget& t,
+        const FlatRuntimeDraw& d,uint32_t q) {
+    if(!d.forwardHdrVerified||!d.forwardUpstreamPhase||d.key.camera||t.writes.draws||t.hdrBad||t.hdrCamera||t.hdrLayoutChanged)return false;
+    const auto* donor=flatRuntimeForwardDonor(p,d.key,q);const auto& cb=d.key.projection[1];
+    return donor&&d.key.cameraHash==donor->key.cameraHash&&!std::memcmp(d.camera,donor->camera,kFlatCameraBytes)&&
+        cb.resource&&cb.width>=forward_light::kBytes&&cb.copied==forward_light::kBytes&&cb.hash&&
+        cb.status==FlatProjectionStatus::Available&&cb.writeEpoch==p.frame&&cb.writeSeq&&cb.writeSeq<q;
+}
 inline bool flatRuntimeQualifiedLaserSceneCamera(const FlatRuntimePrefix& p,
                                                  const FlatRuntimeTarget& t,
                                                  const FlatRuntimeDraw& d, uint32_t q) {
@@ -354,6 +382,8 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
     FlatMonoFrame out{}; out.frame = out.epoch = p.frame;
     const uint32_t q = ++p.sequence;
     // A typed deferred witness cannot simultaneously claim an actual VS b1 camera.
+    if((d.forwardHdrVerified&&(d.key.camera||!d.forwardUpstreamPhase))||
+       (d.forwardUpstreamPhase&&!d.forwardHdrVerified)){p.uncertain=true;return out;}
     if((d.deferredHdrVerified && d.key.camera) || (d.deferredInverseRepaired && !d.deferredHdrVerified)){p.uncertain=true;return out;}
     // The draw's record (about 1.2 KB) is made only where it is stored or a witness takes it: most draws
     // only extend their target's record. The camera tests ask the draw directly (flatRuntimeSameCamera,
@@ -548,6 +578,15 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
             bad(*t, FlatRuntimeConflict::MissingDepth, t->writes);
         if (t->writes.draws && (t->writes.key.depth != k.depth || t->writes.key.dsv != k.dsv))
             bad(*t, FlatRuntimeConflict::DepthMismatch, t->writes);
+        if(flatRuntimeQualifiedForwardCamera(p,*t,d,q)) {
+            const auto& donor=*flatRuntimeForwardDonor(p,k,q);
+            t->tone=current();t->tone.deferredCamera=true;t->tone.forwardLightCamera=true;
+            t->tone.sceneCameraB1=donor.key.b1;t->tone.sceneCameraWriteEpoch=donor.lastWriteEpoch;
+            t->tone.sceneCameraWriteSeq=donor.lastWriteSeq;t->tone.key.camera=donor.key.camera;
+            t->tone.key.writeEpoch=t->tone.firstWriteEpoch=t->tone.lastWriteEpoch=k.projection[1].writeEpoch;
+            t->tone.key.writeSeq=t->tone.firstWriteSeq=t->tone.lastWriteSeq=k.projection[1].writeSeq;
+            t->hdrCamera=true;
+        }
         if(flatRuntimeQualifiedDeferredCamera(p,*t,d,q)) {
             const auto& donor=*flatRuntimeDeferredDonor(p,k,q);
             t->tone=current();t->tone.deferredCamera=true;t->tone.deferredInverseRepaired=d.deferredInverseRepaired;t->tone.sceneCameraB1=donor.key.b1;

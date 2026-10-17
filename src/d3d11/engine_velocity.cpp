@@ -1,4 +1,5 @@
 #include "flat_origin_capture.h"
+#include "flat_forward_light.h"
 #include "engine_velocity.h"
 #include "engine_motion_ready.h"
 #include "temporal_shader_bytecode.h"
@@ -175,6 +176,8 @@ engine_velocity_unkeyed::Table g_unkeyed;
 // What EDVR bound in place of the game's state, and at which generation of
 // the game's own binding, so a later look can tell whether it is still bound.
 struct Bound {
+    Ptr<ID3D11DeviceContext> context;
+    ID3D11VertexShader* sourceVs=nullptr;
     ID3D11PixelShader* originalPs = nullptr;
     ID3D11PixelShader* patchedPs = nullptr;
     uint32_t psGen = 0;
@@ -380,6 +383,7 @@ struct FlatDomainSaved {
     Ptr<ID3D11DeviceContext> context;
     Ptr<ID3D11VertexShader> vs;
     Ptr<ID3D11PixelShader> ps;
+    uint32_t vsGeneration=0,psGeneration=0;
     Ptr<ID3D11BlendState> blend;
     Ptr<ID3D11RenderTargetView> targets[8];
     Ptr<ID3D11DepthStencilView> depth;
@@ -2057,6 +2061,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     }
     if (psInstalled) ++g_draw.settersSkipped;
     else { vScreenPSSetShaderRaw(ctx, usePs, nullptr, 0); engineVelocityNoteStateCalls(1); ++g_draw.settersIssued; }
+    g_bound.context=ctx;g_bound.sourceVs=vs;
     g_bound.originalPs = ps; g_bound.patchedPs = usePs; g_bound.psGen = cache.ps;
     g_bound.originalVs = useVs != vs ? vs : nullptr; g_bound.patchedVs = useVs != vs ? useVs : nullptr; g_bound.vsGen = cache.vs;
     g_bound.family = f;
@@ -2765,6 +2770,7 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if(g_flatDomainSaved.context)return fail("flat-domain-nested-bracket");
     FlatDomainSaved saved; saved.context=ctx;
+    saved.vsGeneration=bindingGeneration(BindSlot::Vs);saved.psGeneration=bindingGeneration(BindSlot::Ps);
     UINT classes=0;ctx->VSGetShader(&saved.vs,nullptr,&classes);if(classes)return fail("flat-domain-VS-linkage");
     ctx->PSGetShader(&saved.ps,nullptr,&classes);if(classes)return fail("flat-domain-PS-linkage");
     if(!saved.vs)return fail("flat-domain-shader-missing");
@@ -2882,6 +2888,36 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
     for(auto* view:verified)if(view)view->Release();
     if(!bound){engineVelocityFlatDomainEndDraw(ctx);return fail("flat-domain-slot-bind-refused");}
     return true;
+}
+bool engineVelocityFlatSourceShaders(ID3D11DeviceContext* ctx,uint64_t vsHash,uint64_t psHash) {
+    if(!ctx||!runtimeFlatProfile())return false;
+    Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
+    ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
+    Ptr<ID3D11GeometryShader> gs;Ptr<ID3D11HullShader> hs;Ptr<ID3D11DomainShader> ds;
+    ctx->GSGetShader(&gs,nullptr,nullptr);ctx->HSGetShader(&hs,nullptr,nullptr);ctx->DSGetShader(&ds,nullptr,nullptr);
+    Ptr<ID3D11Predicate> predicate;BOOL predicateValue=FALSE;ctx->GetPredication(&predicate,&predicateValue);
+    if(gs||hs||ds||predicate)return false;
+    const bool originalVs=lookupShaderHash(vs.Get())==vsHash;
+    const bool originalPs=lookupShaderHash(ps.Get())==psHash;
+    if(originalVs&&originalPs)return true;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    const auto receipt=[&](ID3D11DeviceContext* sourceContext,ID3D11VertexShader* originalVs,ID3D11PixelShader* originalPs,
+                           ID3D11VertexShader* patchedVs,ID3D11PixelShader* patchedPs,uint32_t vsGen,uint32_t psGen) {
+        if(lookupShaderHash(originalVs)!=vsHash||lookupShaderHash(originalPs)!=psHash)return false;
+        forward_light::CloneReceipt r;
+        r.context=reinterpret_cast<uintptr_t>(ctx);r.owner=reinterpret_cast<uintptr_t>(sourceContext);
+        r.originalVs=reinterpret_cast<uintptr_t>(originalVs);r.originalPs=reinterpret_cast<uintptr_t>(originalPs);
+        r.shadowVs=reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Vs));r.shadowPs=reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Ps));
+        r.actualVs=reinterpret_cast<uintptr_t>(vs.Get());r.actualPs=reinterpret_cast<uintptr_t>(ps.Get());
+        r.patchedVs=reinterpret_cast<uintptr_t>(patchedVs);r.patchedPs=reinterpret_cast<uintptr_t>(patchedPs);
+        r.vsGeneration=vsGen;r.psGeneration=psGen;r.currentVsGeneration=bindingGeneration(BindSlot::Vs);r.currentPsGeneration=bindingGeneration(BindSlot::Ps);
+        return forward_light::cloneReceipt(r);
+    };
+    const auto& marker=g_flatDomainSaved;
+    if(marker.context.Get()==ctx)for(const auto& replacement:g_flatDomainShaders)
+        if(replacement.originalVs==marker.vs&&replacement.originalPs==marker.ps&&
+           receipt(marker.context.Get(),marker.vs.Get(),marker.ps.Get(),replacement.patchedVs.Get(),replacement.patchedPs.Get(),marker.vsGeneration,marker.psGeneration))return true;
+    return receipt(g_bound.context.Get(),g_bound.sourceVs,g_bound.originalPs,g_bound.patchedVs,g_bound.patchedPs,g_bound.vsGen,g_bound.psGen);
 }
 void engineVelocityFlatDomainEndDraw(ID3D11DeviceContext* ctx) {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);

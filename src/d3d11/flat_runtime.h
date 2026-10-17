@@ -4,6 +4,7 @@
 #include <dxgi.h>
 #include "flat_compute_readback.h"
 #include "flat_projection_scope.h"
+#include "flat_forward_light.h"
 #include "flat_substitution.h"
 #include "flat_map_bounce.h"
 #include "flat_mutation_diagnostic.h"
@@ -153,9 +154,10 @@ struct FlatRuntimeDrawScope {
     unsigned domainFormat=0;
     unsigned domainWidth=0,domainHeight=0;
     float domainCamera[6][4]{};
+    forward_light::Issue forwardIssue{};
     uint64_t lightPayloadToken=0;
     const FlatProjectionBindingPlan* lightPayloadPlan=nullptr;
-    bool needsActualDraw() const { return lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite ||
+    bool needsActualDraw() const { return forwardIssue.kind!=forward_light::Issue::None || lightPayloadToken || drawPacket || domainPlanned || uiTake || uiComposite ||
                                           flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
                                                                      foregroundPlanned, untrustedPlanned); }
     // After the game's own issue and endActualDraw: the second issues fix.ui_quality's flat layer asks for, each the game's

@@ -101,7 +101,22 @@ inline int wiring(const std::string& runtime,const std::string& inl,const std::s
     const auto pre=runtime.find("lightPayloadToken=captureLightPayloadBefore");
     expect(pre<runtime.find("projection.emplace(*projectionPlan)",pre),"original capture precedes private binding substitution");
     expect(runtime.find("captureLightPreForward(state(),ctx,lightPayloadToken")<runtime.find("void FlatRuntimeDrawScope::endActualDraw()"),"pre-forward observation is in actual draw scope");
-    expect(scope.find("return lightPayloadToken || drawPacket")!=std::string::npos,"diagnostic anchor forces actual draw callbacks");
+    const auto anchorForcesDraw=[](const std::string& header) {
+        const auto begin=header.find("bool needsActualDraw() const {");if(begin==std::string::npos)return false;
+        const auto end=header.find('}',begin),ret=header.find("return ",begin);
+        if(end==std::string::npos||ret==std::string::npos||ret>=end)return false;
+        const auto semi=header.find(';',ret);if(semi==std::string::npos||semi>=end)return false;
+        const auto expression=header.substr(ret,semi-ret);
+        return expression.find("return lightPayloadToken ||")!=std::string::npos||
+            expression.find("|| lightPayloadToken ||")!=std::string::npos;
+    };
+    expect(anchorForcesDraw(scope),"diagnostic anchor forces actual draw callbacks");
+    for(const char* replacement:{"false","(false && lightPayloadToken)"}) {
+        auto mutant=scope;const auto method=mutant.find("bool needsActualDraw() const {");
+        const auto token=method==std::string::npos?std::string::npos:mutant.find("lightPayloadToken",method);
+        if(token!=std::string::npos)mutant.replace(token,std::strlen("lightPayloadToken"),replacement);
+        expect(token!=std::string::npos&&!anchorForcesDraw(mutant),"removed or disabled diagnostic token fails callback wiring");
+    }
     expect(inl.find("if(!lightLive(s))return 0;")!=std::string::npos&&inl.find("flatOriginCapture")==std::string::npos,"manual capture independent of F1 startup flag");
     expect(inl.find("c.expired(frame)")!=std::string::npos&&inl.find("manifest-verified=%u pending=0 drained=1")!=std::string::npos,"independent timeout and verified drained completion");
     return fail;
