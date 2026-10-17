@@ -140,6 +140,51 @@ inline int collectorTests() {
     const Receipt zero=receipt(),failure=receipt(11,31,true);
     expect(zero.diagnostic.reason==Reason::None&&failure.diagnostic.reason==Reason::Phase,"real matrix fixtures enter the intended admission paths");
     {
+        Collector c;unsigned payloadWork=0,analysisWork=0;
+        // Same lazy boundary as the production observer: the fixture's input
+        // exists already, but no Receipt copy or analysis happens until admitted.
+        const auto observe=[&](const Receipt& input){
+            if(c.frozen||c.discardSuccessfulNonzero(input.originalReason,input.pixel[0],input.pixel[1]))return -1;
+            ++payloadWork;Receipt copied=input;++analysisWork;
+            copied.diagnostic=analyze(copied.camera,copied.cb[0],copied.ndc);
+            return c.offer(copied);
+        };
+        c.note(true);c.phase(zero.frame,0,0,zero.width,zero.height);
+        const int slot=observe(zero);complete(c,zero);
+        expect(slot>=0&&c.valid[slot]&&payloadWork==1&&analysisWork==1&&c.calls==1,
+            "zero-phase receipt still copies analyzes and commits the issued returned selected bootstrap");
+        const auto saved=c.committed[slot];const auto oldHistory=c.historyCount;
+        const float discardedPhases[][2]={{.25f,0},{0,-.125f},{-.25f,.375f}};
+        for(const auto& phaseValue:discardedPhases){
+            auto success=zero;success.pixel[0]=phaseValue[0];success.pixel[1]=phaseValue[1];
+            expect(flatProjectionJitter(success.pixel[0],success.pixel[1],success.width,success.height,success.ndc),"nonzero fixture has the actual pixel-to-NDC phase");
+            const auto phased=forward_light_test::scene(success.ndc.ndcX,success.ndc.ndcY);
+            std::memcpy(success.camera,phased.camera,sizeof(success.camera));
+            std::memcpy(success.cb[0],phased.cb,sizeof(success.cb[0]));std::memcpy(success.cb[1],phased.cb,sizeof(success.cb[1]));
+            success.originalReason=match(success.camera,success.cb[0],success.ndc);
+            c.note(true);expect(success.originalReason==Reason::None&&observe(success)<0,"actual successful phase on either pixel axis discards before receipt construction");
+        }
+        expect(payloadWork==1&&analysisWork==1&&c.calls==4&&c.entries==4&&c.zeroSamples==1&&
+            !c.primaryFailures&&!c.noSelectedDomain&&!c.frozen&&c.historyCount==oldHistory&&samePayload(c.committed[slot],saved),
+            "early discarded successes keep considered-call accounting without changing bootstrap cohort phase history or capture state");
+        c.note(true);observe(failure);
+        expect(payloadWork==2&&analysisWork==2&&c.calls==5&&c.primaryFailures==1&&c.frozen&&c.matched&&
+            samePayload(c.paired,zero)&&samePayload(c.failure,failure),
+            "phase failure after discarded successes still copies full bytes and freezes its selected zero bootstrap pair");
+        observe(zero);observe(failure);
+        expect(payloadWork==2&&analysisWork==2&&c.calls==5,"existing frozen observer boundary performs no later payload work or call increment");
+        const auto captured=c.failure;c.lifecycle();
+        expect(c.frozen&&c.matched&&samePayload(c.failure,captured),"lifecycle keeps the same frozen one-pair receipt after early discards");
+    }
+    {
+        Collector c;
+        expect(!c.discardSuccessfulNonzero(Reason::None,-0.f,0.f)&&!c.discardSuccessfulNonzero(Reason::None,0.f,-0.f),
+            "both signed-zero pixel components remain bootstrap eligible");
+        expect(!c.discardSuccessfulNonzero(Reason::Phase,0,0)&&!c.discardSuccessfulNonzero(Reason::Phase,.25f,-.125f)&&
+            !c.discardSuccessfulNonzero(Reason::View,.25f,0)&&!c.calls,
+            "only successful nonzero receipts are early discarded; every phase refusal and other decision remains unchanged");
+    }
+    {
         Collector c;
         expect(state(c,"never-called")&&!c.frozen&&!c.emitted,"startup distinguishes a never-called instrument");
         const int slot=c.offer(zero);

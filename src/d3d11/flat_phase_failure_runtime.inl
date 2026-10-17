@@ -7,6 +7,7 @@ void forwardPhaseObserve(State& s,const FlatRuntimeDraw& draw,const forward_ligh
         const forward_light::Publication& publication,const ForwardConstants constants[2],
         const FlatProjectionJitter& phase,forward_light::Reason originalReason) {
     auto& capture=s.forwardLight.phaseReceipt;if(capture.frozen)return;
+    if(capture.discardSuccessfulNonzero(originalReason,s.phase.currentX,s.phase.currentY))return;
     phase_failure::Receipt r;const auto& k=draw.key;r.frame=s.prefix.frame;r.q=s.prefix.sequence+1;
     r.context=reinterpret_cast<uintptr_t>(s.context.Get());r.device=reinterpret_cast<uintptr_t>(s.device.Get());
     r.hdr=reinterpret_cast<uintptr_t>(k.color);r.dsv=reinterpret_cast<uintptr_t>(k.dsv);r.vs=k.vs;r.ps=k.ps;r.width=k.width;r.height=k.height;

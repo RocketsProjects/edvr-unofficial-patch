@@ -62,6 +62,13 @@ struct Collector {
         if(historyCount&&history[(historyNext+7)%8].frame==frame)return;
         history[historyNext]={epoch,frame,width,height,{x,y}};historyNext=(historyNext+1)%8;if(historyCount<8)++historyCount;
     }
+    // calls counts considered receipts (the legacy eligibleSnapshots log field),
+    // including successful nonzero phases discarded before payload work.
+    // The runtime's existing frozen guard runs before this entry.
+    bool discardSuccessfulNonzero(Reason reason,float pixelX,float pixelY) {
+        if(reason!=Reason::None||(pixelX==0&&pixelY==0))return false;
+        ++calls;return true;
+    }
     int offer(Receipt r) {
         ++calls;if(frozen)return -1;r.epoch=epoch;r.recentCount=historyCount;
         for(unsigned i=0;i<historyCount;++i)r.recent[i]=history[(historyNext+8-historyCount+i)%8];

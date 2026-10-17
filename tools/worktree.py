@@ -11,8 +11,10 @@ runs `git worktree add` and then links each of those folders to the main
 checkout's copy with a directory junction (mklink /J).  A dependency the main
 checkout does not have is skipped with a warning.  The target must not exist.
 
-`remove` deletes the junctions FIRST, with rmdir, which removes the link and
-never the target's contents, and only then runs `git worktree remove`.  Order
+`remove` refuses unregistered, locked or dirty worktrees before touching links.
+It restores detached junctions if removal fails. It deletes the junctions FIRST,
+with rmdir, which removes the link and never the target's contents, and only
+then runs `git worktree remove`. Order
 matters: git deletes ignored files in a worktree, and doing that through a
 junction would delete the main checkout's dependencies.  A dependency path in
 the worktree that is a real directory, not a junction, is left for git.
@@ -44,6 +46,8 @@ import tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+# A CLI dry run must not create an import cache for the local helper.
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(SCRIPT_DIR))
 from build_receipt import DEPENDENCY_ROOTS  # noqa: E402  (the one list of ignored dependency folders)
 
@@ -56,7 +60,7 @@ class WorktreeError(Exception):
 
 
 def _git(repo, *args):
-    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    r = subprocess.run(["git", "--no-optional-locks", "-C", str(repo), *args], capture_output=True, text=True)
     if r.returncode != 0:
         raise WorktreeError("git %s failed: %s" % (" ".join(args), (r.stderr or r.stdout).strip()))
     return r.stdout.strip()
@@ -132,18 +136,57 @@ def remove(repo, path, dry_run=False, roots=DEPENDENCY_ROOTS, out=print):
     if not path.is_dir():
         raise WorktreeError("no such worktree: %s" % path)
     main = main_checkout(repo)
-    if os.path.normcase(str(path)) == os.path.normcase(str(main)):
+    if os.path.normcase(str(path.resolve())) == os.path.normcase(str(main.resolve())):
         raise WorktreeError("refusing: %s is the main checkout" % path)
-    junctions = [path / rel for rel in roots if is_junction(path / rel)]
-    for j in junctions:
-        out("rmdir junction %s (target left alone)" % j)
+    # Porcelain -z preserves spaces, newlines and quoting in registered paths.
+    registered = None
+    for record in _git(main, "worktree", "list", "--porcelain", "-z").split("\0\0"):
+        fields = record.split("\0")
+        if fields[0].startswith("worktree "):
+            candidate = Path(fields[0][len("worktree "):])
+            if os.path.normcase(str(candidate.resolve())) == os.path.normcase(str(path.resolve())):
+                registered = fields
+                break
+    if registered is None:
+        raise WorktreeError("refusing: %s is not a registered worktree" % path)
+    if any(f == "locked" or f.startswith("locked ") for f in registered):
+        raise WorktreeError("refusing: %s is a locked worktree" % path)
+    # --no-optional-locks in _git prevents status refreshing the index, including
+    # on a refused dry run. Ignored dependency links are not user modifications.
+    if _git(path, "status", "--porcelain", "-z", "--untracked-files=all"):
+        raise WorktreeError("refusing: %s contains modified or untracked files" % path)
+    junctions = [(path / rel, junction_target(path / rel))
+                 for rel in roots if is_junction(path / rel)]
+    for link, target in junctions:
+        out("rmdir junction %s (target left alone)" % link)
     out("git -C %s worktree remove %s" % (main, path))
     if dry_run:
         out("dry run: nothing written")
         return
-    for j in junctions:
-        os.rmdir(j)  # removes the link only, never the target's contents
-    _git(main, "worktree", "remove", str(path))
+    detached = []
+    try:
+        for link, target in junctions:
+            os.rmdir(link)  # removes the link only, never the target's contents
+            detached.append((link, target))
+        _git(main, "worktree", "remove", str(path))
+    except (OSError, WorktreeError) as error:
+        # Git may refuse after preflight (a new edit/lock), or fail while deleting.
+        # Never delete a competing path or walk a dependency target to roll back.
+        failures = []
+        for link, target in detached:
+            try:
+                if os.path.lexists(link):
+                    if not is_junction(link) or junction_target(link) != target:
+                        raise OSError("path now exists; refusing to overwrite it")
+                elif not path.is_dir():
+                    raise OSError("worktree directory disappeared; cannot restore link")
+                else:
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    make_junction(link, target)
+            except OSError as restore_error:
+                failures.append("%s -> %s: %s" % (link, target, restore_error))
+        detail = "; junction restoration failed: " + "; ".join(failures) if failures else ""
+        raise WorktreeError("%s%s" % (error, detail)) from error
 
 
 # --------------------------------------------------------------------------
@@ -156,6 +199,23 @@ def _listing(root):
         for n in dirnames + filenames:
             out.append(os.path.relpath(os.path.join(dirpath, n), root))
     return sorted(out)
+
+
+def _snapshot(root):
+    """File bytes/mtimes and links, without descending into junction targets."""
+    result = [(".", "directory", Path(root).stat().st_mtime_ns)]
+    for base, dirs, files in os.walk(root):
+        for name in dirs[:]:
+            entry = Path(base) / name
+            if is_junction(entry):
+                result.append((str(entry.relative_to(root)), "junction", str(junction_target(entry)), entry.lstat().st_mtime_ns))
+                dirs.remove(name)
+            else:
+                result.append((str(entry.relative_to(root)), "directory", entry.stat().st_mtime_ns))
+        for name in files:
+            entry = Path(base) / name
+            result.append((str(entry.relative_to(root)), entry.read_bytes(), entry.stat().st_mtime_ns))
+    return sorted(result)
 
 
 def _self_test():
@@ -176,6 +236,11 @@ def _self_test():
     fake_roots = ("third_party/ngx", "third_party/openxr/loader", "third_party/absent")
     with tempfile.TemporaryDirectory(prefix="edvr-worktree-test-") as scratch:
         scratch = Path(scratch)
+        # TemporaryDirectory recursively cleans this fixture on exit. Validate its
+        # absolute resolved boundary before creating anything that it will remove.
+        if (not scratch.is_absolute() or scratch.resolve().parent != Path(tempfile.gettempdir()).resolve()
+                or not scratch.name.startswith("edvr-worktree-test-")):
+            raise RuntimeError("unsafe self-test cleanup boundary: %s" % scratch)
         repo = scratch / "main"
         repo.mkdir()
         g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, check=True)
@@ -196,9 +261,9 @@ def _self_test():
         wt = scratch / "wt"
 
         # --dry-run writes nothing at all.
-        before = _listing(scratch)
+        before = _snapshot(scratch)
         add(repo, wt, branch="b1", dry_run=True, roots=fake_roots, out=quiet)
-        expect(_listing(scratch) == before, "add --dry-run changed the filesystem")
+        expect(_snapshot(scratch) == before, "add --dry-run changed the filesystem")
         expect(not wt.exists(), "add --dry-run created the worktree")
         expect("b1" not in g("branch", "--list", "b1").stdout, "add --dry-run created the branch")
 
@@ -222,9 +287,107 @@ def _self_test():
                "main_checkout from a worktree is not the main checkout")
 
         # remove --dry-run writes nothing.
-        before = _listing(scratch)
+        before = _snapshot(scratch)
         remove(repo, wt, dry_run=True, roots=fake_roots, out=quiet)
-        expect(_listing(scratch) == before, "remove --dry-run changed the filesystem")
+        expect(_snapshot(scratch) == before, "remove --dry-run changed the filesystem")
+
+        # Dirty/locked/unregistered refusals must preserve every link and byte,
+        # including index contents/mtime in failed dry runs.
+        def refused_unchanged(label, target=wt):
+            for dry_run in (True, False):
+                before = _snapshot(scratch)
+                expect(raises(lambda: remove(repo, target, dry_run=dry_run,
+                                            roots=fake_roots, out=quiet)),
+                       label + " was not refused")
+                expect(_snapshot(scratch) == before, label + " changed the filesystem")
+
+        (wt / "a.txt").write_text("dirty user edit")
+        refused_unchanged("dirty tracked worktree")
+        expect((wt / "a.txt").read_text() == "dirty user edit", "dirty user edit was lost")
+        (wt / "a.txt").write_text("a")
+        (wt / "untracked.txt").write_text("user file")
+        refused_unchanged("untracked worktree")
+        (wt / "untracked.txt").unlink()
+        g("worktree", "lock", str(wt), "--reason", "self-test lock")
+        refused_unchanged("locked worktree")
+        g("worktree", "unlock", str(wt))
+        unrelated = scratch / "not-registered"
+        unrelated.mkdir()
+        make_junction(unrelated / "dependency", repo / "third_party/ngx")
+        refused_unchanged("unregistered directory", unrelated)
+        os.rmdir(unrelated / "dependency")
+        unrelated.rmdir()
+
+        # Exercise production rollback after preflight with actual Git refusing
+        # a new user edit, a late lock, and an injected command failure.
+        global _git
+        real_git = _git
+        for scenario in ("edit race", "lock race", "injected failure", "replacement race"):
+            intercepted = []
+            def failing_git(where, *args):
+                if args[:2] == ("worktree", "remove"):
+                    intercepted.append(True)
+                    expect(all(not os.path.lexists(wt / rel) for rel in fake_roots),
+                           "Git remove ran before links were detached")
+                    if scenario == "edit race":
+                        (wt / "a.txt").write_text("late user edit")
+                    elif scenario == "lock race":
+                        real_git(repo, "worktree", "lock", str(wt))
+                    else:
+                        if scenario == "replacement race":
+                            (wt / fake_roots[0]).mkdir()
+                            (wt / fake_roots[0] / "user.txt").write_text("new user file")
+                        raise WorktreeError("injected Git removal failure")
+                return real_git(where, *args)
+            _git = failing_git
+            try:
+                try:
+                    remove(repo, wt, roots=fake_roots, out=quiet)
+                    expect(False, scenario + " did not fail")
+                except WorktreeError as error:
+                    if scenario == "replacement race":
+                        expect("refusing to overwrite" in str(error),
+                               "replacement conflict was not reported")
+            finally:
+                _git = real_git
+            expect(bool(intercepted), scenario + " never reached Git remove")
+            if scenario == "replacement race":
+                replacement = wt / fake_roots[0]
+                expect((replacement / "user.txt").read_text() == "new user file",
+                       "rollback overwrote a replacement user file")
+                expect(not is_junction(replacement), "rollback replaced a user directory")
+                (replacement / "user.txt").unlink()
+                replacement.rmdir()
+                make_junction(replacement, repo / fake_roots[0])
+            for rel in fake_roots[:2]:
+                expect(is_junction(wt / rel), scenario + " did not restore " + rel)
+                expect(junction_target(wt / rel) == (repo / rel).resolve(),
+                       scenario + " restored wrong target")
+            expect((wt / "third_party/ngx/lib/sdk.lib").read_text() == "sdk",
+                   scenario + " damaged dependency target")
+            if scenario == "edit race":
+                expect((wt / "a.txt").read_text() == "late user edit", "rollback lost late edit")
+                (wt / "a.txt").write_text("a")
+            elif scenario == "lock race":
+                g("worktree", "unlock", str(wt))
+
+        # An unlink failure after the first detach also restores earlier links.
+        real_rmdir = os.rmdir
+        unlinks = []
+        def failing_rmdir(link, *args, **kwargs):
+            unlinks.append(link)
+            if Path(link) == wt / fake_roots[1]:
+                raise OSError("injected second junction unlink failure")
+            return real_rmdir(link, *args, **kwargs)
+        os.rmdir = failing_rmdir
+        try:
+            expect(raises(lambda: remove(repo, wt, roots=fake_roots, out=quiet)),
+                   "unlink failure was not reported")
+        finally:
+            os.rmdir = real_rmdir
+        expect(len(unlinks) == 2, "unlink failure did not exercise partial detach")
+        expect(all(is_junction(wt / rel) for rel in fake_roots[:2]),
+               "partial unlink failure lost dependency links")
 
         # remove deletes junctions and worktree, never the source.
         remove(repo, wt, roots=fake_roots, out=quiet)

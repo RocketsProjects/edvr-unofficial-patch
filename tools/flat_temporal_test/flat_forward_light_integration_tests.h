@@ -115,6 +115,15 @@ inline unsigned run() {
         phaseRuntime.find("domain.source.buffer!=reinterpret_cast<uintptr_t>(selected.sceneConstants)")!=std::string::npos,"successful selected source cohort gates one-pair capture");
     expect(phaseRuntime.find("copyConstants(")==std::string::npos&&phaseRuntime.find("->Map(")==std::string::npos&&
         phaseRuntime.find("projectionFrames")==std::string::npos&&phaseRuntime.find("flatOriginCapture")==std::string::npos,"phase receipt only copies previously qualified bytes without GPU reads or capture flags");
+    const auto phaseObserver=phaseRuntime.find("void forwardPhaseObserve(");
+    const auto earlyDiscard=phaseRuntime.find("if(capture.discardSuccessfulNonzero(originalReason,s.phase.currentX,s.phase.currentY))return;",phaseObserver);
+    expect(phaseObserver!=std::string::npos&&earlyDiscard!=std::string::npos&&
+        phaseRuntime.find("if(capture.frozen)return;",phaseObserver)<earlyDiscard&&
+        earlyDiscard<phaseRuntime.find("phase_failure::Receipt r;",phaseObserver)&&
+        earlyDiscard<phaseRuntime.find("std::memcpy(r.camera",phaseObserver)&&
+        earlyDiscard<phaseRuntime.find("phase_failure::analyze(",phaseObserver)&&
+        earlyDiscard<phaseRuntime.find("capture.offer(r)",phaseObserver),
+        "successful nonzero receipt discard precedes construction payload copies analysis and offer while frozen guard stays first");
     const auto phaseEmission=phaseRuntime.find("void forwardPhaseReport(");
     expect(phaseEmission!=std::string::npos&&phaseRuntime.find("flat phase receipt COMPLETE:",phaseEmission)<phaseRuntime.find("c.emitted=true",phaseEmission)&&
         phaseRuntime.find("c.emitted=true;forwardPhaseRelease(s)",phaseEmission)!=std::string::npos,"receipt completion follows every metadata/payload record and releases retained objects");
