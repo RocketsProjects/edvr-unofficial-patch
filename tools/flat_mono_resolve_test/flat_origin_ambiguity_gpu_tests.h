@@ -3,12 +3,13 @@
 
 // Exercise the production resolver, prep shader, backend reset argument and
 // displayed pixels. Identical camera inputs cannot tell travel from a rebase.
-inline void originAmbiguityGpuTests(ID3D11Device* device,ID3D11DeviceContext* context) {
+inline void originAmbiguityGpuTests(ID3D11Device* device,ID3D11DeviceContext* context,
+    edvr::RuntimeProfile fixtureProfile=edvr::RuntimeProfile::LegacyVr) {
     using namespace edvr;
     const bool previousXessCapture=xessCaptureInputs;
     xessCaptureInputs=true;
     const RuntimeProfile previousProfile=runtimeProfileValue();
-    runtimeProfileSet(RuntimeProfile::LegacyVr); // keep the separate passive-probe quotas untouched
+    runtimeProfileSet(fixtureProfile); // Flat with capture off proves the production reset is independent
     const FlatMonoResolveMode modes[]={FlatMonoResolveMode::Dlaa,FlatMonoResolveMode::Dlss,
         FlatMonoResolveMode::Fsr,FlatMonoResolveMode::Xess};
     struct Case {float before,now;bool reset;};

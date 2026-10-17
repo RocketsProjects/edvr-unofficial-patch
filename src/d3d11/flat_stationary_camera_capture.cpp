@@ -1,3 +1,4 @@
+#include "flat_origin_capture.h"
 #include "flat_stationary_camera_capture.h"
 
 #include <windows.h>
@@ -85,6 +86,7 @@ struct State {
 std::atomic<State*> g_state{nullptr};
 State* stateOrNull() noexcept { return g_state.load(std::memory_order_acquire); }
 State* ensureState() noexcept {
+    if (!flatOriginCaptureEnabled()) return nullptr;
     State* p = stateOrNull();
     if (!p) {
         p = new (std::nothrow) State;
@@ -387,6 +389,7 @@ void report(State& s, uint64_t frame) noexcept {
 } // namespace
 
 void flatStationaryCameraFrame(uint64_t completedFrame) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     if (!runtimeFlatProfile()) return;
     State* state = ensureState();
     if (!state) {
@@ -457,6 +460,7 @@ void flatStationaryCameraFrame(uint64_t completedFrame) noexcept {
 
 void flatStationaryCameraSceneCandidate(uint64_t frame, const float camera[6][4],
                                         const void* depth) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     if (!runtimeFlatProfile()) return;
     State* state = stateOrNull();
     if (!state) return;
@@ -468,6 +472,7 @@ void flatStationaryCameraSceneCandidate(uint64_t frame, const float camera[6][4]
 }
 
 void flatStationaryCameraSceneRejected(uint64_t frame, const char* reason) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     if (!runtimeFlatProfile()) return;
     State* state = stateOrNull();
     if (!state) return;
@@ -479,6 +484,7 @@ void flatStationaryCameraSceneRejected(uint64_t frame, const char* reason) noexc
 
 void flatStationaryCameraSelected(uint64_t frame, const float camera[6][4], bool reset,
                                    bool menuContract, const void* depth) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     if (!runtimeFlatProfile() || !camera || !depth || menuContract) return;
     State* state = stateOrNull();
     if (!state) return;
@@ -494,6 +500,7 @@ void flatStationaryCameraSelected(uint64_t frame, const float camera[6][4], bool
 
 void flatStationaryCameraRefresh(uintptr_t camera, uintptr_t ctx, uint64_t callNo,
                                  uint64_t callerRva, uint32_t kind) noexcept {
+    if (!flatOriginCaptureEnabled()) return;
     State* state = stateOrNull();
     if (!state) return; // existing refresh hook can precede this instrument's first Present
     State& s = *state;

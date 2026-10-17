@@ -1,3 +1,4 @@
+#include "flat_origin_capture.h"
 #include "flat_runtime.h"
 #include "flat_sdk_bench_probe.h"
 #include "flat_capture_policy.h"
@@ -635,6 +636,7 @@ struct State {
 };
 
 static void observePassiveSceneDraw(State& s, const FlatRuntimeDraw& d) {
+    if (!flatOriginCaptureEnabled()) return;
     const auto& k = d.key;
     if (!k.color) return;
     const bool candidate = flatHdrFindCandidate(s.hdr, k.color) != nullptr;
@@ -3043,7 +3045,7 @@ void flatRuntimeResize() {
     s.observing = false; s.covFrameLocallyRefused = false;
     // The HDR route's per-frame detector state names resources of the old device; the key, the latch and the
     // census window are the session's and stay.
-    flatHdrBeginFrame(s.hdr, 0, 0); s.passiveScene.reset(); s.hdrTreated = false;
+    flatHdrBeginFrame(s.hdr, 0, 0); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false;
     g_sceneSizes.store(0, std::memory_order_release);
     s.prefix = FlatRuntimePrefix{}; s.context.Reset(); s.device.Reset(); s.thread = 0; s.viewportCount = 0;
 }
@@ -3483,6 +3485,7 @@ static bool nameSourceFree(State& s, const FlatMonoFrame& sel) {
     return true;
 }
 static void passiveSceneAtHdrTrigger(State& s) {
+    if (!flatOriginCaptureEnabled()) return;
     using namespace flat_mono_detail;
     const auto reject = [&](const char* reason) {
         flatStationaryCameraSceneRejected(s.prefix.frame, reason);
@@ -4326,7 +4329,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.namingVetoedThisFrame=false;
     } else s.namingVetoStreak=0;
     s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;s.frameSourceFree=false;
-    flatHdrBeginFrame(s.hdr, d.Width, d.Height); s.passiveScene.reset(); s.hdrTreated = false;
+    flatHdrBeginFrame(s.hdr, d.Width, d.Height); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false;
     s.observingQualifiedHandoff = false;
     s.drawCapture.begin(frame+1,s.phaseDepth.Get(),s.phaseWidth,s.phaseHeight);
     foreignWork.store(false, std::memory_order_release);
@@ -4808,7 +4811,7 @@ static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
     }
     { flatcpu::Scope trace(flatcpu::kTrace); flatTraceMark(s.traceRing, kFlatTraceEventWriteResource, res); }
     flatRuntimeWritten(s.prefix, res);
-    s.passiveScene.explicitWrite(reinterpret_cast<uintptr_t>(res));
+    if (flatOriginCaptureEnabled()) s.passiveScene.explicitWrite(reinterpret_cast<uintptr_t>(res));
     flatHdrObserveExplicitWrite(s.hdr, res);   // a write into the HDR target after the route's trigger is counted
     if (auto* c = camera(res, false)) s.cameras.invalidate(*c);
     if (s.projection) { flatcpu::Scope shadows(flatcpu::kShadows); s.projection->invalidate(res); }

@@ -1,3 +1,4 @@
+#include "src/d3d11/flat_origin_capture.h"
 #include "src/d3d11/flat_stationary_camera_core.h"
 
 #include <cstdint>
@@ -143,6 +144,18 @@ Memory placedFixture() {
     matrix[12] = 21.0f;
     m.putBytes(object + 0x70, matrix, sizeof(matrix));
     return m;
+}
+
+bool testCaptureControl() {
+    edvr::FlatOriginCaptureControl absent, off, on;
+    if (absent.configured() || absent.enabled()) return false;
+    off.initialize(false); off.initialize(true);
+    if (!off.configured() || off.enabled()) return false; // late enable requires restart
+    on.initialize(true); on.initialize(false);
+    if (!on.configured() || !on.enabled()) return false; // reload cannot change startup choice
+    if (edvr::flatOriginCaptureEnabled()) return false;
+    edvr::flatOriginCaptureInitialize(true); // remaining pure capture fixtures opt in
+    return edvr::flatOriginCaptureEnabled();
 }
 
 bool testGate() {
@@ -557,6 +570,60 @@ bool testPlaced() {
     return true;
 }
 
+std::string sourceText(const char* path) {
+    std::FILE* file = std::fopen(path, "rb");
+    if (!file) return {};
+    std::string source; char bytes[4096]; size_t count;
+    while ((count=std::fread(bytes,1,sizeof(bytes),file))!=0) source.append(bytes,count);
+    const bool okay=std::ferror(file)==0; std::fclose(file);
+    return okay?source:std::string{};
+}
+bool firstGuard(const std::string& source, const char* name) {
+    const auto at=source.find(name);
+    if(at==std::string::npos)return false;
+    const auto brace=source.find('{',at);
+    if(brace==std::string::npos)return false;
+    const auto first=source.find_first_not_of(" \r\n\t",brace+1);
+    const std::string guard="if (!flatOriginCaptureEnabled()) return";
+    return first!=std::string::npos && source.compare(first,guard.size(),guard)==0;
+}
+bool startupOrder(const std::string& source) {
+    const auto commit=source.find("tkModeWatch.run([] { modeWatchFrameBoundary(); });");
+    const auto latch=source.find("flatOriginCaptureInitialize(runtimeFlatProfile() && Config::get().getBool(\"diag.flat_origin_capture\", false))");
+    const auto clock=source.find("tkEngineVelocityClock.run(");
+    const auto tick=source.find("tkFlatOriginCapture.run([] {");
+    const auto end=tick==std::string::npos?std::string::npos:source.find("});",tick);
+    const auto declaration=source.find("EDVR_BOUNDARY_TICK(tkFlatOriginCapture, \"flat_origin_capture\");");
+    return commit!=std::string::npos && latch!=std::string::npos && clock!=std::string::npos &&
+        tick!=std::string::npos && end!=std::string::npos && declaration!=std::string::npos &&
+        commit<tick && tick<latch && latch<end && end<clock;
+}
+bool testCaptureWiring() {
+    const auto capture=sourceText("src/d3d11/flat_stationary_camera_capture.cpp");
+    const char* entries[]={"State* ensureState()", "void flatStationaryCameraFrame(",
+        "void flatStationaryCameraSceneCandidate(", "void flatStationaryCameraSceneRejected(",
+        "void flatStationaryCameraSelected(", "void flatStationaryCameraRefresh("};
+    for(const auto* name:entries) {
+        if(!firstGuard(capture,name))return false;
+        auto mutant=capture;const auto start=mutant.find(name);const auto at=mutant.find("if (!flatOriginCaptureEnabled()) return",start);
+        mutant.erase(at,std::strlen("if (!flatOriginCaptureEnabled()) return"));
+        if(firstGuard(mutant,name))return false;
+    }
+    const auto runtime=sourceText("src/d3d11/flat_runtime.cpp");
+    if(!firstGuard(runtime,"static void observePassiveSceneDraw(") ||
+       !firstGuard(runtime,"static void passiveSceneAtHdrTrigger(") ||
+       runtime.find("if (flatOriginCaptureEnabled()) s.passiveScene.explicitWrite(")==std::string::npos)return false;
+    const auto device=sourceText("src/d3d11/device_hook.cpp");
+    if(!startupOrder(device))return false;
+    auto early=device;const auto at=early.find("flatOriginCaptureInitialize(");
+    const auto end=early.find(';',at)+1;const auto statement=early.substr(at,end-at);
+    early.erase(at,end-at);early.insert(0,statement);
+    if(startupOrder(early))return false;
+    auto shared=device;const auto tick=shared.find("tkFlatOriginCapture.run(");
+    shared.replace(tick,std::strlen("tkFlatOriginCapture.run("),"tkModeWatch.run(");
+    return !startupOrder(shared); // diagnostic faults must not spend the mode-watch budget
+}
+
 bool testReportMarkers() {
     // The one-shot report must distinguish hook-never-ran and missing/partial
     // Placed detail from a successful renderer-source identity capture.
@@ -585,7 +652,7 @@ bool testReportMarkers() {
 
 int main(int argc, char** argv) {
     if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
-    if (!testGate() || !testCompletedSceneGate() || !testPassiveSceneWitness() || !testCapture() || !testPlaced() || !testReportMarkers()) {
+    if (!testCaptureControl() || !testGate() || !testCompletedSceneGate() || !testPassiveSceneWitness() || !testCapture() || !testPlaced() || !testCaptureWiring() || !testReportMarkers()) {
         std::fprintf(stderr, "flat stationary camera test failed\n"); return 1;
     }
     std::puts("flat stationary camera test passed");

@@ -53,9 +53,9 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 conservative flat fix, BUILD VERIFIED, NOT FLOWN:** Astra finds no additional flight needed: ambiguous origin-absorption cases reset history, while continued history retains travel. Full build and all gates passed in 151 seconds; see latest Astra entry below.
-  Sol pins the actual H-to-owned-camera writer. Passive arming uses a guarded pre-admission scene witness, finalized at Present with rejection dominance and missing-frame freshness reset. No treatment-policy or VR rendering change.
-  Exact D-based history preservation and VR per-eye/native/SDK reset propagation remain separate; shared RE helps that work. Steam deployment follows the clean-commit promotion gates. No new config key or flight request.
+- **10-17 F1 conservative flat fix, BUILD VERIFIED, NOT FLOWN:** ambiguous origin-absorption cases reset history, while continued history retains travel. Astra finds no further flight prerequisite for this correction; the final full build passed in 247.1 seconds.
+  Temporary `diag.flat_origin_capture = off` controls the F1 captures together; startup-only, restart in flat after changing it. Passive arming uses a pre-admission scene witness finalized at Present. No VR rendering change.
+  Next: Steam flat user validation before merging the branch to main. Exact D-based history preservation and VR per-eye/native/SDK reset propagation remain separate. See latest entries below.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4528,6 +4528,50 @@ correctness fix; a later flight would check visual compatibility or measure the
 separate history-preserving design. Clean-commit DLL promotion and verified
 Steam deployment use the standard build and install tools, preserving the
 existing settings.
+
+**2026-10-17, F1 capture under [diag], default off; main held for validation.**
+At the user's request, `diag.flat_origin_capture = off` now controls the
+temporary F1 captures together: stationary source/parent/override topology,
+origin and world witnesses, and optical comparisons. The startup choice is
+sampled once after the first owned Present commits mode, profile and config. An
+uninitialized choice is off; a non-flat startup latches off. Restart the game
+in flat mode after changing the key. Config reloads and later profile changes
+cannot enable it.
+
+With the key off, the capture entry points skip their allocation, renderer-hook
+installation, extra game-object reads, passive per-draw/write census, GPU
+dispatch/readback, capture counters and waiting/shutdown logs. Shared
+production camera/emit/store work and the conservative ambiguity reset retain
+their normal behavior. If capture was enabled at startup, leaving flat still
+follows the existing profile-loss refusal and relay cleanup.
+
+The key is temporary and is listed in Status while exact re-anchor history
+preservation remains open. The generated flat template includes the default-off
+setting. Existing Steam settings will be preserved; an absent key also means
+off. The earlier no-new-key statement records the first gate repair, before
+this user-requested control.
+
+Final independent Astra review approved the default-off isolation and confirmed
+that the production reset and shared motion/store work are independent of the
+capture flag. Full validation passed in 247.1 seconds: Python/tool gates,
+production DLLs, 170 pooled jobs and 6 quiet jobs, installer resource checks
+and the full-build receipt. The new flat-profile GPU fixtures compare reset,
+masks, vectors and complete final images with capture off and on. Existing
+source-wiring and fault-budget assertions remain strict.
+
+The first switch build found the startup config read outside a Present fault
+budget. It now has its own BoundaryTick after mode selection; a read fault
+leaves capture off and cannot retire mode selection. The next attempt found
+four prior-LF source files rewritten as CRLF, preventing binary source-wiring
+tests from delimiting functions. Restoring their original LF bytes fixed those
+failures without code or assertion changes. The focused 318-assertion gate test
+and stationary/temporal rigs passed before the final full retry. No flight was
+spent on either integration issue.
+
+The branch is ready for Steam flat validation with diagnostics off. Keep main
+unchanged until the user's validation; exact re-anchor history preservation and
+VR reset propagation remain separate work. Clean-commit DLL promotion and Steam
+installation use the standard tools and preserve existing settings.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
