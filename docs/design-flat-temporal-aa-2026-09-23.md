@@ -53,9 +53,10 @@
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
-- **10-17 F1 arithmetic fix / guarded hangar admission BUILD VERIFIED; VALIDATION PENDING:** the new exact-pair centered-Upstream adapter proves current original light camera, same-depth geometry and returned raw/linear input-output association; existing raw-depth/admission checks and VR/legacy coverage remain. Astra review, focused tests and all full-build gates passed (206.9 seconds).
-  Temporary `diag.flat_origin_capture = off` stays off. Production guard work is independent of that latch and manual Full. Normal nonzero-jitter/history and F1 behavior remain unqualified.
-  Next: after clean promotion/Steam verification, fresh flat stationary baseline 30 s, F7 off 10 s, restore DLSS 30 s; keep the capture hotkey unused and leave the game running for log checks. Keep main unmerged pending validation. Exact D-based history preservation and VR propagation remain separate.
+- **10-17 F1 guard FAILED:** Steam flat `5afe9f4a`; probe off.
+  `diag.flat_origin_capture` stays temporary. Donation works; zero-phase
+  resolves only. Nonzero phases reset history (~148/5s). Sol tracing phase.
+  Main unmerged; no flight yet. F1 travel/VR unqualified.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -4870,6 +4871,90 @@ qualified/CPU-issued donations, stable AA/backend/history treatment under
 nonzero phase, and correct off/on transitions. A phase-zero capture or unit
 pass alone is not this validation. Main remains held; F1 travel validation is
 still separate.
+
+**2026-10-17 ordinary stationary validation: FAILED, retain merge hold.**
+
+Clean DLL promotion passed in 39.9 seconds. The sanctioned Steam installer and
+independent verify-only check confirmed `5afe9f4a`, version
+`v0.20.0-rc.2-126-g5afe9f4a`, schema-2 shared scope both, with both live INI
+hashes unchanged. The actual test was Steam flat `/novr`, DLSS 310.9.1.0 at
+3840x2160, centered Upstream, no VR runtime/headset/per-eye target. The probe
+remained absent/default off; manual Full was unused.
+
+The pinned `edvr_gfx_20261017_131933.log` matches that installed build. F7
+turned AA off at 13:22:09.340 and restored configured DLSS at 13:22:28.024. The
+user reported that some hangar areas became steadier while others shimmered
+more. The new guard runs and donates: at 13:24:28 its ordinary counter reports
+9,441 CPU-issued donations. This is partial progress, not normal AA validation.
+
+At 13:22:33.035 all 298 completed camera resolves were zero-phase, with zero
+nonzero-phase unjittered resolves, zero row pairs and 149 skipped pairs. The
+same pattern persists in later windows. At 13:24:23.035 the HDR route has 444
+frames, 296 treated and 148 refused as `relevant-observations-truncated`;
+jitter failure accounting identifies `phase-mismatch` in all 148 refused
+frames. The generic truncation reason does not establish a census-cap defect:
+the guard deliberately revokes camera authority on phase failure. The repeated
+cycle is two zero-phase resolves, then a nonzero-phase refusal and history
+recovery. Renderer backend failures, camera cuts, frame gaps and
+origin-ambiguity resets are zero; history is repeatedly lost. F7 switching
+worked, but sustained nonzero-jitter history did not.
+
+At 13:24:23.737 the guard's cumulative phase refusals are 4,560; forward,
+origin, view, stale-donor, ambiguous, original-missing/stale/changed,
+actual-issue and abandonment refusals are all zero. Earlier startup
+overflow/unknown-depth counters do not explain the ongoing phase-specific
+cycle. Both used forward and geometry camera matrices passed their mutual
+agreement, origin and view checks before the independent phase test failed.
+Global camera injection/applied counts cannot prove that these selected rows
+received the expected phase. The log alone does not distinguish unphased rows
+from a wrong sign/scale/frame of phase.
+
+- Ruled out: the guarded adapter is dormant or the test used a stale DLL,
+  because the verified new build records thousands of CPU-issued donations.
+- Ruled out: this stationary test validates ordinary jitter/history or F1
+  travel, because every completed resolve has zero phase and the next jittered
+  frames repeatedly refuse and recover history. No travel occurred.
+
+Sol traced projection builder `4F2FF0` and its alternate branch at
+camera+0x269, which can ignore the bounds updated by the kind-3 injector. A
+host-visible, read-only bounded memory check of PID 14824 used 42 reads and 178
+bytes, pinned to the expected game PE timestamp/image. Both logged kind-3
+candidates had stable vtable, kind, aspect, FOV and +0x269=0 through the
+reread. Their restored bounds were zero, which says nothing about earlier
+injections. The restricted query initially missed the running process; the host
+query corrected that. No game writes or calls occurred.
+
+- Ruled out: the bound-ignored alternate projection branch is active on either
+  sampled kind-3 camera at the live observation, because both stable +0x269
+  flags are zero. This read does not identify the selected camera or establish
+  the phase of an earlier GPU upload.
+
+The live read is complete and the user was explicitly released to quit. Next
+discriminate unphased, wrong-sign, wrong-scale and wrong-frame phase from the
+actual rejected draw's used camera bytes and expected phase; global injection
+counters cannot separate them. Keep those hypotheses in one bounded diagnostic
+if source RE cannot resolve them. Do not relax the phase guard or plan another
+flight without discriminating evidence. Keep main unmerged; F1 travel and VR
+propagation remain unqualified by this run.
+
+Sol's offline primary kind-3 algebra agrees with the existing sign/extent
+convention: the +0x269=0 builder forms P20=2*boundX and P21=2*boundY, while
+injection adds (jx/renderW,-jy/renderH). That is not proof of the active
+selected upload: the optional +0x2C0 post-adjust block was not sampled, and
+source-to-selected-camera identity is unproved.
+
+If a diagnostic is required, retain matching bootstrap and first rejected-frame
+receipts: frame/q, expected pixel/NDC phase, render extent, owner/applied
+count; full donor 96 bytes and current original source CB
+identity/range/generation/write stamp; stable original VS/PS CB2 used view rows
+2..4 and forward rows 10..13; selected HDR/raw/linear identities and converter
+publication q; failed axis/component, residual and float bound. Fit actual
+phase by projecting forward X/Y onto used view Z. Zero, negative expected,
+scaled expected or prior-frame expected phase distinguish
+unphased/sign/scale/epoch hypotheses; fitted expected phase with a failing
+residual instead points at the certificate. Only attach camera +0x269/+0x2C0
+mode fields when its actual source identity is proved. Do not use a generic
+last-call camera as the selected camera.
 
 - Ruled out: the new cockpit panel samples show global DLSS resets, because all
   four manifests store the final internal reset decision as false.
