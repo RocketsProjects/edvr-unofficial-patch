@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-17 raw-domain validation): Steam `c6082f4b` PASS for AA/history continuity; steady raw cost 242 versus prior 271 ns/call (10.8% lower, changed workload). Slow leg about 80 fps; fast leg was capped at 90, uncapped 190 reported afterward. Initial low FPS overlaps automatic discovery forcing eager restores. Brief late same-view dip has no AA-reset marker; cause unclassified. Main stays unmerged (last entry).
+State (2026-10-17 startup policy): Automatic discovery permits lazy restoration with every record/budget retained; manual/compute physical reads restore first. Sol focused checks and full validation PASS (149.1 s); Astra evidence-only review finds no blocker. Build/install receipt: `build/startup-discovery-validation.json`. Next: stationary Steam flat startup capture, origin probe off; no measured FPS benefit yet. Direct collector cost unchanged; prior brief late dip still unclassified. Main stays unmerged (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1225,3 +1225,92 @@ reviewed the claims read-only without tests, builds, benchmarks or edits.
 Frozen evidence: `build/carrier_texture_c6082f4b_summary.json`, `_rows.json`,
 `_stdout.txt` and `_late_stdout.txt`. Log capture is complete; the user may
 quit normally. No source or install change; main remains unmerged.
+
+## 2026-10-17: automatic discovery and restoration audit
+
+User authorizes a startup CPU audit, optimization and Steam flat install on
+`codex/flat-startup-discovery-cpu`, keeping main unmerged. Sol owns RE and
+tests; Astra reviews evidence only. The installed baseline remains
+`v0.20.0-rc.4-10-gc6082f4b`. Environment and cold-window evidence are in the
+preceding entry. No new user setting is proposed.
+
+Hypothesis: automatic discovery's logical binding/CPU-byte observations do
+not require restoration of EDVR's private bindings after every producer.
+Confirm with a complete consumer audit and a real D3D counted-call fixture
+showing the same logical records, original state at game work and manual
+capture boundaries, and fewer restoration calls. Refute if any automatic
+consumer needs unrestored physical context state or loses an observation.
+Manual General/Full capture and an independently active compute candidate
+must retain actual-state fidelity. In particular, flatTemporalDraw precedes
+the runtime draw scope, so restoring only in that constructor is too late
+for the first draw after a manual arm.
+
+Consumer audit supports that narrow policy. Automatic Draw uses binding
+shadows, observed setters/viewport, immutable view descriptions and CPU-write
+bytes; Map/Unmap/Update and clear/transfer records use passed operands and
+retain their stamps/invalidation. Actual pipeline readers are compute
+ProbeDraw/Draw/Dispatch and Full menu-copy. Existing clear/copy/update/resolve
+hooks restore before their callbacks. Draw/Dispatch need a new preflight
+because their runtime scopes follow the discovery observer. Candidate
+activation occurs at the owned Present boundary, independently of the
+manual tier. Unknown command-list invalidation and owner/internal guards
+remain in place; the offscreen shortcut still follows discovery observation.
+
+Implementation uses one original-state-demand predicate in the regular and
+offscreen paths. Automatic discovery may remain lazy; manual General/Full
+and active candidate observation demand restoration. Start/stop/completion
+clear manual demand; pause gates it without forgetting a manual window.
+Astra's source-only review finds no blocking concern. Offline validation is
+recorded below; in-game startup validation remains open.
+
+Direct discovery work remains unchanged: no record, diagnostic feature,
+capture budget, CPU copy or hash is removed. Prior steady-state raw-domain
+savings do not establish a startup improvement. Existing discovery
+arm/sample/completion lines, flat-CPU discovery/wrapper scopes and engine
+draw-bracket kept/runs/not-lazy/call counts will distinguish successful lazy
+operation from a collector that never ran. No new setting or counter is
+needed; an in-game startup improvement has not yet been measured.
+
+Focused validation (Sol, sequential compiler window, final sources frozen):
+engine WARP rig PASS, 18,877 checks. The same current draw bracket serving
+128 producers records 896 actual D3D state calls eager, 5 automatic-lazy and
+896 manual-eager; calls are recorded on the context vtable, not inferred
+from EDVR's counters. Actual pending bindings are restored before first
+manual/candidate physical observation and dispatch. The witness slice
+compares binding identities, shader hashes, camera96 bytes, exemplar4096
+bytes/width, epochs/sequence stamps and contract properties across policy
+transitions. Pause/resume, internal nesting, foreign/no-owner and independent
+candidate demand are checked through the exported gate. Temporal PASS:
+32 live-policy combinations, observer/lifecycle wiring and 46/46 corpus
+replays (44,261 draws, 16,314 memo hits). Log-line policy has zero failures.
+
+Limits: the witness uses fixture-provided CB bytes and selected production
+helpers; it does not link the complete collector or resolver. Source audit
+supports unchanged Map/Unmap assembly and observation ordering, not complete
+flight/history equivalence. Astra reviewed the production/test sources only,
+ran nothing, and found no blocking issue within this scope. No FPS estimate
+is derived from the 128-producer fixture. Focused logs:
+`build/startup_discovery_engine_focused.log` and
+`build/startup_discovery_temporal_focused.log`.
+
+Root full `build.bat --wait-lock` PASS, all gates, 149.1 s: production DLLs,
+Python self-tests, complete rendering/lifecycle rigs and self-contained
+installer checks. Receipt input identity:
+`e63e0bf8e4319bcd00cd3b8fdcfec3cfea40eb05c3764b74c15af5f84256bfb8`.
+Full log: `build/flat-startup-discovery-cpu-full.log`. The clean-commit
+`--dll-only` promotion and sanctioned Steam-flat install have a separate
+machine-readable record at `build/startup-discovery-validation.json`; that
+record identifies the installed commit/version and preserves config hashes.
+Main is deliberately unmerged.
+
+Next capture needs no flight or manual capture arm: launch Steam flat,
+load straight into the carrier and face the same slow view as soon as
+loaded. Keep that view and current graphics/FPS settings for three minutes,
+with menus closed and no F7/F8 or Shift+NumLock. Note early and settled FPS,
+then quit normally. Compare automatic discovery's active windows against
+its completion boundary (120 seconds after first owned Present), reporting
+scene/load transitions separately. Require discovery records to remain,
+lazy kept-runs to operate during discovery, eager/not-lazy amplification to
+fall absent manual captures, and AA refusal/reset/continuation counters to
+remain clean after normal startup/load resets. If loading finishes after
+discovery, do not claim that this capture measured the carrier's cold cost.

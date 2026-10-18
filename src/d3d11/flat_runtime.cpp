@@ -5392,7 +5392,7 @@ FlatOffscreenLive flatOffscreenLiveOf(State& s, bool auditing, const FlatContrac
     live.gpuFrameOpened = s.gpuFrameTried;
     live.foregroundFrameReady = s.engine == FlatMonoResolveMode::Taa || s.foregroundDomainFrame == s.prefix.frame;
     live.auditing = auditing;
-    live.diagnostics = flatTemporalCapturing() || s.drawCapture.active() || s.drawPackets.armed();
+    live.diagnostics = flatTemporalNeedsOriginalState() || s.drawCapture.active() || s.drawPackets.armed();
     live.foreignWork = foreignWork.load(std::memory_order_acquire);
     live.overlayOpen = overlayOpen(s) || overlaySuffixActive.load(std::memory_order_acquire);
     live.projectionAudit = s.projectionFrames != 0;
@@ -5562,10 +5562,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     FlatRuntimeDraw d{}; auto& k = d.key;
     // Lazy substitution (engine_velocity.h): engine motion's state may still be bound from the producer draw before this
-    // one, and stays bound only while nothing that could see it runs. A diagnostic capture reads the context, so with
-    // one armed the game's state goes back at once and every producer draw restores after itself, as it always did.
+    // one, and stays bound only while nothing that could see it runs. Automatic discovery reads the logical original
+    // shadow and CPU writes; explicit captures/compute candidates read the context and retain eager restoration.
+    // Their earlier discovery observer restores first too, covering a newly armed capture before this constructor.
     {
-        const bool diagnostics = flatTemporalCapturing() || s.drawCapture.active() || s.drawPackets.armed();
+        const bool diagnostics = flatTemporalNeedsOriginalState() || s.drawCapture.active() || s.drawPackets.armed();
         engineVelocityFlatLazy(!diagnostics);
         if (diagnostics) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);
     }

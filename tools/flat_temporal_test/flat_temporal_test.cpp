@@ -44,6 +44,7 @@
 #include "flat_replay_query_reject_tests.h"
 #include "flat_hdr_route_tests.h"
 #include "flat_offscreen_tests.h"
+#include "flat_discovery_policy_tests.h"
 #include "flat_laser_scene_tone_tests.h"
 #include "flat_deferred_camera_tests.h"
 #include "flat_deferred_failure_capture_tests.h"
@@ -4109,6 +4110,7 @@ int main(int argc, char** argv) {
     failures += flatShadowAccumulateTests();
     failures += flatShadowWiringTests();
     failures += flatLogLineTests();
+    flat_discovery_policy_tests::run(check);
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

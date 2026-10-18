@@ -10,11 +10,14 @@
 #include "flat_temporal_model.h"
 #include "flat_owner_gate.h"
 #include "flat_compute_readback.h"
+#include "flat_compute_capture.h"
+#include "flat_discovery_policy.h"
 
 namespace edvr {
 namespace detail {
 extern std::atomic<bool> g_flatTemporalCapturing;
 extern std::atomic<bool> g_flatTemporalPaused;
+extern std::atomic<bool> g_flatTemporalManual;
 extern std::atomic<DWORD> g_flatTemporalOwnerThread;
 extern std::atomic<uint64_t> g_flatTemporalForeignCalls;
 }
@@ -26,6 +29,18 @@ inline bool flatTemporalCapturing() {
     if (g_flatComputeInternal) return false;
     return flatObserveAsOwner(detail::g_flatTemporalOwnerThread,
                               detail::g_flatTemporalForeignCalls, GetCurrentThreadId());
+}
+
+// Unlike the observer gate this policy query does not count foreign calls.
+// Paused/internal/foreign work cannot demand restoration on the owner's context.
+inline bool flatTemporalNeedsOriginalState() {
+    if (!detail::g_flatTemporalCapturing.load(std::memory_order_relaxed) ||
+        detail::g_flatTemporalPaused.load(std::memory_order_relaxed) ||
+        g_flatComputeInternal) return false;
+    if (detail::g_flatTemporalOwnerThread.load(std::memory_order_relaxed) != GetCurrentThreadId())
+        return false;
+    return flatDiscoveryNeedsOriginalState(true,
+        detail::g_flatTemporalManual.load(std::memory_order_relaxed), flatComputeCandidate());
 }
 
 void flatTemporalStart(ID3D11Device* device);

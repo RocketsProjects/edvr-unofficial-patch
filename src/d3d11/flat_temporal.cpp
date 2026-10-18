@@ -26,6 +26,10 @@ namespace edvr {
 namespace detail {
 std::atomic<bool> g_flatTemporalCapturing{false};
 std::atomic<bool> g_flatTemporalPaused{false};
+// Startup discovery reads logical bindings/CPU writes. Explicit General/Full
+// keeps physical-state capture behavior. Start/stop/finish clear this demand;
+// pause gates it without forgetting the manual window, so resume preserves it.
+std::atomic<bool> g_flatTemporalManual{false};
 std::atomic<DWORD> g_flatTemporalOwnerThread{0};
 std::atomic<uint64_t> g_flatTemporalForeignCalls{0};
 }
@@ -846,6 +850,7 @@ void clearFrame() {
 
 void finishDiscovery(uint64_t frame) {
     report(frame, "final");
+    detail::g_flatTemporalManual.store(false, std::memory_order_release);
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
     Log::get().note("flat temporal: passive discovery complete; flat runtime treatment continues independently and reports its own results");
 }
@@ -855,6 +860,7 @@ void finishDiscovery(uint64_t frame) {
 void flatTemporalStart(ID3D11Device* device) {
     if (!runtimeFlatProfile() || !device) return;
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
+    detail::g_flatTemporalManual.store(false, std::memory_order_release);
     detail::g_flatTemporalOwnerThread.store(0, std::memory_order_release);
     detail::g_flatTemporalForeignCalls.store(0, std::memory_order_release);
     // State includes fixed CB exemplar payloads exceeding a default Windows
@@ -876,6 +882,7 @@ void flatTemporalArm(bool full) {
     ID3D11Device* device = g.device;
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
     flatTemporalStart(device);
+    detail::g_flatTemporalManual.store(true, std::memory_order_release);
     g.captureBudget = flatCaptureBudget(full ? FlatCaptureTier::Full : FlatCaptureTier::General);
     g.projectionDetailsRemaining = 2;
     g.menuCopyReportsLeft = 2;
@@ -889,6 +896,7 @@ void flatTemporalStop() {
     // Teardown can run under the loader lock on another thread. Set only
     // atomics; the static collector has no resources to release or free.
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
+    detail::g_flatTemporalManual.store(false, std::memory_order_release);
     g_waitingForPresent.store(false, std::memory_order_release);
 }
 
@@ -1029,6 +1037,11 @@ void flatTemporalDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instanc
     if (!flatTemporalCapturing()) return;
     flatcpu::Scope timed(flatcpu::kDiscovery);
     ++g.serial;
+    // This observer precedes FlatRuntimeDrawScope. A manual arm/candidate can
+    // follow a lazy producer, so restore BEFORE any physical capture reader.
+    // The owner's restore is internal and cannot recursively feed discovery.
+    if (!g.forwardingPresent && flatTemporalNeedsOriginalState())
+        flatRuntimeSubstitution(ctx, FlatSubstEvent::kOtherDraw);
     if (!g.forwardingPresent && flatComputeCandidate()) flatComputeProbeDraw(ctx,g.epoch,g.serial);
     if (!g.forwardingPresent) captureMenuCopy(ctx);
     if (!g.current) {
@@ -1175,6 +1188,9 @@ void flatTemporalDispatch(ID3D11DeviceContext* ctx, UINT x, UINT y, UINT z, ID3D
     if (!flatTemporalCapturing()) return;
     flatcpu::Scope timed(flatcpu::kDiscovery);
     ++g.serial; ++g.totalDispatches;
+    // Dispatch's runtime scope also follows this observer in the hook.
+    if (!g.forwardingPresent && flatTemporalNeedsOriginalState())
+        flatRuntimeSubstitution(ctx, FlatSubstEvent::kDispatch);
     if (!g.forwardingPresent && flatComputeCandidate()) flatComputeDispatch(ctx, g.epoch, g.serial, x, y, z, args, offset);
 }
 void flatTemporalExecuteList(bool foreign) {
