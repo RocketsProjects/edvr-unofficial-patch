@@ -29,17 +29,20 @@ class SessionBinding {
   SessionBinding& operator=(const SessionBinding&)=delete;
   SessionBinding(SessionBinding&&)=delete;
   SessionBinding& operator=(SessionBinding&&)=delete;
-  XrResult initialize(const BindingDispatch&,XrInstance,XrSystemId,ID3D11Device*);
+  XrResult initialize(const BindingDispatch&,XrInstance,XrSystemId,ID3D11Device*,XrReferenceSpaceType naturalType=XR_REFERENCE_SPACE_TYPE_LOCAL);
   XrResult shutdown();
   XrSession session()const{return session_;}
   XrSpace localSpace()const{return local_;}
+  XrSpace naturalSpace()const{return naturalType_==XR_REFERENCE_SPACE_TYPE_STAGE?stage_:local_;}
+  XrReferenceSpaceType naturalType()const{return naturalType_;}
   XrSpace viewSpace()const{return view_;}
   ID3D11Device* device()const{return device_.Get();}
   XrResult validateTexture(ID3D11Texture2D*)const;
  private:
   BindingDispatch dispatch_{};
   XrSession session_=XR_NULL_HANDLE;
-  XrSpace local_=XR_NULL_HANDLE,view_=XR_NULL_HANDLE;
+  XrSpace local_=XR_NULL_HANDLE,view_=XR_NULL_HANDLE,stage_=XR_NULL_HANDLE;
+  XrReferenceSpaceType naturalType_=XR_REFERENCE_SPACE_TYPE_LOCAL;
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
 };
 }

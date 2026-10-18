@@ -17,11 +17,12 @@ unsigned checks=0,failures=0;
 void check(bool value,const char* message){++checks;if(!value){++failures;std::printf("FAIL: %s\n",message);}}
 const auto instance=reinterpret_cast<XrInstance>(1);
 const auto session=reinterpret_cast<XrSession>(7);
-const auto local=reinterpret_cast<XrSpace>(8), view=reinterpret_cast<XrSpace>(9);
+const auto local=reinterpret_cast<XrSpace>(8), view=reinterpret_cast<XrSpace>(9), stage=reinterpret_cast<XrSpace>(10);
 struct Fake {
   ComPtr<ID3D11Device> device,foreign;LUID luid{};D3D_FEATURE_LEVEL level{};
   std::vector<std::string> trace;std::string failure;XrResult result=XR_ERROR_RUNTIME_FAILURE;
-  bool live=false,localLive=false,viewLive=false,wrongAdapter=false,wrongLevel=false;
+  bool live=false,localLive=false,viewLive=false,stageLive=false,wrongAdapter=false,wrongLevel=false;
+  bool supportsStage=false;
   bool missingSpace=false,grow=false,badCount=false,hugeCount=false,neverFits=false,invalidTracking=false;
   bool expectVelocity=false,badVelocityChain=false;
   XrSpace expectedOrigin=local;
@@ -43,28 +44,33 @@ XrResult XRAPI_PTR createSession(XrInstance i,const XrSessionCreateInfo* info,Xr
   return r;
 }
 XrResult XRAPI_PTR destroySession(XrSession s){
-  check(s==session&&fake->live&&!fake->localLive&&!fake->viewLive,"session destroyed after spaces");fake->live=false;return call("destroySession");
+  check(s==session&&fake->live&&!fake->localLive&&!fake->viewLive&&!fake->stageLive,"session destroyed after spaces");fake->live=false;return call("destroySession");
 }
 XrResult XRAPI_PTR enumerateSpaces(XrSession s,uint32_t capacity,uint32_t* count,XrReferenceSpaceType* values){
   check(s==session&&fake->live,"enumeration session");++fake->enumCalls;
   const XrResult r=call(capacity?"enumFill":"enumCount");if(r!=XR_SUCCESS)return r;
   if(fake->hugeCount){*count=65;return XR_SUCCESS;}
   if(fake->neverFits){*count=capacity+1;return capacity?XR_ERROR_SIZE_INSUFFICIENT:XR_SUCCESS;}
-  *count=fake->grow&&fake->enumCalls==1?1:2;
-  if(!capacity)return XR_SUCCESS;if(capacity<2)return XR_ERROR_SIZE_INSUFFICIENT;
+  *count=fake->grow&&fake->enumCalls==1?1:(fake->supportsStage?3:2);
+  if(!capacity)return XR_SUCCESS;if(capacity<*count)return XR_ERROR_SIZE_INSUFFICIENT;
   values[0]=XR_REFERENCE_SPACE_TYPE_LOCAL;values[1]=fake->missingSpace?XR_REFERENCE_SPACE_TYPE_STAGE:XR_REFERENCE_SPACE_TYPE_VIEW;
+  if(fake->supportsStage)values[2]=XR_REFERENCE_SPACE_TYPE_STAGE;
   if(fake->badCount)*count=capacity+1;return XR_SUCCESS;
 }
 XrResult XRAPI_PTR createSpace(XrSession s,const XrReferenceSpaceCreateInfo* info,XrSpace* out){
   check(s==session&&fake->live&&info->type==XR_TYPE_REFERENCE_SPACE_CREATE_INFO&&!info->next,"space ABI");
   const XrPosef identity{{0,0,0,1},{0,0,0}};check(std::memcmp(&identity,&info->poseInReferenceSpace,sizeof(identity))==0,"identity reference space pose");
-  const bool isLocal=info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL;check(isLocal||info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_VIEW,"required space type");
-  const XrResult r=call(isLocal?"local":"view");
-  if(r==XR_SUCCESS||r==XR_SESSION_LOSS_PENDING){*out=isLocal?local:view;if(isLocal)fake->localLive=true;else fake->viewLive=true;}
+  const bool isLocal=info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL;
+  const bool isStage=info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_STAGE;
+  check(isLocal||isStage||info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_VIEW,"required space type");
+  const XrResult r=call(isLocal?"local":isStage?"stage":"view");
+  if(r==XR_SUCCESS||r==XR_SESSION_LOSS_PENDING){*out=isLocal?local:isStage?stage:view;
+    if(isLocal)fake->localLive=true;else if(isStage)fake->stageLive=true;else fake->viewLive=true;}
   else *out=reinterpret_cast<XrSpace>(123);return r;
 }
 XrResult XRAPI_PTR destroySpace(XrSpace space){
   if(space==view){check(fake->viewLive,"destroy view once");fake->viewLive=false;return call("destroyView");}
+  if(space==stage){check(fake->stageLive,"destroy stage once");fake->stageLive=false;return call("destroyStage");}
   check(space==local&&fake->localLive&&!fake->viewLive,"destroy local after view");fake->localLive=false;return call("destroyLocal");
 }
 XrResult XRAPI_PTR locateViews(XrSession s,const XrViewLocateInfo* info,XrViewState* state,uint32_t capacity,uint32_t* count,XrView* views){
@@ -104,7 +110,7 @@ struct Fixture {
     DXGI_ADAPTER_DESC desc{};check(SUCCEEDED(adapter->GetDesc(&desc)),"fixture LUID");runtime.luid=desc.AdapterLuid;
   }
   ~Fixture(){binding.shutdown();}
-  XrResult init(){return binding.initialize(dispatch(),instance,42,runtime.device.Get());}
+  XrResult init(XrReferenceSpaceType type=XR_REFERENCE_SPACE_TYPE_LOCAL){return binding.initialize(dispatch(),instance,42,runtime.device.Get(),type);}
 };
 int selfTest(){
   {Fixture f;check(f.init()==XR_SUCCESS,"initialize existing device");
@@ -121,6 +127,28 @@ int selfTest(){
     f.runtime.trace.clear();check(f.binding.shutdown()==XR_SUCCESS&&f.runtime.trace.empty(),"cleanup idempotent");
     check(f.init()==XR_SUCCESS,"reinitialize after destruction");
   }
+  {Fixture f;f.runtime.supportsStage=true;
+    check(f.init(XR_REFERENCE_SPACE_TYPE_STAGE)==XR_SUCCESS,"stage binding initializes when enumerated");
+    check(f.binding.naturalType()==XR_REFERENCE_SPACE_TYPE_STAGE&&f.binding.naturalSpace()==stage&&
+          f.binding.localSpace()==local,"stage selected without losing local diagnostic space");
+    check(f.runtime.trace==std::vector<std::string>({"requirements","session","enumCount","enumFill","local","view","stage"}),
+          "stage created after required reference spaces");
+    f.runtime.trace.clear();check(f.binding.shutdown()==XR_SUCCESS,"stage binding shutdown");
+    check(f.runtime.trace==std::vector<std::string>({"destroyView","destroyStage","destroyLocal","destroySession"}),
+          "stage destroyed before local and session");
+  }
+  {Fixture f;check(f.init(XR_REFERENCE_SPACE_TYPE_STAGE)==XR_SUCCESS,
+      "stage request keeps LOCAL when the runtime does not enumerate STAGE");
+    check(f.binding.naturalType()==XR_REFERENCE_SPACE_TYPE_LOCAL&&f.binding.naturalSpace()==local,
+          "unsupported STAGE request selects the existing LOCAL path");
+    check(f.runtime.trace==std::vector<std::string>({"requirements","session","enumCount","enumFill","local","view"}),
+          "unsupported STAGE request creates no STAGE space");
+  }
+  {Fixture f;f.runtime.supportsStage=true;f.runtime.failure="stage";
+    check(f.init(XR_REFERENCE_SPACE_TYPE_STAGE)==XR_ERROR_RUNTIME_FAILURE,
+          "advertised STAGE creation failure is not silently converted to LOCAL");
+    check(!f.runtime.live&&!f.runtime.localLive&&!f.runtime.viewLive&&!f.runtime.stageLive,
+          "advertised STAGE creation failure releases the session and required spaces");}
   for(const char* failure:{"requirements","session","enumCount","enumFill","local","view"}){
     Fixture f;f.runtime.failure=failure;check(f.init()==XR_ERROR_RUNTIME_FAILURE,"exact init error");
     check(!f.runtime.live&&!f.runtime.localLive&&!f.runtime.viewLive&&!f.binding.device(),"every partial init releases known resources");
