@@ -3189,6 +3189,12 @@ void flatRuntimeNoteCameraApplied() { auto& s = state(); s.phase.noteApplied(); 
 bool flatRuntimeWorkFull() { return state().work==FlatWork::Full; }
 bool flatRuntimeLegacyPlanExists() { const auto& s=state(); return s.work==FlatWork::Full && s.projection!=nullptr; }
 void flatRuntimeArmProjectionAudit(bool full) { if(runtimeFlatProfile()) projectionAuditRequested.request(full); }
+bool flatRuntimePassiveRearmBusy() {
+    if (!owner()) return true;
+    const auto& s = state();
+    return projectionAuditRequested.pending() != FlatCaptureTier::None ||
+           s.projectionFrames != 0 || s.drawCapture.active() || s.drawPackets.armed();
+}
 void flatRuntimeCreateBuffer(ID3D11Buffer* buffer, const void* initialData) {
     if(owner() && state().projection) {
         flatcpu::Scope shadows(flatcpu::kShadows);

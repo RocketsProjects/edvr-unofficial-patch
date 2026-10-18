@@ -3107,8 +3107,8 @@ void testFlatWitnessWiring() {
           temporalCpp.find("if (full) flatComputeArm(device, g.presents);")!=std::string::npos &&
           temporalCpp.find("flatRuntimeArmProjectionAudit(full);")!=std::string::npos,
           "ordinary discovery avoids compute/manual projection arms and propagates explicit full tier");
-    check(hookCpp.find("flatTemporalArm((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);")!=std::string::npos,
-          "configured flat census key samples physical Shift for explicit full capture");
+    check(hookCpp.find("flatTemporalArm(route == FlatDrawCaptureRoute::Full);")!=std::string::npos,
+          "configured flat census key still gives Shift its explicit full tier");
     // The camera data capture is not the witness: nothing in the bounded region captures or invalidates a camera.
     const size_t from = runtimeCpp.find("bool witnessWalk(const void* buffer) {");
     const size_t to = runtimeCpp.find("bool depthView(ID3D11Texture2D* depth) {");

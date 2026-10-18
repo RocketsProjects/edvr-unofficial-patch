@@ -185,6 +185,7 @@ static_assert(std::is_trivially_copyable<State>::value,
               "flat discovery State must support direct static reset");
 State g;
 std::atomic<bool> g_waitingForPresent{false};
+std::atomic<bool> g_passiveRearmAvailable{false};
 
 uint64_t nowMs() { return GetTickCount64(); }
 
@@ -869,6 +870,7 @@ void flatTemporalStart(ID3D11Device* device) {
     g.epoch = 1;
     g.device = device;
     g.captureBudget = flatCaptureBudget(FlatCaptureTier::Full);
+    g_passiveRearmAvailable.store(true, std::memory_order_release);
     g_waitingForPresent.store(true, std::memory_order_release);
     Log::get().note("flat temporal: passive discovery armed, awaiting first owned Present thread; the trigger's collection budget is reported at that boundary. Requested=%s; treatment is reported separately by flat runtime",
                     Config::get().requestedTemporalMode().c_str());
@@ -892,11 +894,37 @@ void flatTemporalArm(bool full) {
     Log::get().note("flat temporal: dump_draws started a fresh bounded desktop discovery window tier=%s limit=%llu-ms/%u-useful-frames; general reports shader/state/routing/refusals, Shift+key requests full capture (slow, large)", full ? "full" : "general", static_cast<unsigned long long>(g.captureBudget.milliseconds), g.captureBudget.usefulFrames);
 }
 
+void flatTemporalArmPassive(ID3D11Device* device) {
+    const DWORD owner = detail::g_flatTemporalOwnerThread.load(std::memory_order_acquire);
+    const DWORD thread = GetCurrentThreadId();
+    const char* reason = nullptr;
+    if (!runtimeFlatProfile()) reason = "not-flat-profile";
+    else if (!g_passiveRearmAvailable.load(std::memory_order_acquire)) reason = "stopped";
+    else if (!owner) reason = "owner-not-established";
+    else if (owner != thread) reason = "foreign-owner";
+    else if (!device || device != g.device) reason = "device-mismatch";
+    else if (detail::g_flatTemporalPaused.load(std::memory_order_acquire)) reason = "paused";
+    else if (g_flatComputeInternal) reason = "internal";
+    else if (detail::g_flatTemporalManual.load(std::memory_order_acquire)) reason = "manual-capture-active";
+    else if (flatComputeBusy()) reason = "compute-capture-active";
+    else if (flatRuntimePassiveRearmBusy()) reason = "runtime-diagnostic-active";
+    if (reason) {
+        Log::get().note("flat temporal: passive rearm rejected reason=%s; existing capture unchanged", reason);
+        return;
+    }
+    const bool rearmed = detail::g_flatTemporalCapturing.load(std::memory_order_acquire);
+    if (rearmed) report(0, "rearmed");
+    flatTemporalStart(device);
+    Log::get().note("flat temporal: passive rearm accepted previous=%s; automatic discovery restart limit=%llu-ms/%u-useful-frames manual=0; awaiting first owned Present",
+                    rearmed ? "automatic-active" : "complete", static_cast<unsigned long long>(g.captureBudget.milliseconds), g.captureBudget.usefulFrames);
+}
+
 void flatTemporalStop() {
     // Teardown can run under the loader lock on another thread. Set only
     // atomics; the static collector has no resources to release or free.
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
     detail::g_flatTemporalManual.store(false, std::memory_order_release);
+    g_passiveRearmAvailable.store(false, std::memory_order_release);
     g_waitingForPresent.store(false, std::memory_order_release);
 }
 

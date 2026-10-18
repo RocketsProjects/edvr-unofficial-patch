@@ -82,6 +82,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "flat_hdr_crumbs.h"   // the flat HDR route's crash-safe breadcrumbs: the real Present's pair
 #include "format_support_log.h"   // the device capability log: the two hooks' reports and its closing tick
 #include "flat_temporal.h"   // flat profile discovery at owned Present
+#include "flat_capture_policy.h"  // dump_draws modifier route for flat discovery
 #include "aa_compare.h"      // the AA comparison key's tick (hotkey.compare_aa)
 #include "intro_skip.h"      // the flat profile arms and closes the launch-movie skip from here (vScreen's State is not its owner there)
 #include "flat_shader_capture.h"
@@ -1332,11 +1333,18 @@ void tickHotkeys() {
     // swallowed must say so, because the log it failed to write is the
     // place anyone would look for the reason.
     if (g_state->censusKey.pressed()) {
-        if (runtimeFlatProfile()) {
-            flatTemporalArm((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+        const FlatDrawCaptureRoute route = flatDrawCaptureRoute(
+            true, runtimeFlatProfile(), g_state->censusKey.kind() == HotkeyKind::Key &&
+                 (g_state->censusKey.mods() & kHotkeyCtrl) == 0,
+            (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0,
+            (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0);
+        if (route == FlatDrawCaptureRoute::Passive) {
+            flatTemporalArmPassive(g_state->device);
+        } else if (route == FlatDrawCaptureRoute::General || route == FlatDrawCaptureRoute::Full) {
+            flatTemporalArm(route == FlatDrawCaptureRoute::Full);
             // The flat profile's draw census, both tiers: every draw, offscreen included, for two frames (draw_census.h).
             drawCensusFlatRequest();
-        } else {
+        } else if (route == FlatDrawCaptureRoute::Vr) {
             drawCensusRequest();
             // Same key: the census says WHAT was drawn, the quad probe says
             // WHERE. Two instruments on one press keeps the two answers on

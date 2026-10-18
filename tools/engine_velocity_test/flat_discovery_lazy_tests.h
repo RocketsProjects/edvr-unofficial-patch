@@ -71,6 +71,9 @@ inline void run(const Harness& h) {
     edvr::detail::g_flatTemporalOwnerThread=0;h.check(!edvr::flatTemporalNeedsOriginalState(),"discovery lazy: no owner is not permission to restore");
     edvr::detail::g_flatTemporalOwnerThread=GetCurrentThreadId()+1;
     h.check(!edvr::flatTemporalNeedsOriginalState()&&edvr::detail::g_flatTemporalForeignCalls.load()==0,"discovery lazy: foreign demand query neither restores nor increments observation counters");
+    observing(true,true);
+    observing(false,true);h.check(edvr::flatTemporalNeedsOriginalState(),"discovery lazy: passive rearm clears manual demand but a surviving candidate still requires physical state");
+    observing(false,false);h.check(!edvr::flatTemporalNeedsOriginalState(),"discovery lazy: passive rearm with no candidate returns to lazy observation");
     observing(false);
     recInstall(h.context);
     {
@@ -88,7 +91,10 @@ inline void run(const Harness& h) {
             e.expectGame("first physical draw observer after a lazy run");
             h.check(!edvr::engineVelocityFlatPending()&&same(original,logicalWitness(g)),"discovery lazy: manual/candidate preflight restores before first physical observer and preserves logical witnesses");
             edvr::engineVelocityFlatLazy(!edvr::flatTemporalNeedsOriginalState());e.producer("manual/candidate eager producer");e.expectGame("manual producer restores at its own end");
-            observing(false);edvr::engineVelocityFlatLazy(true);e.producer("automatic observation resumes a lazy run");
+            observing(false);
+            h.check(!edvr::flatTemporalNeedsOriginalState(),"discovery lazy: rearmed passive observation releases manual/candidate physical-state demand");
+            edvr::engineVelocityFlatLazy(true);e.producer("automatic observation resumes a lazy run");
+            h.check(edvr::engineVelocityFlatPending(),"discovery lazy: passive rearm uses the lazy bracket again after manual/candidate observation");
         }
         observing(false,true);if(edvr::flatTemporalNeedsOriginalState())e.substitution(FlatSubstEvent::kDispatch);
         e.expectGame("physical compute observer preflight");h.check(!edvr::engineVelocityFlatPending(),"discovery lazy: dispatch observer cannot inherit private producer bindings");

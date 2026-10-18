@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 startup capture): Steam `0bb83e63` PASS for collector operation, low menu wrapper calls during discovery and carrier AA continuity (78.8-81.2 FPS). Discovery hit 12,000 useful frames after 35.187 s, before carrier entry; heavy cold-carrier benefit remains unmeasured. Two startup/load resets, 37,100-frame continuation run. Sol analyzed; Astra evidence-only review agrees with limits. Probe off; direct collector unchanged. No further flight requested; main stays unmerged (last entry).
+State (2026-10-18 carrier rearm): Ctrl+NumLock starts a fresh automatic-style passive window from the settled carrier. Temporary shortcut, no INI key; probe off. Sol full build/tests PASS (145.4 s), Astra source review PASS. Clean promotion/install receipt: `build/passive-rearm-validation.json`. Next: Ready, 30 s baseline, Ctrl+NumLock once, same view 180 s, quit normally/Done. Keep other captures off. Heavy-view benefit still awaits this capture; AA previously PASS on `0bb83e63`. Main stays unmerged (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1382,3 +1382,85 @@ the frozen evidence only, ran no tests/builds/benchmarks and agrees with
 these limits. No source/build/install change or additional flight request;
 main remains unmerged. Frozen evidence:
 `build/startup_discovery_0bb83e63_summary.json`, `_rows.json`, `_stdout.txt`.
+
+## 2026-10-18: start passive discovery from the carrier
+
+User requests exact steps that keep the measured discovery window out of
+the main menu before merging. The installed build cannot guarantee this:
+`flatTemporalStart` is called at device creation; its deadline expires even
+while paused or without draws. Limiting FPS avoids premature useful-frame
+exhaustion but cannot extend the 120-second wall-clock limit. Existing
+NumLock restarts manual General capture (1000 ms / 3 useful frames), and
+Shift+NumLock restarts Full; both demand eager restoration and add a two-frame
+draw census. They cannot substitute for automatic passive discovery in this
+measurement.
+
+Prepare a narrow temporary Ctrl+NumLock action (Ctrl plus the configured keyboard
+dump_draws key, with Shift absent) that starts the same automatic collector
+from the settled carrier. It must retain the 120-second / 12,000-useful-frame
+budget, clear manual demand through the existing start path, honor ownership
+and independent compute-candidate safety, and avoid arming the draw census,
+projection audit or bulk compute capture. Plain NumLock and Shift (including
+Ctrl+Shift) retain their existing General/Full behavior; VR behavior stays
+unchanged. No new INI key and no origin-probe enable. This shortcut is
+temporary diagnostic scope; propose its removal explicitly after validation.
+
+Instrument hypothesis: a carrier-triggered fresh passive window exercises
+the automatic discovery/restoration policy without spending its budget in
+the menu. Confirm through a distinct accepted/rejected request log, first
+owned Present, active reports/records, low wrapper calls and not-lazy counts
+during collection, completion and continuing AA history. Reject if the new
+route enables manual demand or another expensive capture, or fails to start.
+Sol owns implementation/tests; Astra reviews evidence only. No startup or
+renderer admission policy change is intended.
+
+Implemented source contract: hotkey routing preserves Shift priority, VR,
+mouse/pad routes and configured Ctrl-required keyboard bindings (their normal
+press remains General). The passive entry verifies availability and established
+owner/current thread before reading collector device state. Stopped, wrong
+device, paused/internal, manual, pending/active compute/readback and runtime
+bulk/projection states reject with a reason before mutation. Busy queries do
+not consume pending requests or allocate the compute bank. An active automatic
+collector may be rearmed; AA runtime/history are separate and untouched.
+Accepted requests log `passive rearm accepted` with `manual=0`, followed by
+the existing first-owned-Present/sample/final chain; acceptance alone does
+not prove useful observations occurred. No census or bulk arm is on this route.
+
+Sol full absolute `build.bat --wait-lock` PASS: all 170 jobs, production DLLs,
+Python gates, complete rendering/lifecycle rigs and installer validation,
+145.4 seconds. Engine WARP PASS, 18,885 checks; existing 128-producer fixture
+remains eager896/automatic5/manual896 actual context calls. Temporal policy
+PASS includes route/peek tests and 32 live-policy combinations. Wiring checks
+pin the rearm guards, dispatch and first-Present/report/final chain, including
+foreign rejection before the device read. The complete collector restart TU
+is not executed by the new fixture; actual acceptance/useful frames remain
+part of the in-game check. Astra reviewed source/evidence only, ran no tests
+or builds and found no blocker after the guard-order correction.
+
+Full log: `build/flat-passive-rearm-full-escalated.log`; receipt input identity
+`66b81cd808541be4e70e49abf434f0accf15f969a8b18c4aadd3c9a1cd8a8627`.
+The first two sandbox runs stopped before compilation at tempfile/process
+permissions. The successful run used an approved execution environment with
+TEMP/TMP/TMPDIR under ignored `build/validation_temp`; no gate was skipped.
+Clean promotion and sanctioned Steam-flat install are recorded separately in
+`build/passive-rearm-validation.json`, including the exact installed version
+and preserved config hashes. Use that promoted build, not `0bb83e63`.
+
+Exact stationary sequence after installation:
+
+1. Launch Steam flat, load the carrier and face the same slow view.
+2. Send Ready before the timed capture, then focus the game and close menus.
+3. Hold that view for 30 seconds as the baseline.
+4. Hold Ctrl, tap NumLock once, then release Ctrl. Do not hold Shift.
+5. Hold the same view for 180 seconds, keeping settings, FPS limit and AA mode
+   unchanged. No F7/F8 or other capture key. This spans the collector's maximum
+   120-second window and a post-completion control; at about 80 FPS the time
+   limit comes first. Check the accepted/first-Present/useful-frame log chain
+   while the user holds position, so a rejected trigger is caught promptly.
+6. Note baseline/during/after FPS and any blur or scene jump; quit normally,
+   then send Done.
+
+This isolates collector/restoration overhead in a warm heavy scene; it does
+not measure cold shader compilation or asset loading. Direct discovery still
+costs CPU, so judge wrapper calls/timing and AA continuity alongside FPS.
+The carrier capture remains outstanding and main stays unmerged.

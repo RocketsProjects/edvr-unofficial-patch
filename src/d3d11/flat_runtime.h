@@ -106,6 +106,9 @@ void flatRuntimeUnknown();
 void flatRuntimeOverlayUavBind(ID3D11DeviceContext*, UINT count,
                                ID3D11UnorderedAccessView* const*);
 void flatRuntimeArmProjectionAudit(bool full = false);
+// Owner-thread query for the Ctrl+dump_draws passive discovery restart.
+// It observes other diagnostics without consuming or cancelling their work.
+bool flatRuntimePassiveRearmBusy();
 void flatRuntimeCreateBuffer(ID3D11Buffer*, const void* initialData);
 void flatRuntimeClearBindings();
 void flatRuntimeReplayQueryBegin(ID3D11DeviceContext*, ID3D11Asynchronous*);
