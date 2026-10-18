@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 repeated queries): `ee68d075` installed/verified Steam flat (`v0.20.0-rc.4-16-gee68d075`); immutable DSV/depth-description reuse, actual OM getters and all writer/mutation proof remain per call. Sol full build PASS (158.6 s, cache helper 38 checks), clean promotion PASS, Astra evidence review PASS; settings unchanged, main unmerged. Baseline `4c810f12`: discovery OFF, 68.33 sampled FPS, reported F7-off 263; EDVR 8.311 ms gross / 6.333 estimated floor-net, copy 3.019 gross and other about 2.23. No safe measured draw-shell shortcut found; WRL already skips same-identity reference churn. Next capture: steady slow/fast/slow carrier with cache counters and AA history, saving unmeasured. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test. Origin probe off (last entry).
+State (2026-10-18 cache capture): `ee68d075` Steam flat verified (`040555`, PE `6AD49934`); reuse and AA continuity PASS. Slow-leg DSV hits 99.990%, depth-state about 99.59%; gross raw 204.0/207.5 ns per call versus prior 242.9 (14.6-16.0% lower observed rate, differing workloads). Clean-window FPS 74.13/290.74/73.05; estimated EDVR CPU slow 6.207/6.350 ms, broad overhead remains. No new AA refusals/resets/backend/origin events; two startup/load resets precede legs. Phase bootstrap remains pending, not validated. Sol analyzed, Astra evidence-only review; main unmerged, probe off. No further flight requested for cache proof; remaining target is structural draw/query overhead. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1675,3 +1675,73 @@ Compare DSV/depth hits and misses, actual getter stage equalities, raw ns/call
 and per-frame cost normalized by call/draw counts, discovery-zero windows,
 and AA continuation/reset counters. Different carrier positions/views or
 startup legs cannot establish causal FPS savings.
+
+## 2026-10-18: immutable-description cache carrier validation
+
+User completed slow/fast/slow and left Steam flat running. Sanctioned reader
+verifies `edvr_gfx_20261018_040555.log`,
+`v0.20.0-rc.4-16-gee68d075`, PE `6AD49934`, flat `/novr`. Source is the
+installed `ee68d075`; later HEAD commits are records only. CPU/copy reports
+are frozen through 04:11:51.242, AA through 04:11:50.960 (282 ms earlier).
+The log grew during reading: timestamp cutoffs, not incidental file lengths,
+define the evidence. No live object read is needed; normal quit is safe.
+
+Sol selects stable workload clusters and excludes startup/loading and mixed
+turn windows. Slow 1 has 18 full windows ending 04:08:45.992-04:10:11.114;
+fast core has five ending 04:10:21.115-04:10:41.123; slow 2 has 13 ending
+04:10:51.143-04:11:51.242. These are inferred view intervals, without arm
+markers. For the compact comparison, use six-window slow cores around the
+five-window fast core; excluded first fast/return windows contain the turns.
+
+| Stable group (CPU window ends) | Real FPS | Substituted draws/frame | Raw gross ms / calls / ns per call | DSV / depth-state description hits | EDVR gross / estimated floor-net ms |
+|---|---:|---:|---:|---:|---:|
+| Slow 1 last six, 04:09:46.074-04:10:11.114 | 74.13 | 6352 | 1.497 / 7339.7 / 203.9 | 99.99012% / 99.5956% | 8.271 / 6.207 |
+| Fast five, 04:10:21.115-04:10:41.123 | 290.74 | 121 | 0.049 / 310 / 156.8 | 99.6471% / 94.773% | 1.247 / 0.923 |
+| Slow 2 first six, 04:10:51.143-04:11:16.180 | 73.05 | 6534 | 1.550 / 7467.3 / 207.6 | 99.99034% / 99.5916% | 8.436 / 6.350 |
+
+FPS is total frames divided by summed window seconds; CPU and call means
+are weighted by clocked frames, draws by real frames. Present p50 is not
+used as an average FPS. Full slow groups yield 72.94/71.68 FPS and raw
+204.0/207.5 ns per call, versus prior `4c810f12` 242.9: observed rates are
+16.0%/14.6% lower. Raw gross frame cost is 1.490/1.553 ms versus prior
+1.722 despite more raw calls (7302.5/7485.2 versus 7088.8). At current call
+volumes the prior-rate difference is about 0.284/0.265 ms per clocked frame;
+that is an indicative rate-normalized comparison, not isolated causal frame
+time saved. Different views, role mixes, draw counts and capture conditions
+prevent attributing the whole FPS difference or an exact saving to this
+patch. Timing floor-net is an instrument estimate, not an uninstrumented
+benchmark. The remaining roughly 6.2-6.35 ms of EDVR CPU in the slow cores
+shows that the broad AA-dependent CPU overhead is not resolved.
+
+All 71 paired CPU/copy reports satisfy the getter event partitions. In slow
+1, DSV gets 8,285,644 = 8,284,822 hits + 822 misses; depth hits 8,252,379 +
+33,265 misses, no defaults. Slow 2 gets 6,060,538 = 6,059,954 DSV hits +
+584 misses; depth 6,035,622 hits + 24,916 misses, no defaults. Actual OM
+getters remain live. Their count exceeds raw-domain timer calls because
+`forwardDsv` also runs in admission/validation paths. A DSV miss performs
+GetResource/view GetDesc and attempts texture description; it is not an
+individual count of texture QI/GetDesc on failed resources. No timing gain
+is inferred from hit counts alone. Discovery completes 04:06:26.379 and is
+zero in comparison windows; it cannot explain these steady costs.
+
+AA continuity PASS for the measured legs: slow 1 +6558 accepted continues,
+fast core +7264, slow 2 +4661, all with zero new refusals or accepted resets.
+Requested/lost history, invalid previous camera, camera cut, backend failure,
+origin ambiguity and invalidations have zero leg deltas. No F7 `aa compare`
+toggle appears through cutoff. Two accepted resets precede the comparison:
+04:06:21.070 initial accepted scene and 04:08:28.342 after a 123,625-ms load
+gap. Reset event gap/format flags can be nonzero while cumulative gap/format
+counters stay zero under lost-history handling; that is not contradictory.
+The wider interval's treated streak 1810 to 22646 includes excluded turn
+windows; do not equate that 20,836 growth with the clean-leg sum 18,483.
+Phase failure/reset counters stay unchanged, but status remains
+`awaiting-issued-selected-bootstrap`; this is not new phase-bootstrap proof.
+
+Cache reuse and uninterrupted AA are demonstrated in this capture; no
+additional flight is needed for those observations. No source/build/install
+change from this log review; main remains unmerged and origin probe off.
+Frozen evidence: `build/repeated_query_ee68d075_capture_filtered.txt`,
+`build/repeated_query_ee68d075_capture_summary.json` and `.md`, and
+`build/repeated_query_ee68d075_aa_frozen.json`. Sol performed log extraction
+and normalization; Astra reviewed the evidence only, without running tests,
+builds or benchmarks.
