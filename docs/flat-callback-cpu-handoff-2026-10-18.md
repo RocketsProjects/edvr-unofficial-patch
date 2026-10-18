@@ -32,8 +32,9 @@
   shells (dispatch is 0.008 ms). Continued producers own the constructor
   shell 1.699 of 2.129 ms and the copy residual 1.006 of 1.182 ms, one
   constructor call per substituted draw. Destructor continued is 0.414 ms.
-  The continuation is in the tree. Full build PASS. Not flown. A repeated
-  continued producer keeps the forward observation, reducer, detector,
+  The continuation is installed on Steam flat as `v0.20.0-rc.4-33-g29827591`.
+  Full build PASS. Not flown. A repeated continued producer keeps the
+  forward observation, reducer, detector,
   trace and substitution, and skips the rebuild and the copy checks.
   The shell-split line should show copy-residual-continued near zero and
   ctor-continued well under 1.7 ms, with reuse and AA history still
