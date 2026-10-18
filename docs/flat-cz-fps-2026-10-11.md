@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 carrier rearm): Ctrl+NumLock starts a fresh automatic-style passive window from the settled carrier. Temporary shortcut, no INI key; probe off. Sol full build/tests PASS (145.4 s), Astra source review PASS. Clean promotion/install receipt: `build/passive-rearm-validation.json`. Next: Ready, 30 s baseline, Ctrl+NumLock once, same view 180 s, quit normally/Done. Keep other captures off. Heavy-view benefit still awaits this capture; AA previously PASS on `0bb83e63`. Main stays unmerged (last entry).
+State (2026-10-18 slow carrier): `4c810f12` verified; discovery OFF in carrier, passive restart not logged. User redirects to AA-dependent CPU cost: 68.33 sampled FPS, reported F7-off 263; EDVR 8.311 ms gross / 6.333 estimated floor-net, copy 3.019 gross and other about 2.23. Raw calls +28%, ns/call nearly unchanged versus prior view. Next audit: repeated raw-domain and draw-shell work, no fix/build yet. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test. Probe off, main unmerged (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1464,3 +1464,106 @@ This isolates collector/restoration overhead in a warm heavy scene; it does
 not measure cold shader compilation or asset loading. Direct discovery still
 costs CPU, so judge wrapper calls/timing and AA continuity alongside FPS.
 The carrier capture remains outstanding and main stays unmerged.
+
+## 2026-10-18: slow carrier view and AA-off comparison
+
+User completed the requested sequence but omitted the Ready chat message,
+then reported this different carrier area running in the mid-60s with GPU
+utilization around 25%. They subsequently report 263 FPS with AA off. User
+redirects the investigation to steady AA-dependent CPU overhead; do not
+spend another flight on startup instrumentation at this point.
+
+Sanctioned reader pins `edvr_gfx_20261018_033520.log` to installed
+`v0.20.0-rc.4-14-g4c810f12`, PE `6AD49235`, Steam flat `/novr`. Same RTX 5090,
+DLSS model M and 2496x1404 into 3840x2160; CPU timing on, origin probe off.
+Startup discovery finishes at 03:35:54.534 after 12,000 useful frames. No
+passive-rearm accepted/rejected, manual dump_draws or census press is logged
+through the frozen carrier read at 03:43:11.157. Ready is only a chat
+coordination signal; it has no DLL dependency and its omission cannot prevent
+arming. This carrier read is post-collector, not the new passive validation.
+
+The six stable five-second windows ending 03:42:46-03:43:11 contain 2054
+frames over 30.062 seconds: 68.33 real FPS, mean frame period 14.636 ms.
+Present p50 is 13.97-14.35 ms and must not be inverted as average FPS.
+
+| CPU family / measure | Current weighted value |
+|---|---:|
+| EDVR total, gross per sampled clocked frame | 8.311 ms |
+| Recorded sampled timing floor | 1.978 ms |
+| Estimated EDVR floor-net | 6.333 ms |
+| Copy/admission checks, gross | 3.019 ms |
+| Raw-domain subset of copy checks | 1.722 ms / 7089 calls / 242.9 ns per call |
+| Output-scan subset of copy checks | 0.305 ms |
+| Reported residual copy bucket | 0.989 ms |
+| Other draw/dispatch shell, gross | about 2.23 ms |
+| Engine draw wrapper, gross | 0.324 ms / 307 D3D calls per real frame |
+| Discovery | 0.000 ms |
+
+The raw/output/residual buckets are nested inside copy checks, not additional
+costs to sum on top. The residual is its reported bucket; displayed subsets
+leave about 0.003 ms elsewhere. Timing runs one frame in sixteen. Estimated
+average clock perturbation is 0.253 ms per real frame; do not subtract that
+again after subtracting the sampled floor. Estimated net is not an exact
+uninstrumented benchmark.
+
+Current substituted draws average 6201/frame, versus prior `c6082f4b` steady
+4749 (+30.6%); raw calls rise 27.6%, while gross raw cost is 242.9 versus
+242.0 ns/call (+0.4%). Copy cost rises 26.9%, total gross 21.4% and estimated
+net 21.6%. This supports larger work volume multiplying ordinary per-draw
+cost. Views and role mixes differ; it does not establish a regression or
+prove every operation is unchanged. Offscreen-fast work skips about 4025
+draws/frame. Inferring about 7211 slow draws from two copy scopes per draw
+is a workload estimate, not an exact all-draw census.
+
+The log confirms F7 OFF at 03:44:38.933 and restored at 03:44:41.811, a
+2.878-second interval. The user's 263 FPS corresponds to about 3.80 ms/frame,
+versus the earlier sampled 14.64 ms, a directional difference near 10.8 ms.
+The short off interval is not a logged stable off benchmark. F7 also disables
+AA-dependent UI quality through the same configure sweep, so this isolates
+the broader AA-dependent EDVR path, not NGX alone. Do not attribute the full
+apparent difference to the 6.333-ms CPU estimate or add CPU/GPU spans as
+independent wall times. Reported GPU utilization alone cannot establish the
+bottleneck; combined with measured render-thread cost and the AA-off response,
+CPU-side overhead is strongly supported. GPU span includes CPU-feed gaps.
+
+Sol source trace: `flat_runtime.cpp:5704-5724` runs forward/copy verifications
+for slow-path draws; `flat_forward_light_runtime.inl:198-207` observes depth
+domain/writes before converter shader filtering. Domain checks query the
+current DSV/resource/texture and depth-stencil state, then update camera and
+mutation proof. The immutable descriptor duplication was already cut; mutable
+actual-state queries and ledger work remain. The output guard costs about
+0.3 ms, making it a smaller target than raw-domain work. The other bucket
+spans constructor/destructor/dispatch bookkeeping and must not be assigned to
+one function. Simply moving observations behind shader filtering would lose
+unknown-writer correctness evidence. Failed-domain no-heal alone was already
+ruled out as a safe skip proof; global overflow/publication/issue lifecycle
+must also be respected (earlier descriptor audit entry).
+
+At the pre-toggle cutoff, AA continues: treated 31,064, refused 13,621,
+accepted reset cumulative 2, accepted continue 31,062, current treated streak
+27,247; no backend failure, all adapter reset-window fields zero. Later F7
+reset/warmup events are user actions, not spontaneous history failures.
+Ruled out: active discovery as the cause of these steady carrier costs,
+because its scope is zero and collection already ended. Ruled out: attributing
+the whole view-to-view CPU rise to slower raw checks, because mean ns/call
+is nearly unchanged while call volume rises. No broader regression claim.
+
+Separate input finding: the configured key is NumLock/vk0x90/mods0 and the
+passive entry was never reached. Existing `device_hook.cpp:2035-2046` warns
+about Ctrl+ScrollLock becoming Break. Microsoft's
+[keyboard account](https://devblogs.microsoft.com/oldnewthing/20080211-00/?p=23503)
+describes the corresponding Ctrl+NumLock/Pause equivalence. Choosing that
+default chord was a mistake; actual hardware VK state was not captured, so
+the remap is the likely explanation rather than a measured key trace. F8
+Hotkeys can rebind dump_draws live to an ordinary key when this test resumes;
+no binding has been changed. Do not infer a collector ownership failure
+from a missing ingress event.
+
+Next read-only audit: raw-domain and other cost per call, repeated actual
+state queries versus generation-certified reuse, and offscreen-fast decline
+reasons. Existing evidence justifies those targets, not a new fix yet.
+Sol extracted/normalized the data and traced source; Astra independently
+reviewed arithmetic/attribution only, without tests/builds/benchmarks.
+No source, build, install or config change; main remains unmerged. Frozen
+evidence: `build/passive_rearm_4c810f12_cpu_summary.json` and
+`build/passive_rearm_4c810f12_carrier_read.md`.
