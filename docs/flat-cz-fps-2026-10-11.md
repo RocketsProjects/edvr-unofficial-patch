@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-17 startup policy): Automatic discovery permits lazy restoration with every record/budget retained; manual/compute physical reads restore first. Sol focused checks and full validation PASS (149.1 s); Astra evidence-only review finds no blocker. Build/install receipt: `build/startup-discovery-validation.json`. Next: stationary Steam flat startup capture, origin probe off; no measured FPS benefit yet. Direct collector cost unchanged; prior brief late dip still unclassified. Main stays unmerged (last entry).
+State (2026-10-18 startup capture): Steam `0bb83e63` PASS for collector operation, low menu wrapper calls during discovery and carrier AA continuity (78.8-81.2 FPS). Discovery hit 12,000 useful frames after 35.187 s, before carrier entry; heavy cold-carrier benefit remains unmeasured. Two startup/load resets, 37,100-frame continuation run. Sol analyzed; Astra evidence-only review agrees with limits. Probe off; direct collector unchanged. No further flight requested; main stays unmerged (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1308,9 +1308,77 @@ load straight into the carrier and face the same slow view as soon as
 loaded. Keep that view and current graphics/FPS settings for three minutes,
 with menus closed and no F7/F8 or Shift+NumLock. Note early and settled FPS,
 then quit normally. Compare automatic discovery's active windows against
-its completion boundary (120 seconds after first owned Present), reporting
+its completion boundary (120 seconds or 12,000 useful frames after first
+owned Present, whichever comes first), reporting
 scene/load transitions separately. Require discovery records to remain,
 lazy kept-runs to operate during discovery, eager/not-lazy amplification to
 fall absent manual captures, and AA refusal/reset/continuation counters to
 remain clean after normal startup/load resets. If loading finishes after
 discovery, do not claim that this capture measured the carrier's cold cost.
+
+## 2026-10-18: startup policy capture, carrier continuity PASS
+
+Sean reports stable low-to-mid 80s FPS after the requested Steam test.
+Sanctioned reader verifies `edvr_gfx_20261018_030452.log` as installed
+`v0.20.0-rc.4-12-g0bb83e63`, PE `6AD430D5`, Steam flat `/novr`, RTX 5090,
+DLSS model M/preset 13, 2496x1404 into 3840x2160. Driver/DLSS DLL versions
+are not logged by this build. Preserved profile: CPU timing on, origin
+probe off. No manual General/Full arm or F7 action was recorded. The file
+continued growing, so analysis uses a frozen sanctioned-reader snapshot
+(13,090 source lines), cutoff strictly before 03:15:00; last included
+five-second windows end at 03:14:58. Times below are as logged. The earlier
+root claim that the game had closed normally was premature; process lookup
+did not establish that fact. No live object read is needed for this capture.
+
+Automatic discovery ran 03:04:53.341-03:05:28.528, 35.187 seconds. Its final
+report reaches exactly 12,000 useful frames (12,705 presents), with 8,647,949
+draws, 32,699 copies, 104,721 dispatches and retained world/handoff records
+142/17. No frame-dropped observations are reported in sampled/final reports;
+this is not an exhaustive all-startup observation-equivalence proof. Source
+`flat_temporal.cpp:966,969-980` confirms that useful-frame exhaustion can end
+collection before the 120-second upper limit.
+
+| Window ends / scene | Real FPS | Substituted draws/frame | Wrapper D3D calls/frame | Wrapper / direct discovery / EDVR gross ms |
+|---|---:|---:|---:|---:|
+| 03:05:23-28, menu, discovery active | 400.96 | 248.50 | 103.00 | 0.041 / 0.247 / 0.886 |
+| 03:05:33, following boundary window | 401.76 | 249.00 | 103.00 | 0.039 / 0.006 / 0.641 |
+| 03:07:53-03:08:18, early stable carrier | 78.78 | 4933.83 | 300.50 | 0.256 / - / 6.961 |
+| 03:14:03-28, late stable carrier | 81.17 | 4988.48 | 295.42 | 0.265 / - / 7.065 |
+| Prior `c6082f4b` steady slow2 | 80.39 | 4749.31 | 283.28 | 0.259 / - / 6.845 |
+
+CPU timings use sampled clocked-frame weighting; wrapper D3D calls and
+substituted draws use real frames. The 03:05:33.380 boundary window starts at
+03:05:28.377, about 151 ms before discovery completes; it is not a wholly
+post-discovery control. Low wrapper call counts already coexist with the
+active collector and remain similar across this boundary. The first
+draw-bracket kept/runs/not-lazy report is 03:07:58.952, after collection ends,
+so those counters cannot directly establish lazy kept-runs during discovery.
+Later carrier brackets report not-lazy zero and extensive kept runs.
+
+The heavy carrier view starts around 03:07:33, over two minutes after
+discovery ends. My capture steps did not account for the uncapped menu
+exhausting the useful-frame limit before loading the carrier. Ruled out:
+this launch as a same-scene cold-carrier comparison, because collection and
+the heavy view do not overlap. The carrier workload is somewhat higher than
+the prior steady capture; neither these FPS values nor the gross CPU times
+establish a performance gain. The direct collector work remains unchanged.
+
+AA continuity through the cutoff: 43,920 treatments, 43,918 accepted
+continuations, two requested/accepted resets and two lost-history events
+during startup/loading (03:05:18 and 03:07:28). Current/longest continuation
+reaches 37,100 frames. Refusals stay at 13,634 from carrier entry through the
+cutoff. Backend/camera-cut/origin-ambiguity cumulative counters remain zero;
+phase-failure receipts remain zero and stable carrier jitter failures are
+zero. One `no-3d-scene` jitter failure occurs during the 03:05:38 transition.
+Although cumulative gap/format counters are zero, expected startup/load
+reset-event records contain gap/format flags; do not describe all event
+flags as zero. No AA disengagement or repeated history restart is observed
+in the stable carrier interval.
+
+Scoped PASS: collector operation, low menu wrapper call counts while it is
+active, and carrier AA continuity. Heavy cold-carrier savings remain
+unmeasured. Sol extracted/weighted the sanctioned output; Astra reviewed
+the frozen evidence only, ran no tests/builds/benchmarks and agrees with
+these limits. No source/build/install change or additional flight request;
+main remains unmerged. Frozen evidence:
+`build/startup_discovery_0bb83e63_summary.json`, `_rows.json`, `_stdout.txt`.
