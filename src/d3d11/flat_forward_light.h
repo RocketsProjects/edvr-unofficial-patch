@@ -31,6 +31,21 @@ struct Surface {
     uint64_t resource=0;uint32_t width=0,height=0,mip=0,slice=0,slices=0,samples=0;
     bool known=false;
 };
+// One immutable resource description supplies both the structural surface
+// and its format. The caller still reads actual mutable bindings/state.
+struct TextureDescription {
+    uint32_t width=0,height=0,mipLevels=0,arraySize=0,samples=0,format=0;
+};
+struct TextureObservation { Surface surface{};uint32_t format=0; };
+template<class Describe>
+inline TextureObservation describeTexture(uint64_t resource,unsigned mip,unsigned slice,unsigned slices,Describe&& describe) {
+    TextureDescription d{};const bool texture=resource&&describe(d);
+    if(!texture)d={};
+    TextureObservation out;out.surface.resource=resource;out.surface.mip=mip;out.surface.slice=slice;out.surface.slices=slices;
+    out.surface.width=d.width;out.surface.height=d.height;out.surface.samples=d.samples;out.format=d.format;
+    out.surface.known=texture&&d.arraySize==1&&d.mipLevels==1&&d.samples==1&&mip==0&&slice==0&&slices==1;
+    return out;
+}
 inline bool plane(const Surface& a,const Surface& b) {
     return a.known&&b.known&&a.resource&&a.resource==b.resource&&a.width==b.width&&a.height==b.height&&
         a.mip==b.mip&&a.slice==b.slice&&a.slices==b.slices&&a.samples==b.samples;

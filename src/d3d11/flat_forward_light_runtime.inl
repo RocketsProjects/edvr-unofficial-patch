@@ -29,33 +29,36 @@ void forwardFrame(State& s) {
     f.phaseReceipt.phase(s.prefix.frame,s.phase.currentX,s.phase.currentY,s.phaseWidth,s.phaseHeight);
     f.ownerKnown=true;f.upstream=upstream;
 }
-forward_light::Surface forwardTexture(ID3D11Resource* resource,unsigned mip,unsigned slice,unsigned slices) {
-    forward_light::Surface out;out.resource=reinterpret_cast<uintptr_t>(resource);out.mip=mip;out.slice=slice;out.slices=slices;
-    Ptr<ID3D11Texture2D> texture;if(resource)resource->QueryInterface(IID_PPV_ARGS(&texture));
-    D3D11_TEXTURE2D_DESC desc{};if(texture)texture->GetDesc(&desc);
-    out.width=desc.Width;out.height=desc.Height;out.samples=desc.SampleDesc.Count;
-    out.known=texture&&desc.ArraySize==1&&desc.MipLevels==1&&desc.SampleDesc.Count==1&&mip==0&&slice==0&&slices==1;
-    return out;
+forward_light::Surface forwardTexture(ID3D11Resource* resource,unsigned mip,unsigned slice,unsigned slices,uint32_t* format=nullptr) {
+    const auto observed=forward_light::describeTexture(reinterpret_cast<uintptr_t>(resource),mip,slice,slices,
+        [&](forward_light::TextureDescription& out) {
+            Ptr<ID3D11Texture2D> texture;resource->QueryInterface(IID_PPV_ARGS(&texture));
+            if(!texture)return false;
+            D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
+            out={d.Width,d.Height,d.MipLevels,d.ArraySize,d.SampleDesc.Count,static_cast<uint32_t>(d.Format)};
+            return true;
+        });
+    if(format)*format=observed.format;
+    return observed.surface;
 }
 bool forwardSrv(State& s,unsigned slot,bool raw,forward_light::Surface& out,
                 Ptr<ID3D11ShaderResourceView>& view,Ptr<ID3D11Resource>& resource) {
     s.context->PSGetShaderResources(slot,1,&view);if(!view)return false;view->GetResource(&resource);if(!resource)return false;
-    D3D11_SHADER_RESOURCE_VIEW_DESC v{};view->GetDesc(&v);Ptr<ID3D11Texture2D> texture;resource.As(&texture);
-    D3D11_TEXTURE2D_DESC d{};if(texture)texture->GetDesc(&d);
-    out=forwardTexture(resource.Get(),v.Texture2D.MostDetailedMip,0,1);
+    D3D11_SHADER_RESOURCE_VIEW_DESC v{};view->GetDesc(&v);uint32_t format=0;
+    out=forwardTexture(resource.Get(),v.Texture2D.MostDetailedMip,0,1,&format);
     return out.known&&v.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D&&v.Texture2D.MipLevels==1&&
-        (raw?(d.Format==DXGI_FORMAT_R32G8X24_TYPELESS&&v.Format==DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS):
-             (d.Format==DXGI_FORMAT_R32_TYPELESS&&v.Format==DXGI_FORMAT_R32_FLOAT));
+        (raw?(format==DXGI_FORMAT_R32G8X24_TYPELESS&&v.Format==DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS):
+             (format==DXGI_FORMAT_R32_TYPELESS&&v.Format==DXGI_FORMAT_R32_FLOAT));
 }
 bool forwardDsv(State& s,const FlatContractObservation& k,forward_light::Surface& out,
                 Ptr<ID3D11DepthStencilView>& dsv,Ptr<ID3D11Resource>& resource,bool& writes) {
     s.context->OMGetRenderTargets(0,nullptr,&dsv);if(!dsv)return false;dsv->GetResource(&resource);
-    D3D11_DEPTH_STENCIL_VIEW_DESC v{};dsv->GetDesc(&v);out=forwardTexture(resource.Get(),v.Texture2D.MipSlice,0,1);
-    Ptr<ID3D11Texture2D> texture;resource.As(&texture);D3D11_TEXTURE2D_DESC d{};if(texture)texture->GetDesc(&d);
+    D3D11_DEPTH_STENCIL_VIEW_DESC v{};dsv->GetDesc(&v);uint32_t format=0;
+    out=forwardTexture(resource.Get(),v.Texture2D.MipSlice,0,1,&format);
     Ptr<ID3D11DepthStencilState> state;UINT ref=0;s.context->OMGetDepthStencilState(&state,&ref);
     D3D11_DEPTH_STENCIL_DESC z{};z.DepthEnable=TRUE;z.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;if(state)state->GetDesc(&z);
     writes=z.DepthEnable&&z.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL&&!(v.Flags&D3D11_DSV_READ_ONLY_DEPTH);
-    return out.known&&v.ViewDimension==D3D11_DSV_DIMENSION_TEXTURE2D&&d.Format==DXGI_FORMAT_R32G8X24_TYPELESS&&
+    return out.known&&v.ViewDimension==D3D11_DSV_DIMENSION_TEXTURE2D&&format==DXGI_FORMAT_R32G8X24_TYPELESS&&
         v.Format==DXGI_FORMAT_D32_FLOAT_S8X24_UINT&&dsv.Get()==k.dsv&&resource.Get()==k.depth&&
         out.width==k.depthWidth&&out.height==k.depthHeight;
 }

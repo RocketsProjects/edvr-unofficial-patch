@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-17 guard validation): Steam `a4a4e751` functional PASS: slow-view guard skips 87.0-87.4%, actual OM Gets equal fallbacks, AA history healthy. Output cost about 0.30 ms; raw-domain cost about 1.91 ms remains. Reported 64 versus prior 66 fps is not a controlled regression comparison; scene call volume increased. Astra evidence audit agrees; no FPS-gain claim, main remains unmerged (last entry).
+State (2026-10-17 raw-domain CPU): same-resource descriptor query deduplication on `codex/flat-raw-domain-cpu` passes 20,736 equivalence cases and the full build (159.3 s). All mutable-state and issue-lifecycle checks remain; broader failed-domain elision lacks a complete overflow/callback proof. Clean promotion/Steam-flat install follow, performance validation pending; main stays unmerged (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1065,3 +1065,82 @@ regression. Its RC3/RC4 causal audit is appended to the shared AA investigation.
 No additional flight is needed before the source/cost audit. Frozen evidence:
 `build/carrier_guard_a4a4e751_summary.json` and companion sanctioned-reader
 stdout files. Main remains unmerged.
+
+## 2026-10-17: raw-domain CPU audit and descriptor query reduction
+
+Sean authorizes optimization, Sol for RE/tests, Astra for evidence review only,
+full build and Steam-flat install when ready, with main unmerged. Source branch
+`codex/flat-raw-domain-cpu` starts at `b513b775` (documentation after the tested
+and installed `a4a4e751` source). Baseline is the verified capture above:
+approximately 7027 raw-domain calls per clocked slow frame, 1.906 ms raw-domain
+time and 0.303 ms output scans, with healthy AA/history. The approximately
+14.3k copy-parent scope entries are two scopes per approximately 7.1k draws.
+
+Discriminating audit hypotheses before this build:
+
+- Redundant immutable resource description: `forwardDsv` and `forwardSrv`
+  perform two Texture2D QueryInterface/GetDesc pairs on the same held resource,
+  separately obtaining surface structure and format. Source call ordering
+  confirms the duplication; one description must produce the same surface and
+  format. A counted production-helper read and adapter wiring must show one
+  description per call across valid and refusing shapes/types/formats.
+- Redundant failed-domain camera work: an already-failed domain cannot heal
+  within its ledger epoch, but observation still increments versions and can
+  set global overflow. Geometry begin/return/abandon can revoke a publication
+  created after a constructor snapshot, including after reset/reused identity.
+  Issue presence also affects needsActualDraw. These effects discriminate a
+  valid shortcut from a local no-healing claim; no such shortcut is applied.
+- Mutable-state caching or moving shader filtering ahead of raw observation:
+  actual DSV/depth-state/CB identity, newly introduced raw domains and writer
+  effects remain required. The output guard's NoUsableState result is not
+  continuing authority to skip this observation. No binding cache is added.
+
+Chosen change: one same-call immutable description supplies both Surface and
+format, while fresh DSV/SRV bindings, view descriptors, depth state, CB reads,
+ledger observation and Geometry issue lifecycle retain their existing paths.
+Reuse applies to DSV and SRV consumers, including issue validation. Existing
+per-frame raw-domain timing/call counts support a normalized comparison; no
+new config key or diagnostic arm is needed. No FPS improvement is claimed.
+
+Ruled out: failed-domain no-healing alone as a complete elision proof, because
+global version overflow and later publication/epoch callback effects remain
+observable. Astra independently identified these obligations and reviews the
+implementation boundary without executing tests/builds. Sol owns production
+and behavioral tests. Validation must cover null/not-Texture2D, structural
+shape/mip/slice/sample/format cases, snapshot lifetime and fresh reacquisition;
+the fake immutable-read count is not a D3D-driver performance measurement.
+
+Implemented `TextureDescription`/`TextureObservation` and the reused
+`describeTexture` helper in `flat_forward_light.h`. The actual adapter issues
+one Texture2D QueryInterface and at most one GetDesc per non-null observation;
+DSV/SRV validators obtain format from that same value. A null resource never
+calls the reader; a failed query clears its output. No persistent descriptor
+or binding cache, ledger change, issue elision, new key or new instrument.
+
+Sol's focused temporal rig passes 17 new checks and 20,736 legacy-equivalence
+cases, plus existing forward 166, output guard 60/28,561 sequences,
+integration 119, phase-bound 9570, paired payload 35 and 46 corpus replays.
+The fixture tests a counted immutable-read callback and separately checks the
+actual adapter wiring; it does not claim driver/GPU timing. Astra reviewed
+the production diff and fixture boundary read-only and found no blocking
+concern; it ran no tests/builds/benchmarks. Focused log:
+`build/rawdomain-focused.log`.
+
+Full absolute `build.bat --wait-lock` passed all gates in 159.3 seconds,
+including production DLLs, GPU/state-restoration regressions, Python tools and
+installer payload checks. Log: `build/flat-raw-domain-cpu-full.log`; receipt
+input identity:
+`5acd33dbdfe3754a9175df68ebd290a4a1479ea9a7c3516a5f46796e414afaf3`.
+Sources froze before these gates. Commit/push this exact tree, promote clean
+DLLs, install and verify Steam flat using the sanctioned tool without --ini.
+The existing menu fix, functional output guard and failure capture remain.
+
+One stationary validation: usual DLSS, CPU timing on, Motion source view off,
+origin probe off; return to the same slow carrier view for 30 seconds, turn
+to the faster view for 30 seconds, return for 30 seconds. No capture/F7 arm
+is needed. Note FPS and visible changes; keep running until the log read is
+confirmed complete. Compare raw-domain ms/call as well as total CPU, actual
+scan counts, phase refusals and history; the old slow baseline is 1.906 ms
+at 7027 calls (271 ns/call). No measured saving is available before that run.
+Clean promotion/install/ZIP verification is recorded in
+`build/rawdomain-validation.json`; main remains unmerged.
