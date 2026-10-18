@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-17 raw-domain CPU): same-resource descriptor query deduplication on `codex/flat-raw-domain-cpu` passes 20,736 equivalence cases and the full build (159.3 s). All mutable-state and issue-lifecycle checks remain; broader failed-domain elision lacks a complete overflow/callback proof. Clean promotion/Steam-flat install follow, performance validation pending; main stays unmerged (last entry).
+State (2026-10-17 raw-domain validation): Steam `c6082f4b` PASS for AA/history continuity; steady raw cost 242 versus prior 271 ns/call (10.8% lower, changed workload). Slow leg about 80 fps; fast leg was capped at 90, uncapped 190 reported afterward. Initial low FPS overlaps automatic discovery forcing eager restores. Brief late same-view dip has no AA-reset marker; cause unclassified. Main stays unmerged (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1144,3 +1144,84 @@ scan counts, phase refusals and history; the old slow baseline is 1.906 ms
 at 7027 calls (271 ns/call). No measured saving is available before that run.
 Clean promotion/install/ZIP verification is recorded in
 `build/rawdomain-validation.json`; main remains unmerged.
+
+## 2026-10-17: descriptor optimization capture and startup discovery cost
+
+Sanctioned reader verifies `edvr_gfx_20261017_201643.log` as exact installed
+`v0.20.0-rc.4-10-gc6082f4b` (PE `6AD42BBC`), Steam flat, RTX 5090,
+DLSS model M, 2496x1404 into 3840x2160. CPU timing on, Motion source view
+and origin probe off. Sean reports initial high-40s/mid-50s FPS, then upper
+70s/about 80, plus a later brief mid-60s dip while holding the same view with
+menus closed. The completed primary capture ends at 20:20:39.329. Separate
+late windows and an uncapped observation are not folded into those groups.
+
+| Group / window ends | Real fps | EDVR gross / estimated floor-net ms | Copy / output / raw ms | Raw calls / ns per call |
+|---|---:|---:|---:|---:|
+| Initial cold 20:18:34-44 | 55.99 | 12.264 / 10.188 | 2.686 / 0.345 / 1.214 | 4779 / 253.9 |
+| Steady slow1 20:19:04-14 | 77.11 | 6.694 / 5.072 | 2.294 / 0.240 / 1.289 | 5442 / 236.8 |
+| Fast 20:19:24-39 | 90.00 | 2.216 / 1.690 | 0.503 / 0.060 / 0.266 | 1145 / 231.9 |
+| Steady slow2 20:19:49-20:20:39 | 80.39 | 6.845 / 5.208 | 2.380 / 0.244 / 1.345 | 5557 / 242.0 |
+
+CPU values are clocked-frame weighted; real FPS uses completed frame counts
+and actual window duration. The cold group is mixed startup work, excluded
+from the steady optimization comparison. The fast group is frame-limited.
+After this capture, Sean removed that limit and reported about 190 FPS in
+the fast view versus about 80 in the slow view. This is separate user-reported
+context, not a new measurement group or a controlled patch comparison.
+
+Against `a4a4e751` slow2's 271.28 ns/raw call, current slow2 is 241.97 ns:
+29.31 ns/call or 10.8% lower gross cost, consistent with eliminating duplicate
+descriptor queries. At the old 7027-call volume this scales to about 0.206 ms
+of raw-block cost. Current volume is 20.9% lower and shader/role mix is not
+identical; neither the full 8.442-to-6.845 ms EDVR reduction nor the whole
+FPS rise can be assigned to the patch. One-call normalization is not a
+controlled driver benchmark. The output guard continues to skip 87.33%, with
+zero unknown decisions and 705 actual scans versus 5567 checks per clocked
+slow2 frame; actual OM Gets still equal the full-scan fallback cohort.
+
+AA/history continuity PASS: at the primary endpoint there are 10,767 DLSS
+treatments, 671 historical refusals, two accepted/requested startup/load
+resets and zero backend failures; uninterrupted continuation reaches 10,303
+frames. Refusals and reset/lost-history counters remain constant after
+20:18:29. A separate later check through 20:21:54 reaches 16,749 resolves,
+16,747 continuations and a 16,285-plus current continuation run, with the same
+two resets, zero backend failures/camera cuts/origin-ambiguity resets and zero stable phase
+failures. No external deferred-matrix failure was reproduced.
+
+The initial slowdown has an additional proven source mechanism. Automatic
+passive discovery completes at 20:18:44.018, about two minutes after the first
+owned Present. The cold group includes 2.216 ms direct discovery and 2.856 ms
+engine wrapper work, versus 0.259 ms wrapper work in steady slow2. Source
+`flat_runtime.cpp:5568` includes flatTemporalCapturing in diagnostics and calls
+engineVelocityFlatLazy(!diagnostics); diagnostics force other-draw flushing.
+`engine_velocity.cpp:2965` performs an eager flush after each producer when
+lazy is off. finishDiscovery in `flat_temporal.cpp` clears capturing before
+the completion line, switching that policy back on the next draw. Wrapper
+D3D calls collapse from about 31,954 to 283 per frame despite substituted
+draws increasing. This demonstrates discovery-triggered eager restoration as
+well as direct discovery cost; it does not assign every transient millisecond
+to that mechanism. These paths are unchanged by the descriptor optimization.
+
+Late same-view/menus-closed windows ending 20:20:44.351-20:21:49.449 are
+separate: aggregate 79.86 FPS, five-second averages 75.87-82.72, Present p50
+11.80-12.71 ms and p95 14.66-16.00 ms. Raw cost stays 1.312-1.380 ms at
+5440-5665 calls; EDVR total 6.687-7.060 ms and GPU resolve about 0.95-0.96.
+The tail is compatible with brief slower frames, but no exact timestamp/frame
+ties the reported dip to a cause. No sustained 60-FPS median plateau, AA
+reset, backend failure, mode change or recorded LONG FRAME/FREEZE accompanies
+these windows; the freeze-location sampler was off. GPU span is not proof of
+GPU-busy time or a GPU bottleneck.
+
+Ruled out: recurring AA disengagement/history restart as the explanation for
+the measured late dip, because all relevant continuity counters stay fixed.
+Ruled out: assigning the whole initial recovery to descriptor query removal,
+because automatic discovery changes a separate per-draw restoration policy
+and the raw workload rises while that cold cost falls. The brief untimed dip
+does not justify another optimization or flight by itself. Startup discovery
+cost is a separate concrete audit target; no such change is folded in here.
+
+Sol aggregated/tested evidence and traced the source; Astra independently
+reviewed the claims read-only without tests, builds, benchmarks or edits.
+Frozen evidence: `build/carrier_texture_c6082f4b_summary.json`, `_rows.json`,
+`_stdout.txt` and `_late_stdout.txt`. Log capture is complete; the user may
+quit normally. No source or install change; main remains unmerged.
