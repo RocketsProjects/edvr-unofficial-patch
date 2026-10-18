@@ -2864,16 +2864,27 @@ void testFlatCpuWiring() {
         for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
         return n;
     };
-    const auto scanStart=forwardCpp.find("void forwardDrawWrites(State& s)"),scanEnd=forwardCpp.find("bool forwardConverterState",scanStart);
+    const auto scanStart=forwardCpp.find("void forwardDrawWrites(State& s,"),scanEnd=forwardCpp.find("bool forwardConverterState",scanStart);
     const auto scan=forwardCpp.substr(scanStart,scanEnd-scanStart);
     check(scan.find("if(!watching){counts.add(flatcpu::kCopyWatchSkip);return;}")<scan.find("flatcpu::Scope outputCost")&&
           scan.find("flatcpu::Scope outputCost")<scan.find("OMGetRenderTargetsAndUnorderedAccessViews"),
           "output timing begins only after the unchanged watch gate and covers actual output Gets");
-    check(scan.find("if(counts.active())")<scan.find("forward_light::outputWatch(")&&
-          scan.find("if(inactiveCandidate)return")==std::string::npos&&
-          scan.find("for(const auto& p:ledger.publications)anyLivePublication|=p.live;")!=std::string::npos&&
-          scan.find("counts.add(flatcpu::kCopyInactiveCandidate)")!=std::string::npos,
-          "sampled advisory predicate reuses the complete old publication walk and never skips the real scan");
+    const auto decisionAt=scan.find("const auto decision=forward_light::outputWatch(");
+    const auto skipAt=scan.find("if(decision.reason==forward_light::OutputWatchReason::NoUsableState)");
+    const auto queryAt=scan.find("OMGetRenderTargetsAndUnorderedAccessViews");
+    check(decisionAt<skipAt&&skipAt<queryAt&&scan.find("if(counts.active())")==std::string::npos&&
+          scan.find("counts.add(flatcpu::kCopyGuardSkipped);\n        return;",skipAt)<queryAt&&
+          scan.find("counts.add(flatcpu::kCopyGuardFallback);",skipAt)<queryAt,
+          "functional demand guard runs with timing off and only NoUsableState returns before all actual output queries");
+    check(scan.find("owner()&&actualDrawContext&&actualDrawContext==s.context.Get()")<decisionAt&&
+          scan.find("ledger.frame==s.prefix.frame&&!s.prefix.uncertain&&!foreignWork.load")<decisionAt&&
+          scan.find("s.forwardLight.ownerKnown&&s.forwardLight.upstream&&s.device&&s.context")<decisionAt&&
+          runtimeCpp.find("forwardBefore(s,context,d,kind,count,start,instances,startInstance)")!=std::string::npos&&
+          forwardCpp.find("forwardDrawWrites(s,actualDrawContext);")!=std::string::npos,
+          "actual draw context owner epoch uncertainty and foreign state guard the production skip");
+    check(scan.find("for(const auto& p:ledger.publications)anyLivePublication|=p.live;")<decisionAt&&
+          scan.find("flatcpu::Scope inactiveCost")==std::string::npos,
+          "guard reuses complete publication walk and skipped work never acquires the old inactive scan timer");
     check(scan.find("counts.add(flatcpu::kCopyOmGet)")<scan.find("OMGetRenderTargetsAndUnorderedAccessViews")&&
           scan.find("kCopyRtvSlots,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT")!=std::string::npos&&
           scan.find("kCopyUavSlots,n")!=std::string::npos&&

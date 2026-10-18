@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-17 carrier captures): 137d4743 CONFIRMS inactive scans in two slow views; newest 66.83-fps plateau has 5,279/6,159 scans inactive (85.71%), 1.114 ms gross/frame; raw-depth checks larger at 1.634 ms. No new history resets/backend failures. Next: offline guarded-skip safety proof, then implementation/validation; no FPS saving claimed (last entry).
+State (2026-10-17 guarded output scans): full build PASS (160.2 s) on codex/flat-output-scan-guard; 60 guard checks/28,561 sequences, direct guard overhead 2.2-4.0 ns/call. No-resurrection audit supports the inactive cut; owner/context/epoch certainty and full-scan fallback remain. Next clean DLL promotion/Steam-flat stationary validation before main merge; no FPS gain claimed (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -728,10 +728,10 @@ pre-current-issue owner seam has no global pending-issue publication; outer
 issue/reentrancy safety still requires proof before this could become an
 actual scan gate. No cache is inferred from the existing incomplete binding
 cache, and no refusal, camera, phase, history or renderer policy is relaxed.
-The source audit found current pending converters retain a live publication,
-pending light issues require one, and geometry issues either retain a healthy
-domain or cannot clear its failure on return. This supports the conservative
-candidate but does not certify external-call reentrancy for a production skip.
+The source audit found converter callbacks only mark an already-live
+publication and cannot revive an invalidated one; pending light issues require
+a live publication, and geometry return cannot clear a domain failure. The
+later production audit below resolves how this supports a reentrant skip.
 
 Offline validation must exercise profiler partition/aggregate reporting,
 timing-off no-work, query counts, logging bounds, failed/new-domain and
@@ -895,3 +895,108 @@ before that audit. No code or game installation changed during analysis.
 
 Ignored evidence: `build/carrier_66fps_group_summary.json`,
 `build/carrier_66fps_rows.json`, `build/carrier_66fps_stability_stdout.txt`.
+
+## 2026-10-17: guarded output-scan implementation audit
+
+The user approved proceeding with the guarded-skip audit and implementation.
+The measured hypothesis is that NoUsableState contains no admission or
+revocation work for output mutation: every used raw domain has failed, every
+publication is nonlive, and every authority is nonlive. Slow captures already
+confirm this is a large real cohort, not an assumed performance opportunity.
+
+The source audit finds mutation cannot heal failed raw domains or revive
+publications/authority. A subsequently created domain/publication did not
+exist for the baseline's earlier scan either; recomputing demand next draw
+restores scanning. Converter callbacks only mark already-live publications,
+light return requires a live publication, and geometry return cannot clear a
+failed domain. Skipping can retain an earlier
+nonzero failure reason instead of replacing it with another nonzero reason;
+that distinction must be documented/tested without relaxing admission.
+
+The diagnostic probe's known-state gate is insufficient as production policy:
+add actual owner/draw-context identity, prefix certainty and established epoch.
+The decision itself calls no D3D/external API and changes no state; nesting
+before or after it recomputes demand. The known pending Issue kinds cannot
+make an elided failed-domain mutation useful later, so no new scope counter
+is required. Unknown ownership/context/epoch or invalid state retains scanning.
+Current-frame live authority/publication and every healthy domain always scan.
+Overflow cannot hide live authority/publication, even though the ledger then
+rejects admission; failed overflow state is subject to the same inactive cut.
+
+Acceptance evidence before installation: transition/revocation equivalence,
+late/pending issue callbacks and nested state changes, changed frame/context,
+invalid/overflow state, diagnostic counts distinguishing actual skips from
+observed candidates, no clock/counter work when timing off, and measured guard
+overhead with timing off and sampled timing on. Run the full absolute
+`build.bat --wait-lock` after all sources freeze. No new config key, binding
+cache, raw-depth optimization or camera/phase/history policy change is in scope.
+
+Corrected assumption: converter IssueValid can succeed after its publication
+was invalidated. Safety relies on Ledger::issued/returned never setting live
+true, not on IssueValid requiring a live publication. Tests must exercise that
+late valid-return case explicitly. Pin the current Issue kind count and test
+actual Ledger completion/replacement/reset behavior. The runtime callback
+semantics were manually audited; tests do not execute D3D callbacks or prove
+future callback edits cannot add state-healing behavior. Such edits require
+reassessment of the representation argument.
+
+Implementation is limited to the output scan seam: the actual draw context
+flows from the draw constructor into forwardBefore/forwardDrawWrites; owner,
+context identity, upstream ownership, device/context presence, current ledger
+epoch, prefix certainty and foreign-work state gate the decision. The existing
+complete publication walk is reused. NoUsableState returns before any D3D
+query; every other result retains the original full scan. Raw-domain/color,
+dispatch/write and issue-validation/return/abandon observers are unchanged.
+
+Demand is functional and evaluated every watched draw with CPU timing on or
+off. Existing sampled diagnostic counters now describe decision samples;
+additional actual guard checks/skips/full-scan-fallback counts expose the
+production result. The output-scan family includes decision CPU time; the old
+inactive-scan family stays zero because skipped query work is not executed.
+Zero there is not a measurement of time saved. Timing off reads no profiler
+clock and writes no query counter while the functional guard still runs.
+
+Focused tests cover actual Ledger late/invalidated Converter returns, replaced
+tokens, reset with delayed prior-token callbacks, alias invalidation, fresh
+authority, nonhealing Geometry, malformed/unknown state and admission/revocation
+equivalence across 28,561 short event sequences. The final watch suite passed
+60 checks; the focused temporal rig also passed the existing core/integration
+and 9,570 phase-bound checks. Source wiring checks verify the guard precedes
+queries and receives the actual draw argument. The callback proof includes a
+manual source audit, not execution of the D3D runtime callbacks in these tests.
+
+An ignored no-dummy CPU benchmark measured median incremental guard costs of
+4.004 ns/call for healthy raw state, 2.917 for all-failed state, 3.190 for a live
+publication and 2.201 for unknown state. Five repetitions each used medians of
+five 100,000-call batches after 1,000 warmup calls; an observable returned
+reason was consumed equally by both sides. The fuller dummy-work layout was
+about 31 ns on each side because independent guard work can overlap the dummy
+chain; that is not evidence of a free guard. No D3D/game/GPU/FPS measurement.
+Exact results: `build/rc3-latest-review/forward_output_guard_bench_results.txt`.
+
+All tracked sources froze before the root's absolute full build. After its
+gates, commit/push the branch and promote clean DLL versions, then install for
+Steam flat using the sanctioned installer. Runtime validation must show
+nonzero actual skips, fewer actual OM/output queries, healthy history and
+continued admission when useful state appears. Compare the same slow/fast/slow
+carrier views with timing on and Motion source view off; keep the origin probe
+off and usual AA settings. Merge main after validation, with no FPS promise.
+
+Full validation passed in 160.2 seconds: Python gates, both production DLLs,
+all regression rigs, installer resource checks and receipt. The temporal rig
+passed the final 60 guard checks/28,561 sequences, core 166, integration 114
+and phase-bound 9,570 checks (2,016 independent engine cameras). Receipt
+`9867ad15a04c5626e80cb2cedaaeeb8ea486c8662eb1c8614241f44e2ed66882`
+matches the frozen source tree. Log: `build/flat-output-guard-full.log`.
+Only documentation changed after the gate; no further C++ edits or builds by
+the agents. The host process check found Elite closed before installation.
+
+Stationary validation plan: launch Steam flat with usual AA selected, origin
+probe off, CPU timing on and Motion source view off. Let the main-menu scene
+run for 10 seconds, then load the carrier and hold the same slow view for
+30 seconds, a fast view for 30 seconds and the slow view again for 30 seconds.
+Record FPS and any visible AA/history regression; quit normally afterwards.
+The log must show actual guard skips and fewer OM/output queries, continued
+full scans where demand remains, and healthy treatment/history in stable
+windows. The query count/time comparison, not the old inactive timer's zero,
+will establish whether an actual saving was realized.
