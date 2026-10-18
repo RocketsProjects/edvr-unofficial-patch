@@ -42,7 +42,8 @@
   substituted draws, EDVR gross 6.465 ms. copy-residual-continued 0.026 ms
   over 342 calls. ctor-continued 1.348 ms remained: the shell still wrapped
   the fast path. Reuse 14297/frame, frozen=0. History valid, zero
-  history-resets. The match now runs before that shell. Not flown.
+  history-resets. The match now runs before that shell. Installed on
+  Steam flat as `v0.20.0-rc.4-38-gaaf51238`. Not flown.
   ctor-continued calls should fall from about 7100 toward the draws that
   still miss. No new config key.
 - The upper-60s dip stays open and is not this gap. 06:38:16 was 73.4 fps
