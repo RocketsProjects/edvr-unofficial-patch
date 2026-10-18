@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-17 copy checks): sampled cost breakdown and inactive-ledger shadow probe VALIDATED; actual scans/admission unchanged. Full build passed (166.5 s). Next: one short fast/slow carrier capture on the instrumented build, CPU timing on and Motion source view off; no optimization claimed (last entry).
+State (2026-10-17 carrier capture): 137d4743 Steam fast/slow/fast CONFIRMS a substantial inactive scan cohort: 87.8% of slow-view scans, 0.981 ms gross/frame; raw-depth checks larger at 1.413 ms. No new history resets/backend failures. Next: offline guarded-skip safety proof, then implementation/validation; no FPS saving claimed (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -774,3 +774,88 @@ only motivates an optimization if its measured scan time is meaningful.
 
 No game install was performed in this task. No scan skip, binding cache,
 rendering change, configuration key or performance improvement is claimed.
+
+## 2026-10-17: Steam carrier fast/slow/fast cost capture
+
+The follow-up installed and separately verified the flat payload using
+`tools/install_edvr.py --target steam --scope flat`; settings were preserved.
+Sean completed the requested fast/slow/fast comparison and quit normally.
+`tools/edvr_log.py --target steam --expect-build HEAD --version` verified
+`edvr_gfx_20261017_185739.log`: `v0.20.0-rc.4-2-g137d4743`, PE `6AD4140F`,
+flat `/novr`. Subsequent reads pinned `--expect-build 137d4743`. This is the
+local RTX 5090/DLSS setup, 2496x1404 rendering into 3840x2160, not the AMD/FSR
+reporter's system. CPU timing was on from startup, Motion source view off.
+The build did not record the DLSS runtime or driver version.
+
+Seven steady five-second windows in each group, log-local timestamps:
+
+| Metric | Fast before, 19:01:02-32 | Slow, 19:01:42-19:02:12 | Fast after, 19:02:22-52 |
+|---|---:|---:|---:|
+| Frames / clocked frames | 3151 / 197 | 2546 / 160 | 3138 / 196 |
+| Present p50 (ms) | 11.11 | 13.45 | 11.10 |
+| GPU first-draw-to-Present span p50 (ms) | 6.36 | 13.06 | 6.74 |
+| GPU resolve p50 (ms) | 0.95 | 0.95 | 0.95 |
+| EDVR CPU gross / estimated floor-net (ms) | 2.543 / 1.976 | 7.943 / 6.204 | 2.566 / 1.996 |
+| Copy checks aggregate (ms) | 0.754 | 3.483 | 0.759 |
+| Raw-domain checks (ms) | 0.294 | 1.413 | 0.296 |
+| All output scans (ms) | 0.275 | 1.291 | 0.277 |
+| Inactive subset of output scans (ms) | 0.202 | 0.981 | 0.204 |
+| Remaining copy-check residual (ms) | 0.181 | 0.775 | 0.182 |
+| Actual output scans / clocked frame | 1154.84 | 5473.26 | 1145.70 |
+| Inactive candidates / clocked frame | 979.15 | 4803.83 | 970.40 |
+| Inactive fraction of actual scans | 84.79% | 87.77% | 84.70% |
+
+CPU values are weighted by clocked frames; Present/GPU figures are medians of
+the window p50s. The estimated total floor correction was 0.567/1.740/0.570 ms
+per clocked frame; no floor was allocated to individual child families. All
+output time adds exclusive normal and inactive cells once (slow:
+0.310 + 0.981 = 1.291 ms); the inactive row is a subset, not another addition.
+Query-count bookkeeping is not floor-corrected. No measured gross family cost
+is a guaranteed net saving or an FPS prediction.
+
+The slow group executed 875,722 actual OM Gets and 768,613 inactive candidate
+scans: 7,005,776 RTV slots and 56,046,208 UAV slots requested/scanned, with
+zero bound UAVs, and 3,835,394 GetResource calls. Shadow unknown was zero in
+every comparison group, so the nonzero cohort is an observed known-state
+result, not absence of sampling. Slow copy-check shares were 40.57% raw domain,
+37.07% all output scans, and 28.18% inactive scans (the latter inside outputs).
+Converter/forward costs rounded to 0.002/0.001 ms; verification/manual-conflict
+had zero calls in these sampled windows. Earlier at 19:00:22 the inactive
+fraction was only 20.1%, demonstrating the predicate did not label every scan
+inactive. Per-reason live-authority/publication/healthy-domain counts were not
+logged, so the remaining scans cannot be classified more precisely.
+
+Across 19:01:00-19:02:55, all 24 history-injection summaries reported valid
+history and clean closes, with zero stale/write/flush/off-thread/history-reset
+or fallback counts. Frame refusals stayed at 684; backend failures stayed zero
+and reset/camera-cut/origin-ambiguity counters did not grow. Forward qualified
+564 and overflow 8 were historical unchanged totals. Phase failures were zero,
+but the selected forward phase receipt was still awaiting bootstrap; this
+capture is not proof of a rendered forward-phase certificate.
+
+Ruled out: an inactive-ledger shortcut having no useful cohort in this scene,
+because the running probe observed 87.77% of slow-view scans inactive.
+Ruled out: output scans alone dominating the copy-check aggregate here,
+because raw-domain checks were larger (1.413 versus 1.291 ms).
+Ruled out: new backend failures or history resets explaining this comparison,
+because their counters stayed unchanged while cost rose and recovered.
+
+Next: complete the offline guarded-skip proof around owner/epoch uncertainty,
+pending issues and external-call reentrancy, keeping the actual-state fallback
+whenever demand is unknown. The existing conservative cohort keeps every live
+publication, authority and healthy raw domain watching. Its measured cost
+justifies that work; it does not authorize weakening provenance checks or
+claim a fix is validated. Raw-domain work is the larger remaining audit target.
+No further flight is needed before that code audit. The log does not label
+specific rooms, prove a 90-fps cap or reproduce the AMD user's 120-to-40 drop;
+the GPU span can include CPU starvation and is not GPU-busy time.
+
+Independent reader spot check at 19:01:57.836, frame 23996: 22 clocked frames,
+123,978 actual OM Gets, 109,139 inactive candidates, zero shadow unknown;
+3.566 ms aggregate; the exclusive breakdown was 1.447 raw, 0.314 normal
+outputs, 1.008 inactive outputs, 0.792 residual, 0.002 converter and 0.001
+admission (rounding applies).
+Parsed evidence from the sanctioned reader is in ignored
+`build/latest_steam_perf_group_summary.json`, `build/latest_steam_perf_rows.json`
+and `build/latest_steam_perf_stdout.txt`; the canonical evidence is the pinned
+flight log and the numeric summary above.
