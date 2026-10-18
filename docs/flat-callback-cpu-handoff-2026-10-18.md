@@ -26,8 +26,9 @@
   calls were 0, so the verify functions returned before their own scope.
   Coverage is 0.686 ms over 8126 scene draws. Issue residual 0.548 ms
   over 14500 calls sits near the clock floor.
-- The split is in the tree. Full build PASS. Not flown. No behaviour
-  change and no new config key. Line: `flat draw shell split:`. Figures
+- The split is installed on Steam flat as `v0.20.0-rc.4-30-g124f9d66`.
+  Full build PASS. Not flown. No behaviour change and no new config
+  key. Line: `flat draw shell split:`. Figures
   are per clocked frame, same denominator as `flat cpu 5s`. `continued`
   is `continuesRun`. `ctor-continued` plus `ctor-rest` is the constructor
   shell. `dtor-*` is the destructor shell. Their sum is this draw's share
