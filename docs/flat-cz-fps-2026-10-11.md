@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 repeated queries): immutable DSV/depth-description reuse implemented; actual OM getters and all writer/mutation proof remain per call. Sol full build PASS (158.6 s, cache helper 38 checks), Astra evidence review PASS; clean promotion/install Steam flat pending, main unmerged. Baseline `4c810f12`: discovery OFF, 68.33 sampled FPS, reported F7-off 263; EDVR 8.311 ms gross / 6.333 estimated floor-net, copy 3.019 gross and other about 2.23. No safe measured draw-shell shortcut found; WRL already skips same-identity reference churn. Next capture: steady slow/fast/slow carrier with cache counters and AA history. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test. Origin probe off (last entry).
+State (2026-10-18 repeated queries): `ee68d075` installed/verified Steam flat (`v0.20.0-rc.4-16-gee68d075`); immutable DSV/depth-description reuse, actual OM getters and all writer/mutation proof remain per call. Sol full build PASS (158.6 s, cache helper 38 checks), clean promotion PASS, Astra evidence review PASS; settings unchanged, main unmerged. Baseline `4c810f12`: discovery OFF, 68.33 sampled FPS, reported F7-off 263; EDVR 8.311 ms gross / 6.333 estimated floor-net, copy 3.019 gross and other about 2.23. No safe measured draw-shell shortcut found; WRL already skips same-identity reference churn. Next capture: steady slow/fast/slow carrier with cache counters and AA history, saving unmeasured. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test. Origin probe off (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1638,7 +1638,7 @@ Expected H1 saving is bounded and unmeasured: a prior one-pair reduction
 of about 29 ns/call would correspond to about 0.2 ms at the current 7,089
 raw calls/frame if reuse nearly always hits; remaining immutable calls and
 hit rate are not individually timed. This is not a claim to recover the
-roughly 10.8-ms directional F7 gap. Full build and installed capture pending.
+roughly 10.8-ms directional F7 gap. Installed capture remains pending.
 
 Sol's exclusive full validation build PASS: absolute `build.bat --wait-lock`,
 158.6 seconds reported (159.9 wall), 170-job pool, production d3d11 13 units
@@ -1651,3 +1651,27 @@ Log: `build/repeated-query-full-build.log`. Astra reviewed source/evidence
 only, including revised shared-helper tests, and found no blocker; no tests,
 builds or benchmarks executed by Astra. Clean-version promotion and install
 follow this validated source commit; runtime saving remains unmeasured.
+
+Clean source commit `ee68d075` promoted with `build.bat --dll-only --wait-lock`
+PASS (34.9 seconds wall, receipt verified). Steam flat sanctioned install
+dry-run, install and verify-only PASS, version
+`v0.20.0-rc.4-16-gee68d075`; DLL SHA256
+`915C909F26280288E1191F53CE0B34319A319F6B87BDDBA1813A7220B864B50C`.
+Both live settings hashes exactly match the pre-install snapshot: DLSS,
+CPU timing on, origin probe off. Logs/receipt:
+`build/repeated-query-promotion.log`, `build/repeated-query-validation.json`.
+Feature branch pushed; main remains `043d7ff6` and unmerged.
+
+Stationary validation steps (no arm or Ready dependency): launch Steam flat
+and load the same on-foot carrier slow view, keep DLSS selected, menus
+closed and frame-rate limit unchanged/off as in the preceding comparison.
+Wait two minutes there for startup work to finish; then hold slow 30 seconds,
+turn at least 90 degrees to the fast view for 30 seconds, and return to the
+same slow view for 30 seconds. Record FPS for each leg and whether AA stays
+visibly engaged. Do not press F7, NumLock or its modifier chords during
+these windows. Normal quit afterwards is fine; no live object read is needed.
+Use `edvr_log.py --target steam --expect-build ee68d075` before reading.
+Compare DSV/depth hits and misses, actual getter stage equalities, raw ns/call
+and per-frame cost normalized by call/draw counts, discovery-zero windows,
+and AA continuation/reset counters. Different carrier positions/views or
+startup legs cannot establish causal FPS savings.
