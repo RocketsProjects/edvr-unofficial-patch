@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-17 guarded output scans): `219d2bdb` built and installed for Steam flat; no FPS gain claimed. Combined menu-fix/AA-diagnostic/guard build on `codex/steam-flat-menu-camera-proof` passed all gates (166.9 s), ready for clean promotion and Steam replacement; validation remains pending and main unmerged. See design-flat-temporal-aa-2026-09-23.md, last entry; original guard evidence below.
+State (2026-10-17 guard validation): Steam `a4a4e751` functional PASS: slow-view guard skips 87.0-87.4%, actual OM Gets equal fallbacks, AA history healthy. Output cost about 0.30 ms; raw-domain cost about 1.91 ms remains. Reported 64 versus prior 66 fps is not a controlled regression comparison; scene call volume increased. Astra evidence audit agrees; no FPS-gain claim, main remains unmerged (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1000,3 +1000,68 @@ The log must show actual guard skips and fewer OM/output queries, continued
 full scans where demand remains, and healthy treatment/history in stable
 windows. The query count/time comparison, not the old inactive timer's zero,
 will establish whether an actual saving was realized.
+
+## 2026-10-17: combined Steam guard validation and evidence audit
+
+Sanctioned reader verifies `edvr_gfx_20261017_195802.log` as installed
+`v0.20.0-rc.4-8-ga4a4e751`, Steam flat, RTX 5090, DLSS model M,
+2496x1404 into 3840x2160. CPU timing on, Motion source view off, origin probe
+off; settings preserved. Sean reports 64 fps in the slow view and 90+ after
+turning around. Primary groups stop at 20:01:34.626, the completed capture;
+later live rows are excluded, as are loading and turn-transition windows.
+
+| Group / window ends | Frames / clocked | Present / GPU span ms | EDVR gross / estimated floor-net ms | Copy / output / raw ms |
+|---|---:|---:|---:|---:|
+| Slow 20:00:14.519-29.548, 4 windows | 1246 / 78 | 15.81 / 14.81 | 8.519 / 6.550 | 3.211 / 0.306 / 1.909 |
+| Fast 20:00:39.564-59.577, 5 windows | 2252 / 141 | 11.09 / 4.99 | 1.497 / 1.149 | 0.207 / 0.023 / 0.102 |
+| Slow 20:01:14.603-34.626, 5 windows | 1639 / 102 | 14.86 / 14.78 | 8.442 / 6.496 | 3.202 / 0.303 / 1.906 |
+
+CPU times are weighted by clocked frames; Present/GPU are medians of window
+p50s. GPU span includes scheduling gaps and does not prove GPU-busy time.
+
+Guard checks / skipped scans / actual scans per clocked frame are
+7069/6150/919, 428/362/66 and 7039/6155/884: skip fractions 87.00%, 84.52%
+and 87.44%. Unknown decisions are zero and actual OM Gets equal full-scan
+fallbacks in each group. The old inactive timer is zero because that work
+does not execute. The functional skip and conservative full-scan paths both
+run; this is not a timing-disabled instrument or a dead cohort.
+
+Against the earlier 137d4743 66.83-fps plateau, measured output work falls
+1.492 to 0.303 ms, copy aggregate 4.021 to 3.202 and EDVR gross 8.817 to
+8.442 (estimated floor-net 6.949 to 6.496). Raw-domain work rises 1.634 to
+1.906 ms, but its calls rise 6150 to 7027 per clocked frame (+14.26%);
+gross per-call time changes only 266 to 271 ns (+2.14%). Actual scans fall
+from 6159 to 884 per clocked frame. The views are not guaranteed identical;
+these establish query elimination and remaining cost, not a controlled FPS
+improvement or regression. The approximately 14.3k copy-parent calls in the
+slow view are two scopes per approximately 7.1k draws, not 14.3k actual scans.
+
+DLSS/history remain healthy: refusals stay 686; reset, lost-history and backend
+failure counters do not increase; all 17 relevant phase windows have zero
+failures. GPU resolve remains about 0.96 ms. The current capture does not
+reproduce the external reporter's deferred-matrix refusal.
+
+Ruled out: the new output guard being inactive in the carrier, because it
+actually skips about 87% of eligible scans and the OM query count follows
+only the remaining fallback cohort. Ruled out: new stable AA history failures
+causing this slow/fast contrast, because history/refusal counters remain
+unchanged. A 64-versus-66 readout alone cannot identify a regression with
+this changed per-draw workload.
+
+Sol's source audit identifies the next measured target: raw-domain observation
+runs before converter/light shader filters on every screen-sized DSV draw.
+`forwardDsv` repeats QueryInterface/GetDesc on the same held resource; its
+immutable descriptor can be read once. CB binding/range, copied camera bytes
+and metadata are also checked, with geometry issue begin/return validation
+outside the constructor's raw-domain timer. The residual approximately 0.99 ms
+includes publication/authority walks and mutation/filter work; it is not all
+attributable to one function. No new optimization was applied during this
+analysis. A failed-domain shortcut needs a no-healing proof and cohort/query
+measurements; skipping raw observation globally could miss a new valid domain.
+
+Astra reviewed evidence/source history only, without tests or changes, and
+agrees this is remaining broad admission cost rather than proof of a new FPS
+regression. Its RC3/RC4 causal audit is appended to the shared AA investigation.
+No additional flight is needed before the source/cost audit. Frozen evidence:
+`build/carrier_guard_a4a4e751_summary.json` and companion sanctioned-reader
+stdout files. Main remains unmerged.

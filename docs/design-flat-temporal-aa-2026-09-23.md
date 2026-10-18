@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State (2026-10-17 RC4):** reporter's intermittent deferred-camera refusal remains open; paired witness built/offline-tested, not flown. Separate Steam menu AA-switch delay reproduced.
-  Menu-copy proof-type fix and combined Steam guard/diagnostic build passed all gates; awaiting stationary validation (last entry). No admission-bound change; main remains unmerged.
+- **State (2026-10-17 RC4):** Steam `a4a4e751` menu engagement/mode-switch fix visually PASS; carrier history and functional output guard PASS. External deferred-camera refusal remains open; paired witness awaits reproduction.
+  Astra release-history review separates the two proven RC3 regressions from the older RC2 deferred matcher; no new FPS regression established. No admission-bound change; main remains unmerged (last entries).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -17739,3 +17739,59 @@ the main-menu scene unchanged, switch DLSS to TAA in F8, wait 10 seconds,
 switch back to DLSS and close F8 for 15 seconds. Keep the origin probe off;
 neither F7 nor Full is needed. Compare engagement delay, selector-camera-
 provenance refusals and renderer history continuity across both transitions.
+
+## 2026-10-17: current validation and Astra RC3/RC4 causal audit
+
+Sean confirms the main menu is fixed and AA engages much faster after the
+Steam install. Exact build `v0.20.0-rc.4-8-ga4a4e751` is verified in
+`edvr_gfx_20261017_195802.log`; the subsequent carrier slow/fast/slow capture
+maintains DLSS/history, with no new stable phase/refusal/reset/backend failures.
+Guard functionality passes; FPS attribution remains unqualified. Exact
+performance groups and remaining raw-domain cost are in the last entry of
+`flat-cz-fps-2026-10-11.md`. No new C++ or install change follows this capture.
+
+At Sean's request, Astra reviewed git/source/diagnostic evidence only; Sol
+handled tests, log aggregation and RE. Astra ran no tests/builds/benchmarks
+and made no changes. Its conclusions distinguish these defects:
+
+- `44a8ef1a`, between RC2 and RC3, introduced forward-light admission and
+  treated retained `phaseHdr` planning identity as live ownership. Rejecting
+  an optional first candidate could invalidate an independent valid camera
+  route. Three recorded frames establish that removing the premature
+  uncertainty mark restores the valid route; `c7c14898` scopes that authority.
+- The same new typed path introduced the 752-byte forward discriminator.
+  The existing menu-copy branch omitted it when inheriting a camera record,
+  guaranteeing a 112-byte-type rejection of the copied 752-byte witness.
+  `d1673809` fixes the transfer; before/after reducer evidence and Sean's
+  successful main-menu validation support this result.
+- The external RC4 forward/inverse mismatch is a distinct unresolved stage.
+  Chronology matters: `82dbf1b0` predates RC2, and
+  `git diff v0.20.0-rc.2 HEAD -- src/d3d11/flat_deferred_camera.h` is empty.
+  Gamma8/gamma12 and missing-phase repair already existed in RC2. Changed
+  surrounding execution could expose them; neither a new bound nor onset
+  after RC2 is established. The earlier comparison with v0.19.1 remains true.
+- The F1 arithmetic model has separate positive evidence: exact engine
+  arithmetic reproduced omitted rounded-frustum construction, corrected in
+  `942cfeb3` before the RC3 tag; stationary recovery and the 20-km out/5-km return passed, with
+  seven bounded ambiguity resets. That qualification does not cover every
+  camera-transfer route.
+
+The common failure is proof composition across stages: optional rejection
+was granted too much authority, a partial record copy lost its proof type,
+and generic downstream refusal labels obscured the initiating stage. Individual
+helper/math tests and a successful steady scene did not cover every inheritance
+branch, mode-change reconstruction and failed optional candidate. The prior
+integration fixture exercised image continuation, not the separate menu-copy
+branch constructing a new destination. Full capture/FTR also lacked guaranteed
+paired numerical inputs for the actual RC4 failure; `c6e528ea` addresses that
+evidence gap without claiming a repair.
+
+Recommended offline release gates: every proof type through every constructing
+or inheriting branch (bytes, discriminator, identity, epoch and currentness);
+rejection before and after donation with an independent valid route; actual
+mode-reset/bootstrap/nonzero sequences; first-failure inputs captured before
+mutation and surviving bundle collection; representative draw/call counts for
+new broad observers. A coherent proof-transfer helper could prevent partial
+copy omissions, but no refactor is made here. These checks reuse existing
+captures rather than require a separate flight per hypothesis. Main remains
+unmerged pending Sean's decision; the external paired capture remains open.
