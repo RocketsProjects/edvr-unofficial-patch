@@ -5503,8 +5503,7 @@ void flatOffscreenRecord(State& s, const FlatRuntimeDraw& d, const FlatPairFacts
 // True when this draw is the same continued producer as the one just served. The caller then
 // skips the constructor body and does only what that draw still has to do.
 bool flatProducerRunAccepts(const State& s, const FlatRuntimeDraw& live, const FlatPairFacts& pair,
-                            char kind, uint32_t count, uint32_t start, int32_t base, uint32_t instances,
-                            uint32_t startInstance, bool auditing) {
+                            char kind, uint32_t count, uint32_t instances, bool auditing) {
     const auto& held = s.producerRun;
     if (!held.armed || held.frame != s.prefix.frame || !held.draw.supported || !live.supported || !live.key.camera) return false;
     if (pair.toneSlot != ~0u || pair.copyPair || pair.mapToneSlot != ~0u || pair.uiMayAsk || pair.sourceTone) return false;
@@ -5515,8 +5514,7 @@ bool flatProducerRunAccepts(const State& s, const FlatRuntimeDraw& live, const F
     if (overlayOpen(s) || overlaySuffixActive.load(std::memory_order_acquire)) return false;
     if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) return false;
     if (s.namedDepth != live.key.depth || s.namedConstants != live.key.b1) return false;
-    if (kind != held.kind || count != held.count || start != held.start || base != held.base ||
-        instances != held.instances || startInstance != held.startInstance) return false;
+    // The run is many meshes on one pipeline. Draw arguments are not its identity.
     if (held.rtvGen != bindingGeneration(BindSlot::Rtv0) || held.dsvGen != bindingGeneration(BindSlot::Dsv0) ||
         held.vsGen != bindingGeneration(BindSlot::Vs) || held.psGen != bindingGeneration(BindSlot::Ps) ||
         held.b1Gen != bindingGeneration(BindSlot::VsCb1)) return false;
@@ -5553,11 +5551,12 @@ void flatProducerRunRemember(State& s, const FlatRuntimeDraw& d, char kind, uint
 // detector, the trace, the world-draw notes and the substitution. The constructor returns.
 bool flatProducerContinue(State& s, ID3D11DeviceContext* context, FlatRuntimeDraw& d, const FlatPairFacts& pair,
                           const FlatOffscreenArgs& offscreenArgs, bool auditing, uint32_t offscreenTargetsBefore,
-                          bool offscreenUncertainBefore, char kind, uint32_t count, uint32_t start, int32_t base,
-                          uint32_t instances, uint32_t startInstance, bool& producer, bool& gameHadTarget6,
+                          bool offscreenUncertainBefore, char kind, uint32_t count, uint32_t instances,
+                          bool& producer, bool& gameHadTarget6,
                           forward_light::Issue& forwardIssue) {
-    if (!flatProducerRunAccepts(s, d, pair, kind, count, start, base, instances, startInstance, auditing)) return false;
+    if (!flatProducerRunAccepts(s, d, pair, kind, count, instances, auditing)) return false;
     d = s.producerRun.draw;
+    d.instances = instances;
     if (d.key.camera) d.key.camera = d.camera;   // the saved pointer addressed the previous draw's stack array
     const auto& k = d.key;
     forwardFrame(s);
@@ -5817,7 +5816,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if(overlayOpen(s)) overlayFail(s,"overlay-foreign-work");
     }
     if (cameraKept && flatProducerContinue(s, context, d, pairFact, offscreenArgs, auditing, offscreenTargetsBefore,
-                                     offscreenUncertainBefore, kind, count, start, base, instances, startInstance,
+                                     offscreenUncertainBefore, kind, count, instances,
                                      producer, gameHadTarget6, forwardIssue)) {
         splitContinued = true;
         flatcpu::drawSplitSetContinued(true);
