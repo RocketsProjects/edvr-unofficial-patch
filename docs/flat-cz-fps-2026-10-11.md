@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-17 carrier capture): 137d4743 Steam fast/slow/fast CONFIRMS a substantial inactive scan cohort: 87.8% of slow-view scans, 0.981 ms gross/frame; raw-depth checks larger at 1.413 ms. No new history resets/backend failures. Next: offline guarded-skip safety proof, then implementation/validation; no FPS saving claimed (last entry).
+State (2026-10-17 carrier captures): 137d4743 CONFIRMS inactive scans in two slow views; newest 66.83-fps plateau has 5,279/6,159 scans inactive (85.71%), 1.114 ms gross/frame; raw-depth checks larger at 1.634 ms. No new history resets/backend failures. Next: offline guarded-skip safety proof, then implementation/validation; no FPS saving claimed (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -859,3 +859,39 @@ Parsed evidence from the sanctioned reader is in ignored
 `build/latest_steam_perf_group_summary.json`, `build/latest_steam_perf_rows.json`
 and `build/latest_steam_perf_stdout.txt`; the canonical evidence is the pinned
 flight log and the numeric summary above.
+
+## 2026-10-17: additional slower carrier view, about 66 fps
+
+While the first analysis completed, Sean found a slower view and reported
+66 fps after a stationary hold. The same verified 137d4743 log continued;
+the exact room/view was not supplied. Six complete windows ending
+19:06:43.153-19:07:08.198 cover 2,008 frames over 30.045 seconds: 66.83 fps.
+The 126 clocked frames give this comparison against the first slow group:
+
+| Metric (ms) | Original slow | New plateau |
+|---|---:|---:|
+| Present p50 | 13.45 | 14.545 |
+| GPU first-draw-to-Present span p50 | 13.06 | 14.255 |
+| GPU resolve p50 | 0.95 | 0.93 |
+| EDVR CPU gross / estimated floor-net | 7.943 / 6.204 | 8.817 / 6.949 |
+| Copy-check aggregate | 3.483 | 4.021 |
+| Raw-domain checks | 1.413 | 1.634 |
+| All output scans | 1.291 | 1.492 |
+| Included inactive output subset | 0.981 | 1.114 |
+
+CPU times are clocked-frame weighted; Present/GPU are medians of window p50s.
+Actual output scans averaged 6,159 per clocked frame; 5,279 were inactive
+candidates (85.71%), with zero shadow unknown. The inactive subset was 27.70%
+of copy-check time; raw-domain checks remained largest at 40.63%. These are
+instrumented costs, not proven net savings. GPU span is not GPU-busy time.
+
+No new treatment refusal, history reset, camera cut, backend failure or
+injector write failure accompanied the slowdown. Frame refusals stayed 684
+and historical overflow eight; timing stayed on, motion view off. The forward
+phase receipt continued awaiting bootstrap. This reinforces the same CPU-cost
+finding rather than identifying a new AA failure. The next step remains the
+offline guarded-skip safety proof; no further stationary capture is needed
+before that audit. No code or game installation changed during analysis.
+
+Ignored evidence: `build/carrier_66fps_group_summary.json`,
+`build/carrier_66fps_rows.json`, `build/carrier_66fps_stability_stdout.txt`.
