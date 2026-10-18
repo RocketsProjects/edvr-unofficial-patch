@@ -105,6 +105,33 @@ inline unsigned run() {
         expect(admitted&&target->tone.key.b1==nullptr&&target->tone.sceneCameraB1==src.key.b1,"inherited H names actual donor without forging bound b1");
         expect(target->tone.key.projection[1].resource==cb.resource&&target->tone.key.projection[1].copied==752&&
             target->tone.firstWriteSeq==2&&target->tone.sceneCameraWriteSeq==1&&flat_mono_detail::cameraCurrent(target->tone,900),"selected camera retains original light and donor write ordinals");
+        // Main-menu transfer: an already-qualified forward H passes the
+        // verified camera-independent HDR copy. Its proof type must survive
+        // with its bytes/stamps; no fresh matrix or binding is authorized.
+        auto menu=draw(token(0x7000),26,nullptr,nullptr,0xDEF19B035D5EDEDCull,0xDED8796049C7BB4Aull);
+        menu.key.depthWidth=menu.key.depthHeight=0;menu.key.srvResource[0]=h.key.color;
+        menu.key.srvView[0]=token(0x7002);menu.menuHdrCopyVerified=true;
+        flatRuntimeObserve(p,menu);auto* inherited=flatRuntimeTarget(p,menu.key.color);
+        expect(p.menuCopiesAccepted==1&&inherited->menuInherited&&inherited->hdrCamera&&!inherited->hdrBad,
+            "verified menu copy establishes inherited H through the real reducer path");
+        expect(inherited->tone.deferredCamera&&inherited->tone.key.projection[1].copied==752&&
+            inherited->tone.sceneCameraB1==target->tone.sceneCameraB1&&
+            inherited->tone.sceneCameraWriteEpoch==target->tone.sceneCameraWriteEpoch&&
+            inherited->tone.sceneCameraWriteSeq==target->tone.sceneCameraWriteSeq&&
+            !std::memcmp(inherited->tone.camera,target->tone.camera,96),
+            "menu copy preserves exact forward payload camera and donor stamps");
+        const bool inheritedType=inherited->tone.forwardLightCamera;
+        std::printf("forward menu provenance reproduction: source-current=%u source-forward=%u destination-menu=%u destination-deferred=%u destination-forward=%u copied=%u destination-current=%u\n",
+            flat_mono_detail::cameraCurrent(target->tone,900)?1u:0u,target->tone.forwardLightCamera?1u:0u,
+            inherited->menuInherited?1u:0u,inherited->tone.deferredCamera?1u:0u,inheritedType?1u:0u,
+            inherited->tone.key.projection[1].copied,flat_mono_detail::cameraCurrent(inherited->tone,900)?1u:0u);
+        expect(inheritedType==target->tone.forwardLightCamera,"menu copy preserves forward proof discriminator");
+        expect(flat_mono_detail::cameraCurrent(inherited->tone,900),"verified forward menu copy remains camera-current");
+        // Counterfactual changes this discriminator only, proving that the
+        // retained original752 span/stamps and identical rows already suffice.
+        inherited->tone.forwardLightCamera=target->tone.forwardLightCamera;
+        expect(flat_mono_detail::cameraCurrent(inherited->tone,900),"type-only counterfactual restores camera provenance");
+        inherited->tone.forwardLightCamera=inheritedType;
         auto image=draw(token(0x5000),9,token(0x2000),token(0x2001),0xCFA91824129ECBBCull,0xFCFAD73924BF45B9ull);
         image.imageSourceCameraIndependentVerified=true;flatRuntimeObserve(p,image);
         auto copy=draw(h.key.color,26,nullptr,nullptr,0xCFA91824129ECBBCull,0xDFCBA0EC70B03C9Bull);

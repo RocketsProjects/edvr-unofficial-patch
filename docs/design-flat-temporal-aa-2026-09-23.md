@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State (2026-10-17 RC4 report):** real intermittent deferred-camera certificate refusals; exact rc4, backend healthy. Paired failure-only matrix witness built and offline-tested; not captured in game. No admission change.
-  First failure forward-mismatch, later inverse-mismatch. Existing Full can miss failing phases; capture exact pre-refusal values before a fix (last entry). Guarded-scan validation remains separate.
+- **State (2026-10-17 RC4):** reporter's intermittent deferred-camera refusal remains open; paired witness built/offline-tested, not flown. Separate Steam menu AA-switch delay reproduced.
+  Menu-copy proof-type fix passed regression and full build, awaiting stationary validation (last entry). No admission-bound change; guarded-scan validation remains separate.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -17653,3 +17653,76 @@ original bytes and donor bytes when a refusal occurs; absent witness with
 zero new deferred failures is a non-reproduction, not proof the instrument
 ran. The observed pair and phase must reproduce the failing numerical check
 offline before proposing an admission fix. This diagnostic has not been flown.
+
+## 2026-10-17: Steam main-menu AA mode-switch delay
+
+Sean confirms the parked-ship main menu remains open throughout, and switching
+AA modes in F8 causes a visible delay before engagement. Sanctioned reader
+verifies `edvr_gfx_20261017_194338.log` as the installed guarded-scan build
+`v0.20.0-rc.4-5-g219d2bdb`, PE `6AD41F4B`, not diagnostic `c6e528ea`.
+Environment: Steam flat `/novr`, RTX 5090, DLSS model M/preset 13,
+2496x1404 into 3840x2160; driver/DLSS runtime versions unavailable, VR N/A.
+CPU timing is enabled. Main and the Steam installation remain unchanged.
+
+Startup has a separate one-time cost: no-scene standdown enters 19:43:45.117,
+resumes at 19:44:16.886, route trains at 16.919, NGX completes after 1025 ms
+at 17.944, and first resolve is 18.040. By 18.986 there are 73 treatments,
+two accepted resets and 71 continuations. This does not measure menu arrival.
+
+The repeatable failure follows F8 mode changes, without NGX reinitializing:
+19:44:20.623 TAA, 22.552 off, 23.040 TAA, 23.707 DLSS. Another sequence at
+19:45:36.393 TAA and 41.182 DLSS reproduces the refusals. After recovery, the
+unchanged scene sustains thousands of consecutive treatments. Conflict receipts
+name `selector-hdr-camera-provenance`, not deferred inverse propagation.
+At frame 13295 q409, the reference camera is invalid and current camera valid,
+but both hash to `63676EB4A55692F9`, with the same shaders, target, depth and
+dimensions. The copied reference retains a B1 identity and current write stamp;
+the selector's current scene-camera record has a null B1. Identical hashes
+alone do not establish current provenance.
+
+Discriminator from 19:44:23.985 to 29.010: qualified forward-light donations
+increase 76 to 263 (187); the selector-camera-provenance conflict window is
+exactly 187. Forward guard refusals increase by 253, and treatments also
+increase by 253. This joins the optional successful forward-camera path to the
+lost-copy proof, rather than a delay in DLSS initialization.
+
+Root cause reproduced offline: the verified `kMenuHdrCopyVs/kMenuHdrCopyPs`
+branch in `flat_runtime_model.h` creates a new destination tone and transfers
+`deferredCamera`, original projection, scene-camera identity/stamps and the
+camera bytes, but omits `forwardLightCamera`. Its source passes cameraCurrent
+with a 752-byte forward-light projection. The inherited destination loses the
+type bit, so cameraCurrent expects a 112-byte deferred projection and rejects
+the unchanged 752-byte witness. Before any production change, the regression
+fails exactly the retained-type and destination-currentness assertions; a
+test-only type-bit counterfactual restores currentness. Log:
+`build/flat_menu_proof_before_fix.log` (119 integration checks, two failures).
+
+Minimal correction: inherit `forwardLightCamera` alongside `deferredCamera`
+inside that already-verified menu copy. Do not loosen sizes, camera identity,
+write epochs, order, depth or source validation. Independent Sol review found
+the same bug and audited the adjacent image-copy path, which retains its
+existing destination tone instead of constructing another partial copy.
+The source/output phase-domain distinction and intermittent optional-forward
+qualification can explain different warmup/nonzero paths; the log does not
+prove every intermediate frame of the three-frame reset cycle.
+
+Ruled out: a new fixed four/five-second warmup timer, because the live-phase
+gate still needs two clean accepted frames, while the old 5 s standdown,
+1.5 s probes and 1 s preflight retry predate RC4. Ruled out: repeated NGX
+initialization causing the F8-switch delays, because it initializes once and
+the subsequent failures are exact selector camera-provenance refusals.
+Ruled out: using this menu type-loss fix as proof of the external reporter's
+forward/inverse mismatch, which is a different refusal stage and still needs
+the paired matrix capture above. No further flight is needed for menu
+reproduction; validation is a stationary F8 switch and clean history recovery.
+
+After the one-field fix, the same integration rig passes all 119 checks with
+destination forward=1, copied=752 and cameraCurrent=1. The full temporal rig
+also passes, including the 35 paired-payload checks and numerical bounds.
+Full `build.bat --wait-lock` passed all gates in 173.4 seconds; log:
+`build/flat-menu-camera-proof-full.log`; receipt input identity:
+`9fede1234c7b5b3371bb2652d1ca479ef69215fe620433d809e07d8b6085293d`.
+Sean requested Steam installation when ready. Preserve installed guard
+`219d2bdb` by integrating it on a separate Steam test branch and validating
+the combined tree before installation. Keep main unmerged pending in-game
+validation; do not overwrite settings or enable the origin probe.

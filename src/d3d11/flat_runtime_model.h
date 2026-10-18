@@ -587,6 +587,7 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         t->tone.key.depthFormat = t->writes.key.depthFormat;
         t->tone.key.b1 = source->tone.key.b1;
         t->tone.deferredCamera=source->tone.deferredCamera;
+        t->tone.forwardLightCamera=source->tone.forwardLightCamera;
         t->tone.deferredInverseRepaired=source->tone.deferredInverseRepaired;
         t->tone.sceneCameraB1=source->tone.sceneCameraB1;
         t->tone.sceneCameraWriteEpoch=source->tone.sceneCameraWriteEpoch;
