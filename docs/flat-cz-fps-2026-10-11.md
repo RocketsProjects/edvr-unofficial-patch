@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 callback-internals install): `041f8e78` (`rc.4-23`) installed/verified Steam flat; full build, focused runtime tests and clean promotion PASS, Sol RE/tests and Astra evidence review. Geometry Issue uses one owner-serialized tracked/shadow read for metadata+96 bytes, preserving fresh actual bindings/ranges/width and pre/post Draw proof. Flight pending; main unmerged, probe off, settings unchanged. Callback aggregate is residual + shader + DSV + constants; new scopes need refreshed floor estimates. Prior `709ba499` native-HDR slow/fast/slow: 63.6/204.9/64.4 FPS, callbacks 4.426/0.160/4.558 ms gross; all 10,893 leg frames retained AA history. No measured saved-ms/FPS claim yet. Next capture: same carrier slow/fast/slow at 300-FPS limit, DLSS/settings unchanged, no diagnostic arm. Zero Light sites cannot justify skipping earlier producers. Phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (previous entries).
+State (2026-10-18 callback handoff): `041f8e78` (`rc.4-23`) installed/verified Steam flat, full build/promotion PASS, but completed capture shows no demonstrated useful speed win: last slow1 59.03 FPS, fast 221.29, full slow2 65.18. Earlier slow1 61.64 is a different overlapping slice. All 18,442 selected frames continue AA history/backend at native3840 HDR, zero new resets/refusals/jitter failures. Full slow2 callback gross5.976/net whole11.891 ms vs709's4.558/11.220; coverage is SAME, three new child timers add cost, attribution unresolved. Main unmerged, probe off, settings unchanged. User-requested handoff: `docs/flat-callback-cpu-handoff-2026-10-18.md`; start there for checkout/build/artifacts, external-review assessment and next certificate proof. Existing engine generation cache/1in64 shader checks do not certify all forward-Issue dependencies. No further identical flight requested. Sol RE/tests, Astra evidence only. Phase bootstrap remains unvalidated; Ctrl+NumLock ingress issue persists (earlier entries).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -2158,3 +2158,33 @@ history/refusal/reset/backend continuity. Shader/DSV/constant child calls
 must be nonzero where their stage runs; absent labels with clocks active
 do not count as a zero-cost success. Keep claims of saved milliseconds
 conditional on that capture and its workload.
+
+Completed Steam capture, user-confirmed: log `edvr_gfx_20261018_052052.log`,
+build `041f8e78`/PE `6AD4AAE7`. Freeze CPU/copy 05:27:48.247 and runtime
+05:27:47.834. Final last slow1 six windows end 05:24:38.027: 59.03 FPS,
+7234 draws/frame, gross15.940/net estimate12.647 ms. Earlier 61.64-FPS
+slice ends 05:24:17.991 and overlaps; do not label it last30 or sum both.
+Fast 221.29 FPS; full stable slow2 65.18 FPS,7085 draws/frame,
+gross15.070/net estimate11.891, callback residual+shader+DSV+constants
+1.430+1.609+0.700+2.237=5.976 ms. Selected nonoverlap AA cores total
+1771+8849+7822=18,442 clean HDR/backend/history frames, no new reset,
+refusal or jitter failure. The 05:25:48 CPU/copy report exists 1ms apart;
+the parser now pairs it and excludes it as the first stabilization window.
+
+No demonstrated useful speed win. Slow1/early slow2 FPS fall; full slow2
+is slightly faster with fewer draws. Whole callback coverage is unchanged
+from709; extra children subdivide it and add clocks/gates. Full slow2
+whole floor-net rises0.671 ms; combined callback recorded-floor rises0.682
+ms (three new child floors total0.688). Neither source-specific regression
+nor instrumentation-only cause is isolated. Ruled out: using the existing
+engine cache unchanged as a complete forward-Issue certificate; its actual
+1in64 probe covers shaders only, and raw/unhooked state paths remain.
+
+User-requested handoff in active checkout:
+`docs/flat-callback-cpu-handoff-2026-10-18.md`. It records environment,
+installed/source/worktree identities, final artifacts, complete mutation
+coverage needed for run reuse, and a narrower camera-proof option.
+Final evidence: `build/callback_snapshot_041f8e78_final_summary.md/.json`,
+JSON SHA256 `F6FDEBC27750060BF4B251364F145B8007817E1AEDDA83D84CE1EC9B4CE5AB52`.
+Sol normalized/analyzed; Astra reviewed corrected selection/arithmetic.
+No new source/build/install from this read; main remains unmerged.
