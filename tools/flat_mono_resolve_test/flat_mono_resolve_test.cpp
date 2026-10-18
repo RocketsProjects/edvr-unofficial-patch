@@ -217,7 +217,11 @@ void Log::note(const char* fmt,...) {
 }
 // Stand-in for src\common\proxy.cpp's breadcrumb(): the route's crumbs land here so the rig can read the trail back.
 void breadcrumb(const char* stage) {if(stage)crumbLines.emplace_back(stage);}
-bool ensureDirectory(const std::wstring& path) {return CreateDirectoryW(path.c_str(),nullptr) || GetLastError()==ERROR_ALREADY_EXISTS;}
+bool flatDrawCaptureNoDirectoryWrites=false;
+bool ensureDirectory(const std::wstring& path) {
+    if(flatDrawCaptureNoDirectoryWrites)return true;
+    return CreateDirectoryW(path.c_str(),nullptr) || GetLastError()==ERROR_ALREADY_EXISTS;
+}
 thread_local bool g_flatComputeInternal = false;
 ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* context,const void* bytecode,size_t size,
                                          const char*,const char*) {
