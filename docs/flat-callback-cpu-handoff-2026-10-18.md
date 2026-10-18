@@ -37,7 +37,8 @@
   over 7071 calls and copy-residual-continued 0.993 ms over 14141 calls,
   the same shape as 073157. No picture regression. Ruled out: matching
   the previous draw's arguments. The run is many meshes on one pipeline.
-  That check is removed. The next flight should show
+  That check is removed. Installed on Steam flat as
+  `v0.20.0-rc.4-35-g455ffd45`. The next flight should show
   copy-residual-continued near zero. No new config key.
 - The upper-60s dip stays open and is not this gap. 06:38:16 was 73.4 fps
   at the same draw count, certificate still hit. Other-thread engine
