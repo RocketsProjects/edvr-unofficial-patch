@@ -2,6 +2,7 @@
 
 ## Status
 
+State (2026-10-17 carrier report): verified `c7c14898`, RX 9070 XT, native FSR; 120-to-40 fps captured with valid AA history. EDVR CPU grows about 1.1 to 9.8 ms net; copy/state checks are the largest measured family. Exact subpath attribution remains open; no next walk requested (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -25,7 +26,6 @@ Earlier state: BUILT on `claude/fps-drops-onfoot-czs-577f5a` (observers, copier,
 FLOWN. A bounded experiment on one of three suspects, plus instruments that say whether it was the right one. NOT the fix: the
 expected gain is about 4-5 ms of a 13-25 ms gap at most, and the per-draw render-thread work (about 8-9 ms a frame) is untouched.
 Report: flat v0.19.1 (Steam, build 6ACAF769), RTX 3050, "40 fps without the mod, 20-25 with DLSS" in on-foot CZs.
-Working files (gitignored): `reviews\flat-cz-fps-findings-2026-10-11.md`, `reviews\flat-cz-fps-review-2026-10-11.md`.
 
 Evidence, from the reporter's log `edvr_gfx_20261011_184408.log`:
 - In-CZ A/B: `fix.temporal_aa` toggled through F8, off at 18:58:43, 19:01:52, 19:13:28. vScreen 20 s windows: DLSS 21 fps
@@ -61,6 +61,8 @@ the always-on 0.19.1 additions all run in the 45 fps off state. Ask which `tempo
 NOT claimed: that the observers are on Elite's critical path; that this recovers the off/on delta; that any fps is gained.
 
 ## What changed
+
+Working files (gitignored): `reviews\flat-cz-fps-findings-2026-10-11.md`, `reviews\flat-cz-fps-review-2026-10-11.md`.
 
 `src\d3d11\engine_velocity_primary_copy.h`: `g_claimsLive`, `g_emissionsLive`, `ClaimLock`, `AddressSet`, `mergeNoClaimsToken`,
 `copierLockFree`, `g_poolView`, `Caller`, `formatLockLine`, `formatExitLine`. `stats()` folds the lock-free counters into
@@ -599,3 +601,87 @@ about 0.27 ms a frame on average; so it is off unless a user turns it on, and a 
   is off; Present p95 at a settlement near p50 (no clocked-frame hitch). Turned on from F8 > Debug: the line logs the change and the next window's
   line carries the families again. NOT measured here: the off state's cost (the scopes' gate checks remain: a load and a compare each, about 130k a frame
   at 14k draws).
+
+## 2026-10-17: carrier terminals, elevator and vault hallway frame drops
+
+The reporter describes roughly 120 to 40 fps near a carrier terminal and
+front elevator, with the worst view looking down the rear hallway from the
+vault side of the glass. Bundle `edvr-logs-20261017-164941.zip` contains
+`edvr_gfx_20261017_160006.log`, 48,377 lines over about 49 minutes. It does not
+mark those exact views, so timestamps cannot be assigned to individual rooms.
+
+Build verification: `c7c14898`, PE build `6AD3FA41`, flat `/novr`, scope both.
+The explicit expected build is C7, not the current rc.4 tag on `735f495d`:
+the intervening commits only change Python installation/docs, and
+`git diff c7c14898 HEAD -- src/d3d11 src/common src/openxr` is empty. This is
+the fixed AA rendering code. Environment: RX 9070 XT, FSR 3.1.2, native
+3440x1440 HDR/output, VSync off, origin probe off, UI quality off. VR runtime
+and headset are not involved. Early/live AA mode switches are separate from
+the steady FSR windows below.
+
+| Log window | Present p50 | Frames per 5 s | Estimated EDVR CPU after reported clock-floor deduction | Copy-check family, measured |
+|---|---:|---:|---:|---:|
+| 16:40:49 | 24.93 ms | 199 | 9.56 ms | 4.755 ms / 16,863 calls |
+| 16:46:39 | 24.71 ms | 199 | 9.82 ms | 4.884 ms / 16,844 calls |
+| 16:48:59 | 8.35 ms | 591 | 1.09 ms | 0.232 ms / 1,270 calls |
+
+Twenty-five timing-on windows have Present p50 at least 20 ms; their median
+is 22.67 ms. Slow-group median EDVR CPU after the reported floor deduction is
+8.749 ms, versus 2.303 ms for the under-10-ms group. The individual examples
+above are recovered/heavy views, not a controlled same-view AA-off baseline.
+The measurements support a substantial draw-dependent EDVR CPU contribution;
+they do not assign the entire frame-time difference to EDVR.
+
+The GPU first-game-draw-to-Present span grows from 7.90 to about 24.9 ms. This
+includes gaps while the CPU supplies commands, so it does not prove GPU
+saturation. The measured resolve grows only from 1.34 to about 2.1 ms.
+
+Ruled out: recurrence of the AA admission/reset loop as the cause of these
+steady slow windows, because they retain nonzero phases, valid history and
+zero row mismatches while refusal/failure totals remain unchanged. Cumulative
+backend failures are 191, accrued earlier around rapid mode changes; they are
+not zero for the whole flight and must not be attributed to these later
+steady FSR windows.
+
+Ruled out: debug timing as the onset, because a 25.50-ms p50 window already
+occurs at 16:34:33 before CPU timing is enabled at 16:34:50.421. The slow-group
+logged average clock cost is about 0.253 ms/frame, distinct from the roughly
+2-ms floor contamination in a sampled frame's displayed family totals.
+
+Ruled out: the motion-source view alone, because the 16:40:49 heavy window is
+inside its off interval, 16:36:17.297 through 16:42:00.626. The view initially
+enables at 16:34:41.517, also after the first cited slow window. Bundled final
+INI values are not the settings for the whole flight.
+
+Ruled out: a manual diagnostic capture causing this run, because no General,
+Full, trace, draw-packet or light-audit arm appears. Only startup passive
+discovery ran. Production `FlatWork::Full` is not a manually armed capture.
+
+Source audit: `kCopyChecks` wraps forward camera/depth provenance, copy/menu/
+image/deferred checks and bounded captures; a second scope covers camera
+conflict capture. The 16,863 calls therefore correspond to roughly 8,432 slow
+draw entries, not that many output scans. `forwardBefore` calls
+`forwardDrawWrites` before shader filtering. Once watching resources, it reads
+all eight RTVs, 8 or 64 UAV slots depending on feature level, blend state and
+bound resources. That scan is included in the measured family, but its exact
+share is not separately timed. The previous isolated RTX 5090 97–138-ns query
+benchmark does not bound this AMD flight's complete function or driver cost.
+
+Foreground capture is also production work: original-VS stream output,
+state/projection checks and owner-marker preparation. Later motion-map replay
+is under resolve. The motion view adds classification writes/reads in existing
+GPU passes; it does not enable the broad per-draw output scan.
+
+Ruled out: an overflow-only scan shortcut as a useful fix for this report,
+because every one of the 588 forward-refusal summaries has overflow zero.
+All 588 forward summaries also have qualified zero: optional forward admission
+never succeeds, while the independent AA route continues. An all-failed-domain
+shortcut still needs proof that a later healthy domain/authority cannot be
+missed; do not bypass actual mutation checks from these aggregate counters.
+
+Next investigation: split/measure the copy-check family and its actual query
+counts, then prove a fast path or complete binding-cache invalidation before
+changing rendering code. Preserve actual-state fallback for uncertain
+bindings. Existing data is enough to choose this target; no further carrier
+walk or generic graphics-setting advice is requested yet. No C++ or live
+configuration change was made for this report.
