@@ -37,9 +37,12 @@
   over 7071 calls and copy-residual-continued 0.993 ms over 14141 calls,
   the same shape as 073157. No picture regression. Ruled out: matching
   the previous draw's arguments. The run is many meshes on one pipeline.
-  That check is removed. Installed on Steam flat as
-  `v0.20.0-rc.4-35-g455ffd45`. The next flight should show
-  copy-residual-continued near zero. No new config key.
+  Corrected flight `edvr_gfx_20261018_080537.log` (`455ffd45`). At
+  08:09:17: 590 frames / 5 s = 118 fps, present p50 8.13 ms, 7156
+  substituted draws, EDVR gross 6.465 ms. copy-residual-continued 0.026 ms
+  over 342 calls. ctor-continued 1.348 ms remains: the shell still wraps
+  the fast path. Reuse 14297/frame, frozen=0. History valid, zero
+  history-resets. No new config key.
 - The upper-60s dip stays open and is not this gap. 06:38:16 was 73.4 fps
   at the same draw count, certificate still hit. Other-thread engine
   merge was 2.435 ms over 1727 calls and clear 1.567 ms over 948, against
