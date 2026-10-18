@@ -185,28 +185,36 @@ inline int flatCpuTests() {
                "the outer scope is its 100 ticks less the middle's whole 30: 70; the three add up to 100");
     }
 
-    // The two issue callbacks are separate scopes around, rather than over,
-    // the game's draw. A nested foreground operation belongs to its own family.
+    // The two issue callbacks bracket the game's draw. Geometry child scopes
+    // are exclusive, and their sum with the residual recovers callback time.
     {
         flatcpu::resetForTest();fake(0);
         { flatcpu::Scope begin(flatcpu::kIssueCallbacks);
           t_now=10;
-          { flatcpu::Scope child(flatcpu::kForegroundCapture);t_now=17; }
-          t_now=23;
+          { flatcpu::Scope shader(flatcpu::kIssueShader);t_now=13; }
+          { flatcpu::Scope dsv(flatcpu::kIssueDsv);t_now=18; }
+          { flatcpu::Scope constants(flatcpu::kIssueConstants);t_now=25; }
+          { flatcpu::Scope foreground(flatcpu::kForegroundCapture);t_now=28; }
+          t_now=30;
         }
-        t_now=123; // game's draw, outside either callback scope
-        { flatcpu::Scope end(flatcpu::kIssueCallbacks);t_now=136; }
+        t_now=130; // game's draw, outside either callback scope
+        { flatcpu::Scope end(flatcpu::kIssueCallbacks);t_now=138; }
         const auto* slot=flatcpu::t_ctx.slot;
-        expect(slot&&slot->cell[flatcpu::kIssueCallbacks].ticks.load()==29&&
+        expect(slot&&slot->cell[flatcpu::kIssueCallbacks].ticks.load()==20&&
                slot->cell[flatcpu::kIssueCallbacks].calls.load()==2&&
-               slot->cell[flatcpu::kForegroundCapture].ticks.load()==7&&
-               slot->cell[flatcpu::kForegroundCapture].calls.load()==1,
-               "issue callbacks count 23+13 less the seven-tick child, excluding the 100-tick game draw");
+               slot->cell[flatcpu::kIssueShader].ticks.load()==3&&
+               slot->cell[flatcpu::kIssueDsv].ticks.load()==5&&
+               slot->cell[flatcpu::kIssueConstants].ticks.load()==7&&
+               slot->cell[flatcpu::kForegroundCapture].ticks.load()==3&&
+               20+3+5+7+3==38,
+               "issue residual plus children equals 30+8 callback ticks and excludes the 100-tick game draw");
         flatcpu::g_gate.store(flatcpu::makeGate(false,flatcpu::kNoThread),std::memory_order_relaxed);
         const auto reads=t_reads;
-        { flatcpu::Scope gated(flatcpu::kIssueCallbacks);t_now+=50; }
-        expect(slot&&slot->cell[flatcpu::kIssueCallbacks].calls.load()==2&&t_reads==reads,
-               "unclocked callback scope has no clock reads or recorded call");
+        { flatcpu::Scope gated(flatcpu::kIssueCallbacks);
+          { flatcpu::Scope child(flatcpu::kIssueConstants);t_now+=50; } }
+        expect(slot&&slot->cell[flatcpu::kIssueCallbacks].calls.load()==2&&
+               slot->cell[flatcpu::kIssueConstants].calls.load()==1&&t_reads==reads,
+               "unclocked parent and child have no clock reads or recorded calls");
     }
 
     // ---- 2: a frame's figures, in the census and in the words ---------------------------------
@@ -257,8 +265,11 @@ inline int flatCpuTests() {
         expect(has(text, "camera witness 10.00 us/write (" + std::to_string(3u * K) + " writes clocked)"),
                "the witness prints its cost per write, and how many writes it clocked");
         expect(has(text, "engine motion hooks 0.000 ms (calls 0.0)"), "engine motion's hooks print as zero when they never ran");
-        expect(has(text, "draw issue callbacks 0.000 ms (calls 0.0)"),
-               "the previously unmeasured draw callbacks appear as their own zero family");
+        expect(has(text, "draw issue callbacks residual 0.000 ms (calls 0.0)")&&
+               has(text, "issue geometry shader 0.000 ms (calls 0.0)")&&
+               has(text, "issue geometry DSV 0.000 ms (calls 0.0)")&&
+               has(text, "issue geometry constants 0.000 ms (calls 0.0)"),
+               "inactive callback residual and three child families each report zero");
         expect(lines.count >= 1 && !lines.truncated, "a window fits the lines the log holds");
         expect(std::strncmp(lines.line[0], "flat cpu 5s:", 12) == 0, "the first line is the flat cpu 5s line");
         for (int i = 1; i < lines.count; ++i)
@@ -518,10 +529,11 @@ inline int flatCpuTests() {
         const std::string text = joined(lines);
         expect(got && r.queries.served[depth] == 300ull * 1130 && r.queries.sampled[depth] == 20 && r.queries.sampled[blend] == 10,
                "the window sums the frames' query counts");
-        expect(has(text, "query shortcuts (answers a frame from what the runtime tracks; one frame in 64 also asks the context and compares): "
-                         "coverage depth view 1130.0 (checked 20, wrong 0), coverage shader identity 0.0 (checked 0, wrong 0), "
-                         "game blend state 40.0 (checked 10, wrong 0)"),
-               "the line says how many questions a frame were answered from what the runtime tracks, per state, and how many were checked");
+        expect(has(text, "query shortcuts (answers a frame from what the runtime tracks; one frame in 64 also asks the context and compares):")&&
+               has(text, "coverage depth view 1130.0 (checked 20, wrong 0)")&&
+               has(text, "coverage shader identity 0.0 (checked 0, wrong 0)")&&
+               has(text, "game blend state 40.0 (checked 10, wrong 0)"),
+               "each shortcut reports its answer and comparison count across continuation lines");
         expect(has(text, "no state asks the context again"), "and says that no state fell back");
         expect(!lines.truncated, "and the window still fits the lines");
         // A state that fell back is named, with how often it asks now.
@@ -638,6 +650,9 @@ inline int flatCpuTests() {
         expect(lines.count >= 2 && lines.count <= flatcpu::kMaxLines && !lines.truncated && within,
                "at the worst values the window is a few lines, none over the limit, nothing dropped");
         const std::string text = joined(lines);
+        expect(has(text,"draw issue callbacks residual")&&has(text,"issue geometry shader")&&
+               has(text,"issue geometry DSV")&&has(text,"issue geometry constants"),
+               "exclusive callback children and residual survive worst-width window formatting");
         bool named = true;
         for (auto& value : r.copy) value = ~uint64_t(0);
         flatcpu::Lines detail; flatcpu::formatCopyWindow(r,~uint64_t(0),&detail);

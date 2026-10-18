@@ -476,6 +476,31 @@ FlatProjectionShadowMetadata FlatProjectionRuntime::constantsMetadata(ID3D11Buff
     }
     return result;
 }
+FlatProjectionTrackedSnapshot FlatProjectionRuntime::snapshotTrackedConstants(
+    ID3D11Buffer* buffer, uint32_t offset, uint32_t count, void* out, bool eligible) {
+    FlatProjectionTrackedSnapshot result{};
+    if (!owner()) return result;
+    const Tracked* entry = find(buffer);
+    if (!entry) return result;
+    auto& metadata = result.metadata;
+    metadata.tracked = true; metadata.mapped = entry->mapped; metadata.pending = entry->pending;
+    metadata.width = entry->width; metadata.generation = entry->generation;
+    metadata.mutationSerial = entry->mutationSerial;
+    metadata.writeFrame = entry->writeFrame; metadata.writeSequence = entry->writeSequence;
+    FlatProjectionShadowView view{};
+    metadata.shadowPresent = shadows_.lookup(buffer, entry->generation, view);
+    if (metadata.shadowPresent) {
+        metadata.writeGeneration = view.writeGeneration; metadata.bankEpoch = view.bankEpoch;
+    }
+    // The tracked bank is serialized by this owner thread. No D3D call,
+    // callback or writer intervenes between the metadata and byte copy.
+    if (eligible && out && count && !metadata.mapped && !metadata.pending && metadata.shadowPresent &&
+        offset <= view.width && count <= view.width - offset) {
+        std::memcpy(out, view.bytes + offset, count);
+        result.copied = true;
+    }
+    return result;
+}
 
 bool FlatProjectionRuntime::sameRecipe(const CachedPlan& plan,
     const FlatProjectionRuntimeRequest* requests, uint32_t count,

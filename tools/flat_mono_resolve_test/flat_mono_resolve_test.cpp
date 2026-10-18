@@ -80,7 +80,7 @@ void check(bool ok,const char* text){if(!ok){if(mutationFailures){if(!*mutationF
 // skin 9200, flatPixelCapture 4200, flatWeaponFootprint 2500, taaHistoryDepth 2000, mapEasu 1800, each SDK foreground case 300-800.
 struct ShardUnit {const char* name;int group;};
 const ShardUnit kUnits[]={
-    {"projectionScopeTests",1},{"projectionRuntimeTests",1},
+    {"projectionScopeTests",1},{"projectionRuntimeTests",1},{"projectionSnapshotTests",1},
     {"resolver",2},
     {"flatPixelCaptureGpuTests",2},{"flatDrawCaptureGpuTests",2},{"flatDrawPacketGpuTests",2},
     {"flatWeaponFootprintGpuTests",2},{"flatOverlayLayerGpuTests",2},{"flatLoopOutputGpuTests",2},
@@ -328,6 +328,7 @@ int main(int argc,char** argv) {
     ComPtr<ID3D11InfoQueue> messages;device.As(&messages);
     if(shardRuns("projectionScopeTests"))timedSuite("projectionScopeTests",[&]{return projectionScopeTests(device.Get(), context.Get());});
     if(shardRuns("projectionRuntimeTests"))timedSuite("projectionRuntimeTests",[&]{return projectionRuntimeTests(device.Get(), context.Get());});
+    if(shardRuns("projectionSnapshotTests"))timedSuite("projectionSnapshotTests",[&]{return projectionSnapshotTests(device.Get(), context.Get());});
     // The suites that follow the resolver section and the checks that close main(), as lambdas: a shard without the resolver section
     // (whose locals its tail uses) runs them too, in the same order. Defined here, called after the section or in its place.
     auto runSuites=[&]{

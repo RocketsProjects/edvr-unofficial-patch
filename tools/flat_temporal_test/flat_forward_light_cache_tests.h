@@ -117,6 +117,36 @@ inline int run() {
            count(source,"forwardIssueValid(s,issue)")>=2&&
            count(issue,"kCopyIssueGeometryDsvGet")==1&&count(issue,"kCopyIssueLightDsvGet")==1,
            "pre- and post-draw issue checks independently re-read and count the actual DSV");
+    std::ifstream cbInput("src/d3d11/flat_light_payload_runtime.inl",std::ios::binary);
+    const std::string cbSource((std::istreambuf_iterator<char>(cbInput)),{});
+    const auto cbBegin=cbSource.find("void lightBoundCb(State& s,");
+    const auto cbEnd=cbSource.find("void lightDepth(",cbBegin);
+    const std::string cbBody=cbBegin!=std::string::npos&&cbEnd!=std::string::npos?
+        cbSource.substr(cbBegin,cbEnd-cbBegin):std::string{};
+    expect(cbBody.find("VSGetConstantBuffers1(slot,1,&buffer,&first,&count)")!=std::string::npos&&
+           cbBody.find("VSGetConstantBuffers(slot,1,&buffer)")!=std::string::npos&&
+           cbBody.find("buffer->GetDesc(&desc)")!=std::string::npos&&
+           cbBody.find("range(first,count,out.width,row,bytes/16)")!=std::string::npos&&
+           cbBody.find("snapshotTrackedConstants(")!=std::string::npos&&
+           cbBody.find("finish(out,snapshot.copied,bytes,")!=std::string::npos&&
+           cbBody.find("constantsMetadata(buffer.Get())")!=std::string::npos,
+           "each Geometry proof re-reads actual VS CB/range/width; diagnostic path remains available");
+    expect(count(issue,"lightBoundCb(s,s.context.Get(),0,1,270,96,cb,0,true)")==1&&
+           count(issue,"flatcpu::Scope shaderCost(flatcpu::kIssueShader)")==1&&
+           count(issue,"flatcpu::Scope depthCost(flatcpu::kIssueDsv)")==1&&
+           count(issue,"flatcpu::Scope constantsCost(flatcpu::kIssueConstants)")==1&&
+           count(issue,"forwardIssueValid(s,issue)")==0,
+           "only Geometry selects the tracked snapshot and exclusive callback children");
+    std::ifstream runtimeInput("src/d3d11/flat_projection_runtime.cpp",std::ios::binary);
+    const std::string runtimeSource((std::istreambuf_iterator<char>(runtimeInput)),{});
+    const auto snapBegin=runtimeSource.find("FlatProjectionTrackedSnapshot FlatProjectionRuntime::snapshotTrackedConstants(");
+    const auto snapEnd=runtimeSource.find("bool FlatProjectionRuntime::sameRecipe(",snapBegin);
+    const std::string snapshot=snapBegin!=std::string::npos&&snapEnd!=std::string::npos?
+        runtimeSource.substr(snapBegin,snapEnd-snapBegin):std::string{};
+    expect(count(snapshot,"find(buffer)")==1&&count(snapshot,"shadows_.lookup(")==1&&
+           count(snapshot,"std::memcpy(")==1&&snapshot.find("if (!owner()) return result;")!=std::string::npos&&
+           snapshot.find("entry->mapped")!=std::string::npos&&snapshot.find("entry->pending")!=std::string::npos,
+           "production snapshot uses one owner-guarded tracker/shadow lookup and bounded byte copy");
     using namespace edvr::forward_light;
     int actualView=0,gets=0,inspections=0;
     const int changedViews[]={3,4};

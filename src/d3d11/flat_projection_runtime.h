@@ -65,6 +65,10 @@ struct FlatProjectionShadowMetadata {
     uint64_t writeFrame = 0;
     uint32_t writeSequence = 0;
 };
+struct FlatProjectionTrackedSnapshot {
+    FlatProjectionShadowMetadata metadata{};
+    bool copied = false;
+};
 enum class FlatProjectionCopyFailureKind : uint8_t {
     None, OwnerUnavailable, InvalidRequest, UntrackedNoPrivateCopy, PrivateUnready, PrivateRange,
     ShadowUnregistered, ShadowGenerationMismatch, ShadowMapping,
@@ -144,6 +148,12 @@ public:
                        FlatProjectionCopyFailure* failure = nullptr);
     // Read-only owner-thread metadata; does not track, allocate or queue a readback.
     FlatProjectionShadowMetadata constantsMetadata(ID3D11Buffer*);
+    // Original tracked bytes for the forward Geometry camera proof. A single
+    // owner-thread lookup supplies metadata and an optional bounded copy;
+    // untracked/private buffers never qualify. The actual binding is acquired
+    // separately by the caller on each side of Draw.
+    FlatProjectionTrackedSnapshot snapshotTrackedConstants(ID3D11Buffer*, uint32_t byteOffset,
+        uint32_t byteCount, void* out, bool eligible);
 
     // Preflight is required before a nonzero raster phase. Warm calls may
     // allocate private buffers and a structural binding plan. With allocation

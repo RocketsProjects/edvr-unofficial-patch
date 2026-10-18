@@ -110,7 +110,10 @@ enum Family : unsigned {
     kForegroundCapture, // foreground identity/certificate and original-VS stream-output capture
     kInject,        // the camera inject callback (refreshPre / refreshPost): game threads
     kOffscreenFast, // the offscreen fast path's own time (flat_offscreen_fast.h): the draws that skipped the draw scope's constructor, calls = those draws
-    kIssueCallbacks, // beginActualDraw/endActualDraw around the game's draw, not including the game draw itself
+    kIssueCallbacks, // residual beginActualDraw/endActualDraw time, excluding the game Draw and child scopes
+    kIssueShader, // Geometry Issue's fresh shader/predicate validation
+    kIssueDsv, // Geometry Issue's fresh DSV/depth-state/plane validation
+    kIssueConstants, // Geometry Issue's fresh original-CB/camera validation
     // Exclusive children of copy checks; folded into its legacy headline.
     kCopyOutputs, kCopyDomain, kCopyConverter, kCopyForward, kCopyVerify, kCopyCapture, kCopyInactiveOutputs,
     kFamilies
@@ -150,7 +153,10 @@ inline constexpr FamilyInfo kInfo[kFamilies] = {
     {"foreground capture", false},
     {"camera inject", true},
     {"offscreen fast path", false},
-    {"draw issue callbacks", false},
+    {"draw issue callbacks residual", false},
+    {"issue geometry shader", false},
+    {"issue geometry DSV", false},
+    {"issue geometry constants", false},
     {"output scan", false}, {"raw domain", false}, {"converter", false},
     {"forward admission", false}, {"copy verification", false}, {"manual/conflict", false},
     {"output inactive-ledger", false},

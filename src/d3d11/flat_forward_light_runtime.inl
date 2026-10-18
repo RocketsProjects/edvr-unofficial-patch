@@ -338,16 +338,21 @@ bool forwardIssueValid(State& s,const forward_light::Issue& issue) {
     using namespace forward_light;if(issue.frame!=s.prefix.frame||!owner()||s.prefix.uncertain||foreignWork.load(std::memory_order_acquire)||
        !phaseReceipt(flatCameraInjectUpstreamOwns(),s.phase.currentX,s.phase.currentY,s.phase.applied))return false;
     if(issue.kind==Issue::Geometry) {
+        flatcpu::Scope shaderCost(flatcpu::kIssueShader);
         if(!engineVelocityFlatSourceShaders(s.context.Get(),issue.vs,issue.ps))return false;
     }else if(!forwardActualPair(s,issue.vs,issue.ps))return false;
     if(issue.kind==Issue::Geometry) {
         Ptr<ID3D11DepthStencilView> dsv;Ptr<ID3D11Resource> depth;Surface observed;bool writes=false;
         FlatContractObservation key;key.depth=reinterpret_cast<void*>(issue.raw.resource);
         key.depthWidth=issue.raw.width;key.depthHeight=issue.raw.height;
-        flatcpu::CopyCounter counts;counts.add(flatcpu::kCopyIssueGeometryDsvGet);
-        if(!forwardDsvActual(s,key,observed,dsv,depth,writes)||writes!=issue.depthWrite||!plane(observed,issue.raw)||
-           issue.phaseX!=s.phase.currentX||issue.phaseY!=s.phase.currentY)return false;
-        lightaudit::Cb cb;lightBoundCb(s,s.context.Get(),0,1,270,96,cb);
+        {
+            flatcpu::Scope depthCost(flatcpu::kIssueDsv);
+            flatcpu::CopyCounter counts;counts.add(flatcpu::kCopyIssueGeometryDsvGet);
+            if(!forwardDsvActual(s,key,observed,dsv,depth,writes)||writes!=issue.depthWrite||!plane(observed,issue.raw)||
+               issue.phaseX!=s.phase.currentX||issue.phaseY!=s.phase.currentY)return false;
+        }
+        flatcpu::Scope constantsCost(flatcpu::kIssueConstants);
+        lightaudit::Cb cb;lightBoundCb(s,s.context.Get(),0,1,270,96,cb,0,true);
         const ConstantIdentity id{cb.buffer,cb.before.generation,cb.before.mutation,cb.before.writeGeneration,cb.before.bank,
             cb.before.writeFrame,cb.first,cb.count,cb.width,cb.before.writeQ,96,static_cast<uint32_t>(flatCameraHash(cb.payload))};
         return cb.status==lightaudit::Full&&cb.fresh==lightaudit::Current&&same(id,issue.constants[0])&&!std::memcmp(cb.payload,issue.camera,96);

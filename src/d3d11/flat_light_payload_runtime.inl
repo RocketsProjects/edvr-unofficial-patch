@@ -7,7 +7,7 @@ lightaudit::Stamp lightStamp(const FlatProjectionShadowMetadata& m) {
 }
 bool lightLive(const State& s) {return s.lightAudit&&s.lightAudit->collector.active();}
 void lightBoundCb(State& s,ID3D11DeviceContext* ctx,unsigned stage,unsigned slot,unsigned row,unsigned bytes,
-                  lightaudit::Cb& out,uint32_t q=0) {
+                   lightaudit::Cb& out,uint32_t q=0,bool originalTrackedSnapshot=false) {
     using namespace lightaudit;out={};out.context=reinterpret_cast<uintptr_t>(ctx);out.stage=stage;out.slot=slot;out.row=row;
     if(stage==0&&slot==1)out.bindingGeneration=bindingGeneration(BindSlot::VsCb1);
     Ptr<ID3D11Buffer> buffer;UINT first=0,count=0;
@@ -22,6 +22,20 @@ void lightBoundCb(State& s,ID3D11DeviceContext* ctx,unsigned stage,unsigned slot
     D3D11_BUFFER_DESC desc{};if(buffer){buffer->GetDesc(&desc);out.width=desc.ByteWidth;}
     if(!s.projectionContext){count=out.width/16;out.rangeKnown=buffer?1u:0u;}
     out.count=count;
+    if(originalTrackedSnapshot) {
+        // Production Geometry validates a fresh actual CB binding on both sides
+        // of Draw. The tracked original shadow is owner-serialized, so metadata
+        // and the 96-byte copy can share one lookup; private copies do not qualify.
+        const bool eligible=buffer&&bytes<=kDeclaredBytes&&range(first,count,out.width,row,bytes/16);
+        const auto snapshot=s.projection?s.projection->snapshotTrackedConstants(
+            buffer.Get(),static_cast<uint32_t>((uint64_t(first)+row)*16),bytes,out.payload,eligible):
+            FlatProjectionTrackedSnapshot{};
+        out.before=lightStamp(snapshot.metadata);out.after=out.before;
+        if(eligible&&out.before.tracked&&out.before.shadow&&!out.before.mapped&&!out.before.pending)
+            out.byteOffset=static_cast<uint32_t>((uint64_t(first)+row)*16);
+        finish(out,snapshot.copied,bytes,s.prefix.frame,q?q:s.prefix.sequence+1);
+        return;
+    }
     out.before=lightStamp(s.projection?s.projection->constantsMetadata(buffer.Get()):FlatProjectionShadowMetadata{});
     bool copied=false;
     if(buffer&&bytes<=kDeclaredBytes&&range(first,count,out.width,row,bytes/16)&&out.before.tracked&&

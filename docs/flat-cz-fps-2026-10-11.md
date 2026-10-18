@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 remaining per-draw capture): Steam `709ba499` (`rc.4-19`) slow/fast/slow at user-reported 300-FPS limit: 63.6/204.9/64.4 FPS, callbacks 4.426/0.160/4.558 ms gross per clocked frame. New reached-stage counters imply 14,728 formerly redundant Geometry DSV queries removed per slow2 clocked frame; saved milliseconds are not isolated. DSV/depth description cache hits 99.9913%/99.5437%; all 10,893 leg frames retain AA history and complete HDR, no new resets/refusals/failures. Current Steam and valid Frontier `208ea3e8` both use native 3840 HDR; prior Steam `ee68d075` was 2496 copy and omitted callback timing, so no causal regression size. Next target: subdivide/trace callback proof before proposing a shortcut; zero Light sites cannot justify skipping earlier producers. Settings unchanged, main unmerged, probe off. Phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (last entry).
+State (2026-10-18 callback-internals audit): authorized single-snapshot investigation/build/install, Sol RE/tests and Astra evidence only; main unmerged, probe off. Steam `709ba499` slow/fast/slow: 63.6/204.9/64.4 FPS, callbacks 4.426/0.160/4.558 ms gross per clocked frame, 14,728 Geometry sites/slow2 frame. All 10,893 leg frames retain AA history and complete HDR, no new resets/refusals/failures. Source confirms camera proof repeats three owner-thread tracked/shadow lookups with no callback between them; proposed original-only single snapshot retains actual CB binding/range and fresh pre/post Draw validation. Finer shader/DSV/constant timing will separate residual cost; no whole-callback attribution or saved-ms claim. Current Steam and valid Frontier use native 3840 HDR; prior Steam used 2496 copy and omitted callback timing. Zero Light sites cannot justify skipping earlier producers. Phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (previous entries).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -2053,3 +2053,80 @@ settings unchanged, probe off, main unmerged. Saved evidence is sufficient;
 normal quit is safe. Remaining CPU target is the newly exposed callback
 work; trace/subdivide it before selecting a guarded optimization. Phase
 bootstrap remains outside this validation.
+
+## 2026-10-18: callback-internals optimization preflight
+
+Hypothesis: Geometry's camera proof repeats bounded tracking/shadow-table
+searches inside one serialized owner-thread read, adding avoidable work at
+the 14,728 reached sites per sampled slow frame. This does not attribute
+all 4.558 ms of callback work to that proof. Discriminators: exclusive
+shader, DSV/depth and constant-validation timing, plus counted production
+snapshot lookups and fresh binding checks in the test fixture.
+
+Source evidence before edits: `forwardIssueValid` calls `lightBoundCb`,
+which calls `constantsMetadata`, `copyConstants`, `constantsMetadata`.
+Each runtime operation searches 64 retained tracked entries and then the
+shadow bank. The first metadata must say tracked before copy is attempted,
+so the private-buffer fallback in `copyConstants` is unreachable here.
+`FlatProjectionRuntime::owner()` requires context plus owner thread ID;
+map/unmap/update/invalidation writers require that owner, and the shadow
+bank documents single-owner serialization. There is no D3D call, external
+callback or supported concurrent writer between the three old reads.
+
+Candidate: original-only snapshot API gets the same metadata and 96 bytes
+from one tracked entry and one shadow view, preserving mapped/pending,
+shadow/generation, range, freshness and identity rules. Actual CB/range is
+queried anew on each side of game Draw; shader and DSV/depth checks stay
+fresh too. Diagnostic readers/private fallback stay unchanged. Retain the
+actual immutable buffer width read initially to limit scope. Require
+production-used fixture coverage of failure cases and mutations between
+separate snapshots, not a mirror-only helper test. Astra reviews the owner
+serialization/equivalence evidence before implementation. No broad producer
+skip, cross-Draw mutable-state cache or new configuration key is proposed.
+
+Implementation is deliberately limited to Geometry Issue validation. New
+`snapshotTrackedConstants` reads one retained original tracked entry and
+one shadow view; metadata and the byte copy use that same view, with no
+external call, allocation or supported writer in between. `lightBoundCb`
+selects it explicitly only for this production check. Fresh actual CB,
+range and `GetDesc` remain; shader, DSV/depth, owner/foreign/phase, identity
+and before/after game Draw validation remain too. Ordinary writer observation
+and Full diagnostic readers retain their old path. Width caches, smaller
+scratch records and hash changes were deferred to keep this proof narrow.
+
+Three exclusive child timers separate Geometry shader/predication, DSV/depth
+and constant/camera validation. The parent label is now `draw issue callbacks
+residual`; compare its sum with `issue geometry shader`, `issue geometry
+DSV` and `issue geometry constants` against the old callback family. A lower
+residual alone is a category change, not a speedup. Three additional clocked
+scopes per fully reached Geometry validation require refreshed floor
+estimates; instrumentation is not free. Stage calls remain sampled counts,
+not all real-frame operations.
+
+Sol focused temporal and WARP `projectionRuntimeTests,projectionSnapshotTests`
+PASS. Runtime tests exercise the production API and actual shadow writers,
+exact bytes/metadata, chronology/freshness, range, wrong owner, invalidation,
+reset, private/untracked, mapped/pending and tracker eviction. Eviction
+checks old identity Untracked and replacement Full, not numeric generation
+values directly. Source pins check one tracked lookup plus one shadow lookup
+and fresh actual CB/width selection; this is structural work reduction,
+not a measured millisecond saving. Fake clocks verify exclusive child sums,
+game Draw exclusion and disabled-clock behavior; maximum-width report checks
+cover the new names. Stale formatter expectations were repaired. The large
+new runtime fixture moved to a separate heap-backed suite after the first
+layout exceeded the existing test function's stack; final focused rerun
+passes, and Astra verified the suite executes and propagates failures.
+Astra final source/test review CLEAR, evidence only, no execution. Full
+validation ran under the single build lock before any source commit.
+
+Full validation PASS: absolute `build.bat --wait-lock`, 151.3 seconds
+reported / 152.6 wall, 170-job pool, d3d11 8 compiled / 133 reused.
+Production DLLs, all Python and rig gates, installer resource validation
+and final receipt pass. Forward cache/helper checks 55/0; the WARP shard
+runs both `projectionRuntimeTests` and `projectionSnapshotTests`. Worst-width
+CPU output fits five lines (985/973/867/962/459 chars, all below 1000).
+Full receipt inputs:
+`96cc23878fd2aede59ecad4965f77ecd70174f5663ee5f7af11fd5cffe1e05de`.
+Log: `build/callback-snapshot-full-build.log`; final all-gates PASS read.
+Both Steam settings hashes still match the pre-build snapshot. Source
+commit, clean DLL promotion and sanctioned Steam flat install follow.
