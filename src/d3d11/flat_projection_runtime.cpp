@@ -1,4 +1,5 @@
 #include "flat_projection_runtime.h"
+#include "flat_issue_epoch.h"
 #include "flat_compute_readback.h"
 #include <cstring>
 
@@ -177,6 +178,8 @@ void FlatProjectionRuntime::mutate(Tracked& entry) {
     entry.writeFrame = 0; entry.writeSequence = 0;
     if (entry.mutationSerial == UINT64_MAX) entry.mutationOverflow = true;
     else ++entry.mutationSerial;
+    // The certified camera buffer only. Other tracked buffers stay off this epoch.
+    flatIssueEpochNoteResource(entry.buffer.Get());
 }
 void FlatProjectionRuntime::clearCold(ColdReadback& item) {
     if (!item.used) return;

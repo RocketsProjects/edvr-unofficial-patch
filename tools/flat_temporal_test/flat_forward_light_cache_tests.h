@@ -137,6 +137,13 @@ inline int run() {
            count(issue,"flatcpu::Scope constantsCost(flatcpu::kIssueConstants)")==1&&
            count(issue,"forwardIssueValid(s,issue)")==0,
            "only Geometry selects the tracked snapshot and exclusive callback children");
+    const auto reuseAt=issue.find("geometryIssueReuse(");
+    const auto shaderAt=issue.find("flatcpu::kIssueShader");
+    const auto constantsAt=issue.find("flatcpu::kIssueConstants");
+    const auto stampAt=issue.find("geometryCertStamp(");
+    expect(reuseAt!=std::string::npos&&shaderAt!=std::string::npos&&constantsAt!=std::string::npos&&
+           stampAt!=std::string::npos&&reuseAt<shaderAt&&constantsAt<stampAt,
+           "reuse is decided before the shader queries and the stamp follows the constant query");
     std::ifstream runtimeInput("src/d3d11/flat_projection_runtime.cpp",std::ios::binary);
     const std::string runtimeSource((std::istreambuf_iterator<char>(runtimeInput)),{});
     const auto snapBegin=runtimeSource.find("FlatProjectionTrackedSnapshot FlatProjectionRuntime::snapshotTrackedConstants(");
@@ -187,6 +194,42 @@ inline int run() {
     const auto reset=source.find("void forwardReset(State& s,");
     expect(reset!=std::string::npos&&source.find("f.dsvDescription.clear();f.depthDescription.clear();",reset)!=std::string::npos,
            "forward lifecycle reset releases both caches");
+    Surface surface{};
+    surface.resource=11;surface.width=1920;surface.height=1080;surface.slices=1;surface.samples=1;surface.known=true;
+    ConstantIdentity id{};
+    id.buffer=0x1000;id.generation=3;id.mutation=4;id.writeGeneration=5;id.bank=6;id.writeFrame=7;
+    id.first=0;id.count=8;id.width=256;id.writeQ=9;id.bytes=96;id.hash=0xABCDu;
+    unsigned char camera[96]{};
+    for(int i=0;i<96;++i)camera[i]=static_cast<unsigned char>(i);
+    Issue matched{};
+    matched.kind=Issue::Geometry;matched.frame=7;matched.vs=11;matched.ps=22;matched.depthWrite=true;
+    matched.raw=surface;matched.constants[0]=id;matched.phaseX=0.25f;matched.phaseY=-0.5f;
+    std::memcpy(matched.camera,camera,96);
+    GeometryReuseProof reuseProof{};
+    geometryCertStamp(reuseProof,matched,40,99);
+    expect(geometryIssueReuse(reuseProof,matched,40,7,0.25f,-0.5f,false),"matching geometry proof reuses");
+    expect(!geometryIssueReuse(reuseProof,matched,40,7,0.25f,-0.5f,true),"frozen proof never reuses");
+    expect(!geometryIssueReuse(reuseProof,matched,41,7,0.25f,-0.5f,false),"epoch mismatch refuses reuse");
+    matched.camera[95]^=1;
+    expect(!geometryIssueReuse(reuseProof,matched,40,7,0.25f,-0.5f,false),"one camera byte refuses reuse");
+    matched.camera[95]^=1;
+    matched.depthWrite=false;
+    expect(!geometryIssueReuse(reuseProof,matched,40,7,0.25f,-0.5f,false),"depth write flip refuses reuse");
+    matched.depthWrite=true;
+    matched.raw.resource=12;
+    expect(!geometryIssueReuse(reuseProof,matched,40,7,0.25f,-0.5f,false),"plane mismatch refuses reuse");
+    matched.raw.resource=11;
+    matched.constants[0].hash^=1u;
+    expect(!geometryIssueReuse(reuseProof,matched,40,7,0.25f,-0.5f,false),"constant identity mismatch refuses reuse");
+    matched.constants[0].hash^=1u;
+    expect(geometryObserveReuse(reuseProof,40,7,11,22,11,99,0x1000,0.25f,-0.5f,camera,false),
+           "observe reuse accepts the proof's depth view, resource and buffer");
+    expect(!geometryObserveReuse(reuseProof,40,7,11,22,11,98,0x1000,0.25f,-0.5f,camera,false),
+           "observe reuse refuses a different depth view");
+    expect(!geometryObserveReuse(reuseProof,40,7,11,22,12,99,0x1000,0.25f,-0.5f,camera,false),
+           "observe reuse refuses a different depth resource");
+    expect(!geometryObserveReuse(reuseProof,40,7,11,22,11,99,0x1001,0.25f,-0.5f,camera,false),
+           "observe reuse refuses a different constant buffer");
     std::printf("forward light cache: %u checks, %d failed\n",checks,failures);
     return failures;
 }

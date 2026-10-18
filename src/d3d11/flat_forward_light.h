@@ -1,5 +1,6 @@
 #pragma once
 #include "flat_deferred_camera.h"
+#include <cstring>
 
 namespace edvr { namespace forward_light {
 constexpr uint64_t kVs=0x8289669D93A18C1Dull,kPs=0xC6E6E419DA9F6FADull;
@@ -257,6 +258,41 @@ struct Issue {
     Surface raw{},linear{};ConstantIdentity constants[2]{};
     float phaseX=0,phaseY=0;unsigned char camera[96]{};bool depthWrite=false,donated=false,issued=false,returned=false;
 };
+// What one fresh Geometry validation proved about the bound state. Reuse is
+// allowed only when the caller still holds that epoch and this issue names
+// the same shaders, depth plane, write bit, camera bytes, constant identity
+// and phase. Frozen means a writer could not be hooked.
+struct GeometryReuseProof {
+    uint64_t epoch=0,frame=0,vs=0,ps=0,dsv=0;
+    Surface raw{};ConstantIdentity constants{};
+    float phaseX=0,phaseY=0;unsigned char camera[96]{};
+    bool depthWrite=false,valid=false;
+};
+inline void geometryCertStamp(GeometryReuseProof& proof,const Issue& issue,uint64_t epoch,uint64_t dsv) {
+    proof.epoch=epoch;proof.frame=issue.frame;proof.vs=issue.vs;proof.ps=issue.ps;proof.dsv=dsv;
+    proof.raw=issue.raw;proof.constants=issue.constants[0];
+    proof.phaseX=issue.phaseX;proof.phaseY=issue.phaseY;proof.depthWrite=issue.depthWrite;
+    std::memcpy(proof.camera,issue.camera,96);proof.valid=true;
+}
+inline bool geometryIssueReuse(const GeometryReuseProof& proof,const Issue& issue,uint64_t epoch,uint64_t frame,
+                               float phaseX,float phaseY,bool frozen) {
+    if(frozen||!proof.valid||proof.epoch!=epoch||proof.frame!=frame||issue.frame!=frame||issue.kind!=Issue::Geometry)return false;
+    if(proof.vs!=issue.vs||proof.ps!=issue.ps||proof.depthWrite!=issue.depthWrite)return false;
+    if(proof.phaseX!=phaseX||proof.phaseY!=phaseY||issue.phaseX!=phaseX||issue.phaseY!=phaseY)return false;
+    if(!plane(proof.raw,issue.raw)||!same(proof.constants,issue.constants[0]))return false;
+    return std::memcmp(proof.camera,issue.camera,96)==0;
+}
+// Domain observation may skip its driver queries on the same proof. The draw
+// key's depth view, resource and b1 have to name what the proof measured,
+// because that observation runs before substitution rebinds anything.
+inline bool geometryObserveReuse(const GeometryReuseProof& proof,uint64_t epoch,uint64_t frame,uint64_t vs,uint64_t ps,
+                                 uint64_t depth,uint64_t dsv,uint64_t buffer,float phaseX,float phaseY,
+                                 const unsigned char* camera,bool frozen) {
+    if(frozen||!proof.valid||!camera||proof.epoch!=epoch||proof.frame!=frame)return false;
+    if(proof.vs!=vs||proof.ps!=ps||proof.dsv!=dsv||proof.raw.resource!=depth||proof.constants.buffer!=buffer)return false;
+    if(proof.phaseX!=phaseX||proof.phaseY!=phaseY)return false;
+    return std::memcmp(proof.camera,camera,96)==0;
+}
 inline bool close(double a,double b,unsigned n=12) {
     return std::abs(a-b)<=flatDeferredFloatBound(n,std::abs(a)+std::abs(b));
 }

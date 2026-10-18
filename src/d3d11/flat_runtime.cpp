@@ -49,6 +49,7 @@
 #include "flat_standdown.h"
 #include "flat_witness_bound.h"
 #include "flat_cpu.h"
+#include "flat_issue_epoch.h"
 #include "flat_pair_facts.h"   // what a draw's shader pair alone says, remembered per pair
 #include "flat_offscreen_fast.h"   // the offscreen fast path: a repeat of a verified class-4 draw skips the draw scope's constructor
 #include "flat_camera_table.h"

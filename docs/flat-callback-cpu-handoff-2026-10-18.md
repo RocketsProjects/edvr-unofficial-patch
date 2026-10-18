@@ -2,23 +2,29 @@
 
 ## Status
 
-- Performance issue remains open. Latest snapshot build does **not** demonstrate
-  a useful speed win; the slow view remains about 59–65 FPS versus about
-  221 FPS when turned toward the fast view. AA history stays continuous.
-- Active checkout: `C:\Users\seanm\projects\edvr-unofficial-patch`.
-- Branch: `codex/flat-startup-discovery-cpu`. Installed code: `041f8e78`;
-  later commits are evidence/documentation. Use that literal build for logs.
-- Main remains unmerged at `043d7ff6`. Keep it unmerged until validation.
-- Steam flat `/novr`, DLSS, native 3840x2160 HDR, user-reported 300-FPS limit.
-  CPU timing is on; origin probe is off; both live settings files unchanged.
-- User finished the slow/fast/slow capture. No live object read is pending;
-  normal quit is safe. Current process state is not required for analysis.
-- Use Sol for RE and tests. Astra reviews source/evidence only; do not have
-  Astra execute tests, builds or benchmarks.
-- Next work is a proof/invalidation design for reusing validated camera or
-  producer-run state, with fresh actual-state fallback when uncertain.
-  The existing engine cache is not a complete forward-Issue certificate.
-- No additional flight is needed to identify the present hot paths.
+- Geometry issue reuse is on `codex/flat-startup-discovery-cpu`. Full build
+  PASS. Not flown. No new config key. Active checkout:
+  `C:\Users\seanm\projects\edvr-unofficial-patch`. Main stays unmerged at
+  `043d7ff6`.
+- A fresh Geometry validation stamps the shaders, depth plane, depth-write
+  bit, 96-byte camera, VS b1 identity and phase. Later begin and return
+  checks, and pool or supported observe queries, reuse that stamp while the
+  owner epoch is unchanged. A Context1 slot the vtable cannot take freezes
+  reuse (`frozen=1`) and the fresh queries stay.
+- Flight line: `flat geometry issue reuse:`. Reuse near twice the substituted
+  draws, with the shader, DSV and constants children and raw-domain down by
+  milliseconds, and AA history still continuous, is the recovery. Zero
+  reused with `frozen=0` means the certificate never matched. `revokes`
+  counts epoch clears, including one frame reset. The setter counters name
+  a per-draw miss.
+- This carrier view's ceiling is about 100 fps if those queries go away.
+  The fast view's 221 fps is the same session with about 120 draws. Baseline
+  remains `edvr_gfx_20261018_052052.log` (slow 59–65 fps, fast 221), build
+  `041f8e78`. Read FPS as CPU-report frames over the paired logged seconds.
+- Steam flat `/novr`, DLSS, native 3840x2160 HDR, user 300-FPS limit, CPU
+  timing on, origin probe off. Settings files unchanged. Phase bootstrap
+  and travel/origin were not retested.
+- Use Sol for RE and tests. Astra reviews source/evidence only.
 
 ## Start in the correct checkout
 
@@ -176,29 +182,23 @@ may still run before realDraw; hook chains or reentrant/foreign work are
 not proven absent. Skipping return validation requires certifying that
 whole interval and retaining Issue/Return/Abandon effects.
 
-## Next work before another build or flight
+## Flight
 
-1. Define an explicit owner/trust epoch and complete dependency contract
-   for any producer-run certificate. Cover public and private/raw setters,
-   Context1 CB ranges, depth state, extra shader stages/predication,
-   ClearState/command lists, context/device changes and foreign/reentrant
-   boundaries. Unobserved or uncertain access must revoke reuse and take
-   the existing fresh validation path. Keep every-writer provenance,
-   publication, resource mutation and overflow observation live.
-2. A narrower provable component is reuse of the issued 96-byte camera
-   proof: query actual CB/range afresh, then require retained buffer,
-   generation, mutation, write generation/Q/frame, bank, validity and range
-   to match the issued record before skipping duplicate copy/hash. It
-   cannot replace shader/DSV/phase or ledger checks. Test the actual
-   production path with mutation/rebind/alias/range/epoch changes; do not
-   ship from a mirrored model or approximate hash alone.
-3. Investigate timing overhead separately from functional cost. Do not
-   claim the new children are free, or compare residual alone with 709.
-   The current capture already identifies the hot families; do not request
-   another identical flight without a discriminating change or question.
-4. Full build and clean promotion precede any new install. Keep Steam flat
-   settings/probe state and main-unmerged constraint. Any new flight should
-   measure total callback cost, raw-domain work and uninterrupted AA together.
+The certificate is in the tree. The flight decides whether depth state,
+GS/HS/DS, predication, VS b1 or a write of the certified camera buffer
+lands on each producer draw. Those show up as the per-frame counters on
+`flat geometry issue reuse:`.
+
+Reuse near twice the substituted draws, with the shader, DSV and constants
+children and raw-domain down by milliseconds, and AA still continuous, is
+the result that recovers the frame time. A zero reuse count is a miss.
+Compare residual plus the three children with 052052's 5.976 ms callback
+sum. Residual alone is not the old callback family.
+
+Install with `python tools\install_edvr.py --target steam --scope flat`
+and no `--ini`. After the flight, `python tools\edvr_log.py --target steam
+--expect-build` the certificate commit. `041f8e78` remains the baseline
+log's build.
 
 ## Reproduction and validated build evidence
 

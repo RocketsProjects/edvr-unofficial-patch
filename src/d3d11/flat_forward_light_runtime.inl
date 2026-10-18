@@ -1,5 +1,15 @@
 // Production flat-only exact-light adapter; independent of every diagnostic arm.
 // Existing owner-context observers only. No GPU reads, game calls or bindings.
+// One Geometry proof for this owner. Cleared at every forward reset. The epoch
+// header is included by flat_runtime.cpp, outside this anonymous namespace.
+forward_light::GeometryReuseProof& geometryCert() {
+    static forward_light::GeometryReuseProof proof;
+    return proof;
+}
+void geometryCertClear() {
+    geometryCert()={};
+    flatIssueEpochRevoke();
+}
 void forwardRefusal(State&,forward_light::Reason,const void* =nullptr);
 void forwardPhaseLifecycle(State&);
 void forwardRevoke(State& s,uint64_t resource,forward_light::Reason reason) {
@@ -18,6 +28,7 @@ void forwardMutation(State& s,uint64_t resource,bool forgetSources=true) {
 }
 void forwardReset(State& s,uint64_t frame=0,bool captureLifecycle=true) {
     if(captureLifecycle)forwardPhaseLifecycle(s);
+    geometryCertClear();
     auto& f=s.forwardLight;forwardRevoke(s,0,forward_light::Reason::Ownership);f.ledger.reset(frame);
     f.dsvDescription.clear();f.depthDescription.clear();
     for(auto& observed:f.phaseObservedDonor)observed={};
@@ -145,10 +156,39 @@ bool forwardActualPair(State& s,uint64_t vs,uint64_t ps) {
     Ptr<ID3D11Predicate> predicate;BOOL value=FALSE;s.context->GetPredication(&predicate,&value);
     return !gs&&!hs&&!ds&&!predicate&&lookupShaderHash(v.Get())==vs&&lookupShaderHash(p.Get())==ps;
 }
+bool forwardObserveFromCert(State& s,const FlatRuntimeDraw& d,forward_light::Issue& issue) {
+    using namespace forward_light;auto& f=s.forwardLight;const auto& k=d.key;
+    const Role role=d.supported?Role::Origin:typedRole(k.vs,k.ps);
+    if(role==Role::Unknown)return false;
+    const auto& cert=geometryCert();
+    if(!geometryObserveReuse(cert,flatIssueEpochLoad(),s.prefix.frame,k.vs,k.ps,reinterpret_cast<uintptr_t>(k.depth),
+        reinterpret_cast<uintptr_t>(k.dsv),reinterpret_cast<uintptr_t>(k.b1),s.phase.currentX,s.phase.currentY,d.camera,flatIssueEpochFrozen()))
+        return false;
+    const Surface raw=cert.raw;const bool writes=cert.depthWrite;
+    if(writes)forwardMutation(s,raw.resource,false);
+    const bool current=flatRuntimeCameraCurrent(d,s.prefix.sequence+1,s.prefix.frame)&&cert.constants.writeQ<k.writeSeq;
+    Source source{cert.constants.buffer,cert.constants.generation,cert.constants.bank,cert.constants.writeGeneration,
+        k.writeEpoch,k.writeSeq,cert.constants.first,cert.constants.count};
+    f.ledger.observe(raw,role,writes,current,source,current?d.camera:nullptr,s.prefix.sequence+1);
+    if(auto* domain=f.ledger.domain(raw)){const auto index=static_cast<unsigned>(domain-f.ledger.domains);
+        if(current){issue.kind=Issue::Geometry;issue.frame=s.prefix.frame;issue.q=s.prefix.sequence+1;
+            issue.raw=raw;issue.vs=k.vs;issue.ps=k.ps;issue.depthWrite=writes;
+            issue.phaseX=s.phase.currentX;issue.phaseY=s.phase.currentY;std::memcpy(issue.camera,d.camera,96);
+            issue.constants[0]=cert.constants;
+            if(!f.phaseReceipt.frozen)f.phaseObservedDonor[index]=issue.constants[0];}
+    }
+    if(auto* domain=f.ledger.domain(raw))if(domain->failure!=Reason::None)forwardRevoke(s,raw.resource,domain->failure);
+    if(f.ledger.overflow)forwardRevoke(s,0,Reason::Overflow);
+    return true;
+}
 forward_light::Issue forwardObserveDomain(State& s,const FlatRuntimeDraw& d) {
     using namespace forward_light;Issue issue;auto& f=s.forwardLight;const auto& k=d.key;
     if(!k.depth||flatContractKind(false,k.depth,k.depth,k.depthWidth,k.depthHeight,26,s.prefix.width,s.prefix.height,false)!=kFlatContractScreen)return issue;
     flatcpu::Scope domainCost(flatcpu::kCopyDomain);
+    // Pool and supported producers skip the shader Gets. Reuse their depth and
+    // camera observation while the proof's epoch still names this binding.
+    if((d.supported||d.poolFamilyVs)&&forwardObserveFromCert(s,d,issue)){flatIssueEpochCountObserveReuse();return issue;}
+    flatIssueEpochCountObserveFresh();
     FlatComputeInternalScope internal;Surface raw;Ptr<ID3D11DepthStencilView> dsv;Ptr<ID3D11Resource> resource;bool writes=false;
     if(!forwardDsv(s,k,raw,dsv,resource,writes)){f.ledger.overflow=true;forwardRevoke(s,0,Reason::Lineage);return issue;}
     if(writes)forwardMutation(s,raw.resource,false); // depth draw invalidates old conversion, not coherent earlier geometry
@@ -338,10 +378,15 @@ bool forwardIssueValid(State& s,const forward_light::Issue& issue) {
     using namespace forward_light;if(issue.frame!=s.prefix.frame||!owner()||s.prefix.uncertain||foreignWork.load(std::memory_order_acquire)||
        !phaseReceipt(flatCameraInjectUpstreamOwns(),s.phase.currentX,s.phase.currentY,s.phase.applied))return false;
     if(issue.kind==Issue::Geometry) {
-        flatcpu::Scope shaderCost(flatcpu::kIssueShader);
-        if(!engineVelocityFlatSourceShaders(s.context.Get(),issue.vs,issue.ps))return false;
-    }else if(!forwardActualPair(s,issue.vs,issue.ps))return false;
-    if(issue.kind==Issue::Geometry) {
+        if(geometryIssueReuse(geometryCert(),issue,flatIssueEpochLoad(),s.prefix.frame,s.phase.currentX,s.phase.currentY,flatIssueEpochFrozen())) {
+            flatIssueEpochCountReuse();
+            return true;
+        }
+        const uint64_t epoch=flatIssueEpochLoad();
+        {
+            flatcpu::Scope shaderCost(flatcpu::kIssueShader);
+            if(!engineVelocityFlatSourceShaders(s.context.Get(),issue.vs,issue.ps)){flatIssueEpochCountFresh();return false;}
+        }
         Ptr<ID3D11DepthStencilView> dsv;Ptr<ID3D11Resource> depth;Surface observed;bool writes=false;
         FlatContractObservation key;key.depth=reinterpret_cast<void*>(issue.raw.resource);
         key.depthWidth=issue.raw.width;key.depthHeight=issue.raw.height;
@@ -349,14 +394,25 @@ bool forwardIssueValid(State& s,const forward_light::Issue& issue) {
             flatcpu::Scope depthCost(flatcpu::kIssueDsv);
             flatcpu::CopyCounter counts;counts.add(flatcpu::kCopyIssueGeometryDsvGet);
             if(!forwardDsvActual(s,key,observed,dsv,depth,writes)||writes!=issue.depthWrite||!plane(observed,issue.raw)||
-               issue.phaseX!=s.phase.currentX||issue.phaseY!=s.phase.currentY)return false;
+               issue.phaseX!=s.phase.currentX||issue.phaseY!=s.phase.currentY){flatIssueEpochCountFresh();return false;}
         }
-        flatcpu::Scope constantsCost(flatcpu::kIssueConstants);
-        lightaudit::Cb cb;lightBoundCb(s,s.context.Get(),0,1,270,96,cb,0,true);
-        const ConstantIdentity id{cb.buffer,cb.before.generation,cb.before.mutation,cb.before.writeGeneration,cb.before.bank,
-            cb.before.writeFrame,cb.first,cb.count,cb.width,cb.before.writeQ,96,static_cast<uint32_t>(flatCameraHash(cb.payload))};
-        return cb.status==lightaudit::Full&&cb.fresh==lightaudit::Current&&same(id,issue.constants[0])&&!std::memcmp(cb.payload,issue.camera,96);
-    }
+        bool proven=false;uintptr_t provenDsv=0;
+        {
+            flatcpu::Scope constantsCost(flatcpu::kIssueConstants);
+            lightaudit::Cb cb;lightBoundCb(s,s.context.Get(),0,1,270,96,cb,0,true);
+            const ConstantIdentity id{cb.buffer,cb.before.generation,cb.before.mutation,cb.before.writeGeneration,cb.before.bank,
+                cb.before.writeFrame,cb.first,cb.count,cb.width,cb.before.writeQ,96,static_cast<uint32_t>(flatCameraHash(cb.payload))};
+            proven=cb.status==lightaudit::Full&&cb.fresh==lightaudit::Current&&same(id,issue.constants[0])&&!std::memcmp(cb.payload,issue.camera,96);
+            if(proven)provenDsv=reinterpret_cast<uintptr_t>(dsv.Get());
+        }
+        flatIssueEpochCountFresh();
+        // A setter during the reads leaves the epoch moved. Do not publish that torn result.
+        if(proven&&!flatIssueEpochFrozen()&&flatIssueEpochLoad()==epoch) {
+            geometryCertStamp(geometryCert(),issue,epoch,provenDsv);
+            flatIssueEpochPublishBuffer(issue.constants[0].buffer);
+        }
+        return proven;
+    }else if(!forwardActualPair(s,issue.vs,issue.ps))return false;
     Ptr<ID3D11ShaderResourceView> input;Ptr<ID3D11Resource> resource;Surface observed;
     if(!forwardSrv(s,issue.kind==Issue::Converter?0:issue.linearSlot,issue.kind==Issue::Converter,observed,input,resource)||
        !plane(observed,issue.kind==Issue::Converter?issue.raw:issue.linear))return false;
@@ -416,4 +472,14 @@ void forwardReport(State& s) {
         count(R::Ownership),count(R::Overflow),count(R::UnknownWriter),count(R::StaleDonor),count(R::Ambiguous),count(R::MissingProducer),count(R::PendingProducer),
         count(R::MutatedProducer),count(R::Lineage),count(R::Binding),count(R::Range),count(R::OriginalMissing),count(R::OriginalStale),count(R::OriginalChanged),
         count(R::Forward),count(R::Origin),count(R::View),count(R::Phase),count(R::Issue),count(R::Abandoned));
+    static uint64_t reuseFrame=0;
+    const bool haveBaseline=reuseFrame!=0;
+    const uint64_t frames=haveBaseline&&s.prefix.frame>reuseFrame?s.prefix.frame-reuseFrame:0;
+    reuseFrame=s.prefix.frame;
+    const FlatIssueEpochWindow reuse=flatIssueEpochTakeWindow();
+    if(!haveBaseline)return; // the first report would divide by the absolute frame number
+    const auto per=[&](uint64_t n){return frames?static_cast<double>(n)/static_cast<double>(frames):0.0;};
+    Log::get().note("flat geometry issue reuse: reused=%.0f/frame fresh=%.0f/frame observe-reused=%.0f/frame observe-fresh=%.0f/frame depth-sets=%.0f/frame stage-sets=%.0f/frame rt-sets=%.0f/frame cb1-sets=%.0f/frame cb-writes=%.0f/frame revokes=%.0f/frame frames=%llu frozen=%u; reused skipped the shader/DSV/CB queries, fresh ran them, zero reused with frozen=0 means the certificate never matched, revokes count epoch clears such as the frame reset",
+        per(reuse.reuse),per(reuse.fresh),per(reuse.observeReuse),per(reuse.observeFresh),per(reuse.depthSets),per(reuse.stageSets),
+        per(reuse.rtSets),per(reuse.cb1Sets),per(reuse.cbWrites),per(reuse.revokes),(unsigned long long)frames,reuse.frozen);
 }
