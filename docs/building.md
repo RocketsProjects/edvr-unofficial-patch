@@ -147,6 +147,8 @@ gh release create "v$version" @assets --draft --verify-tag --notes-file release-
 if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed' }
 ```
 
+For a prerelease tag, add `--prerelease` to `gh release create` as well.
+
 The draft is the review point before publication. A failed build has no package
 artifact and should never be used for a release.
 

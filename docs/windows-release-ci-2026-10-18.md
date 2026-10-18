@@ -2,9 +2,9 @@
 
 ## Status
 
-- State: the capture collision fix is locally compiled and tested; the current
-  release workflow is awaiting its full native Windows proof on
-  `codex/release-workflow`. GitHub CLI authentication is working.
+- State: full native Windows validation and packaging passed in run
+  `39134563542`; the downloaded receipt and all three ZIP checksums were
+  verified on the Linux device. GitHub CLI authentication is working.
 - Latest failed run: `38990816615`, source
   `e700f005ef390e1c17c207f422c9118784209948`.
 - Actual failing gate: `flat_mono_resolve_shard2`, specifically the final
@@ -14,11 +14,11 @@
   harness reproduced the collision; a process-wide atomic suffix fixes it.
 - Ruled-out pointer: the seven first-person `FAIL:` lines belong to mutation
   children whose failures are required; their parent suite reports PASS.
-- Next run: full canonical Windows build and packaging on `windows-2022`, with
-  the motion fixture retained in diagnostics. No validation gates are bypassed.
-- Initial proof `39133903189` was superseded after local tests exposed an
-  annotated-tag selection edge case; cancellation was requested before retrying
-  the corrected workflow.
+- Next release: tag the chosen version on clean `main`, let the Windows
+  workflow validate and package that tag, then create a reviewed draft from the
+  device. No validation gates are bypassed.
+- Initial proof `39133903189` was cancelled after local tests exposed an
+  annotated-tag selection edge case; the corrected run passed.
 - Release scope: create validated ZIP artifacts; release notes and draft
   creation remain explicit device-side steps. No public release is requested
   now.
@@ -74,3 +74,23 @@ The actual PowerShell block passed scratch checks for real release tags,
 annotated and lightweight tags on branch proofs, an untagged branch proof, and
 a clear rejection of an unsupported exact tag. Actionlint and PowerShell syntax
 checks passed before restarting the native proof.
+
+## October 18: native proof completed
+
+[Run
+39134563542](https://github.com/characterecho-sean/edvr-unofficial-patch/actions/runs/39134563542)
+passed at source `8d5d25c3263705fcc5b7d98396be971129f51cf7`. The complete
+`build.bat --wait-lock --jobs 4` took 19 minutes 37 seconds, including the
+production DLLs, test rigs, installer and final gates. The log ends with
+`Native OpenXR build and all gates passed.`
+
+The full-build receipt has status `full-pass`, describe string
+`v0.0.0-ci.39134563542.1`, and input fingerprint
+`1075b69559f4fb6662fe840f5c5c6c7b85b0e49d7aa69023dd5ad5a769751b70`.
+`package.bat` then produced the main, Windows-installer and Linux-installer
+ZIPs. All three downloaded archives passed `sha256sum -c SHA256SUMS` on this
+device; the Linux scripts retain executable ZIP attributes.
+
+Logs, receipt and proof packages are retained locally under the Git-ignored
+`.toolchains/windows/ci-39134563542/`. The proof tag exists only on the runner;
+no release version tag or public release was created.
