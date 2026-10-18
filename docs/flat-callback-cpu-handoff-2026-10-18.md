@@ -42,10 +42,14 @@
   substituted draws, EDVR gross 6.465 ms. copy-residual-continued 0.026 ms
   over 342 calls. ctor-continued 1.348 ms remained: the shell still wrapped
   the fast path. Reuse 14297/frame, frozen=0. History valid, zero
-  history-resets. The match now runs before that shell. Installed on
-  Steam flat as `v0.20.0-rc.4-38-gaaf51238`. Not flown.
-  ctor-continued calls should fall from about 7100 toward the draws that
-  still miss. No new config key.
+  history-resets. Early match flew as `v0.20.0-rc.4-38-gaaf51238`, log
+  `edvr_gfx_20261018_083659.log`. At 08:39:35: 589 frames / 5.006 s =
+  118 fps, present p50 8.22 ms, GPU span p50 8.24 ms, 5622 substituted
+  draws, EDVR gross 4.799 ms. ctor-continued 0.090 ms over 333 calls;
+  dtor-continued 0.314 ms over 5620. Reuse 11088/frame, frozen=0. History
+  valid, zero history-resets. The scene rendered correctly. The frame
+  matches the GPU span, so this view did not go above 118 fps. No new
+  config key.
 - The upper-60s dip stays open and is not this gap. 06:38:16 was 73.4 fps
   at the same draw count, certificate still hit. Other-thread engine
   merge was 2.435 ms over 1727 calls and clear 1.567 ms over 948, against
