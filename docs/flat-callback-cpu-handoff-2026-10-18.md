@@ -2,29 +2,28 @@
 
 ## Status
 
-- Geometry issue reuse is on `codex/flat-startup-discovery-cpu`. Full build
-  PASS. Steam flat install verified as `v0.20.0-rc.4-26-g1012c7c2`. Not
-  flown. No new config key. Active checkout:
-  `C:\Users\seanm\projects\edvr-unofficial-patch`. Main stays unmerged at
-  `043d7ff6`.
-- A fresh Geometry validation stamps the shaders, depth plane, depth-write
-  bit, 96-byte camera, VS b1 identity and phase. Later begin and return
-  checks, and pool or supported observe queries, reuse that stamp while the
-  owner epoch is unchanged. A Context1 slot the vtable cannot take freezes
-  reuse (`frozen=1`) and the fresh queries stay.
-- Flight line: `flat geometry issue reuse:`. Reuse near twice the substituted
-  draws, with the shader, DSV and constants children and raw-domain down by
-  milliseconds, and AA history still continuous, is the recovery. Zero
-  reused with `frozen=0` means the certificate never matched. `revokes`
-  counts epoch clears, including one frame reset. The setter counters name
-  a per-draw miss.
-- This carrier view's ceiling is about 100 fps if those queries go away.
-  The fast view's 221 fps is the same session with about 120 draws. Baseline
-  remains `edvr_gfx_20261018_052052.log` (slow 59–65 fps, fast 221), build
-  `041f8e78`. Read FPS as CPU-report frames over the paired logged seconds.
+- Geometry issue reuse flew on `codex/flat-startup-discovery-cpu` as
+  `v0.20.0-rc.4-26-g1012c7c2`. Log `edvr_gfx_20261018_063400.log`. The
+  windows below are from the live session, not a frozen cutoff. No new
+  config key. Main stays unmerged at `043d7ff6`.
+- Carrier view at 06:41:16: 489 frames / 5.003 s = 97.7 fps, present p50
+  9.87 ms (p95 13.78), 7137 substituted draws. EDVR gross 8.491 ms.
+  Shader 0.030, DSV 0.011, constants 0.032, residual 0.548, raw domain
+  0.521 ms. Baseline 052052 slow2 was 65.18 fps and 15.070 ms gross, with
+  those four callback children at 5.976 ms and raw domain 1.762 ms.
+- Reuse held near twice the substituted draws (about 14000 reused and
+  about 200 fresh per frame), `frozen=0`. History stayed valid, and the
+  log has zero `history-resets`. Depth, stage, render-target and VS b1
+  setters are hundreds per frame.
+- The upper-60s dip is the 06:38:16 window: 367 frames / 5 s = 73.4 fps,
+  present p50 13.21 ms (p95 17.29), 7162 draws, EDVR gross 9.249 ms, same
+  query children. Other-thread engine merge was 2.435 ms over 1727 calls
+  and clear 1.567 ms over 948, against 0.151 ms over 1900 and 0.318 ms
+  over 751 at 06:41:16. The certificate cost stayed down. Open.
 - Steam flat `/novr`, DLSS, native 3840x2160 HDR, user 300-FPS limit, CPU
   timing on, origin probe off. Settings files unchanged. Phase bootstrap
-  and travel/origin were not retested.
+  and travel/origin were not retested. Baseline log remains
+  `edvr_gfx_20261018_052052.log`, build `041f8e78`.
 - Use Sol for RE and tests. Astra reviews source/evidence only.
 
 ## Start in the correct checkout
@@ -185,16 +184,16 @@ whole interval and retaining Issue/Return/Abandon effects.
 
 ## Flight
 
-The certificate is in the tree. The flight decides whether depth state,
-GS/HS/DS, predication, VS b1 or a write of the certified camera buffer
-lands on each producer draw. Those show up as the per-frame counters on
-`flat geometry issue reuse:`.
+The 06:41:16 window is the recovery. The 06:38:16 window is the dip, and
+its extra time is in other-thread engine merge and clear. See Status.
+Depth, stage, render-target and VS b1 setters landed hundreds of times a
+frame, and reuse still held. The open item is that dip, not another
+certificate miss.
 
-Reuse near twice the substituted draws, with the shader, DSV and constants
-children and raw-domain down by milliseconds, and AA still continuous, is
-the result that recovers the frame time. A zero reuse count is a miss.
-Compare residual plus the three children with 052052's 5.976 ms callback
-sum. Residual alone is not the old callback family.
+Read a later window the same way: reuse near twice the substituted draws,
+shader, DSV, constants and raw-domain down by milliseconds, AA history
+still valid. Compare residual plus the three children with 052052's
+5.976 ms. Residual alone is not the old callback family.
 
 Steam flat is installed and verified as `v0.20.0-rc.4-26-g1012c7c2`
 (`python tools\install_edvr.py --target steam --scope flat`, no `--ini`).
