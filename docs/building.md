@@ -50,13 +50,15 @@ full build receipt, installer, native DLLs, three release ZIPs, and
 uploaded separately even when a gate fails. The workflow does not create a
 GitHub release or use signing secrets.
 
-A push to a `codex/release-*` branch runs the entire build and package path.
-The runner creates a temporary local tag such as `v0.0.0-ci.123456789.1` before
-building, so the version stamped into the DLLs and installer matches the
-package version. That tag exists only on the runner; the resulting ZIPs are
-proof artifacts, not release assets. The branch push trigger works before this
-workflow reaches `main`. GitHub does not offer its manual **Run workflow**
-control for a new workflow until the workflow file is on the default branch.
+A push to a `codex/release-*` branch runs the entire build and package path. If
+the commit already has a release tag, the runner uses its exact version;
+otherwise it creates a temporary local tag such as `v0.0.0-ci.123456789.1`
+before building. This makes the version stamped into the DLLs and installer
+match the package version. The temporary tag exists only on the runner; either
+branch result is a proof artifact, not a release asset. The branch push trigger
+works before this workflow reaches `main`. GitHub does not offer its manual
+**Run workflow** control for a new workflow until the workflow file is on the
+default branch.
 
 After the workflow is on `main`, a manual branch run is also possible:
 

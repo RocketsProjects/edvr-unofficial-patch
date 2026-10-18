@@ -62,12 +62,25 @@ jobs:
             if ($tagCommit -ne $headCommit) { throw "Checkout is not at $tag" }
             $kind = 'release-tag'
           } else {
-            # This tag exists only in this checkout. It is never pushed or released.
-            $version = "0.0.0-ci.$env:GITHUB_RUN_ID.$env:GITHUB_RUN_ATTEMPT"
-            $tag = "v$version"
-            git tag $tag HEAD
-            if ($LASTEXITCODE -ne 0) { throw "Cannot make local proof tag $tag" }
-            $kind = 'runner-only-proof'
+            $exactTags = @(git tag --points-at HEAD)
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot list tags at checkout HEAD' }
+            if ($exactTags.Count -gt 0) {
+              # An annotated tag wins over a new lightweight tag at this commit.
+              $tag = git describe --tags --exact-match HEAD
+              if ($LASTEXITCODE -ne 0) { throw 'Cannot select exact tag at checkout HEAD' }
+              if ($tag -cnotmatch '^v([0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?)$') {
+                throw "Existing exact tag is not a supported release version: $tag"
+              }
+              $version = $Matches[1]
+              $kind = 'existing-tag-proof'
+            } else {
+              # This tag exists only in this checkout. It is never pushed or released.
+              $version = "0.0.0-ci.$env:GITHUB_RUN_ID.$env:GITHUB_RUN_ATTEMPT"
+              $tag = "v$version"
+              git tag $tag HEAD
+              if ($LASTEXITCODE -ne 0) { throw "Cannot make local proof tag $tag" }
+              $kind = 'runner-only-proof'
+            }
           }
           $stamp = git describe --tags --always --dirty
           if ($LASTEXITCODE -ne 0 -or $stamp -cne $tag) {

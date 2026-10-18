@@ -2,8 +2,9 @@
 
 ## Status
 
-- State: investigating native Windows CI and preparing a current release
-  workflow on `codex/release-workflow`. GitHub CLI authentication is working.
+- State: the capture collision fix is locally compiled and tested; the current
+  release workflow is awaiting its full native Windows proof on
+  `codex/release-workflow`. GitHub CLI authentication is working.
 - Latest failed run: `38990816615`, source
   `e700f005ef390e1c17c207f422c9118784209948`.
 - Actual failing gate: `flat_mono_resolve_shard2`, specifically the final
@@ -15,6 +16,9 @@
   children whose failures are required; their parent suite reports PASS.
 - Next run: full canonical Windows build and packaging on `windows-2022`, with
   the motion fixture retained in diagnostics. No validation gates are bypassed.
+- Initial proof `39133903189` was superseded after local tests exposed an
+  annotated-tag selection edge case; cancellation was requested before retrying
+  the corrected workflow.
 - Release scope: create validated ZIP artifacts; release notes and draft
   creation remain explicit device-side steps. No public release is requested
   now.
@@ -57,3 +61,16 @@ through `tools/compile_cache.py`; `tools/flat_draw_pixels.py --self-test`
 passed and now prints expected/found frame IDs and the directory if the motion
 fixture is mixed. Wine could not create the WARP device (`FAIL: WARP device`),
 so the native Windows full build is still the deciding gate.
+
+## October 18: workflow tag selection
+
+A branch proof originally always made a lightweight runner-local CI tag. On a
+commit already carrying an annotated release tag, Git still selected the
+annotated tag, so the expected stamp did not match. A scratch Git repository
+reproduced that failure. The workflow now reuses the exact supported version
+tag at HEAD, or creates the runner-local proof tag when HEAD is untagged.
+
+The actual PowerShell block passed scratch checks for real release tags,
+annotated and lightweight tags on branch proofs, an untagged branch proof, and
+a clear rejection of an unsupported exact tag. Actionlint and PowerShell syntax
+checks passed before restarting the native proof.
