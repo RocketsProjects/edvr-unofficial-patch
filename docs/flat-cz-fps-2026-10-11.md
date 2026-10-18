@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 remaining per-draw audit): query-once Geometry/Light Issue DSV validation and exclusive callback timing source/test review PASS; Sol full build PASS (172.8 s), clean promotion/install Steam flat pending. Fresh actual snapshots remain at Begin/Return; ordinary draw-key matching unchanged. Historical diff Frontier `208ea3e8` to Steam `ee68d075` identifies `44a8ef1a` adding broad writer/Issue proof absent in older build. Frontier flat selected XeSS but DLL missing, zero AA treatments/spatial fallback, so its 90 FPS is not an active-AA control. Previous roughly 6.3-ms CPU total omitted callbacks; larger new totals need coverage-aware comparison. Main unmerged, probe off; phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test. Next capture: callback costs, reached-Issue snapshots, existing raw/cache counters and AA continuity (last entry).
+State (2026-10-18 remaining per-draw audit): `709ba499` installed/verified Steam flat (`rc.4-19`), query-once Geometry/Light DSV validation plus exclusive callback timing. Sol full build PASS (172.8 s), clean promotion PASS, Astra evidence review PASS, settings unchanged; main unmerged, probe off. Previous roughly 6.3-ms CPU total omitted callbacks: expanded totals need coverage-aware comparison. Historical Frontier `208ea3e8` to Steam `ee68d075` adds broad writer/Issue proof at `44a8ef1a`. New Frontier DLSS run did treat 601 earlier flat frames, then all 1306 recent carrier frames fell back on foreground-contract-unqualified; its FPS is not active-AA performance for that interval. Next Steam capture: callbacks, reached-Issue snapshots, existing raw/cache counters and AA continuity. Phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1891,3 +1891,55 @@ This validates code/rigs; removed-query counts, new callback CPU and FPS
 benefit still require the installed capture. Future comparisons must keep
 legacy families separate from the new callback family; subtracting gross
 callback time from an expanded floor-net total would mix timing corrections.
+
+Clean source `709ba499` promoted by absolute `build.bat --dll-only --wait-lock`
+PASS, 41.2 seconds wall / 39.9 reported, receipt matched validated source.
+Version `v0.20.0-rc.4-19-g709ba499`; Steam flat sanctioned dry-run, install
+and verify-only PASS. DLL SHA256
+`16C20864D0712FDE96CF92E799F107D46CCB94B02F268F4C30912568011C8927`.
+Both Steam settings hashes match the pre-audit snapshot; DLSS selected, CPU
+timing on, origin probe off. Frontier files remain untouched. Source pushed
+to feature branch; main still `043d7ff6`. Logs/metadata:
+`build/per-draw-issue-promotion.log`, `build/per-draw-issue-validation.json`.
+
+User then reports Frontier flat with DLSS also exceeds 90 FPS. This is a new
+run and must not be explained by the preceding XeSS failure. Sanctioned
+reader pins `edvr_gfx_20261018_043544.log` to `208ea3e8`/PE `6AD27EAB`,
+initial VR at 04:35:44.943, flat switch 04:36:21.301. Frozen evidence through
+04:37:56.317 is in `build/frontier_dlss_208ea3e8_frozen.md`.
+
+DLSS genuinely worked earlier in that flat session: treated reaches 601 by
+04:36:36.316, including 160 treated/prepped/backend frames in that early
+five-second window. Those are not VR carryover. The later carrier route
+differs, and the three recent windows end 04:37:46.317, 04:37:51.318 and
+04:37:56.317 with 424, 442 and 440 frames respectively. All 1306 report
+foreground-contract-unqualified refusal; configured mode is DLSS, treated
+stays 601, accepted history is zero, and HDR treated/prepped/backend are
+zero. Spatial fallback grows by 882 over the last two windows, exactly
+442+440. This is bounded evidence of fallback in the current carrier view,
+not a claim that DLSS never worked in the session.
+
+Relevant current cause: selected-H first failure is foreground-active-query,
+H attempts 3471 / qualified 0, replay query rejects 1760/1760 with
+UNCERTAIN_BRACKET#100. At old source `flat_runtime.cpp:6860-6871`,
+`replayQueriesSafe` refusal blocks planning opaque foreground work; old
+`flat_mono_resolve.cpp:830-833` requires the qualified same-frame motion map.
+Earlier backend-failure cumulative 407 is not a new failure delta here.
+GPU resolve is untimed in the complete adjacent CPU window and CPU timing
+is off. The reported FPS is real user experience, but these recent frames
+do not provide a successful-DLSS CPU control or establish a store-specific
+cause. Sol extracted and traced this separate run; Astra reviewed the frozen
+evidence and accepted this interval-limited conclusion without execution.
+
+Next Steam validation: launch flat, load the same slow on-foot carrier view,
+DLSS selected, menus closed and FPS uncapped. Wait two minutes, then hold
+slow 30 seconds, turn at least 90 degrees to fast 30 seconds, return to the
+same slow view 30 seconds; record FPS and visible AA continuity. No F7,
+NumLock, Ready or diagnostic arm is required. Normal quit afterward is fine.
+Read the resulting log with `edvr_log.py --expect-build 709ba499` first.
+Check nonzero draw-issue-callback time/calls and reached Geometry/Light DSV
+Get counters; absent counters with clocks active mean the new stage did
+not run, not a proven zero cost. Keep raw OM Get counters' historical scope
+separate from the eliminated pre-gets. Compare legacy families and new
+coverage explicitly, plus reset/refusal/history/backend continuity. No
+measured FPS claim for this patch until that capture.
