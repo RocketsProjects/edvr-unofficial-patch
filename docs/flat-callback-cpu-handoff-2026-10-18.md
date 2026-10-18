@@ -26,17 +26,15 @@
   calls were 0, so the verify functions returned before their own scope.
   Coverage is 0.686 ms over 8126 scene draws. Issue residual 0.548 ms
   over 14500 calls sits near the clock floor.
-- The split is installed on Steam flat as `v0.20.0-rc.4-30-g124f9d66`.
-  Full build PASS. Not flown. No behaviour change and no new config
-  key. Line: `flat draw shell split:`. Figures
-  are per clocked frame, same denominator as `flat cpu 5s`. `continued`
-  is `continuesRun`. `ctor-continued` plus `ctor-rest` is the constructor
-  shell. `dtor-*` is the destructor shell. Their sum is this draw's share
-  of `other`; the rest of `other` is the dispatch shell. `copy-residual-*`
-  sums to the copy-check residual. If `ctor-continued` is most of that
-  shell, the next change is a continuation path that does not rebuild the
-  draw record or enter copy checks. If `ctor-rest` owns it, that bypass
-  will not move the frame rate.
+- Shell split flew as `v0.20.0-rc.4-30-g124f9d66`, log
+  `edvr_gfx_20261018_073157.log`. At 07:35:03: 459 frames / 5.012 s =
+  91.6 fps, 7249 substituted draws. `other` 2.598 ms is the two draw
+  shells (dispatch is 0.008 ms). Continued producers own the constructor
+  shell 1.699 of 2.129 ms and the copy residual 1.006 of 1.182 ms, one
+  constructor call per substituted draw. Destructor continued is 0.414 ms.
+  Next change: a continuation path that does not rebuild the draw record
+  or enter copy checks. That is about 2.7 ms before counting the
+  destructor. Not a frozen cutoff. No new config key.
 - The upper-60s dip stays open and is not this gap. 06:38:16 was 73.4 fps
   at the same draw count, certificate still hit. Other-thread engine
   merge was 2.435 ms over 1727 calls and clear 1.567 ms over 948, against
