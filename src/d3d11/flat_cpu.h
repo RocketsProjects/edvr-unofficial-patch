@@ -110,7 +110,16 @@ enum Family : unsigned {
     kForegroundCapture, // foreground identity/certificate and original-VS stream-output capture
     kInject,        // the camera inject callback (refreshPre / refreshPost): game threads
     kOffscreenFast, // the offscreen fast path's own time (flat_offscreen_fast.h): the draws that skipped the draw scope's constructor, calls = those draws
+    // Exclusive children of copy checks; folded into its legacy headline.
+    kCopyOutputs, kCopyDomain, kCopyConverter, kCopyForward, kCopyVerify, kCopyCapture, kCopyInactiveOutputs,
     kFamilies
+};
+constexpr bool copyChild(unsigned f) noexcept { return f >= kCopyOutputs && f <= kCopyInactiveOutputs; }
+enum CopyCount : unsigned {
+    kCopyWatch, kCopyWatchSkip, kCopyOmGet, kCopyRtvSlots, kCopyUavSlots,
+    kCopyBlendGet, kCopyBlendDesc, kCopyRtvBound, kCopyUavBound, kCopyGetResource,
+    kCopyShadowChecks, kCopyShadowUnknown, kCopyInactiveCandidate,
+    kCopyCounts
 };
 struct FamilyInfo {
     const char* name;
@@ -136,6 +145,9 @@ inline constexpr FamilyInfo kInfo[kFamilies] = {
     {"foreground capture", false},
     {"camera inject", true},
     {"offscreen fast path", false},
+    {"output scan", false}, {"raw domain", false}, {"converter", false},
+    {"forward admission", false}, {"copy verification", false}, {"manual/conflict", false},
+    {"output inactive-ledger", false},
 };
 constexpr unsigned kCal = kFamilies;   // the calibration cell, never reported
 constexpr unsigned kCells = kFamilies + 1;
@@ -191,6 +203,7 @@ struct alignas(32) Cell {
 };
 struct alignas(64) Slot {
     Cell cell[kCells];
+    std::atomic<uint64_t> copy[kCopyCounts]{};
     std::atomic<uint32_t> tid{0};
 };
 constexpr unsigned kMaxSlots = 64;
@@ -215,12 +228,26 @@ __declspec(noinline) inline Slot* registerSlot() noexcept {
 }
 inline unsigned slotCount() noexcept { return (std::min)(g_slotCount.load(std::memory_order_acquire), kMaxSlots); }
 
+// Query counters share the sampling gate, but never read a clock. Construct
+// once before the watch gate; disabled/unclocked frames only test the gate.
+class CopyCounter {
+public:
+    CopyCounter() noexcept { if (gateClocks(g_gate.load(std::memory_order_relaxed))) slot_ = registerSlot(); }
+    bool active() const noexcept { return slot_ != nullptr; }
+    void add(CopyCount c, uint64_t n = 1) noexcept {
+        if (slot_) { auto& v = slot_->copy[c]; v.store(v.load(std::memory_order_relaxed) + n, std::memory_order_relaxed); }
+    }
+private:
+    Slot* slot_ = nullptr;
+};
+
 // ---- the scope ----------------------------------------------------------------------------
 // RAII. A scope the gate did not clock is `live_ == false`: construction set one byte and the
 // destructor returns at once.
 class Scope {
 public:
     explicit Scope(unsigned family) noexcept { open(g_gate, family); }
+    Scope(unsigned family, bool enabled) noexcept { if (enabled) open(g_gate, family); }
     // The calibration and the rig give the gate.
     Scope(unsigned family, const std::atomic<uint64_t>& gate) noexcept { open(gate, family); }
     ~Scope() {
@@ -262,6 +289,7 @@ private:
 struct CutState {
     uint64_t ticks[kFamilies];
     uint64_t calls[kFamilies];
+    uint64_t copy[kCopyCounts];
 };
 inline CutState g_cut[kMaxSlots + 1];
 
@@ -270,6 +298,7 @@ struct FrameCut {
     uint64_t renderCalls[kFamilies];
     uint64_t otherTicks[kFamilies];
     uint64_t otherCalls[kFamilies];
+    uint64_t copy[kCopyCounts];
 };
 // Called by the thread that calls Present, once a frame: deltas since the previous cut, that
 // thread's slot against everyone else's.
@@ -283,6 +312,11 @@ inline void cutFrame(FrameCut& out) noexcept {
         const unsigned index = i < n ? i : kMaxSlots;
         CutState& st = g_cut[index];
         const bool render = s == me;
+        for (unsigned c = 0; c < kCopyCounts; ++c) {
+            const auto value = s->copy[c].load(std::memory_order_relaxed);
+            if (render) out.copy[c] += value - st.copy[c];
+            st.copy[c] = value;
+        }
         for (unsigned f = 0; f < kFamilies; ++f) {
             const uint64_t t = s->cell[f].ticks.load(std::memory_order_relaxed);
             const uint64_t k = s->cell[f].calls.load(std::memory_order_relaxed);
@@ -301,9 +335,11 @@ inline void resetForTest() noexcept {
     for (unsigned i = 0; i < kMaxSlots; ++i) {
         Slot& s = g_slots[i];
         for (unsigned f = 0; f < kCells; ++f) { s.cell[f].ticks.store(0); s.cell[f].calls.store(0); }
+        for (auto& c : s.copy) c.store(0);
         s.tid.store(0);
     }
     for (unsigned f = 0; f < kCells; ++f) { g_overflow.cell[f].ticks.store(0); g_overflow.cell[f].calls.store(0); }
+    for (auto& c : g_overflow.copy) c.store(0);
     std::memset(g_cut, 0, sizeof(g_cut));
     g_slotCount.store(0);
     g_gate.store(kSampledBit);
@@ -416,6 +452,7 @@ struct WindowReport {
     double otherMs[kFamilies] = {};
     uint64_t renderCalls[kFamilies] = {};
     uint64_t otherCalls[kFamilies] = {};
+    uint64_t copy[kCopyCounts] = {};
     // Engine motion's parts (engine_motion_cpu.h), as the census cut them: window totals.
     double emRenderMs[emcpu::kParts] = {};
     double emOtherMs[emcpu::kParts] = {};
@@ -513,6 +550,7 @@ public:
             otherTicks_[f] += cut.otherTicks[f];
             otherCalls_[f] += cut.otherCalls[f];
         }
+        for (unsigned c = 0; c < kCopyCounts; ++c) copy_[c] += cut.copy[c];
         emcpu::FrameCut emCut;
         emcpu::cutFrame(emCut);
         for (unsigned p = 0; p < emcpu::kParts; ++p) {
@@ -617,6 +655,7 @@ public:
             out.emRenderCalls[p] = emRenderCalls_[p];
             out.emOtherCalls[p] = emOtherCalls_[p];
         }
+        for (unsigned c = 0; c < kCopyCounts; ++c) out.copy[c] = copy_[c];
         out.stateCalls = stateCalls_;
         out.substitutedDraws = substitutedDraws_;
         out.offscreen = offscreen_;
@@ -666,6 +705,7 @@ private:
         std::memset(emRenderCalls_, 0, sizeof(emRenderCalls_));
         std::memset(emOtherTicks_, 0, sizeof(emOtherTicks_));
         std::memset(emOtherCalls_, 0, sizeof(emOtherCalls_));
+        std::memset(copy_, 0, sizeof(copy_));
         stateCalls_ = substitutedDraws_ = 0;
         offscreen_ = FlatOffscreenCounts{};
         queries_ = FlatQueryCounts{};
@@ -683,6 +723,7 @@ private:
     unsigned frames_ = 0, paused_ = 0, sampled_ = 0, renderClocked_ = 0, gpuFrame_ = 0, gpuResolve_ = 0;
     uint64_t renderTicks_[kFamilies] = {}, renderCalls_[kFamilies] = {};
     uint64_t otherTicks_[kFamilies] = {}, otherCalls_[kFamilies] = {};
+    uint64_t copy_[kCopyCounts] = {};
     uint64_t emRenderTicks_[emcpu::kParts] = {}, emRenderCalls_[emcpu::kParts] = {};
     uint64_t emOtherTicks_[emcpu::kParts] = {}, emOtherCalls_[emcpu::kParts] = {};
     uint64_t stateCalls_ = 0, substitutedDraws_ = 0, gpuSkipped_ = 0, gpuInvalid_ = 0;
@@ -784,6 +825,34 @@ inline InstrumentCost instrumentCost(const WindowReport& r) noexcept {
     c.costMs = c.clockedMs * share;
     return c;
 }
+inline double copyCheckMs(const WindowReport& r) noexcept {
+    double ms = r.renderMs[kCopyChecks];
+    for (unsigned f = kCopyOutputs; f <= kCopyInactiveOutputs; ++f) ms += r.renderMs[f];
+    return ms;
+}
+inline void formatCopyWindow(const WindowReport& r, uint64_t completedFrame, Lines* out) {
+    Tokens tk;
+    tk.add("", "flat cpu copy checks 5s: frame-end=%llu frames=%u clocked=%u one-in=%u seconds=%.3f; exclusive partition of legacy copy checks, output-scan queries are sampled-window totals",
+        static_cast<unsigned long long>(completedFrame), r.frames, r.renderClockedFrames, r.renderPeriod, r.seconds);
+    if (r.clocksOff || !r.renderClockedFrames) {
+        tk.add("; ", "%s; time/query counts unavailable, not zero", r.clocksOff ? "timing off" : "no clocked frame");
+    } else {
+        const double n = r.renderClockedFrames;
+        tk.add("; ", "aggregate %.3f ms (parent calls %.1f); residual %.3f ms", copyCheckMs(r)/n,
+            static_cast<double>(r.renderCalls[kCopyChecks])/n, r.renderMs[kCopyChecks]/n);
+        for (unsigned f = kCopyOutputs; f <= kCopyInactiveOutputs; ++f) {
+            char calls[32]; callsText(calls,sizeof(calls),static_cast<double>(r.renderCalls[f])/n);
+            tk.add(" + ", "%s %.3f ms (calls %s)", kInfo[f].name, r.renderMs[f]/n, calls);
+        }
+        const char* names[kCopyCounts] = {"watch entries","watch skips","OM Get calls","RTV slots requested/scanned","UAV slots requested/scanned",
+            "blend Get calls","blend GetDesc calls","bound RTVs","bound UAVs","GetResource calls",
+            "shadow checks","shadow unknown","inactive-ledger candidates"};
+        for (unsigned c = 0; c < kCopyCounts; ++c)
+            tk.add(c ? ", " : "; ", "%s=%llu", names[c], static_cast<unsigned long long>(r.copy[c]));
+        tk.add("; ", "zero calls means not run in sampled frames; inactive-ledger is advisory pre-issue (pending=false), old scan always runs; query counting not floor-corrected");
+    }
+    packLines(tk,out);
+}
 inline void formatWindow(const WindowReport& r, Lines* out) {
     Tokens tk;
     char calls[32];
@@ -816,8 +885,10 @@ inline void formatWindow(const WindowReport& r, Lines* out) {
                r.renderClockedFrames, r.frames, r.renderPeriod, total);
     if (anyClocked) {
         for (unsigned f = 0; f < kFamilies; ++f) {
+            if (copyChild(f)) continue;
             callsText(calls, sizeof(calls), static_cast<double>(r.renderCalls[f]) / clocked);
-            tk.add(f == 0 ? " = " : " + ", "%s %.3f ms (calls %s)", kInfo[f].name, r.renderMs[f] / clocked, calls);
+            const double ms = f == kCopyChecks ? copyCheckMs(r) : r.renderMs[f];
+            tk.add(f == 0 ? " = " : " + ", "%s %.3f ms (calls %s)", kInfo[f].name, ms / clocked, calls);
         }
         callsText(calls, sizeof(calls), static_cast<double>(emRenderCalls) / clocked);
         tk.add(" + ", "engine motion hooks %.3f ms (calls %s)", emRenderMs / clocked, calls);

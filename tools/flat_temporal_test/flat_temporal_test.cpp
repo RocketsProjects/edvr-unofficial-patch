@@ -27,6 +27,7 @@
 #include "flat_hdr_projection_capture_tests.h"
 #include "flat_light_payload_capture_tests.h"
 #include "flat_forward_light_tests.h"
+#include "flat_forward_watch_tests.h"
 #include "flat_forward_light_integration_tests.h"
 #include "flat_phase_failure_capture_tests.h"
 #include "flat_forward_phase_bound_tests.h"
@@ -2853,6 +2854,7 @@ void testFlatCpuWiring() {
     const std::string engineCpp = slurp("src/d3d11/engine_velocity.cpp");
     const std::string engineH = slurp("src/d3d11/engine_velocity.h");
     const std::string cpuH = slurp("src/d3d11/flat_cpu.h");
+    const std::string forwardCpp = slurp("src/d3d11/flat_forward_light_runtime.inl");
     const std::string menuCpp = slurp("src/d3d11/menu.cpp");
     check(!runtimeCpp.empty() && !resolveCpp.empty() && !resolveH.empty() && !injectCpp.empty() && !temporalCpp.empty() &&
           !engineCpp.empty() && !engineH.empty() && !cpuH.empty() && !menuCpp.empty(),
@@ -2862,6 +2864,26 @@ void testFlatCpuWiring() {
         for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
         return n;
     };
+    const auto scanStart=forwardCpp.find("void forwardDrawWrites(State& s)"),scanEnd=forwardCpp.find("bool forwardConverterState",scanStart);
+    const auto scan=forwardCpp.substr(scanStart,scanEnd-scanStart);
+    check(scan.find("if(!watching){counts.add(flatcpu::kCopyWatchSkip);return;}")<scan.find("flatcpu::Scope outputCost")&&
+          scan.find("flatcpu::Scope outputCost")<scan.find("OMGetRenderTargetsAndUnorderedAccessViews"),
+          "output timing begins only after the unchanged watch gate and covers actual output Gets");
+    check(scan.find("if(counts.active())")<scan.find("forward_light::outputWatch(")&&
+          scan.find("if(inactiveCandidate)return")==std::string::npos&&
+          scan.find("for(const auto& p:ledger.publications)anyLivePublication|=p.live;")!=std::string::npos&&
+          scan.find("counts.add(flatcpu::kCopyInactiveCandidate)")!=std::string::npos,
+          "sampled advisory predicate reuses the complete old publication walk and never skips the real scan");
+    check(scan.find("counts.add(flatcpu::kCopyOmGet)")<scan.find("OMGetRenderTargetsAndUnorderedAccessViews")&&
+          scan.find("kCopyRtvSlots,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT")!=std::string::npos&&
+          scan.find("kCopyUavSlots,n")!=std::string::npos&&
+          scan.find("if(blend){counts.add(flatcpu::kCopyBlendDesc);blend->GetDesc")!=std::string::npos&&
+          count(scan,"counts.add(flatcpu::kCopyGetResource)")==2,
+          "query counters name actual Gets, requested 8/64 slots, nullable GetDesc and writable-resource queries");
+    check(runtimeCpp.find("flatcpu::formatCopyWindow(window,frame,&lines);")!=std::string::npos&&
+          runtimeCpp.find("flatcpu::Scope captureCost(flatcpu::kCopyCapture,s.projectionFrames!=0||lightLive(s));")!=std::string::npos&&
+          count(runtimeCpp,"flatcpu::Scope verifyCost(flatcpu::kCopyVerify);")==4,
+          "same completed window emits the partition and capture/filter scopes respect their work gates");
     struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
     const Pin pins[] = {
         // Every family the census names has its scope at the entry points that family stands for.
@@ -2896,7 +2918,7 @@ void testFlatCpuWiring() {
         {&runtimeCpp, "if (censusWasRunning) s.census.noteWrapper(", 1, "and handed to the census only while it runs: no backlog"},
         {&runtimeCpp, "const FlatQueryCounts queries = flatQueryCut().take();", 1, "the query shortcuts' counts are drained every frame too"},
         {&runtimeCpp, "if (censusWasRunning) s.census.noteQueries(queries);", 1, "and handed over only while the census runs"},
-        {&runtimeCpp, "Log::get().note(\"%s\", lines.line[i]);", 1, "the lines go to the log as they are"},
+        {&runtimeCpp, "Log::get().note(\"%s\", lines.line[i]);", 2, "legacy and partition report lines both go to the log as formatted"},
         // The census drives engine motion's clock in the flat profile; nothing else does.
         {&cpuH, "emcpu::g_gate.store(gate, std::memory_order_relaxed);", 1, "the census opens engine motion's gate with its own sampling decision"},
         {&cpuH, "emcpu::g_gate.store(0, std::memory_order_relaxed);", 1, "and closes it when it stops"},
@@ -3996,6 +4018,7 @@ int main(int argc, char** argv) {
     failures += flatHdrProjectionCaptureTests();
     failures += light_payload_test::run();
     failures += forward_light_test::run();
+    failures += forward_watch_test::run();
     failures += forward_light_integration_test::run();
     failures += flatPhaseFailureCaptureTests();
     failures += flatForwardPhaseBoundTests();

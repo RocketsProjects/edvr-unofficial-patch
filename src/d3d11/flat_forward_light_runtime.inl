@@ -103,6 +103,7 @@ bool forwardActualPair(State& s,uint64_t vs,uint64_t ps) {
 forward_light::Issue forwardObserveDomain(State& s,const FlatRuntimeDraw& d) {
     using namespace forward_light;Issue issue;auto& f=s.forwardLight;const auto& k=d.key;
     if(!k.depth||flatContractKind(false,k.depth,k.depth,k.depthWidth,k.depthHeight,26,s.prefix.width,s.prefix.height,false)!=kFlatContractScreen)return issue;
+    flatcpu::Scope domainCost(flatcpu::kCopyDomain);
     FlatComputeInternalScope internal;Surface raw;Ptr<ID3D11DepthStencilView> dsv;Ptr<ID3D11Resource> resource;bool writes=false;
     if(!forwardDsv(s,k,raw,dsv,resource,writes)){f.ledger.overflow=true;forwardRevoke(s,0,Reason::Lineage);return issue;}
     if(writes)forwardMutation(s,raw.resource,false); // depth draw invalidates old conversion, not coherent earlier geometry
@@ -132,24 +133,43 @@ forward_light::Issue forwardObserveDomain(State& s,const FlatRuntimeDraw& d) {
 // Every actual bound target can mutate a retained raw/linear identity, not
 // just RT0. The existing dispatch and explicit-write seams cover other writes.
 void forwardDrawWrites(State& s) {
-    auto& ledger=s.forwardLight.ledger;bool watching=ledger.used!=0;
-    for(const auto& p:ledger.publications)watching|=p.live;
-    if(!watching)return;
+    flatcpu::CopyCounter counts;counts.add(flatcpu::kCopyWatch);
+    auto& ledger=s.forwardLight.ledger;bool anyLivePublication=false;
+    for(const auto& p:ledger.publications)anyLivePublication|=p.live;
+    const bool watching=ledger.used!=0||anyLivePublication;
+    if(!watching){counts.add(flatcpu::kCopyWatchSkip);return;}
+    flatcpu::Scope outputCost(flatcpu::kCopyOutputs);
+    bool inactiveCandidate=false;
+    if(counts.active()) {
+        // Advisory sampled shadow at the pre-issue owner seam. No held-issue
+        // tracker is inferred here; any future real skip needs its own proof.
+        const bool known=s.forwardLight.ownerKnown&&s.forwardLight.upstream&&s.device&&s.context&&
+            !foreignWork.load(std::memory_order_acquire);
+        const auto decision=forward_light::outputWatch(ledger,s.forwardLight.authority,s.prefix.frame,anyLivePublication,known,false);
+        counts.add(flatcpu::kCopyShadowChecks);
+        if(decision.reason==forward_light::OutputWatchReason::UnknownState)counts.add(flatcpu::kCopyShadowUnknown);
+        inactiveCandidate=!decision.needed();
+        if(inactiveCandidate)counts.add(flatcpu::kCopyInactiveCandidate);
+    }
+    flatcpu::Scope inactiveCost(flatcpu::kCopyInactiveOutputs,inactiveCandidate);
     FlatComputeInternalScope internal;
     ID3D11RenderTargetView* targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
     ID3D11UnorderedAccessView* uavs[D3D11_1_UAV_SLOT_COUNT]{};
     const UINT n=s.device&&s.device->GetFeatureLevel()>=D3D_FEATURE_LEVEL_11_1?D3D11_1_UAV_SLOT_COUNT:D3D11_PS_CS_UAV_REGISTER_COUNT;
+    counts.add(flatcpu::kCopyOmGet);counts.add(flatcpu::kCopyRtvSlots,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);counts.add(flatcpu::kCopyUavSlots,n);
     s.context->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,targets,nullptr,0,n,uavs);
+    counts.add(flatcpu::kCopyBlendGet);
     Ptr<ID3D11BlendState> blend;FLOAT factors[4]{};UINT mask=0;s.context->OMGetBlendState(&blend,factors,&mask);
-    D3D11_BLEND_DESC desc{};if(blend)blend->GetDesc(&desc);
+    D3D11_BLEND_DESC desc{};if(blend){counts.add(flatcpu::kCopyBlendDesc);blend->GetDesc(&desc);}
     for(unsigned i=0;i<D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;++i)if(targets[i]) {
+        counts.add(flatcpu::kCopyRtvBound);
         Ptr<ID3D11RenderTargetView> view;view.Attach(targets[i]);
         const auto slot=desc.IndependentBlendEnable?i:0;
-        if(!blend||desc.RenderTarget[slot].RenderTargetWriteMask){Ptr<ID3D11Resource> resource;view->GetResource(&resource);
+        if(!blend||desc.RenderTarget[slot].RenderTargetWriteMask){counts.add(flatcpu::kCopyGetResource);Ptr<ID3D11Resource> resource;view->GetResource(&resource);
             forwardMutation(s,reinterpret_cast<uintptr_t>(resource.Get()),false);}
     }
-    for(unsigned i=0;i<n;++i)if(uavs[i]){Ptr<ID3D11UnorderedAccessView> view;view.Attach(uavs[i]);
-        Ptr<ID3D11Resource> resource;view->GetResource(&resource);forwardMutation(s,reinterpret_cast<uintptr_t>(resource.Get()));}
+    for(unsigned i=0;i<n;++i)if(uavs[i]){counts.add(flatcpu::kCopyUavBound);Ptr<ID3D11UnorderedAccessView> view;view.Attach(uavs[i]);
+        counts.add(flatcpu::kCopyGetResource);Ptr<ID3D11Resource> resource;view->GetResource(&resource);forwardMutation(s,reinterpret_cast<uintptr_t>(resource.Get()));}
 }
 bool forwardConverterState(State& s,unsigned width,unsigned height) {
     forward_light::ConverterRaster raster;raster.width=width;raster.height=height;
@@ -179,6 +199,7 @@ forward_light::Issue forwardBefore(State& s,FlatRuntimeDraw& d,char kind,unsigne
     if(k.color)forwardMutation(s,reinterpret_cast<uintptr_t>(k.color),false);
     issue=forwardObserveDomain(s,d);
     if(k.vs!=kDepthVs||k.ps!=kDepthPs)return issue;
+    flatcpu::Scope converterCost(flatcpu::kCopyConverter);
     issue={};++f.converters;FlatComputeInternalScope internal;
     if(kind!='N'||count!=3||start||instances!=1||startInstance||k.depth||!forwardConverterState(s,k.width,k.height)||!forwardActualPair(s,kDepthVs,kDepthPs)||
        !forwardViewport(s,k.width,k.height)){forwardRefusal(s,Reason::Binding);return issue;}
@@ -208,6 +229,7 @@ forward_light::Issue forwardQualify(State& s,FlatRuntimeDraw& d) {
     if(consumer==1)f.phaseReceipt.note(flatCameraInjectUpstreamOwns());
     bool first=true,typed=false;for(unsigned i=0;i<s.prefix.targetsUsed;++i)if(s.prefix.targets[i].resource==k.color){first=!s.prefix.targets[i].writes.draws;typed=s.prefix.targets[i].tone.forwardLightCamera;}
     if((!first&&!typed)||(consumer!=1&&!typed))return issue; // old inverse/ordinary H untouched; later recipes cannot establish camera
+    flatcpu::Scope forwardCost(flatcpu::kCopyForward);
     const auto refuse=[&](Reason r){forwardRefusal(s,r,k.color);return Issue{};};
     if(!phaseReceipt(flatCameraInjectUpstreamOwns(),s.phase.currentX,s.phase.currentY,s.phase.applied))return refuse(Reason::Ownership);
     if(s.prefix.uncertain||foreignWork.load(std::memory_order_acquire))return refuse(Reason::Uncertain);

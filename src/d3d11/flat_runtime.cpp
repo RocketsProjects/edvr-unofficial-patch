@@ -1621,6 +1621,7 @@ constexpr uint64_t kMenuCopyPs=0xDED8796049C7BB4Aull;
 bool verifyMenuHdrCopy(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
     auto& k=draw.key;
     if(k.vs!=kMenuCopyVs || k.ps!=kMenuCopyPs || k.format!=26)return false;
+    flatcpu::Scope verifyCost(flatcpu::kCopyVerify);
     FlatComputeInternalScope guard;
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
     Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;
@@ -1653,6 +1654,7 @@ bool verifyMenuHdrCopy(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
 bool verifyCameraIndependentImageSource(ID3D11DeviceContext* ctx,const FlatRuntimeDraw& draw) {
     const auto& k=draw.key;
     if(k.format!=9 || !flatRuntimeCameraIndependentImageSourcePair(k.vs,k.ps))return false;
+    flatcpu::Scope verifyCost(flatcpu::kCopyVerify);
     FlatComputeInternalScope guard;
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
     Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;
@@ -1710,6 +1712,7 @@ void captureUnknownProjection(State& s,const FlatContractObservation& k) {
 bool verifyHdrCopy(ID3D11DeviceContext* ctx,FlatRuntimeDraw& draw) {
     auto& k=draw.key;
     if(k.vs!=kHdrCopyVs || k.ps!=kHdrCopyPs || k.format!=26)return false;
+    flatcpu::Scope verifyCost(flatcpu::kCopyVerify);
     FlatComputeInternalScope guard;
     Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
     Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;
@@ -1949,6 +1952,7 @@ const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDr
     // or invalidate scene history. Selected-H identity remains protected even
     // when its current depth, extent or donor proof is damaged.
     if(flatCameraInjectUpstreamOwns() && !flatDeferredVerifyInPhase(nonzero,phaseDomain))return nullptr;
+    flatcpu::Scope verifyCost(flatcpu::kCopyVerify);
     bool firstWitness=true;
     for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
         if(s.prefix.targets[i].resource==k.color && s.prefix.targets[i].writes.draws)firstWitness=false;
@@ -4066,6 +4070,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             flatcpu::Lines lines;
             flatcpu::formatWindow(window, &lines);
             for (int i = 0; i < lines.count; ++i) Log::get().note("%s", lines.line[i]);
+            flatcpu::formatCopyWindow(window,frame,&lines);
+            for (int i = 0; i < lines.count; ++i) Log::get().note("%s", lines.line[i]);
         }
         s.gpuFrameTried = false;
     }
@@ -5662,15 +5668,19 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         d.menuHdrCopyVerified=verifyMenuHdrCopy(ctx,d);
         d.imageSourceCameraIndependentVerified=verifyCameraIndependentImageSource(ctx,d);
         deferredPlan=verifyDeferredHdrCamera(s,d);
-        captureCopyProvenance(s,ctx,d);
-        lightPayloadToken=captureLightPayloadBefore(s,d,kind,count,start,base,instances,startInstance);
-        captureHdrProjectionDraw(s,d);
+        {
+            flatcpu::Scope captureCost(flatcpu::kCopyCapture,s.projectionFrames!=0||lightLive(s));
+            captureCopyProvenance(s,ctx,d);
+            lightPayloadToken=captureLightPayloadBefore(s,d,kind,count,start,base,instances,startInstance);
+            captureHdrProjectionDraw(s,d);
+        }
     }
     const auto oldTargets = s.prefix.targetsUsed;
     const uint32_t oldImageAccepted=s.prefix.imageCopiesAccepted,oldImageRefused=s.prefix.imageCopiesRefused;
     const uint32_t oldMenuAccepted=s.prefix.menuCopiesAccepted,oldMenuRefused=s.prefix.menuCopiesRefused;
     const uint32_t cameraProbeAttempt=[&] {
         flatcpu::Scope checks(flatcpu::kCopyChecks);   // F10-only unless it is the camera-conflict draw
+        flatcpu::Scope captureCost(flatcpu::kCopyCapture,s.projectionFrames!=0);
         return captureCameraConflict(s,d);
     }();
     if(s.weaponFootprint.active() && k.vs==0x025B4B9FF54622EDull &&

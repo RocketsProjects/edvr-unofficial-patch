@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-17 carrier report): verified `c7c14898`, RX 9070 XT, native FSR; 120-to-40 fps captured with valid AA history. EDVR CPU grows about 1.1 to 9.8 ms net; copy/state checks are the largest measured family. Exact subpath attribution remains open; no next walk requested (last entry).
+State (2026-10-17 copy checks): sampled cost breakdown and inactive-ledger shadow probe VALIDATED; actual scans/admission unchanged. Full build passed (166.5 s). Next: one short fast/slow carrier capture on the instrumented build, CPU timing on and Motion source view off; no optimization claimed (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -685,3 +685,92 @@ changing rendering code. Preserve actual-state fallback for uncertain
 bindings. Existing data is enough to choose this target; no further carrier
 walk or generic graphics-setting advice is requested yet. No C++ or live
 configuration change was made for this report.
+
+## 2026-10-17: separate copy checks before choosing a performance fix
+
+The user approved proceeding with cost isolation and a safe reduction audit.
+Work is on `codex/flat-copy-check-costs`. The current evidence does not price
+the forward output scan separately and does not justify disabling mutation
+checks whenever forward admission happens to fail in an observed scene.
+
+Discriminating hypotheses for one instrumented capture:
+
+- Output binding/mutation queries dominate: the output-scan timer is large,
+  with actual OM/blend/resource-query counts scaling with slow draw entries.
+- Raw-depth provenance dominates: the domain timer is large while output
+  queries account for little of the parent family.
+- Camera or existing copy/deferred checks dominate: qualification or the
+  remaining verification timer accounts for the difference. Cheap exact-pair
+  filters remain outside expensive-path timers.
+- Conflict/capture bookkeeping dominates despite no manual arm: its separate
+  timer/calls expose that path rather than attributing it to output queries.
+- A failed-ledger fast path is useful: sampled scans spend meaningful time
+  with no healthy raw domain, no live publication and no current authority.
+  If other healthy domains/publications keep watching necessary, the cohort
+  counts will refute this shortcut without another hypothesis-only build.
+
+Use the existing CPU-timing switch and one-in-16 schedule, with no new key or
+manual capture requirement. The existing headline copy-check total and call
+count must retain their meaning. Nested exclusive child timers are folded
+back into that headline; total EDVR CPU must count each cell only once.
+Separate bounded lines report the breakdown and exact queries within clocked
+frames, with calibration including the new scopes. Timing off must read no
+clock, update no query counter, and evaluate no shadow predicate.
+The output-scan cells are exclusive: add `output scan` and
+`output inactive-ledger` for the complete actual-scan cost. The former's call
+count includes all scans; the latter counts only the advisory inactive subset.
+
+The stateless candidate predicate conservatively watches current live
+authority, every live publication and any nonfailed raw domain. Unknown
+epochs/state and pending issues retain the watching fallback. It is only an
+advisory shadow probe: the real full actual-state scan always runs. The
+pre-current-issue owner seam has no global pending-issue publication; outer
+issue/reentrancy safety still requires proof before this could become an
+actual scan gate. No cache is inferred from the existing incomplete binding
+cache, and no refusal, camera, phase, history or renderer policy is relaxed.
+The source audit found current pending converters retain a live publication,
+pending light issues require one, and geometry issues either retain a healthy
+domain or cannot clear its failure on return. This supports the conservative
+candidate but does not certify external-call reentrancy for a production skip.
+
+Offline validation must exercise profiler partition/aggregate reporting,
+timing-off no-work, query counts, logging bounds, failed/new-domain and
+publication transitions, current/revoked authority and reset/unknown-state
+fallbacks. Measure default-off gate overhead separately from GPU work and
+from any claimed game FPS benefit. Build and test results follow.
+
+The focused rig passed 50 watch checks and 28,561 actual-ledger state
+sequences, plus the existing 166 forward-core, 114 integration and 9,570
+phase-bound checks. The profiler fixture reconciles the legacy aggregate and
+parent call count, sampled query counts, window reset, timing-off no-work and
+bounded output. The full gate will also exercise maximum query-counter values.
+
+An ignored CPU benchmark on Ryzen 7 9800X3D, MSVC 19.44.35228.0 and Windows
+26200 measured median incremental layout costs of 1.380 ns/draw with timing
+off and 4.775 ns/draw with one-in-16 sampling (five repeated medians, identical
+dummy work). The local RTX 5090 full-query fixture cost 104.5-145.9 ns/check;
+the pure predicate cost 2.1-2.3 ns/check. These are isolated layout/query
+measurements, not the complete production function, the reporter's AMD driver,
+the real inactive-cohort rate or an FPS prediction. Evidence and exact method:
+`build/rc3-latest-review/forward_watch_probe_audit.txt` and adjacent raw results.
+
+Full validation: absolute `build.bat --wait-lock` passed in 166.5 seconds,
+including Python gates, both production DLLs, regression rigs, installer
+resource checks and receipt. The temporal rig rebuilt after the final
+maximum-counter fixture and passed; no shared focused-test artifact was reused.
+Receipt `199a6f501ae4f4d1431fae3ec8a2a77dd1f6ad63b406040d4b59e71299344209`
+matches the final source tree. Log: `build/flat-copy-costs-full.log`.
+
+Next evidence, after installing this instrumented build: keep the same flat
+FSR/resolution settings on the reporter's AMD setup. In F8 > Debug enable
+`CPU timing in the log`, disable `Motion source view`, then close the menu.
+Stand still facing a fast view for 30 seconds, a reported slow terminal or
+hallway view for 30 seconds, and the first view again for 30 seconds. Note the
+transition times and save a log bundle. No General/Full capture or origin probe
+is needed. Verify the new build first, then pair `flat cpu copy checks 5s`
+with the existing headline and AA/history summaries by window/frame. A zero
+inactive count refutes this proposed shortcut for that capture; a large cohort
+only motivates an optimization if its measured scan time is meaningful.
+
+No game install was performed in this task. No scan skip, binding cache,
+rendering change, configuration key or performance improvement is claimed.

@@ -259,7 +259,8 @@ inline int flatCpuTests() {
             const bool got = run.census->take(run.now, false, r);
             flatcpu::Lines lines;
             flatcpu::formatWindow(r, &lines);
-            const std::string text = joined(lines);
+            flatcpu::Lines detail; flatcpu::formatCopyWindow(r,300,&detail);
+            const std::string text = joined(lines) + joined(detail);
             const std::string entry = std::string(flatcpu::kInfo[fam].name) + " 0.007 ms (calls 1.0)";
             expect(got && r.renderClockedFrames > 0 && nearly(r.renderMs[fam] / r.renderClockedFrames, 0.007) &&
                        r.renderCalls[fam] == r.renderClockedFrames,
@@ -283,7 +284,8 @@ inline int flatCpuTests() {
         const bool got = run.census->take(run.now, false, r);
         flatcpu::Lines lines;
         flatcpu::formatWindow(r, &lines);
-        const std::string text = joined(lines);
+        flatcpu::Lines detail; flatcpu::formatCopyWindow(r,300,&detail);
+        const std::string text = joined(lines) + joined(detail);
         expect(got && lines.count >= 1, "an empty window still closes and prints");
         bool all = true;
         for (unsigned fam = 0; fam < flatcpu::kFamilies; ++fam)
@@ -613,7 +615,12 @@ inline int flatCpuTests() {
                "at the worst values the window is a few lines, none over the limit, nothing dropped");
         const std::string text = joined(lines);
         bool named = true;
-        for (unsigned f = 0; f < flatcpu::kFamilies; ++f) named = named && has(text, flatcpu::kInfo[f].name);
+        for (auto& value : r.copy) value = 9999999999999999999ull;
+        flatcpu::Lines detail; flatcpu::formatCopyWindow(r,9999999999999999999ull,&detail);
+        for (unsigned f = 0; f < flatcpu::kFamilies; ++f) named = named && has(text + joined(detail), flatcpu::kInfo[f].name);
+        bool detailFits=!detail.truncated;
+        for(int i=0;i<detail.count;++i)detailFits=detailFits&&std::strlen(detail.line[i])<=flatcpu::kLineLimit;
+        expect(detailFits,"worst-value copy partition and query counts fit bounded report lines");
         for (unsigned i = 0; i < flatcpu::kEmNameCount; ++i) named = named && has(text, flatcpu::kEmNames[i].name);
         named = named && has(text, "engine motion hooks") && has(text, "GPU frame") && has(text, "GPU resolve") &&
                 has(text, "clock floor") && has(text, "camera witness") && has(text, "engine motion wrapper D3D calls") &&
@@ -972,6 +979,81 @@ inline int flatCpuTests() {
         expect(t_reads == readsBefore, "off: and not one clock read since the switch");
     }
 
+    // Copy-check partition: real nested scopes/counters and the actual window
+    // cut, rather than a report populated by hand. Legacy total and parent
+    // calls remain unchanged; the seven children never count twice.
+    {
+        flatcpu::resetForTest();fake(0);Run run;
+        for(unsigned i=0;i<320;++i)run.frame(15625,false,[] {
+            flatcpu::Scope shell(flatcpu::kOther);t_now+=3;
+            {
+                flatcpu::Scope parent(flatcpu::kCopyChecks);t_now+=10;
+                flatcpu::CopyCounter count;count.add(flatcpu::kCopyWatch);
+                {
+                    flatcpu::Scope output(flatcpu::kCopyOutputs);t_now+=12;
+                    flatcpu::Scope inactive(flatcpu::kCopyInactiveOutputs);t_now+=8;
+                    count.add(flatcpu::kCopyOmGet);count.add(flatcpu::kCopyRtvSlots,8);count.add(flatcpu::kCopyUavSlots,64);
+                    count.add(flatcpu::kCopyBlendGet);count.add(flatcpu::kCopyBlendDesc);
+                    count.add(flatcpu::kCopyRtvBound,2);count.add(flatcpu::kCopyUavBound);count.add(flatcpu::kCopyGetResource,3);
+                    count.add(flatcpu::kCopyShadowChecks);count.add(flatcpu::kCopyInactiveCandidate);
+                }
+                {flatcpu::Scope part(flatcpu::kCopyDomain);t_now+=30;}
+                {flatcpu::Scope part(flatcpu::kCopyConverter);t_now+=5;}
+                {flatcpu::Scope part(flatcpu::kCopyForward);t_now+=7;}
+                {flatcpu::Scope part(flatcpu::kCopyVerify);t_now+=11;}
+                {flatcpu::Scope part(flatcpu::kCopyCapture);t_now+=13;}
+                t_now+=4;
+            }
+            {flatcpu::Scope parent(flatcpu::kCopyChecks);flatcpu::Scope disabled(flatcpu::kCopyCapture,false);}
+            t_now+=3;
+        });
+        flatcpu::WindowReport r;expect(run.census->take(run.now,false,r),"partition window closes");
+        const auto n=r.renderClockedFrames;
+        expect(n==20&&nearly(flatcpu::copyCheckMs(r)/n,.100)&&nearly(r.renderMs[flatcpu::kCopyChecks]/n,.014),
+            "exclusive children plus residual reconcile to legacy copy-check elapsed time");
+        expect(r.renderCalls[flatcpu::kCopyChecks]==2*n&&r.renderCalls[flatcpu::kCopyCapture]==n,
+            "legacy parent calls preserved and disabled optional capture clocks nothing");
+        double total=0;for(double ms:r.renderMs)total+=ms;
+        expect(nearly(total/n,.106),"overall exclusive total counts no folded child twice");
+        expect(r.copy[flatcpu::kCopyWatch]==n&&r.copy[flatcpu::kCopyWatchSkip]==0&&r.copy[flatcpu::kCopyOmGet]==n&&
+            r.copy[flatcpu::kCopyRtvSlots]==8*n&&r.copy[flatcpu::kCopyUavSlots]==64*n&&
+            r.copy[flatcpu::kCopyBlendDesc]==n&&r.copy[flatcpu::kCopyGetResource]==3*n&&r.copy[flatcpu::kCopyInactiveCandidate]==n,
+            "actual sampled query calls, slot counts and bound-resource queries survive frame/window cut");
+        flatcpu::Lines old,detail;flatcpu::formatWindow(r,&old);flatcpu::formatCopyWindow(r,320,&detail);
+        expect(has(joined(old),"copy checks 0.100 ms (calls 2.0)")&&!has(joined(old),"raw domain"),
+            "legacy headline folds elapsed time while detail names stay separate");
+        expect(has(joined(detail),"frame-end=320 frames=320 clocked=20 one-in=16")&&
+            has(joined(detail),"residual 0.014 ms")&&has(joined(detail),"output scan 0.012 ms")&&
+            has(joined(detail),"output inactive-ledger 0.008 ms")&&has(joined(detail),"OM Get calls=20")&&
+            has(joined(detail),"UAV slots requested/scanned=1280"),"paired report labels same window and sampled exact counts");
+        r.floor.measured=true;r.floor.costNs=10;r.floor.recordedNs=3;r.emFloor.measured=false;
+        const auto price=flatcpu::instrumentCost(r);
+        expect(nearly(price.scopesPerFrame,10)&&nearly(price.clockedMs,.0001),
+            "scope calibration prices every new raw child once, not folded headline calls");
+        for(unsigned i=0;i<320;++i)run.frame(15625,false,{});
+        flatcpu::WindowReport empty;expect(run.census->take(run.now,false,empty)&&empty.copy[flatcpu::kCopyOmGet]==0,
+            "query sample totals reset with the shared timing window");
+        flatcpu::formatCopyWindow(empty,640,&detail);
+        expect(has(joined(detail),"OM Get calls=0")&&has(joined(detail),"zero calls means not run in sampled frames"),
+            "sampled not-run is distinct from missing clocks");
+    }
+    {
+        flatcpu::resetForTest();fake(0);flatcpu::g_gate.store(flatcpu::kNoThread);
+        unsigned predicateCalls=0;
+        for(unsigned i=0;i<100;++i){flatcpu::Scope parent(flatcpu::kCopyChecks);
+            flatcpu::CopyCounter count;count.add(flatcpu::kCopyWatch);count.add(flatcpu::kCopyOmGet);
+            if(count.active())++predicateCalls;
+            flatcpu::Scope output(flatcpu::kCopyOutputs);flatcpu::Scope optional(flatcpu::kCopyInactiveOutputs,false);
+        }
+        expect(t_reads==0&&predicateCalls==0&&flatcpu::slotCount()==0,
+            "off/unclocked gates never read QPC, register slots, count queries or evaluate shadow predicate");
+        flatcpu::WindowReport r;r.clocksOff=true;r.frames=100;
+        flatcpu::Lines detail;flatcpu::formatCopyWindow(r,100,&detail);
+        expect(has(joined(detail),"timing off; time/query counts unavailable, not zero")&&
+            !has(joined(detail),"OM Get calls=0"),"disabled query report never advertises observed zero");
+        r.clocksOff=false;flatcpu::formatCopyWindow(r,100,&detail);
+        expect(has(joined(detail),"no clocked frame"),"unsampled window is distinct from timing disabled");
+    }
     fake(0);
     t_fake = false;
     return failures;
