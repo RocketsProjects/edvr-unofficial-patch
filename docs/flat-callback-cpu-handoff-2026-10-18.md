@@ -3,7 +3,8 @@
 ## Status
 
 - Geometry issue reuse is on `codex/flat-startup-discovery-cpu`. Full build
-  PASS. Not flown. No new config key. Active checkout:
+  PASS. Steam flat install verified as `v0.20.0-rc.4-26-g1012c7c2`. Not
+  flown. No new config key. Active checkout:
   `C:\Users\seanm\projects\edvr-unofficial-patch`. Main stays unmerged at
   `043d7ff6`.
 - A fresh Geometry validation stamps the shaders, depth plane, depth-write
@@ -195,10 +196,11 @@ the result that recovers the frame time. A zero reuse count is a miss.
 Compare residual plus the three children with 052052's 5.976 ms callback
 sum. Residual alone is not the old callback family.
 
-Install with `python tools\install_edvr.py --target steam --scope flat`
-and no `--ini`. After the flight, `python tools\edvr_log.py --target steam
---expect-build` the certificate commit. `041f8e78` remains the baseline
-log's build.
+Steam flat is installed and verified as `v0.20.0-rc.4-26-g1012c7c2`
+(`python tools\install_edvr.py --target steam --scope flat`, no `--ini`).
+After the flight, `python tools\edvr_log.py --target steam --expect-build
+1012c7c2`. `041f8e78` remains the baseline log's build. A later
+documentation commit is not the DLL.
 
 ## Reproduction and validated build evidence
 
