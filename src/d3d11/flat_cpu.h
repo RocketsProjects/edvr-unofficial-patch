@@ -119,6 +119,7 @@ enum CopyCount : unsigned {
     kCopyWatch, kCopyWatchSkip, kCopyOmGet, kCopyRtvSlots, kCopyUavSlots,
     kCopyBlendGet, kCopyBlendDesc, kCopyRtvBound, kCopyUavBound, kCopyGetResource,
     kCopyShadowChecks, kCopyShadowUnknown, kCopyInactiveCandidate,
+    kCopyGuardChecks, kCopyGuardSkipped, kCopyGuardFallback,
     kCopyCounts
 };
 struct FamilyInfo {
@@ -846,10 +847,11 @@ inline void formatCopyWindow(const WindowReport& r, uint64_t completedFrame, Lin
         }
         const char* names[kCopyCounts] = {"watch entries","watch skips","OM Get calls","RTV slots requested/scanned","UAV slots requested/scanned",
             "blend Get calls","blend GetDesc calls","bound RTVs","bound UAVs","GetResource calls",
-            "shadow checks","shadow unknown","inactive-ledger candidates"};
+            "decision samples","decision unknown","inactive-ledger candidates",
+            "actual guard checks","actual guard skips","actual full-scan fallbacks"};
         for (unsigned c = 0; c < kCopyCounts; ++c)
             tk.add(c ? ", " : "; ", "%s=%llu", names[c], static_cast<unsigned long long>(r.copy[c]));
-        tk.add("; ", "zero calls means not run in sampled frames; inactive-ledger is advisory pre-issue (pending=false), old scan always runs; query counting not floor-corrected");
+        tk.add("; ", "zero calls means not run in sampled frames; output scan includes guard CPU; inactive-ledger scan time is zero after guard (skips untimed, not measured savings); query counting not floor-corrected");
     }
     packLines(tk,out);
 }

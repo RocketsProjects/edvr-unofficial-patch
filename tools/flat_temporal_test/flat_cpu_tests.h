@@ -61,6 +61,7 @@ inline int64_t now() {
 #define EDVR_FLATCPU_NOW() (::flat_cpu_rig::now())
 #define EDVR_EMCPU_NOW() (::flat_cpu_rig::now())
 #include "../../src/d3d11/flat_cpu.h"
+#include "../../src/d3d11/flat_forward_light.h"
 
 namespace flat_cpu_rig {
 
@@ -996,6 +997,7 @@ inline int flatCpuTests() {
                     count.add(flatcpu::kCopyBlendGet);count.add(flatcpu::kCopyBlendDesc);
                     count.add(flatcpu::kCopyRtvBound,2);count.add(flatcpu::kCopyUavBound);count.add(flatcpu::kCopyGetResource,3);
                     count.add(flatcpu::kCopyShadowChecks);count.add(flatcpu::kCopyInactiveCandidate);
+                    count.add(flatcpu::kCopyGuardChecks);count.add(flatcpu::kCopyGuardFallback);
                 }
                 {flatcpu::Scope part(flatcpu::kCopyDomain);t_now+=30;}
                 {flatcpu::Scope part(flatcpu::kCopyConverter);t_now+=5;}
@@ -1017,7 +1019,8 @@ inline int flatCpuTests() {
         expect(nearly(total/n,.106),"overall exclusive total counts no folded child twice");
         expect(r.copy[flatcpu::kCopyWatch]==n&&r.copy[flatcpu::kCopyWatchSkip]==0&&r.copy[flatcpu::kCopyOmGet]==n&&
             r.copy[flatcpu::kCopyRtvSlots]==8*n&&r.copy[flatcpu::kCopyUavSlots]==64*n&&
-            r.copy[flatcpu::kCopyBlendDesc]==n&&r.copy[flatcpu::kCopyGetResource]==3*n&&r.copy[flatcpu::kCopyInactiveCandidate]==n,
+            r.copy[flatcpu::kCopyBlendDesc]==n&&r.copy[flatcpu::kCopyGetResource]==3*n&&r.copy[flatcpu::kCopyInactiveCandidate]==n&&
+            r.copy[flatcpu::kCopyGuardChecks]==n&&r.copy[flatcpu::kCopyGuardFallback]==n&&r.copy[flatcpu::kCopyGuardSkipped]==0,
             "actual sampled query calls, slot counts and bound-resource queries survive frame/window cut");
         flatcpu::Lines old,detail;flatcpu::formatWindow(r,&old);flatcpu::formatCopyWindow(r,320,&detail);
         expect(has(joined(old),"copy checks 0.100 ms (calls 2.0)")&&!has(joined(old),"raw domain"),
@@ -1046,13 +1049,44 @@ inline int flatCpuTests() {
             flatcpu::Scope output(flatcpu::kCopyOutputs);flatcpu::Scope optional(flatcpu::kCopyInactiveOutputs,false);
         }
         expect(t_reads==0&&predicateCalls==0&&flatcpu::slotCount()==0,
-            "off/unclocked gates never read QPC, register slots, count queries or evaluate shadow predicate");
+            "off/unclocked profiler never reads QPC, registers slots or counts queries (functional guard is independent)");
         flatcpu::WindowReport r;r.clocksOff=true;r.frames=100;
         flatcpu::Lines detail;flatcpu::formatCopyWindow(r,100,&detail);
         expect(has(joined(detail),"timing off; time/query counts unavailable, not zero")&&
             !has(joined(detail),"OM Get calls=0"),"disabled query report never advertises observed zero");
         r.clocksOff=false;flatcpu::formatCopyWindow(r,100,&detail);
         expect(has(joined(detail),"no clocked frame"),"unsampled window is distinct from timing disabled");
+    }
+    // Functional demand is independent of the profiler gate. Count the
+    // actual skip/fallback distinction with the same production decision;
+    // only the simulated D3D query body changes, never the demand predicate.
+    {
+        using namespace forward_light;
+        flatcpu::resetForTest();fake(0);
+        Ledger ledger;ledger.reset(900);ledger.used=1;
+        ledger.domains[0].raw={17,1920,1080,0,0,1,1,true};
+        ledger.domains[0].failure=Reason::Ambiguous;
+        Authority authority[kPublications]{};
+        unsigned queries=0,guardCalls=0;
+        auto apply=[&](bool known) {
+            flatcpu::CopyCounter counter;
+            ++guardCalls;const auto d=outputWatch(ledger,authority,900,false,known,false);
+            counter.add(flatcpu::kCopyGuardChecks);
+            if(d.reason==OutputWatchReason::NoUsableState){counter.add(flatcpu::kCopyGuardSkipped);return;}
+            counter.add(flatcpu::kCopyGuardFallback);counter.add(flatcpu::kCopyOmGet);++queries;
+        };
+        apply(true);apply(false);
+        flatcpu::FrameCut cut;flatcpu::cutFrame(cut);
+        expect(queries==1&&cut.copy[flatcpu::kCopyGuardChecks]==2&&cut.copy[flatcpu::kCopyGuardSkipped]==1&&
+            cut.copy[flatcpu::kCopyGuardFallback]==1&&cut.copy[flatcpu::kCopyOmGet]==1,
+            "actual guard skip/fallback query counts reconcile on sampled frames");
+        flatcpu::g_gate.store(flatcpu::kNoThread);fake(0);queries=guardCalls=0;
+        apply(true);apply(false);
+        expect(guardCalls==2&&queries==1&&t_reads==0,
+            "functional NoUsableState guard and unknown fallback execute with CPU timing off and no clock reads");
+        flatcpu::cutFrame(cut);
+        expect(cut.copy[flatcpu::kCopyGuardChecks]==0&&cut.copy[flatcpu::kCopyOmGet]==0,
+            "functional execution with timing off never advertises sampled counts");
     }
     fake(0);
     t_fake = false;

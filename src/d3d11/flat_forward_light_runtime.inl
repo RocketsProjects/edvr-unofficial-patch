@@ -132,26 +132,28 @@ forward_light::Issue forwardObserveDomain(State& s,const FlatRuntimeDraw& d) {
 }
 // Every actual bound target can mutate a retained raw/linear identity, not
 // just RT0. The existing dispatch and explicit-write seams cover other writes.
-void forwardDrawWrites(State& s) {
+void forwardDrawWrites(State& s,ID3D11DeviceContext* actualDrawContext) {
     flatcpu::CopyCounter counts;counts.add(flatcpu::kCopyWatch);
     auto& ledger=s.forwardLight.ledger;bool anyLivePublication=false;
     for(const auto& p:ledger.publications)anyLivePublication|=p.live;
     const bool watching=ledger.used!=0||anyLivePublication;
     if(!watching){counts.add(flatcpu::kCopyWatchSkip);return;}
     flatcpu::Scope outputCost(flatcpu::kCopyOutputs);
-    bool inactiveCandidate=false;
-    if(counts.active()) {
-        // Advisory sampled shadow at the pre-issue owner seam. No held-issue
-        // tracker is inferred here; any future real skip needs its own proof.
-        const bool known=s.forwardLight.ownerKnown&&s.forwardLight.upstream&&s.device&&s.context&&
-            !foreignWork.load(std::memory_order_acquire);
-        const auto decision=forward_light::outputWatch(ledger,s.forwardLight.authority,s.prefix.frame,anyLivePublication,known,false);
-        counts.add(flatcpu::kCopyShadowChecks);
-        if(decision.reason==forward_light::OutputWatchReason::UnknownState)counts.add(flatcpu::kCopyShadowUnknown);
-        inactiveCandidate=!decision.needed();
-        if(inactiveCandidate)counts.add(flatcpu::kCopyInactiveCandidate);
+    // Re-evaluate actual demand on every watched draw, even with CPU timing
+    // off. Unknown state always takes the old full scan. Current Issue kinds
+    // cannot resurrect failed domains/dead publications: represented live
+    // dependencies already force scanning (see outputWatch and its tests).
+    const bool known=owner()&&actualDrawContext&&actualDrawContext==s.context.Get()&&
+        s.forwardLight.ownerKnown&&s.forwardLight.upstream&&s.device&&s.context&&
+        ledger.frame==s.prefix.frame&&!s.prefix.uncertain&&!foreignWork.load(std::memory_order_acquire);
+    const auto decision=forward_light::outputWatch(ledger,s.forwardLight.authority,s.prefix.frame,anyLivePublication,known,false);
+    counts.add(flatcpu::kCopyGuardChecks);counts.add(flatcpu::kCopyShadowChecks);
+    if(decision.reason==forward_light::OutputWatchReason::UnknownState)counts.add(flatcpu::kCopyShadowUnknown);
+    if(decision.reason==forward_light::OutputWatchReason::NoUsableState) {
+        counts.add(flatcpu::kCopyInactiveCandidate);counts.add(flatcpu::kCopyGuardSkipped);
+        return; // No forward dependency can observe these mutations; no D3D query.
     }
-    flatcpu::Scope inactiveCost(flatcpu::kCopyInactiveOutputs,inactiveCandidate);
+    counts.add(flatcpu::kCopyGuardFallback);
     FlatComputeInternalScope internal;
     ID3D11RenderTargetView* targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
     ID3D11UnorderedAccessView* uavs[D3D11_1_UAV_SLOT_COUNT]{};
@@ -192,10 +194,10 @@ bool forwardConverterState(State& s,unsigned width,unsigned height) {
 }
 // Publish bound raw-input/linear-output association only after CPU Draw return.
 // This does not certify pixel coverage or metric equivalence; resolve uses raw DSV.
-forward_light::Issue forwardBefore(State& s,FlatRuntimeDraw& d,char kind,unsigned count,unsigned start,unsigned instances,unsigned startInstance) {
+forward_light::Issue forwardBefore(State& s,ID3D11DeviceContext* actualDrawContext,FlatRuntimeDraw& d,char kind,unsigned count,unsigned start,unsigned instances,unsigned startInstance) {
     using namespace forward_light;forwardFrame(s);Issue issue;auto& f=s.forwardLight;const auto& k=d.key;
     if(!f.upstream)return issue;
-    forwardDrawWrites(s);
+    forwardDrawWrites(s,actualDrawContext);
     if(k.color)forwardMutation(s,reinterpret_cast<uintptr_t>(k.color),false);
     issue=forwardObserveDomain(s,d);
     if(k.vs!=kDepthVs||k.ps!=kDepthPs)return issue;

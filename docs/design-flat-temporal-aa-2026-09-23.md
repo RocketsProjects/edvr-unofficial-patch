@@ -3,7 +3,7 @@
 ## Status
 
 - **State (2026-10-17 RC4):** reporter's intermittent deferred-camera refusal remains open; paired witness built/offline-tested, not flown. Separate Steam menu AA-switch delay reproduced.
-  Menu-copy proof-type fix passed regression and full build, awaiting stationary validation (last entry). No admission-bound change; guarded-scan validation remains separate.
+  Menu-copy proof-type fix and combined Steam guard/diagnostic build passed all gates; awaiting stationary validation (last entry). No admission-bound change; main remains unmerged.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -17726,3 +17726,16 @@ Sean requested Steam installation when ready. Preserve installed guard
 `219d2bdb` by integrating it on a separate Steam test branch and validating
 the combined tree before installation. Keep main unmerged pending in-game
 validation; do not overwrite settings or enable the origin probe.
+
+Combined tree on `codex/steam-flat-menu-camera-proof` retains `219d2bdb`
+without conflicts and passes the full locked build in 166.9 seconds, including
+the menu regression, paired failure payload, functional output guard and all
+production/installer gates. Log: `build/steam-flat-menu-integration-full.log`;
+receipt input identity:
+`5c1363fa92aec050c09c0027b9d4b4e359be257b633ac351879452d2ab2a5de1`.
+The clean DLL promotion, DLL-only ZIP and sanctioned Steam-flat install follow
+from this same tested source tree. In-game validation remains pending: leave
+the main-menu scene unchanged, switch DLSS to TAA in F8, wait 10 seconds,
+switch back to DLSS and close F8 for 15 seconds. Keep the origin probe off;
+neither F7 nor Full is needed. Compare engagement delay, selector-camera-
+provenance refusals and renderer history continuity across both transitions.

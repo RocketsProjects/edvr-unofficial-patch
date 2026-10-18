@@ -147,24 +147,32 @@ struct Authority {
         return live&&frame==current&&(!resource||resource==raw||resource==linear);
     }
 };
-// Prospective output-scan demand, observed by the sampled CPU probe only.
-// NoUsableState does not change the ledger or authorize skipping today's scan.
+// Output mutation demand, evaluated afresh at the current owner draw seam.
 // A failed domain cannot become healthy before reset; a new domain/publication
-// makes the next stateless observation watch again. ALL live publications are
-// retained, including pending/failed-domain/overflow publications, so a future
-// gate would not silently discard their mutation provenance.
+// makes the next observation watch again. ALL live publications are retained,
+// including pending/failed-domain/overflow publications. Live authority also
+// watches after overflow or publication invalidation, until actually revoked.
+//
+// Known held issues cannot resurrect unrepresented usable state: Converter's
+// issued/returned only update a still-live publication; valid Geometry return
+// does not heal its domain; Light validation requires a live returned token.
+// Invalid/abandoned issues only invalidate or refuse. This is a representation
+// proof, NOT an assertion that callbacks cannot nest. Re-audit these callbacks
+// if any Issue kind gains a state-creating/healing return path.
+// Skipping a UAV mutation may retain a different NONZERO failed-domain reason;
+// admission/revocation are preserved, not byte-identical refusal diagnostics.
 enum class OutputWatchReason:uint32_t {UnknownState,LiveAuthority,LivePublication,HealthyRaw,NoUsableState,Count};
 struct OutputWatchDecision {
     OutputWatchReason reason=OutputWatchReason::UnknownState;
     bool needed()const {return reason!=OutputWatchReason::NoUsableState;}
 };
 inline OutputWatchDecision outputWatch(const Ledger& ledger,const Authority (&authority)[kPublications],
-        uint64_t currentFrame,bool anyLivePublication,bool stateKnown,bool pendingIssue) {
+        uint64_t currentFrame,bool anyLivePublication,bool stateKnown,bool unrepresentedPendingIssue) {
     // anyLivePublication is the result of the existing complete publication
     // walk immediately before this call, with no intervening ledger mutation.
-    // Unknown ownership/context, a suspended issue or an unestablished epoch
+    // Unknown ownership/context, an unrepresented issue or unestablished epoch
     // always asks for the actual pipeline. No binding-state cache is involved.
-    if(!stateKnown||pendingIssue||!currentFrame||ledger.frame!=currentFrame||ledger.used>kDomains)
+    if(!stateKnown||unrepresentedPendingIssue||!currentFrame||ledger.frame!=currentFrame||ledger.used>kDomains)
         return {OutputWatchReason::UnknownState};
     for(const auto& a:authority)if(a.live) {
         if(a.frame!=currentFrame)return {OutputWatchReason::UnknownState};
@@ -173,14 +181,15 @@ inline OutputWatchDecision outputWatch(const Ledger& ledger,const Authority (&au
     if(anyLivePublication)return {OutputWatchReason::LivePublication};
     for(unsigned i=0;i<ledger.used;++i) {
         const auto& d=ledger.domains[i];
-        if(!d.raw.known||!d.raw.resource||static_cast<unsigned>(d.failure)>=static_cast<unsigned>(Reason::Count))
+        if(!d.raw.known||!d.raw.resource||!d.raw.width||!d.raw.height||!d.raw.slices||!d.raw.samples||
+           static_cast<unsigned>(d.failure)>=static_cast<unsigned>(Reason::Count))
             return {OutputWatchReason::UnknownState};
         if(d.failure==Reason::None)return {OutputWatchReason::HealthyRaw};
     }
     return {OutputWatchReason::NoUsableState};
 }
 struct Issue {
-    enum Kind:uint32_t {None,Converter,Light,Geometry};Kind kind=None;
+    enum Kind:uint32_t {None,Converter,Light,Geometry,Count};Kind kind=None;
     uint64_t token=0,frame=0,color=0,vs=0,ps=0;uint32_t q=0,linearSlot=0;
     Surface raw{},linear{};ConstantIdentity constants[2]{};
     float phaseX=0,phaseY=0;unsigned char camera[96]{};bool depthWrite=false,donated=false,issued=false,returned=false;

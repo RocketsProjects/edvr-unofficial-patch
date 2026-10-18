@@ -5695,7 +5695,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         // The exact-shader verifications: each returns at once unless this draw is the copy it
         // names, and then reads the pipeline back from the context (shader, targets, view, viewport).
         flatcpu::Scope checks(flatcpu::kCopyChecks);
-        forwardIssue=forwardBefore(s,d,kind,count,start,instances,startInstance);
+        forwardIssue=forwardBefore(s,context,d,kind,count,start,instances,startInstance);
         const auto lightIssue=forwardQualify(s,d);
         if(lightIssue.kind!=forward_light::Issue::None)forwardIssue=lightIssue;
         d.hdrCopyVerified=verifyHdrCopy(ctx,d);

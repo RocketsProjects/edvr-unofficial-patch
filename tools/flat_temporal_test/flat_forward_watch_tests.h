@@ -6,6 +6,7 @@
 
 namespace forward_watch_test {
 using namespace edvr::forward_light;
+static_assert(Issue::Count==4,"New issue kinds require review of the output-scan no-resurrection proof");
 inline Surface raw(uint64_t resource) {
     Surface s{};s.resource=resource;s.width=3440;s.height=1440;s.slices=1;s.samples=1;s.known=true;return s;
 }
@@ -89,7 +90,7 @@ inline int run() {
     Rig r;
     expect(r.watch().reason==W::NoUsableState&&!r.watch().needed(),"empty established epoch has no prospective demand");
     expect(r.watch(false).reason==W::UnknownState&&r.watch(false).needed(),"unknown context/foreign ownership falls back");
-    expect(r.watch(true,true).reason==W::UnknownState,"suspended issue falls back, not an inferred completed draw");
+    expect(r.watch(true,true).reason==W::UnknownState,"unrepresented held issue falls back");
     expect(outputWatch(r.ledger,r.authority,r.frame+1,false,true,false).reason==W::UnknownState,"frame mismatch falls back before reset");
     r.observe(1);expect(r.watch().reason==W::HealthyRaw,"new healthy raw domain re-enables watching");
     r.observe(1,true);expect(r.watch().reason==W::NoUsableState,"conflicting camera irreversibly fails this domain");
@@ -114,6 +115,8 @@ inline int run() {
     invalid=Rig{};invalid.ledger.used=1;expect(invalid.watch().reason==W::UnknownState,"unknown DSV/resource shape falls back");
     invalid=Rig{};invalid.observe(1);invalid.ledger.domains[0].failure=static_cast<Reason>(999);
     expect(invalid.watch().reason==W::UnknownState,"unknown failure code cannot be treated as a proved failed domain");
+    invalid=Rig{};invalid.unknownWriter(1);invalid.ledger.domains[0].raw.samples=0;
+    expect(invalid.watch().reason==W::UnknownState,"corrupt known surface cannot certify a failed domain");
     invalid=Rig{};invalid.authority[0]={invalid.frame+1,100,1,3,1,true};
     expect(invalid.watch().reason==W::UnknownState,"foreign authority epoch falls back");
     expect(outputWatch(r.ledger,r.authority,0,r.anyPublication(),true,false).reason==W::UnknownState,"unestablished frame zero falls back");
@@ -133,6 +136,42 @@ inline int run() {
     capacity=Rig{};
     capacity.ledger.observe(raw(1),Role::Unknown,false,false,{},nullptr,capacity.q++);
     expect(capacity.watch().reason==W::HealthyRaw,"unfailed domain without a donor stays conservative for future geometry");
+    // A Converter can pass actual binding validation after its publication died.
+    // These are its real Ledger completion operations, including an issue that
+    // had not begun yet when a nested draw invalidated the publication.
+    Rig held;held.unknownWriter(1);const auto dead=held.ledger.publish(raw(1),raw(3),held.q++);
+    held.mutation(3,false);held.ledger.issued(dead);held.ledger.returned(dead);
+    expect(!held.ledger.publications[0].live&&!held.ledger.publications[0].issued&&
+        !held.ledger.publications[0].returned&&held.watch().reason==W::NoUsableState,
+        "late Converter begin/return cannot revive a publication invalidated before issue");
+    const auto replacement=held.ledger.publish(raw(1),raw(3),held.q++);
+    held.ledger.returned(dead);held.ledger.abandon(dead);
+    expect(replacement!=dead&&held.ledger.publications[0].token==replacement&&
+        held.ledger.publications[0].live&&!held.ledger.publications[0].returned&&held.watch().needed(),
+        "replacement publication is watched and isolated from old return/abandon");
+    held.ledger.issued(replacement);held.mutation(3,false);held.ledger.returned(replacement);
+    expect(!held.ledger.publications[0].returned&&held.watch().reason==W::NoUsableState,
+        "already-issued Converter return cannot revive a subsequently invalidated token");
+    held.nextFrame();const auto next=held.ledger.publish(raw(2),raw(3),held.q++);
+    held.ledger.issued(replacement);held.ledger.returned(replacement);held.ledger.abandon(replacement);
+    expect(next>replacement&&held.ledger.publications[0].live&&!held.ledger.publications[0].issued&&held.watch().needed(),
+        "frame reset preserves token serial against delayed prior-frame completion");
+    held.observe(2);held.ledger.issued(next);held.ledger.returned(next);held.attest(2,3);
+    expect(held.watch().reason==W::LiveAuthority&&held.admit(2,3),"nested reset/new producer may establish fresh watched authority");
+    held.mutation(3,false);Reason missing;const auto* light=held.ledger.find(raw(2),raw(3),held.q,missing);
+    expect(!light&&missing==Reason::MutatedProducer&&!held.authority[0].live&&held.hdrBad,
+        "Light token becomes invalid and retained HDR cannot hide revocation");
+    held.unknownWriter(2);const auto failed=held.ledger.domains[0].failure;
+    // Manual callback audit establishes that a valid Geometry return has no
+    // Ledger operation. Test the real subsequent observation, without a fake
+    // callback implementation that merely mirrors that audited behavior.
+    held.observe(2);
+    expect(held.ledger.domains[0].failure==failed&&held.watch().reason==W::NoUsableState,
+        "failed Geometry's later matching donor cannot heal domain");
+    held.ledger.mutation(2);expect(held.ledger.domains[0].failure!=Reason::None,
+        "invalid or abandoned Geometry mutation only overwrites failure with failure");
+    held.observe(4);held.publish(4,2,false);
+    expect(held.watch().reason==W::LivePublication,"new healthy raw and aliased pending output re-enable watching immediately");
     // Check the probe itself, including padding bytes: no serial, failure,
     // publication, authority or camera byte may change while taking a sample.
     unsigned char before[sizeof(r)];std::memcpy(before,&r,sizeof(r));for(unsigned i=0;i<32;++i)(void)r.watch();
