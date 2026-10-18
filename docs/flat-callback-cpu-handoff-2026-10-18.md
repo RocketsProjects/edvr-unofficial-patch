@@ -15,11 +15,27 @@
   about 200 fresh per frame), `frozen=0`. History stayed valid, and the
   log has zero `history-resets`. Depth, stage, render-target and VS b1
   setters are hundreds per frame.
-- The upper-60s dip is the 06:38:16 window: 367 frames / 5 s = 73.4 fps,
-  present p50 13.21 ms (p95 17.29), 7162 draws, EDVR gross 9.249 ms, same
-  query children. Other-thread engine merge was 2.435 ms over 1727 calls
-  and clear 1.567 ms over 948, against 0.151 ms over 1900 and 0.318 ms
-  over 751 at 06:41:16. The certificate cost stayed down. Open.
+- Next, before any skip. 97.7 fps is 10.24 ms. The AA-off sample is
+  `edvr_gfx_20261018_033520.log`, 263 fps over 2.878 s (3.80 ms), on
+  `4c810f12`; F7 also drops UI quality. Wall gap about 6.4 ms. Resolve
+  plus backend CPU is 0.08 ms. The remaining cost is the slow-path draw
+  hook, not the certificate queries.
+- Largest exclusive bucket at 06:41:16 is `other` 2.451 ms over 16554
+  calls: the draw-scope shell after named families are carved out.
+  Copy-check residual is 1.147 ms over 16529 calls, and copy verification
+  calls were 0, so the verify functions returned before their own scope.
+  Coverage is 0.686 ms over 8126 scene draws. Issue residual 0.548 ms
+  over 14500 calls sits near the clock floor.
+- One flight, no behaviour change: split `other` and the copy-check scope
+  into continued producers versus every other slow draw. Continued
+  producers are the reuse hits, about 7000 draws against about 200 fresh.
+  If they own the shell, the change is a continuation path that does not
+  rebuild the draw record or enter copy checks. If the other draws own
+  it, that bypass will not move the frame rate.
+- The upper-60s dip stays open and is not this gap. 06:38:16 was 73.4 fps
+  at the same draw count, certificate still hit. Other-thread engine
+  merge was 2.435 ms over 1727 calls and clear 1.567 ms over 948, against
+  0.151 ms over 1900 and 0.318 ms over 751 at 06:41:16.
 - Steam flat `/novr`, DLSS, native 3840x2160 HDR, user 300-FPS limit, CPU
   timing on, origin probe off. Settings files unchanged. Phase bootstrap
   and travel/origin were not retested. Baseline log remains
