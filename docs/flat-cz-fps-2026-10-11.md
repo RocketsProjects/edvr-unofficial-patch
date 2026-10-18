@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 remaining per-draw audit): `709ba499` installed/verified Steam flat (`rc.4-19`), query-once Geometry/Light DSV validation plus exclusive callback timing. Sol full build/promotion PASS, Astra evidence review PASS, settings unchanged; main unmerged, probe off. Latest Frontier `208ea3e8` fresh-flat `043900` DOES run DLSS (3209/3209 clean frames); prior `043544` fallback is session-specific. Frontier native 3840 HDR and Steam 2496 copy routes/draw loads differ, CPU timing Frontier off: no isolated regression size. Historical diff adds broad writer/Issue proof at `44a8ef1a`. Prior roughly 6.3-ms Steam CPU total omitted callbacks, so expanded totals need coverage-aware comparison. Next Steam capture: callbacks, reached-Issue snapshots, raw/cache counters and AA continuity. Phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (last entry).
+State (2026-10-18 remaining per-draw capture): Steam `709ba499` (`rc.4-19`) slow/fast/slow at user-reported 300-FPS limit: 63.6/204.9/64.4 FPS, callbacks 4.426/0.160/4.558 ms gross per clocked frame. New reached-stage counters imply 14,728 formerly redundant Geometry DSV queries removed per slow2 clocked frame; saved milliseconds are not isolated. DSV/depth description cache hits 99.9913%/99.5437%; all 10,893 leg frames retain AA history and complete HDR, no new resets/refusals/failures. Current Steam and valid Frontier `208ea3e8` both use native 3840 HDR; prior Steam `ee68d075` was 2496 copy and omitted callback timing, so no causal regression size. Next target: subdivide/trace callback proof before proposing a shortcut; zero Light sites cannot justify skipping earlier producers. Settings unchanged, main unmerged, probe off. Phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1988,3 +1988,68 @@ separate. No new source/build/install change from this read; Steam
 `709ba499` remains installed and main unmerged. Use the user's 300-FPS limit
 for the next Steam slow/fast/slow check, keeping the comparison conditions
 steady; no new settings-file edit is needed.
+
+## 2026-10-18: query-once and callback capture results
+
+User completed slow/fast/slow with the 300-FPS limit. Sanctioned reader
+verifies `edvr_gfx_20261018_044929.log` as installed `709ba499`,
+`v0.20.0-rc.4-19-g709ba499`, PE `6AD4A15C`, flat `/novr` and DLSS.
+Freeze CPU/copy at 04:53:45.379 and paired runtime at 04:53:45.120;
+exclude subsequent growing-log rows. Automatic discovery finished at
+04:50:45.243, 12,000 useful frames, before all three measured legs.
+
+| Core (five-second report ends) | Real FPS | Substituted draws/frame | Callback gross ms / calls per clocked frame | Raw-domain ms / calls per clocked frame |
+| --- | ---: | ---: | ---: | ---: |
+| Slow1, 04:51:40-04:52:05 | 63.6 | 7046 | 4.426 / 14354 | 1.619 / 8075 |
+| Fast, 04:52:20-04:52:40 | 204.9 | 139 | 0.160 / 369 | 0.052 / 337 |
+| Slow2 first 30 seconds, 04:52:50-04:53:15 | 66.3 | 7236 | 4.499 / 14723 | 1.646 / 8301 |
+| Slow2 full, 04:52:50-04:53:45 | 64.4 | 7261 | 4.558 / 14773 | 1.669 / 8322 |
+
+FPS uses real CPU-report frames divided by paired logged window seconds;
+CPU time/calls use clocked-frame weighting. CPU and AA reports have slightly
+different boundaries; retain their separate frame populations. Callback
+timing is exclusive of existing nested families and excludes the game's
+Draw, but includes other begin/end work besides forward Issue validation.
+The whole 4.6 ms cannot be assigned to DSV proof without finer evidence.
+Slow2 whole CPU is 13.709 ms gross / 11.220 ms recorded-floor net estimate.
+The directly recorded callback floor estimate is 0.236 ms, estimated
+callback clock cost about 0.488 ms; neither is an uninstrumented benchmark.
+Old gross 8.504 / net 6.414 ms omitted callbacks. Do not subtract gross
+callback time from expanded floor-net totals or call that increase a
+regression. Current slow2 also has about 11% more draws than old 6545/frame.
+
+Query accounting is internally consistent: slow2 raw DSV Gets 5,578,313 =
+5,577,829 description-cache hits + 484 misses, a 99.9913% hit rate; depth
+state description hits are 99.5437%. Raw-domain work averages 200.5 ns/call
+against old 207.5, with 8322 versus 7485 calls per clocked frame and changed
+route/call mix. This does not isolate a time saving from this edit.
+Issue Geometry reaches 3,564,170 snapshots / 242 clocked frames = 14,728
+per frame; Light is zero. Each reached stage now performs one actual DSV
+query instead of two, retaining separate before/after Draw validation.
+The Geometry count is a subset of raw DSV Gets, not another getter count.
+The removed outer pre-get was uncounted previously, so stable raw counts
+cannot refute the removal or measure milliseconds saved. Zero Light sites
+do not certify that earlier producer/provenance observations can be skipped.
+
+AA passes all 23 core windows: slow1 1909/1909, fast 5119/5119, slow2
+3865/3865 accepted history and completed HDR backend, 10,893/10,893 total.
+No new reset, refusal, backend failure or jitter-failed frame in the legs;
+treated streak reaches 15,109. Four cumulative startup/scene-entry resets
+precede the legs; the last is the 04:51:10 scene entry with no-previous=1.
+Ruled out: repeated AA disengagement/history loss as the cause of this
+capture's held slow-view cost, because every measured leg frame continues
+history and completes treatment. Current Steam uses native 3840x2160 HDR,
+matching the valid Frontier route; previous Steam used 2496x1404 copy.
+Frontier clocks were off and draw load differed, so no isolated historical
+or storefront CPU/FPS regression size follows from these captures.
+
+Frozen artifacts: `build/per_draw_issue_709ba499_summary.json` and `.md`,
+`build/per_draw_issue_709ba499_aa_frozen.md`, reader output
+`build/per_draw_issue_709ba499_filtered.txt`. Sol normalized CPU/counters
+and independently traced AA/routes; Astra evidence-only review PASS, with
+no arithmetic or attribution blocker. Astra ran no tests/builds/benchmarks.
+No source/build/install change from this log review; Steam stays `709ba499`,
+settings unchanged, probe off, main unmerged. Saved evidence is sufficient;
+normal quit is safe. Remaining CPU target is the newly exposed callback
+work; trace/subdivide it before selecting a guarded optimization. Phase
+bootstrap remains outside this validation.
