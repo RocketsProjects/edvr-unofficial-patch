@@ -246,6 +246,17 @@ struct ForwardRuntime {
     uint64_t reasons[static_cast<unsigned>(forward_light::Reason::Count)]{};
     forward_light::Reason last=forward_light::Reason::Never;
 };
+// The last continued producer draw this frame. The next draw with the same
+// bindings, camera and arguments reuses it instead of rebuilding the record.
+struct ProducerContinuation {
+    bool armed = false;
+    uint64_t frame = 0;
+    char kind = 0;
+    uint32_t count = 0, start = 0, instances = 0, startInstance = 0;
+    int32_t base = 0;
+    uint32_t rtvGen = 0, dsvGen = 0, vsGen = 0, psGen = 0, b1Gen = 0;
+    FlatRuntimeDraw draw{};
+};
 struct State {
     ForwardRuntime forwardLight;
     FlatDrawCapture drawCapture;
@@ -420,6 +431,7 @@ struct State {
     Ptr<ID3D11Resource> uavs[8];
     const void* namedDepth = nullptr, *namedConstants = nullptr;
     unsigned char namedCamera[kFlatCameraBytes]{};
+    ProducerContinuation producerRun{};
     // The draw that named the world this frame (its shaders), and how often the camera it named was not the one H selected (design
     // section 104, the grenade hold: a first-person camera that names the world makes every world draw after it a "foreign" draw).
     uint64_t namedVs = 0, namedPs = 0;
@@ -4466,6 +4478,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.namingVetoedThisFrame=false;
     } else s.namingVetoStreak=0;
     s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;s.frameSourceFree=false;
+    s.producerRun.armed = false;
     flatHdrBeginFrame(s.hdr, d.Width, d.Height); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false;
     s.observingQualifiedHandoff = false;
     s.drawCapture.begin(frame+1,s.phaseDepth.Get(),s.phaseWidth,s.phaseHeight);
@@ -5487,6 +5500,97 @@ void flatOffscreenRecord(State& s, const FlatRuntimeDraw& d, const FlatPairFacts
     s.offscreen.record(s.prefix.frame, key, d);
     ++s.offscreenCounts.recorded;
 }
+// True when this draw is the same continued producer as the one just served. The caller then
+// skips the constructor body and does only what that draw still has to do.
+bool flatProducerRunAccepts(const State& s, const FlatRuntimeDraw& live, const FlatPairFacts& pair,
+                            char kind, uint32_t count, uint32_t start, int32_t base, uint32_t instances,
+                            uint32_t startInstance, bool auditing) {
+    const auto& held = s.producerRun;
+    if (!held.armed || held.frame != s.prefix.frame || !held.draw.supported || !live.supported || !live.key.camera) return false;
+    if (pair.toneSlot != ~0u || pair.copyPair || pair.mapToneSlot != ~0u || pair.uiMayAsk || pair.sourceTone) return false;
+    if (!flatCameraInjectUpstreamOwns() || s.work != FlatWork::Full || s.projectionFrames != 0 || auditing) return false;
+    if (flatTemporalNeedsOriginalState() || s.drawCapture.active() || s.drawPackets.armed()) return false;
+    if (foreignWork.load(std::memory_order_acquire) || s.prefix.uncertain || s.weaponFootprint.active()) return false;
+    if (flatHdrCouldConsume(s.hdr, live.key)) return false;
+    if (overlayOpen(s) || overlaySuffixActive.load(std::memory_order_acquire)) return false;
+    if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) return false;
+    if (s.namedDepth != live.key.depth || s.namedConstants != live.key.b1) return false;
+    if (kind != held.kind || count != held.count || start != held.start || base != held.base ||
+        instances != held.instances || startInstance != held.startInstance) return false;
+    if (held.rtvGen != bindingGeneration(BindSlot::Rtv0) || held.dsvGen != bindingGeneration(BindSlot::Dsv0) ||
+        held.vsGen != bindingGeneration(BindSlot::Vs) || held.psGen != bindingGeneration(BindSlot::Ps) ||
+        held.b1Gen != bindingGeneration(BindSlot::VsCb1)) return false;
+    const auto& a = held.draw.key;
+    const auto& b = live.key;
+    if (a.color != b.color || a.rtv != b.rtv || a.depth != b.depth || a.dsv != b.dsv || a.b1 != b.b1 ||
+        a.vs != b.vs || a.ps != b.ps || a.format != b.format || a.kind != b.kind ||
+        a.width != b.width || a.height != b.height || a.depthWidth != b.depthWidth ||
+        a.depthHeight != b.depthHeight || a.depthFormat != b.depthFormat || a.viewportCount != b.viewportCount ||
+        a.cameraHash != b.cameraHash || a.writeEpoch != b.writeEpoch || a.writeSeq != b.writeSeq) return false;
+    if (std::memcmp(a.viewport, b.viewport, sizeof(a.viewport)) != 0) return false;
+    if (std::memcmp(held.draw.camera, live.camera, kFlatCameraBytes) != 0) return false;
+    return true;
+}
+void flatProducerRunRemember(State& s, const FlatRuntimeDraw& d, char kind, uint32_t count, uint32_t start,
+                             int32_t base, uint32_t instances, uint32_t startInstance) {
+    auto& held = s.producerRun;
+    held.armed = true;
+    held.frame = s.prefix.frame;
+    held.kind = kind;
+    held.count = count;
+    held.start = start;
+    held.base = base;
+    held.instances = instances;
+    held.startInstance = startInstance;
+    held.rtvGen = bindingGeneration(BindSlot::Rtv0);
+    held.dsvGen = bindingGeneration(BindSlot::Dsv0);
+    held.vsGen = bindingGeneration(BindSlot::Vs);
+    held.psGen = bindingGeneration(BindSlot::Ps);
+    held.b1Gen = bindingGeneration(BindSlot::VsCb1);
+    held.draw = d;
+}
+// Serves a repeated continued producer: the forward observation, the reducer, the HDR
+// detector, the trace, the world-draw notes and the substitution. The constructor returns.
+bool flatProducerContinue(State& s, ID3D11DeviceContext* context, FlatRuntimeDraw& d, const FlatPairFacts& pair,
+                          const FlatOffscreenArgs& offscreenArgs, bool auditing, uint32_t offscreenTargetsBefore,
+                          bool offscreenUncertainBefore, char kind, uint32_t count, uint32_t start, int32_t base,
+                          uint32_t instances, uint32_t startInstance, bool& producer, bool& gameHadTarget6,
+                          forward_light::Issue& forwardIssue) {
+    if (!flatProducerRunAccepts(s, d, pair, kind, count, start, base, instances, startInstance, auditing)) return false;
+    d = s.producerRun.draw;
+    if (d.key.camera) d.key.camera = d.camera;   // the saved pointer addressed the previous draw's stack array
+    const auto& k = d.key;
+    forwardFrame(s);
+    forwardDrawWrites(s, context);
+    if (k.color) forwardMutation(s, reinterpret_cast<uintptr_t>(k.color), false);
+    forwardIssue = forwardObserveDomain(s, d);
+    {
+        flatcpu::Scope reduce(flatcpu::kReduce);
+        flatRuntimeObserve(s.prefix, d);
+    }
+    {
+        flatcpu::Scope hdrScope(flatcpu::kHdrRoute);
+        flatHdrObserveDraw(s.hdr, k, s.prefix.sequence, nullptr, false);
+        observePassiveSceneDraw(s, d);
+    }
+    {
+        flatcpu::Scope trace(flatcpu::kTrace);
+        flatTraceRecord(s.traceRing, d, false, nullptr, s.prefix.sequence);
+    }
+    if (s.engine != FlatMonoResolveMode::Taa && k.depth) ++s.foregroundCounts.worldUnmarked;
+    if (s.foreground.active())
+        s.foreground.worldSource(context, s.prefix.frame, s.prefix.sequence,
+            static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),
+            static_cast<ID3D11DepthStencilView*>(const_cast<void*>(k.dsv)));
+    {
+        FlatComputeInternalScope guard;
+        flatcpu::Scope engine(flatcpu::kEngineDraw);
+        producer = engineVelocityFlatBeginDraw(context, &gameHadTarget6);
+    }
+    if (flatUiLayerOn()) flatUiLayerNoteSceneDraw(context, count, instances, kind);
+    flatOffscreenRecord(s, d, pair, offscreenArgs, auditing, false, offscreenTargetsBefore, offscreenUncertainBefore);
+    return true;
+}
 }  // namespace
 
 FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances,
@@ -5644,6 +5748,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     s.drawVs = k.vs; s.drawPs = k.ps;
     k.b1 = bindingGet(BindSlot::VsCb1); k.viewportCount = s.viewportCount;
     static_assert(sizeof(k.viewport) == sizeof(D3D11_VIEWPORT), "viewport layout"); std::memcpy(k.viewport, &s.viewport, sizeof(k.viewport));
+    bool cameraKept = false;
     {
         // The camera rows the buffer bound at b1 holds for this frame. The table keeps its last answer and serves
         // it to every draw until the binding, the frame or the table changes (flat_camera_table.h: on foot about
@@ -5655,7 +5760,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if (!kept) {
             flatcpu::Scope rows(flatcpu::kCameraRows);   // camera table lookup, rows copy and hash: a fresh lookup
             kept = &s.cameras.refresh(k.b1, b1Binding, s.prefix.frame);
-        }
+        } else cameraKept = true;
         if (kept->have) { std::memcpy(d.camera, kept->rows, sizeof(d.camera)); k.camera = d.camera; k.cameraHash = kept->hash; d.cameraHashTrusted = true; k.writeEpoch = kept->epoch; k.writeSeq = kept->sequence; }
     }
     if(s.drawPackets.armed()) {
@@ -5710,6 +5815,13 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if (foreignWork.load(std::memory_order_acquire)) {
         flatRuntimeMarkUncertain(s.prefix,FlatRuntimeUncertainCause::ForeignWork,k.color,k.depth,k.vs,k.ps);
         if(overlayOpen(s)) overlayFail(s,"overlay-foreign-work");
+    }
+    if (cameraKept && flatProducerContinue(s, context, d, pairFact, offscreenArgs, auditing, offscreenTargetsBefore,
+                                     offscreenUncertainBefore, kind, count, start, base, instances, startInstance,
+                                     producer, gameHadTarget6, forwardIssue)) {
+        splitContinued = true;
+        flatcpu::drawSplitSetContinued(true);
+        return;
     }
     {
         // The exact-shader verifications: each returns at once unless this draw is the copy it
@@ -6275,6 +6387,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         std::memcmp(s.namedCamera, d.camera, sizeof(d.camera)) == 0;
     splitContinued = continuesRun;
     flatcpu::drawSplitSetContinued(continuesRun);
+    if (continuesRun)
+        flatProducerRunRemember(s, d, kind, count, start, base, instances, startInstance);
     const bool coverageReads = s.projection && sceneExtent && k.color != s.prefix.output &&
         (k.format==9 || k.format==23 || k.format==26 || k.format==60) &&
         (s.projectionFrames != 0 || !flatCameraInjectUpstreamOwns());

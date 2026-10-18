@@ -2902,7 +2902,9 @@ void testFlatCpuWiring() {
         const auto ctorBody=ctorAt!=std::string::npos&&ctorEnd!=std::string::npos?runtimeCpp.substr(ctorAt,ctorEnd-ctorAt):std::string{};
         const auto dtorBody=ctorEnd!=std::string::npos?runtimeCpp.substr(ctorEnd, 4000):std::string{};
         check(ctorBody.find("flatcpu::DrawSplitCtor splitCtor;")<ctorBody.find("flatcpu::Scope shell(flatcpu::kOther);")&&
+              ctorBody.find("flatProducerContinue(")<ctorBody.find("flatcpu::kCopyChecks")&&
               ctorBody.find("flatcpu::kCopyChecks")<ctorBody.find("const bool continuesRun")&&
+              ctorBody.find("const bool continuesRun")<ctorBody.find("flatProducerRunRemember(")&&
               ctorBody.find("const bool continuesRun")<ctorBody.find("flatcpu::drawSplitSetContinued(continuesRun);"),
               "the constructor arms the shell split before its scope and classes the draw after copy checks");
         check(dtorBody.find("flatcpu::DrawSplitDtor splitDtor(splitContinued);")<dtorBody.find("flatcpu::Scope shell(flatcpu::kOther);"),
@@ -2938,18 +2940,18 @@ void testFlatCpuWiring() {
         // Every family the census names has its scope at the entry points that family stands for.
         {&runtimeCpp, "flatcpu::Scope shell(flatcpu::kOther);", 3, "the draw scope (both halves) and the dispatch scope time their own shells"},
         {&runtimeCpp, "flatcpu::Scope fast(flatcpu::kOffscreenFast);", 1, "the offscreen fast path times itself as its own family"},
-        {&runtimeCpp, "flatcpu::kReduce", 3, "contract reduction times the reducer (the fast path's too) and the final copy's admission by structure"},
+        {&runtimeCpp, "flatcpu::kReduce", 4, "contract reduction times the reducer (both fast paths) and the final copy's admission by structure"},
         {&runtimeCpp, "flatcpu::kCopyChecks", 2, "the exact-shader verifications and the F10 captures are timed"},
         {&runtimeCpp, "flatcpu::kCameraRows", 2, "the camera lookup and hash, and capture()"},
-        {&runtimeCpp, "flatcpu::kTrace", 6, "every trace-ring copy is timed: capture, dispatch, write, record (both paths) and the HDR route's resolve marker"},
+        {&runtimeCpp, "flatcpu::kTrace", 7, "every trace-ring copy is timed: capture, dispatch, write, record (both fast paths and the slow path) and the HDR route's resolve marker"},
         {&runtimeCpp, "flatcpu::kResource", 5, "Written, WrittenExtent, Map, Unmap and Update time their lookups"},
         {&runtimeCpp, "flatcpu::kCoverage", 1, "coverage classification"},
         {&runtimeCpp, "flatcpu::kProjection", 3, "qualifyProjection, the private binding and its restore"},
         {&runtimeCpp, "flatcpu::kShadows", 7, "the constant-buffer shadow observers and map-cache install/flush"},
         {&runtimeCpp, "flatcpu::kWitness", 1, "the camera witness"},
-        {&runtimeCpp, "flatcpu::kEngineDraw", 4, "engine motion's draw wrapper: naming, its begin (BeforeDraw), its end, and the flush of what it kept bound"},
+        {&runtimeCpp, "flatcpu::kEngineDraw", 5, "engine motion's draw wrapper: naming, its begin (the slow path and the producer continuation), its end, and the flush of what it kept bound"},
         {&runtimeCpp, "flatcpu::kResolve", 2, "the treatment at the copy draw and at the HDR route's trigger"},
-        {&runtimeCpp, "flatcpu::kHdrRoute", 3, "the HDR route's trigger detector on every draw (the fast path's too), and its selection at the trigger"},
+        {&runtimeCpp, "flatcpu::kHdrRoute", 4, "the HDR route's trigger detector on every draw (both fast paths), and its selection at the trigger"},
         {&runtimeCpp, "flatcpu::kTrackers", 5, "the state trackers"},
         {&resolveCpp, "flatcpu::Scope backendScope(flatcpu::kBackend);", 1, "the backend evaluation inside the resolver"},
         {&injectCpp, "flatcpu::Scope timed(flatcpu::kInject);", 2, "the camera inject callback, both halves"},

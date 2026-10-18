@@ -32,9 +32,12 @@
   shells (dispatch is 0.008 ms). Continued producers own the constructor
   shell 1.699 of 2.129 ms and the copy residual 1.006 of 1.182 ms, one
   constructor call per substituted draw. Destructor continued is 0.414 ms.
-  Next change: a continuation path that does not rebuild the draw record
-  or enter copy checks. That is about 2.7 ms before counting the
-  destructor. Not a frozen cutoff. No new config key.
+  The continuation is in the tree. Full build PASS. Not flown. A repeated
+  continued producer keeps the forward observation, reducer, detector,
+  trace and substitution, and skips the rebuild and the copy checks.
+  The shell-split line should show copy-residual-continued near zero and
+  ctor-continued well under 1.7 ms, with reuse and AA history still
+  holding. No new config key.
 - The upper-60s dip stays open and is not this gap. 06:38:16 was 73.4 fps
   at the same draw count, certificate still hit. Other-thread engine
   merge was 2.435 ms over 1727 calls and clear 1.567 ms over 948, against
