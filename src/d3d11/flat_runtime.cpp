@@ -54,6 +54,7 @@
 #include "flat_camera_table.h"
 #include "flat_hdr_projection_capture.h"
 #include "flat_deferred_camera.h"
+#include "flat_deferred_failure_witness.h"
 #include "flat_query_cut.h"
 #include "flat_query_reads.h"
 #include "gpu_timing.h"
@@ -1904,10 +1905,22 @@ uint32_t captureCameraConflict(State& s, const FlatRuntimeDraw& draw) {
     return attempt;
 }
 void recordDeferredFailure(State& s,const FlatContractObservation& k,const char* reason,
-        bool actual,bool input,const FlatContractRecord* donor,bool firstWitness) {
-    ++s.deferredFailureCalls;
+        bool actual,bool input,const FlatContractRecord* donor,bool firstWitness,
+        const FlatDeferredFailureWitness* sameCall=nullptr) {
+    // Freeze the call's phase and donor before the pre-existing ownership
+    // queries/logging, which must not turn this into a later State sample.
+    FlatDeferredFailureWitness witness=sameCall?*sameCall:FlatDeferredFailureWitness{};
+    if(!sameCall){witness.frame=s.prefix.frame;witness.q=s.prefix.sequence+1;
+        witness.phaseX=s.phase.currentX;witness.phaseY=s.phase.currentY;witness.applied=s.phase.applied;}
+    witness.hdr=k.color;witness.depth=k.depth;witness.vs=k.vs;witness.ps=k.ps;
+    unsigned char donorCamera[kFlatCameraBytes]{};
+    if(donor){witness.donorColor=donor->key.color;witness.donorB1=donor->key.b1;
+        witness.donorWriteFrame=donor->lastWriteEpoch;witness.donorWriteQ=donor->lastWriteSeq;
+        witness.donorHash=donor->key.cameraHash;witness.donorFirst=donor->first;witness.donorLast=donor->last;
+        if(donor->key.camera){std::memcpy(donorCamera,donor->camera,sizeof(donorCamera));witness.donorCamera=donorCamera;}}
+    witness.calls=++s.deferredFailureCalls;
     const uint64_t now=GetTickCount64();
-    if(s.deferredFailureCalls==1 || now-s.deferredFailureLastLog>=5000) {
+    if(flatDeferredFailureWitnessDue(s.deferredFailureCalls,now,s.deferredFailureLastLog)) {
         Ptr<ID3D11Buffer> buffer;UINT first=0,count=0;
         FlatComputeInternalScope internal;
         if(s.projectionContext)s.projectionContext->VSGetConstantBuffers1(2,1,&buffer,&first,&count);
@@ -1922,6 +1935,11 @@ void recordDeferredFailure(State& s,const FlatContractObservation& k,const char*
             donor?donor->key.color:nullptr,donor?donor->key.b1:nullptr,donor?"qualified-pool":"unavailable",
             (unsigned long long)(donor?donor->key.cameraHash:0),firstWitness?1u:0u,s.phase.currentX,s.phase.currentY,
             (unsigned long long)s.deferredFailureCalls);
+        // Same existing first-call/5s detail budget. Verifier bytes precede
+        // failPhase and any private binding; no additional pipeline reads.
+        char lines[4][1000]{};
+        if(flatFormatDeferredFailureWitness(witness,lines))for(const auto& line:lines)Log::get().note("%.999s",line);
+        else Log::get().note("flat deferred failure witness: v=1 frame=%llu q=%u H=%p result=format-unavailable",(unsigned long long)witness.frame,witness.q,witness.hdr);
         s.deferredFailureLastLog=now;
     }
     if(s.deferredFailureCapture.request(s.prefix.frame)) {
@@ -2004,6 +2022,22 @@ const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDr
         desc.ArraySize==1 && desc.SampleDesc.Count==1;
     const auto match=donor && copied?flatMatchDeferredCamera(donor->camera,raw):FlatDeferredCameraMatch::Unavailable;
     const bool qualified=actual && input && donor && copied && !foreignWork.load(std::memory_order_acquire);
+    const float requestedPhaseX=s.phase.currentX,requestedPhaseY=s.phase.currentY;
+    const uint64_t requestedApplied=s.phase.applied,requestedFrame=s.prefix.frame;
+    const uint32_t requestedQ=s.prefix.sequence+1;
+    const auto reportFailure=[&](const char* why) {
+        FlatDeferredFailureWitness witness;witness.contextAvailable=true;witness.relation=match;
+        witness.phaseX=requestedPhaseX;witness.phaseY=requestedPhaseY;witness.applied=requestedApplied;
+        witness.frame=requestedFrame;witness.q=requestedQ;
+        witness.buffer=buffer.Get();witness.first=first;witness.count=count;witness.width=metadata.width;
+        witness.generation=metadata.generation;witness.mutation=metadata.mutationSerial;
+        witness.writeGeneration=metadata.writeGeneration;witness.bank=metadata.bankEpoch;
+        witness.writeFrame=metadata.writeFrame;witness.writeQ=metadata.writeSequence;
+        witness.range=range;witness.tracked=metadata.tracked;witness.shadow=metadata.shadowPresent;
+        witness.mapped=metadata.mapped;witness.pending=metadata.pending;witness.current=current;witness.copied=copied;
+        witness.original=copied?raw:nullptr;
+        recordDeferredFailure(s,k,why,actual,input,donor,firstWitness,&witness);
+    };
     FlatProjectionJitter jitter{};unsigned char certified[kFlatDeferredCameraBytes]{};
     const bool missingPhase=qualified && flatCameraInjectUpstreamOwns() && nonzero &&
         flatProjectionJitter(s.phase.currentX,s.phase.currentY,k.width,k.height,jitter) &&
@@ -2034,7 +2068,7 @@ const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDr
             if(!prepared)deferredPlan=nullptr;
         }
         if(missingPhase && !prepared) {
-            recordDeferredFailure(s,k,"deferred-inverse-preparation-failed",actual,input,donor,firstWitness);
+            reportFailure("deferred-inverse-preparation-failed");
             failPhase(s,"deferred-inverse-preparation-failed");
             flatRuntimeMarkUncertain(s.prefix,FlatRuntimeUncertainCause::DeferredPrepare,k.color,k.depth,k.vs,k.ps);
             flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);
@@ -2044,7 +2078,7 @@ const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDr
     // Later exact consumers cannot hide a changed/unavailable inverse behind
     // the first H witness. This consumer's execution must remain coherent too.
     if(flatCameraInjectUpstreamOwns() && nonzero && !executionCoherent && !missingPhase) {
-        recordDeferredFailure(s,k,"deferred-inverse-unproven",actual,input,donor,firstWitness);
+        reportFailure("deferred-inverse-unproven");
         failPhase(s,"deferred-inverse-unproven");
         flatRuntimeMarkUncertain(s.prefix,FlatRuntimeUncertainCause::DeferredExecution,k.color,k.depth,k.vs,k.ps);
         flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);
