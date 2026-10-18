@@ -2901,7 +2901,8 @@ void testFlatCpuWiring() {
         const auto ctorEnd=runtimeCpp.find("FlatRuntimeDrawScope::~FlatRuntimeDrawScope()", ctorAt);
         const auto ctorBody=ctorAt!=std::string::npos&&ctorEnd!=std::string::npos?runtimeCpp.substr(ctorAt,ctorEnd-ctorAt):std::string{};
         const auto dtorBody=ctorEnd!=std::string::npos?runtimeCpp.substr(ctorEnd, 4000):std::string{};
-        check(ctorBody.find("flatcpu::DrawSplitCtor splitCtor;")<ctorBody.find("flatcpu::Scope shell(flatcpu::kOther);")&&
+        check(ctorBody.find("flatProducerContinueEarly(")<ctorBody.find("flatcpu::DrawSplitCtor splitCtor;")&&
+              ctorBody.find("flatcpu::DrawSplitCtor splitCtor;")<ctorBody.find("flatcpu::Scope shell(flatcpu::kOther);")&&
               ctorBody.find("flatProducerContinue(")<ctorBody.find("flatcpu::kCopyChecks")&&
               ctorBody.find("flatcpu::kCopyChecks")<ctorBody.find("const bool continuesRun")&&
               ctorBody.find("const bool continuesRun")<ctorBody.find("flatProducerRunRemember(")&&

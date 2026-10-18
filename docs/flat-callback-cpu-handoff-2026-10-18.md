@@ -40,9 +40,11 @@
   Corrected flight `edvr_gfx_20261018_080537.log` (`455ffd45`). At
   08:09:17: 590 frames / 5 s = 118 fps, present p50 8.13 ms, 7156
   substituted draws, EDVR gross 6.465 ms. copy-residual-continued 0.026 ms
-  over 342 calls. ctor-continued 1.348 ms remains: the shell still wraps
+  over 342 calls. ctor-continued 1.348 ms remained: the shell still wrapped
   the fast path. Reuse 14297/frame, frozen=0. History valid, zero
-  history-resets. No new config key.
+  history-resets. The match now runs before that shell. Not flown.
+  ctor-continued calls should fall from about 7100 toward the draws that
+  still miss. No new config key.
 - The upper-60s dip stays open and is not this gap. 06:38:16 was 73.4 fps
   at the same draw count, certificate still hit. Other-thread engine
   merge was 2.435 ms over 1727 calls and clear 1.567 ms over 948, against
