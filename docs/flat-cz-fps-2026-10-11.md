@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 callback-internals audit): authorized single-snapshot investigation/build/install, Sol RE/tests and Astra evidence only; main unmerged, probe off. Steam `709ba499` slow/fast/slow: 63.6/204.9/64.4 FPS, callbacks 4.426/0.160/4.558 ms gross per clocked frame, 14,728 Geometry sites/slow2 frame. All 10,893 leg frames retain AA history and complete HDR, no new resets/refusals/failures. Source confirms camera proof repeats three owner-thread tracked/shadow lookups with no callback between them; proposed original-only single snapshot retains actual CB binding/range and fresh pre/post Draw validation. Finer shader/DSV/constant timing will separate residual cost; no whole-callback attribution or saved-ms claim. Current Steam and valid Frontier use native 3840 HDR; prior Steam used 2496 copy and omitted callback timing. Zero Light sites cannot justify skipping earlier producers. Phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (previous entries).
+State (2026-10-18 callback-internals install): `041f8e78` (`rc.4-23`) installed/verified Steam flat; full build, focused runtime tests and clean promotion PASS, Sol RE/tests and Astra evidence review. Geometry Issue uses one owner-serialized tracked/shadow read for metadata+96 bytes, preserving fresh actual bindings/ranges/width and pre/post Draw proof. Flight pending; main unmerged, probe off, settings unchanged. Callback aggregate is residual + shader + DSV + constants; new scopes need refreshed floor estimates. Prior `709ba499` native-HDR slow/fast/slow: 63.6/204.9/64.4 FPS, callbacks 4.426/0.160/4.558 ms gross; all 10,893 leg frames retained AA history. No measured saved-ms/FPS claim yet. Next capture: same carrier slow/fast/slow at 300-FPS limit, DLSS/settings unchanged, no diagnostic arm. Zero Light sites cannot justify skipping earlier producers. Phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (previous entries).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -2130,3 +2130,31 @@ Full receipt inputs:
 Log: `build/callback-snapshot-full-build.log`; final all-gates PASS read.
 Both Steam settings hashes still match the pre-build snapshot. Source
 commit, clean DLL promotion and sanctioned Steam flat install follow.
+
+Clean source `041f8e78` promoted by absolute
+`build.bat --dll-only --wait-lock` PASS, matching full receipt, 34.3 seconds
+reported / 35.5 wall. Version `v0.20.0-rc.4-23-g041f8e78`; d3d11 5 compiled /
+136 reused. Game was closed. Sanctioned Steam flat dry-run, install and
+verify-only PASS; built and installed graphics DLL SHA256 both
+`026F38A011E3AF1B07CA78C06EEA7C89A1B567E484F143DD01452C183491E05B`.
+Both Steam settings hashes are unchanged; CPU timing remains on, origin
+probe off. No Frontier file changes or main merge. Evidence:
+`build/callback-snapshot-promotion.log`,
+`build/callback-snapshot-validation.json`. Source pushed on feature branch;
+flight performance and AA continuity on this installed build remain pending.
+Astra final metadata review CLEAR: full receipt matches and promotion targets
+the clean source commit; no measured flight benefit is claimed.
+
+Next capture: launch Steam flat with DLSS and the same resolution/settings
+and 300-FPS limit as the `709ba499` capture. Load the same carrier position,
+close menus and wait two minutes in the slow view. Hold slow for 30 seconds,
+turn at least 90 degrees to the same fast view for 30 seconds, then return
+to the same slow view for 30 seconds. No F7, NumLock or manual capture arm.
+Normal quit afterward is fine. Read the log with
+`edvr_log.py --target steam --expect-build 041f8e78` first. Compare callback
+residual plus three children with old callback gross, update clock-floor
+estimates and check raw-domain/cache counters, draw load, route and AA
+history/refusal/reset/backend continuity. Shader/DSV/constant child calls
+must be nonzero where their stage runs; absent labels with clocks active
+do not count as a zero-cost success. Keep claims of saved milliseconds
+conditional on that capture and its workload.
