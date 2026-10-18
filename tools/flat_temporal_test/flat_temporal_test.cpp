@@ -27,6 +27,7 @@
 #include "flat_hdr_projection_capture_tests.h"
 #include "flat_light_payload_capture_tests.h"
 #include "flat_forward_light_tests.h"
+#include "flat_forward_light_cache_tests.h"
 #include "flat_forward_watch_tests.h"
 #include "flat_texture_description_tests.h"
 #include "flat_forward_light_integration_tests.h"
@@ -4032,6 +4033,7 @@ int main(int argc, char** argv) {
     failures += flatHdrProjectionCaptureTests();
     failures += light_payload_test::run();
     failures += forward_light_test::run();
+    failures += forward_light_cache_test::run();
     failures += forward_watch_test::run();
     failures += texture_description_test::run();
     failures += forward_light_integration_test::run();

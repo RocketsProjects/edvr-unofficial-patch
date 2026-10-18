@@ -120,6 +120,8 @@ enum CopyCount : unsigned {
     kCopyBlendGet, kCopyBlendDesc, kCopyRtvBound, kCopyUavBound, kCopyGetResource,
     kCopyShadowChecks, kCopyShadowUnknown, kCopyInactiveCandidate,
     kCopyGuardChecks, kCopyGuardSkipped, kCopyGuardFallback,
+    kCopyRawDsvGet, kCopyRawDsvHit, kCopyRawDsvMiss,
+    kCopyRawDepthGet, kCopyRawDepthHit, kCopyRawDepthMiss, kCopyRawDepthDefault,
     kCopyCounts
 };
 struct FamilyInfo {
@@ -848,7 +850,9 @@ inline void formatCopyWindow(const WindowReport& r, uint64_t completedFrame, Lin
         const char* names[kCopyCounts] = {"watch entries","watch skips","OM Get calls","RTV slots requested/scanned","UAV slots requested/scanned",
             "blend Get calls","blend GetDesc calls","bound RTVs","bound UAVs","GetResource calls",
             "decision samples","decision unknown","inactive-ledger candidates",
-            "actual guard checks","actual guard skips","actual full-scan fallbacks"};
+            "actual guard checks","actual guard skips","actual full-scan fallbacks",
+            "raw DSV OM Gets","raw DSV description hits","raw DSV description misses",
+            "raw depth-state OM Gets","raw depth-state description hits","raw depth-state description misses","raw depth-state defaults"};
         for (unsigned c = 0; c < kCopyCounts; ++c)
             tk.add(c ? ", " : "; ", "%s=%llu", names[c], static_cast<unsigned long long>(r.copy[c]));
         tk.add("; ", "zero calls means not run in sampled frames; output scan includes guard CPU; inactive-ledger scan time is zero after guard (skips untimed, not measured savings); query counting not floor-corrected");

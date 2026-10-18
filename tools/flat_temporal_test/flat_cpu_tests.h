@@ -616,12 +616,21 @@ inline int flatCpuTests() {
                "at the worst values the window is a few lines, none over the limit, nothing dropped");
         const std::string text = joined(lines);
         bool named = true;
-        for (auto& value : r.copy) value = 9999999999999999999ull;
-        flatcpu::Lines detail; flatcpu::formatCopyWindow(r,9999999999999999999ull,&detail);
+        for (auto& value : r.copy) value = ~uint64_t(0);
+        flatcpu::Lines detail; flatcpu::formatCopyWindow(r,~uint64_t(0),&detail);
         for (unsigned f = 0; f < flatcpu::kFamilies; ++f) named = named && has(text + joined(detail), flatcpu::kInfo[f].name);
         bool detailFits=!detail.truncated;
         for(int i=0;i<detail.count;++i)detailFits=detailFits&&std::strlen(detail.line[i])<=flatcpu::kLineLimit;
         expect(detailFits,"worst-value copy partition and query counts fit bounded report lines");
+        const std::string copyText=joined(detail);
+        expect(has(copyText,"raw DSV OM Gets=18446744073709551615")&&
+               has(copyText,"raw DSV description hits=18446744073709551615")&&
+               has(copyText,"raw DSV description misses=18446744073709551615")&&
+               has(copyText,"raw depth-state OM Gets=18446744073709551615")&&
+               has(copyText,"raw depth-state description hits=18446744073709551615")&&
+               has(copyText,"raw depth-state description misses=18446744073709551615")&&
+               has(copyText,"raw depth-state defaults=18446744073709551615"),
+               "all new raw-binding counters survive worst-width line packing");
         for (unsigned i = 0; i < flatcpu::kEmNameCount; ++i) named = named && has(text, flatcpu::kEmNames[i].name);
         named = named && has(text, "engine motion hooks") && has(text, "GPU frame") && has(text, "GPU resolve") &&
                 has(text, "clock floor") && has(text, "camera witness") && has(text, "engine motion wrapper D3D calls") &&

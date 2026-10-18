@@ -37,6 +37,32 @@ struct TextureDescription {
     uint32_t width=0,height=0,mipLevels=0,arraySize=0,samples=0,format=0;
 };
 struct TextureObservation { Surface surface{};uint32_t format=0; };
+// The caller owns the actual binding returned by a D3D getter on every use.
+// Hold retains its COM identity, so a recycled address cannot become a hit.
+// Only immutable descriptions belong here; mutable bindings and ledger work
+// must still be observed for each draw.
+template<class Hold,class Description>
+struct ImmutableDescriptionCache {
+    Hold held{};
+    Description description{};
+    bool valid=false;
+    const Description* find(const Hold& actual) const {
+        return valid&&actual.Get()&&held.Get()==actual.Get()?&description:nullptr;
+    }
+    void remember(const Hold& actual,const Description& value) {
+        if(!actual.Get()){clear();return;}
+        held=actual;description=value;valid=true;
+    }
+    template<class Load>
+    const Description* describe(const Hold& actual,Description& scratch,bool& hit,Load&& load) {
+        hit=false;
+        if(!actual.Get())return nullptr;
+        if(const auto* kept=find(actual)){hit=true;return kept;}
+        if(load(scratch)){remember(actual,scratch);return &description;}
+        return &scratch; // Uncertain metadata is usable only for this observation; retry next draw.
+    }
+    void clear(){held.Reset();description={};valid=false;}
+};
 template<class Describe>
 inline TextureObservation describeTexture(uint64_t resource,unsigned mip,unsigned slice,unsigned slices,Describe&& describe) {
     TextureDescription d{};const bool texture=resource&&describe(d);

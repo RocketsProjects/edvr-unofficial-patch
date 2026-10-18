@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 slow carrier): `4c810f12` verified; discovery OFF in carrier, passive restart not logged. User redirects to AA-dependent CPU cost: 68.33 sampled FPS, reported F7-off 263; EDVR 8.311 ms gross / 6.333 estimated floor-net, copy 3.019 gross and other about 2.23. Raw calls +28%, ns/call nearly unchanged versus prior view. Next audit: repeated raw-domain and draw-shell work, no fix/build yet. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test. Probe off, main unmerged (last entry).
+State (2026-10-18 repeated queries): immutable DSV/depth-description reuse implemented; actual OM getters and all writer/mutation proof remain per call. Sol full build PASS (158.6 s, cache helper 38 checks), Astra evidence review PASS; clean promotion/install Steam flat pending, main unmerged. Baseline `4c810f12`: discovery OFF, 68.33 sampled FPS, reported F7-off 263; EDVR 8.311 ms gross / 6.333 estimated floor-net, copy 3.019 gross and other about 2.23. No safe measured draw-shell shortcut found; WRL already skips same-identity reference churn. Next capture: steady slow/fast/slow carrier with cache counters and AA history. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test. Origin probe off (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1567,3 +1567,87 @@ reviewed arithmetic/attribution only, without tests/builds/benchmarks.
 No source, build, install or config change; main remains unmerged. Frozen
 evidence: `build/passive_rearm_4c810f12_cpu_summary.json` and
 `build/passive_rearm_4c810f12_carrier_read.md`.
+
+## 2026-10-18: repeated state-query and draw-shell audit
+
+User authorizes optimization, Sol for RE/tests and Astra for evidence review
+only, full build/install Steam flat, origin probe off and main unmerged.
+Baseline is the preceding pinned `4c810f12` carrier read, not a controlled
+comparison against a different view. No new flight is needed to establish
+that the immutable descriptions are repeatedly queried: the production
+`forwardDsv` path reads actual bound DSV and depth state on every call and
+then repeats view/resource/texture/depth-state metadata queries.
+
+H1: retained immutable description reuse can remove that metadata work
+without weakening mutable state or writer proof. Confirmation requires a
+production-used helper rig counting every actual OM getter, descriptions
+once per retained identity run, fresh descriptions after identity change or
+reset, and identical surface/write decisions including null defaults,
+read-only views, unsupported descriptions and aliases. The flight signature
+will be nonzero cache hits and fewer immutable queries per raw-domain call,
+with uninterrupted AA history and no new safety refusals.
+
+H2: the roughly 2.23-ms gross draw-shell bucket has redundant work. Sol's
+first audit finds a distributed constructor/destructor residual, not a
+single expensive function; removing unknown-writer observation or bypassing
+the reducer/phase lifecycle would be unsafe. Do not justify a broad skip
+from shader filtering or failed-domain status. Existing offscreen fast
+path already skips about 4,025 draws/frame. Further shell audit is pending.
+
+Proposed H1 boundary: actual OM DSV/depth-state queries and all ledger,
+mutation, camera and Issue checks remain per call. Independently retained
+DSV/resource and depth-state COM identities key owner-state, bounded
+immutable metadata; reset releases references, changes query fresh, and
+uncertainty fails closed. Binding shadow generations are not evidence of
+actual mutable state. Astra's initial evidence review accepts that narrow
+boundary subject to production wiring and the counted transition tests.
+
+Implementation keeps one retained DSV/resource description and one retained
+depth-state description, independently, and clears both in `forwardReset`.
+Both adapters execute `ImmutableDescriptionCache::describe`; miss loaders
+query fresh metadata, successful immutable observations are retained, and
+uncertain observations are returned only as uncached scratch and retried.
+The actual OM getters remain outside and before reuse. Existing copy-window
+sampling adds DSV/depth OM Gets, description hits/misses and null-depth
+defaults; these are staged events, not individual texture QI/GetDesc counts.
+Non-null DSV hits plus misses equal depth Gets; depth hits plus misses plus
+defaults equal depth Gets. Null DSV returns before either cache observation
+or the depth getter. No new toggle, binding shadow dependency or GPU read.
+
+The revised behavioral rig executes that production helper with counted
+loaders, retained fake COM handles, replacement/reset, independent identities,
+null and failed-description retries. Actual D3D OM calls and write/ledger
+wiring are source assertions and runtime counters, not an executable D3D
+equivalence claim. The first test-owned adapter loop was removed after root
+and Astra review because it duplicated production control flow. The full
+formatter test exercises every new label at maximum uint64 width.
+
+Draw-shell audit completed without a production shell change. Most target
+loops are already feature-gated. The `overlayOpen && hdrBad` scan cannot be
+gated on `overlaySuffixActive` alone: `flatRuntimeObserve` can open and fail
+an overlay on the protected draw before that flag is raised. Scope-object
+default initialization precedes the constructor's shell clock and cannot
+be assigned to its measured residual. Ruled out: redundant same-identity
+COM reference churn in `domainHolds`, because the local SDK's WRL
+`ComPtr` exact-type and raw-pointer assignments already compare pointers
+before AddRef/Release (`winrt/wrl/client.h:301-307,317-323`). Adding an
+external compare would duplicate existing work. A repeated scalar jitter
+baseline assignment is too small to justify a separate optimization claim.
+
+Expected H1 saving is bounded and unmeasured: a prior one-pair reduction
+of about 29 ns/call would correspond to about 0.2 ms at the current 7,089
+raw calls/frame if reuse nearly always hits; remaining immutable calls and
+hit rate are not individually timed. This is not a claim to recover the
+roughly 10.8-ms directional F7 gap. Full build and installed capture pending.
+
+Sol's exclusive full validation build PASS: absolute `build.bat --wait-lock`,
+158.6 seconds reported (159.9 wall), 170-job pool, production d3d11 13 units
+compiled / 128 reused. Shared cache helper 38 checks / 0 failures; texture
+description 17 checks and 20,736 oracle cases / 0 failures; worst-width
+formatter, collector policy and 18,885 engine checks PASS. Both production
+DLLs, installer and resource checks pass; final all-gates PASS and receipt
+inputs `0497a4a287da2e5e417e942619309bc79475a055496b569f44b22314b028c702`.
+Log: `build/repeated-query-full-build.log`. Astra reviewed source/evidence
+only, including revised shared-helper tests, and found no blocker; no tests,
+builds or benchmarks executed by Astra. Clean-version promotion and install
+follow this validated source commit; runtime saving remains unmeasured.

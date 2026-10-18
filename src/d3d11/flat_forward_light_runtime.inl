@@ -19,6 +19,7 @@ void forwardMutation(State& s,uint64_t resource,bool forgetSources=true) {
 void forwardReset(State& s,uint64_t frame=0,bool captureLifecycle=true) {
     if(captureLifecycle)forwardPhaseLifecycle(s);
     auto& f=s.forwardLight;forwardRevoke(s,0,forward_light::Reason::Ownership);f.ledger.reset(frame);
+    f.dsvDescription.clear();f.depthDescription.clear();
     for(auto& observed:f.phaseObservedDonor)observed={};
     for(auto& a:f.authority)a={};for(auto& h:f.authorityHdr)h.Reset();
     for(auto& h:f.domainHolds)h={};for(auto& h:f.publicationHolds)h={};
@@ -52,11 +53,40 @@ bool forwardSrv(State& s,unsigned slot,bool raw,forward_light::Surface& out,
 }
 bool forwardDsv(State& s,const FlatContractObservation& k,forward_light::Surface& out,
                 Ptr<ID3D11DepthStencilView>& dsv,Ptr<ID3D11Resource>& resource,bool& writes) {
-    s.context->OMGetRenderTargets(0,nullptr,&dsv);if(!dsv)return false;dsv->GetResource(&resource);
-    D3D11_DEPTH_STENCIL_VIEW_DESC v{};dsv->GetDesc(&v);uint32_t format=0;
-    out=forwardTexture(resource.Get(),v.Texture2D.MipSlice,0,1,&format);
-    Ptr<ID3D11DepthStencilState> state;UINT ref=0;s.context->OMGetDepthStencilState(&state,&ref);
-    D3D11_DEPTH_STENCIL_DESC z{};z.DepthEnable=TRUE;z.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;if(state)state->GetDesc(&z);
+    // Actual mutable bindings are queried on every draw. The one-entry caches
+    // retain COM identities only for descriptions that cannot change while a
+    // view/state is alive; a different binding immediately takes the miss path.
+    flatcpu::CopyCounter counts;
+    counts.add(flatcpu::kCopyRawDsvGet);
+    s.context->OMGetRenderTargets(0,nullptr,&dsv);if(!dsv)return false;
+    auto& cache=s.forwardLight.dsvDescription;
+    ForwardDsvDescription fresh{};
+    bool dsvHit=false;
+    const ForwardDsvDescription* described=cache.describe(dsv,fresh,dsvHit,[&](ForwardDsvDescription& value) {
+        dsv->GetResource(&value.resource);
+        dsv->GetDesc(&value.view);
+        value.surface=forwardTexture(value.resource.Get(),value.view.Texture2D.MipSlice,0,1,&value.format);
+        return value.resource&&value.surface.known;
+    });
+    counts.add(dsvHit?flatcpu::kCopyRawDsvHit:flatcpu::kCopyRawDsvMiss);
+    const ForwardDsvDescription& actual=*described;
+    resource=actual.resource;out=actual.surface;
+    const auto& v=actual.view;
+    const uint32_t format=actual.format;
+    Ptr<ID3D11DepthStencilState> state;UINT ref=0;
+    counts.add(flatcpu::kCopyRawDepthGet);
+    s.context->OMGetDepthStencilState(&state,&ref);
+    D3D11_DEPTH_STENCIL_DESC z{};z.DepthEnable=TRUE;z.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
+    if(state) {
+        auto& depthCache=s.forwardLight.depthDescription;
+        D3D11_DEPTH_STENCIL_DESC freshDepth{};
+        bool depthHit=false;
+        const auto* describedDepth=depthCache.describe(state,freshDepth,depthHit,[&](D3D11_DEPTH_STENCIL_DESC& value) {
+            state->GetDesc(&value);return true;
+        });
+        counts.add(depthHit?flatcpu::kCopyRawDepthHit:flatcpu::kCopyRawDepthMiss);
+        z=*describedDepth;
+    } else {counts.add(flatcpu::kCopyRawDepthDefault);s.forwardLight.depthDescription.clear();}
     writes=z.DepthEnable&&z.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL&&!(v.Flags&D3D11_DSV_READ_ONLY_DEPTH);
     return out.known&&v.ViewDimension==D3D11_DSV_DIMENSION_TEXTURE2D&&format==DXGI_FORMAT_R32G8X24_TYPELESS&&
         v.Format==DXGI_FORMAT_D32_FLOAT_S8X24_UINT&&dsv.Get()==k.dsv&&resource.Get()==k.depth&&

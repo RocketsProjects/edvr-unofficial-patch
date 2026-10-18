@@ -94,16 +94,21 @@ inline unsigned run() {
     expect(count(adapter,"forward_light::describeTexture(")==1&&count(adapter,"->QueryInterface(")==1&&count(adapter,"->GetDesc(")==1&&
         adapter.find("if(!texture)return false;")!=std::string::npos&&adapter.find("if(format)*format=observed.format;")!=std::string::npos,
         "actual adapter links one callback request to one QI and at most one texture GetDesc");
-    for(const auto* text:{&srv,&dsv})expect(count(*text,"forwardTexture(")==1&&text->find("out=forwardTexture(resource.Get(),")!=std::string::npos&&text->find(",&format)")!=std::string::npos&&
-        text->find("QueryInterface")==std::string::npos&&text->find("resource.As(")==std::string::npos&&text->find("texture->GetDesc")==std::string::npos,
-        "each actual view path reuses format from its single same-resource texture observation");
+    expect(count(srv,"forwardTexture(")==1&&srv.find("out=forwardTexture(resource.Get(),")!=std::string::npos&&
+        srv.find(",&format)")!=std::string::npos&&srv.find("QueryInterface")==std::string::npos&&
+        srv.find("texture->GetDesc")==std::string::npos,
+        "SRV path reuses format from its one same-resource texture observation");
+    expect(count(dsv,"forwardTexture(")==1&&dsv.find("value.surface=forwardTexture(value.resource.Get(),")!=std::string::npos&&
+        dsv.find(",&value.format)")!=std::string::npos&&dsv.find("QueryInterface")==std::string::npos&&
+        dsv.find("texture->GetDesc")==std::string::npos,
+        "DSV cache miss reuses format from its one same-resource texture observation");
     expect(srv.find("PSGetShaderResources(slot,1,&view)")!=std::string::npos&&srv.find("view->GetResource(&resource)")!=std::string::npos&&
         srv.find("view->GetDesc(&v)")!=std::string::npos&&srv.find("if(!resource)return false;")!=std::string::npos,
         "SRV still reads actual nullable binding, resource and immutable view descriptor");
-    expect(dsv.find("OMGetRenderTargets(0,nullptr,&dsv)")!=std::string::npos&&dsv.find("dsv->GetResource(&resource)")!=std::string::npos&&
-        dsv.find("dsv->GetDesc(&v)")!=std::string::npos&&dsv.find("OMGetDepthStencilState(&state,&ref)")!=std::string::npos&&
-        dsv.find("state->GetDesc(&z)")!=std::string::npos&&dsv.find("D3D11_DSV_READ_ONLY_DEPTH")!=std::string::npos,
-        "DSV still reads actual view and mutable depth state with read-only/default-state handling");
+    expect(dsv.find("OMGetRenderTargets(0,nullptr,&dsv)")!=std::string::npos&&dsv.find("dsv->GetResource(&value.resource)")!=std::string::npos&&
+        dsv.find("dsv->GetDesc(&value.view)")!=std::string::npos&&dsv.find("OMGetDepthStencilState(&state,&ref)")!=std::string::npos&&
+        dsv.find("state->GetDesc(&value)")!=std::string::npos&&dsv.find("D3D11_DSV_READ_ONLY_DEPTH")!=std::string::npos,
+        "DSV still queries actual view and depth state, describing on cache miss with read-only handling");
     std::printf("texture description: %u checks, %u oracle cases, %u failure(s)\n",checks,cases,failures);return failures;
 }
 } // namespace texture_description_test

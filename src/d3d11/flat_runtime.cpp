@@ -221,11 +221,19 @@ struct ForwardPhaseHold {
     Ptr<ID3D11Resource> hdr,raw,linear;
     Ptr<ID3D11Buffer> source,original[2];
 };
+struct ForwardDsvDescription {
+    Ptr<ID3D11Resource> resource;
+    D3D11_DEPTH_STENCIL_VIEW_DESC view{};
+    forward_light::Surface surface{};
+    uint32_t format=0;
+};
 struct ForwardRuntime {
     phase_failure::Collector phaseReceipt;
     forward_light::ConstantIdentity phaseObservedDonor[forward_light::kDomains];
     ForwardPhaseHold phasePending[phase_failure::kSlots],phaseCommitted[phase_failure::kSlots];
     forward_light::Ledger ledger;
+    forward_light::ImmutableDescriptionCache<Ptr<ID3D11DepthStencilView>,ForwardDsvDescription> dsvDescription;
+    forward_light::ImmutableDescriptionCache<Ptr<ID3D11DepthStencilState>,D3D11_DEPTH_STENCIL_DESC> depthDescription;
     forward_light::Authority authority[forward_light::kPublications];
     Ptr<ID3D11Resource> authorityHdr[forward_light::kPublications];
     bool ownerKnown=false,upstream=false;
