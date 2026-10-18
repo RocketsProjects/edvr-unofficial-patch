@@ -7124,6 +7124,7 @@ static void __stdcall foregroundOriginalDraw(ID3D11DeviceContext* ctx,UINT count
 }
 void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indirectOffset) {
     if(!ctx)return;
+    flatcpu::Scope callbacks(flatcpu::kIssueCallbacks);
     if(drawPacketOnly){FlatComputeInternalScope internal;state().drawPackets.execution(ctx,drawPacket,indirectArgs,indirectOffset,"capture-only-AA-off-or-paused");return;}
     // fix.ui_quality's flat layer (flat_ui_layer.h), right before the game's issue: a taken HUD draw is bound into the
     // layer (false: it goes to H as always), and the output copy gets this frame's HUD composited over what it reads.
@@ -7414,6 +7415,7 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         weaponDrawStartInstance,indirectArgs,indirectOffset);
 }
 void FlatRuntimeDrawScope::endActualDraw() {
+    flatcpu::Scope callbacks(flatcpu::kIssueCallbacks,ctx!=nullptr);
     if(forwardIssue.kind!=forward_light::Issue::None&&ctx)forwardReturn(state(),forwardIssue);
     if(lightPayloadToken&&ctx)captureLightReturned(state(),lightPayloadToken);
     // The game's state back from the layer first, before anything else here reads the context.

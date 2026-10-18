@@ -89,8 +89,8 @@ inline unsigned run() {
     // calls. These checks connect the behavioral callback budget to the actual
     // QI/GetDesc adapter and verify the two callers no longer repeat that work.
     const auto adapter=region("forward_light::Surface forwardTexture(","bool forwardSrv(");
-    const auto srv=region("bool forwardSrv(","bool forwardDsv(");
-    const auto dsv=region("bool forwardDsv(","bool forwardViewport(");
+    const auto srv=region("bool forwardSrv(","bool forwardDsvActual(");
+    const auto dsv=region("bool forwardDsvActual(","bool forwardDsv(");
     expect(count(adapter,"forward_light::describeTexture(")==1&&count(adapter,"->QueryInterface(")==1&&count(adapter,"->GetDesc(")==1&&
         adapter.find("if(!texture)return false;")!=std::string::npos&&adapter.find("if(format)*format=observed.format;")!=std::string::npos,
         "actual adapter links one callback request to one QI and at most one texture GetDesc");
@@ -105,7 +105,7 @@ inline unsigned run() {
     expect(srv.find("PSGetShaderResources(slot,1,&view)")!=std::string::npos&&srv.find("view->GetResource(&resource)")!=std::string::npos&&
         srv.find("view->GetDesc(&v)")!=std::string::npos&&srv.find("if(!resource)return false;")!=std::string::npos,
         "SRV still reads actual nullable binding, resource and immutable view descriptor");
-    expect(dsv.find("OMGetRenderTargets(0,nullptr,&dsv)")!=std::string::npos&&dsv.find("dsv->GetResource(&value.resource)")!=std::string::npos&&
+    expect(dsv.find("OMGetRenderTargets(0,nullptr,&current)")!=std::string::npos&&dsv.find("dsv->GetResource(&value.resource)")!=std::string::npos&&
         dsv.find("dsv->GetDesc(&value.view)")!=std::string::npos&&dsv.find("OMGetDepthStencilState(&state,&ref)")!=std::string::npos&&
         dsv.find("state->GetDesc(&value)")!=std::string::npos&&dsv.find("D3D11_DSV_READ_ONLY_DEPTH")!=std::string::npos,
         "DSV still queries actual view and depth state, describing on cache miss with read-only handling");

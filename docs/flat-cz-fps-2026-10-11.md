@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 cache capture): `ee68d075` Steam flat verified (`040555`, PE `6AD49934`); reuse and AA continuity PASS. Slow-leg DSV hits 99.990%, depth-state about 99.59%; gross raw 204.0/207.5 ns per call versus prior 242.9 (14.6-16.0% lower observed rate, differing workloads). Clean-window FPS 74.13/290.74/73.05; estimated EDVR CPU slow 6.207/6.350 ms, broad overhead remains. No new AA refusals/resets/backend/origin events; two startup/load resets precede legs. Phase bootstrap remains pending, not validated. Sol analyzed, Astra evidence-only review; main unmerged, probe off. No further flight requested for cache proof; remaining target is structural draw/query overhead. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (last entry).
+State (2026-10-18 remaining per-draw audit): query-once Geometry/Light Issue DSV validation and exclusive callback timing source/test review PASS; Sol full build PASS (172.8 s), clean promotion/install Steam flat pending. Fresh actual snapshots remain at Begin/Return; ordinary draw-key matching unchanged. Historical diff Frontier `208ea3e8` to Steam `ee68d075` identifies `44a8ef1a` adding broad writer/Issue proof absent in older build. Frontier flat selected XeSS but DLL missing, zero AA treatments/spatial fallback, so its 90 FPS is not an active-AA control. Previous roughly 6.3-ms CPU total omitted callbacks; larger new totals need coverage-aware comparison. Main unmerged, probe off; phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test. Next capture: callback costs, reached-Issue snapshots, existing raw/cache counters and AA continuity (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1745,3 +1745,149 @@ Frozen evidence: `build/repeated_query_ee68d075_capture_filtered.txt`,
 `build/repeated_query_ee68d075_aa_frozen.json`. Sol performed log extraction
 and normalization; Astra reviewed the evidence only, without running tests,
 builds or benchmarks.
+
+## 2026-10-18: remaining per-draw CPU audit
+
+User authorizes continued optimization, Sol for RE/tests, Astra for evidence
+review only, full build/install Steam flat and main unmerged. Baseline is
+the preceding `ee68d075` capture, not a new unpinned flight. Origin probe
+stays off, settings preserved. No live object read is needed for this audit.
+
+Candidate discriminants before editing: repeated pure target/source/pair
+lookups need a source call/occupancy census and equivalence proof; repeated
+actual-state/CB proof needs a bounded no-mutation certificate covering each
+intervening operation; draw-scope initialization needs production codegen or
+measured helper evidence; timing-gate overhead needs the real production
+Scope path and must not be confused with the recorded clock floor. A large
+aggregate bucket does not identify a removable operation. Existing camera,
+pair-fact and offscreen memoization must be accounted for first.
+
+Prior ruled-out shortcuts still apply: overlay-suffix flag alone can miss
+the same draw's new failure, failed-domain status cannot bypass global
+overflow/publications/authority or a pending Issue, and WRL already avoids
+same-pointer reference churn. Any faster lookup must preserve array order,
+first-match/null behavior, append/reset and full/unknown fallback; it may
+accelerate finding live data, not cache mutable camera/mutation verdicts.
+
+Confirmed source evidence before editing: Geometry and Light
+`forwardIssueValid` each read actual DSV only to fill `key.dsv`, then
+`forwardDsv` immediately reads it again and compares to that just-read
+identity. It is not a prepared-Issue view identity. Owner/foreign/uncertain
+and phase guards precede the queries; no game Draw or state setter intervenes.
+The narrow change uses one fresh actual DSV snapshot per validation while
+keeping ordinary draw-key exact-view matching and all surface/resource,
+format/subresource/extent, read-only/write-state, phase, CB, publication and
+RTV proof. Begin and Return still validate independently on opposite sides
+of the actual draw; Converter's separate null-DSV/RTV path is untouched.
+Single-owner operation is the supported assumption, not an atomic snapshot
+claim for concurrent context mutation. Astra accepts this boundary subject
+to production wiring and transition/alias/default/unknown tests.
+
+Also confirmed a timing-coverage hole: flat draw thunks in `vscreen.cpp`
+return from the constructor, call `beginActualDraw`, issue the game Draw,
+call `endActualDraw`, then destruct the scope. The constructor/destructor
+local `kOther` clocks do not cover these callbacks. In particular, the
+per-draw forward Issue checks before/after Draw are outside the reported
+family sum. Prior roughly 6.3-ms floor-net is therefore incomplete coverage,
+not a bound on EDVR's total overhead. A new exclusive draw-issue-callback
+family will time both callbacks, excluding the game Draw between them and
+carving out existing nested feature scopes. Begin's timer follows !ctx
+return; end's is conditional on ctx, preserving cleanup/reentry behavior.
+EDVR private replays inside callbacks count as EDVR CPU; destructor cleanup
+before its existing clock remains outside this family, so this still does
+not claim exhaustive hook coverage. Adding measured callback CPU may raise
+the report total without a runtime regression. Calibration and bounded
+formatting must include the new family.
+
+Existing raw DSV OM Get counters count only `forwardDsv`'s inner query, not
+the redundant pre-query in Issue validation. They must not be claimed to
+drop from about 20k to 7k per frame. A separate sampled reached-Issue DSV
+snapshot count will show one former pre-query eliminated per reached stage;
+it does not imply every Issue passes earlier guards or measure time saved.
+Expected eligible count is roughly the excess of inner getter calls over
+raw-domain calls (about 13k/frame, with other qualification paths mixed in),
+not a measured ms saving. No target-index accelerator is justified yet
+without call/occupancy/cost evidence.
+
+User then reports Frontier's same carrier spot held 90 FPS in VR cinema and
+flat, and requests the installed-commit diff before proceeding. Build was
+held while this comparison was checked. Explicit Frontier path is
+`C:\Users\seanm\AppData\Local\Frontier_Developments\Products\elite-dangerous-odyssey-64`.
+Sanctioned log reader verifies `edvr_gfx_20261018_042154.log` as
+`v0.20.0-rc.2-66-g208ea3e8`, PE `6AD27EAB`; initial profile VR/scope both,
+subsequently switched flat. Steam installed source is `ee68d075`; the pending
+unbuilt query/timer patch is not part of that historical diff. `208ea3e8` is
+the merge base and an ancestor. Complete exact diff: 158 files, 23,048
+insertions / 573 deletions, saved as
+`build/frontier-208ea3e8-vs-steam-ee68d075.patch` (1,825,374 bytes). Source
+and test subset is large; do not attribute all changed lines to CPU work.
+
+Most relevant path changes, source-proven independently by Sol and Astra:
+
+- `44a8ef1a` introduces the production forward-camera adapter and raw-depth
+  writer ledger, mutation/revocation and Issue prepare/begin/return/abandon
+  proof. These paths are absent in `208ea3e8`. Installed Steam calls
+  `forwardBefore`/`forwardQualify` on slow-path draws; under upstream phase
+  ownership, output/write tracking and screen-depth domain observation run
+  before the exact converter/light shader filter. Geometry Issues then add
+  shader/DSV/depth-state/CB proof at Begin and Return. This is substantial
+  added per-draw work; current raw timer alone is about 1.55 ms/frame and
+  callback work was unclocked. It does not establish the full FPS delta.
+- `942cfeb3` supplies operation-derived frustum-rounding bounds for forward
+  admission; `c7c14898` keeps rejected forward candidates local.
+  `a4a4e751` integrates the menu/on-foot camera-proof fix with the output
+  guard. These are correctness/admission changes, not justified removals.
+- `219d2bdb`, `c6082f4b` and `ee68d075` trim output scans and repeated
+  immutable description work in that new path. `45595786` adds the offscreen
+  repeat fast path absent from the Frontier baseline; it currently avoids
+  roughly 4.2k slow draw scopes/frame. `0bb83e63` reduces startup discovery
+  restoration cost. Those offsets also belong in the comparison.
+- Manual light-payload capture (`b025e8fd`) is Full-capture gated, and passive
+  stationary capture (`387288ed`) is gated by the default-off origin probe.
+  Their file size is not evidence of normal per-draw CPU cost.
+
+Crucial control limitation: Frontier flat config selects XeSS, CPU timing
+is off, and its runtime is unavailable. At 04:25:58.773 the flat summary is
+treated=0, refused=6214, last=spatial-fallback, accepted-history-5s=0; HDR
+prepped/backend=0 and no timed GPU resolve. At 04:26:01.461 preflight reports
+`libxess.dll is missing beside EDVR`, backend-available=0 and 6427 spatial
+fallbacks, then flat switches back to VR at 04:26:01.462. Older renderer
+accepted totals include the separate earlier VR interval; they cannot be
+presented as successful flat AA. Frontier flat's 90 FPS therefore is not a
+working temporal-AA baseline, and VR uses a different draw path. No
+store-specific regression or exact frame-time increase follows from this
+pair of logs. No Frontier files/settings/runtime were changed.
+
+The diff still identifies added proof work worth optimizing. Deferring all
+writer observation until a light consumer appears is unsafe: later admission
+needs earlier same-frame coherence and unknown-writer/mutation history;
+qualified=0 at the end is not a safe skip certificate. A broad lazy-start
+design needs independent prefix provenance or explicit fail-closed recovery.
+The narrower duplicate-query removal and new timing remain justified, and
+the original authorized build/install resumes after this comparison.
+
+Sol tests execute production-used one-query observation and structural/write
+proof helpers, changed bindings/defaults/null/read-only/resource/plane
+cases, timing exclusivity with a nested child and game Draw outside the
+callbacks, unclocked gating and maximum-width log fields. Production hook
+ordering and guard seams have static assertions; this is not a real-driver
+benchmark or complete Issue execution fixture. Astra found a stale `&dsv`
+assertion after the helper switched to `&current`; Sol corrected it before
+build. Final source/test review PASS, no additional blocker; Astra ran no
+tests/builds/benchmarks. No wider draw-shell shortcut was justified.
+
+Sol full validation PASS: absolute `build.bat --wait-lock`, 172.8 seconds
+reported / 174.1 wall, production d3d11 13 compiled / 128 reused, 170-job
+pool and installer/resource gates. Forward core 166 checks, cache/helper
+52, integration 119, texture description 17 plus 20,736 oracle cases, and
+engine velocity 18,885 checks all pass. Callback fake-clock tests include
+nested exclusivity and game work outside scopes; maximum-width window
+format fits five lines (longest 989 of 1000 chars), both new counters named.
+Full receipt inputs:
+`15b822edffa892f271953021ad41d0528f59edb5707e8a25bc9efee8524282a9`.
+Log `build/per-draw-issue-full-build.log`; final all-gates PASS read. Source
+commit and clean promotion follow, then sanctioned Steam flat install.
+This validates code/rigs; removed-query counts, new callback CPU and FPS
+benefit still require the installed capture. Future comparisons must keep
+legacy families separate from the new callback family; subtracting gross
+callback time from an expanded floor-net total would mix timing corrections.

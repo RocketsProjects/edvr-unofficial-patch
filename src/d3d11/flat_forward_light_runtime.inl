@@ -51,14 +51,16 @@ bool forwardSrv(State& s,unsigned slot,bool raw,forward_light::Surface& out,
         (raw?(format==DXGI_FORMAT_R32G8X24_TYPELESS&&v.Format==DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS):
              (format==DXGI_FORMAT_R32_TYPELESS&&v.Format==DXGI_FORMAT_R32_FLOAT));
 }
-bool forwardDsv(State& s,const FlatContractObservation& k,forward_light::Surface& out,
-                Ptr<ID3D11DepthStencilView>& dsv,Ptr<ID3D11Resource>& resource,bool& writes) {
+bool forwardDsvActual(State& s,const FlatContractObservation& k,forward_light::Surface& out,
+                      Ptr<ID3D11DepthStencilView>& dsv,Ptr<ID3D11Resource>& resource,bool& writes) {
     // Actual mutable bindings are queried on every draw. The one-entry caches
     // retain COM identities only for descriptions that cannot change while a
     // view/state is alive; a different binding immediately takes the miss path.
     flatcpu::CopyCounter counts;
     counts.add(flatcpu::kCopyRawDsvGet);
-    s.context->OMGetRenderTargets(0,nullptr,&dsv);if(!dsv)return false;
+    return forward_light::observeCurrentDsv(dsv,[&](auto& current) {
+        s.context->OMGetRenderTargets(0,nullptr,&current);
+    },[&](const auto&) {
     auto& cache=s.forwardLight.dsvDescription;
     ForwardDsvDescription fresh{};
     bool dsvHit=false;
@@ -87,10 +89,20 @@ bool forwardDsv(State& s,const FlatContractObservation& k,forward_light::Surface
         counts.add(depthHit?flatcpu::kCopyRawDepthHit:flatcpu::kCopyRawDepthMiss);
         z=*describedDepth;
     } else {counts.add(flatcpu::kCopyRawDepthDefault);s.forwardLight.depthDescription.clear();}
-    writes=z.DepthEnable&&z.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL&&!(v.Flags&D3D11_DSV_READ_ONLY_DEPTH);
-    return out.known&&v.ViewDimension==D3D11_DSV_DIMENSION_TEXTURE2D&&format==DXGI_FORMAT_R32G8X24_TYPELESS&&
-        v.Format==DXGI_FORMAT_D32_FLOAT_S8X24_UINT&&dsv.Get()==k.dsv&&resource.Get()==k.depth&&
-        out.width==k.depthWidth&&out.height==k.depthHeight;
+    const forward_light::DsvObservationProof actualProof{out,reinterpret_cast<uintptr_t>(resource.Get()),
+        static_cast<uint32_t>(v.ViewDimension),format,static_cast<uint32_t>(v.Format),
+        z.DepthEnable!=FALSE,z.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL,(v.Flags&D3D11_DSV_READ_ONLY_DEPTH)!=0};
+    const forward_light::DsvRequirement expected{reinterpret_cast<uintptr_t>(k.depth),k.depthWidth,k.depthHeight,
+        D3D11_DSV_DIMENSION_TEXTURE2D,DXGI_FORMAT_R32G8X24_TYPELESS,DXGI_FORMAT_D32_FLOAT_S8X24_UINT};
+    return forward_light::dsvObservationMatches(actualProof,expected,writes);
+    });
+}
+bool forwardDsv(State& s,const FlatContractObservation& k,forward_light::Surface& out,
+                Ptr<ID3D11DepthStencilView>& dsv,Ptr<ID3D11Resource>& resource,bool& writes) {
+    // Ordinary draw observation still compares the current DSV to the draw's
+    // binding identity. Issue validation has no earlier issued-view identity:
+    // its former key.dsv was a redundant immediate query of the same context.
+    return forwardDsvActual(s,k,out,dsv,resource,writes)&&dsv.Get()==k.dsv;
 }
 bool forwardViewport(State& s,unsigned width,unsigned height) {
     UINT n=D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
@@ -331,8 +343,9 @@ bool forwardIssueValid(State& s,const forward_light::Issue& issue) {
     if(issue.kind==Issue::Geometry) {
         Ptr<ID3D11DepthStencilView> dsv;Ptr<ID3D11Resource> depth;Surface observed;bool writes=false;
         FlatContractObservation key;key.depth=reinterpret_cast<void*>(issue.raw.resource);
-        key.depthWidth=issue.raw.width;key.depthHeight=issue.raw.height;s.context->OMGetRenderTargets(0,nullptr,&dsv);key.dsv=dsv.Get();
-        if(!forwardDsv(s,key,observed,dsv,depth,writes)||writes!=issue.depthWrite||!plane(observed,issue.raw)||
+        key.depthWidth=issue.raw.width;key.depthHeight=issue.raw.height;
+        flatcpu::CopyCounter counts;counts.add(flatcpu::kCopyIssueGeometryDsvGet);
+        if(!forwardDsvActual(s,key,observed,dsv,depth,writes)||writes!=issue.depthWrite||!plane(observed,issue.raw)||
            issue.phaseX!=s.phase.currentX||issue.phaseY!=s.phase.currentY)return false;
         lightaudit::Cb cb;lightBoundCb(s,s.context.Get(),0,1,270,96,cb);
         const ConstantIdentity id{cb.buffer,cb.before.generation,cb.before.mutation,cb.before.writeGeneration,cb.before.bank,
@@ -352,9 +365,10 @@ bool forwardIssueValid(State& s,const forward_light::Issue& issue) {
     if(!publication||publication->token!=issue.token)return false;
     Ptr<ID3D11DepthStencilView> dsv;Ptr<ID3D11Resource> depth;FlatContractObservation key;
     key.depth=reinterpret_cast<void*>(issue.raw.resource);key.depthWidth=issue.raw.width;key.depthHeight=issue.raw.height;
-    // Re-read actual DSV identity and its subresource, not a retained token only.
-    s.context->OMGetRenderTargets(0,nullptr,&dsv);key.dsv=dsv.Get();bool writes=false;
-    if(!forwardDsv(s,key,observed,dsv,depth,writes)||writes||!plane(observed,issue.raw))return false;
+    // Re-read actual DSV and its subresource once for this post- or pre-Draw
+    // validation. No binding is reused across the game's actual draw.
+    bool writes=false;flatcpu::CopyCounter counts;counts.add(flatcpu::kCopyIssueLightDsvGet);
+    if(!forwardDsvActual(s,key,observed,dsv,depth,writes)||writes||!plane(observed,issue.raw))return false;
     Ptr<ID3D11RenderTargetView> rtv;Ptr<ID3D11Resource> color;s.context->OMGetRenderTargets(1,&rtv,nullptr);if(rtv)rtv->GetResource(&color);
     if(reinterpret_cast<uintptr_t>(color.Get())!=issue.color||!forwardViewport(s,issue.raw.width,issue.raw.height))return false;
     for(unsigned stage=0;stage<2;++stage){ForwardConstants cb;if(forwardConstants(s,stage,issue.constants[stage].bytes,cb)!=Reason::None||!same(cb.id,issue.constants[stage]))return false;}

@@ -185,6 +185,30 @@ inline int flatCpuTests() {
                "the outer scope is its 100 ticks less the middle's whole 30: 70; the three add up to 100");
     }
 
+    // The two issue callbacks are separate scopes around, rather than over,
+    // the game's draw. A nested foreground operation belongs to its own family.
+    {
+        flatcpu::resetForTest();fake(0);
+        { flatcpu::Scope begin(flatcpu::kIssueCallbacks);
+          t_now=10;
+          { flatcpu::Scope child(flatcpu::kForegroundCapture);t_now=17; }
+          t_now=23;
+        }
+        t_now=123; // game's draw, outside either callback scope
+        { flatcpu::Scope end(flatcpu::kIssueCallbacks);t_now=136; }
+        const auto* slot=flatcpu::t_ctx.slot;
+        expect(slot&&slot->cell[flatcpu::kIssueCallbacks].ticks.load()==29&&
+               slot->cell[flatcpu::kIssueCallbacks].calls.load()==2&&
+               slot->cell[flatcpu::kForegroundCapture].ticks.load()==7&&
+               slot->cell[flatcpu::kForegroundCapture].calls.load()==1,
+               "issue callbacks count 23+13 less the seven-tick child, excluding the 100-tick game draw");
+        flatcpu::g_gate.store(flatcpu::makeGate(false,flatcpu::kNoThread),std::memory_order_relaxed);
+        const auto reads=t_reads;
+        { flatcpu::Scope gated(flatcpu::kIssueCallbacks);t_now+=50; }
+        expect(slot&&slot->cell[flatcpu::kIssueCallbacks].calls.load()==2&&t_reads==reads,
+               "unclocked callback scope has no clock reads or recorded call");
+    }
+
     // ---- 2: a frame's figures, in the census and in the words ---------------------------------
     // 300 frames of 16,667 ticks: the shell 50 own ticks, contract reduction 40, the witness 30
     // (three writes of 10), the trace ring 20, then 10 more of the shell's own.
@@ -227,15 +251,14 @@ inline int flatCpuTests() {
             "other 0.060 ms (calls 1.0) + contract reduction 0.040 ms (calls 1.0) + copy checks 0.000 ms (calls 0.0) + "
             "camera rows 0.000 ms (calls 0.0) + trace ring 0.020 ms (calls 1.0) + resource lookup 0.000 ms (calls 0.0) + "
             "coverage 0.000 ms (calls 0.0) + projection readiness 0.000 ms (calls 0.0) + cb shadows 0.000 ms (calls 0.0) + "
-            "camera witness 0.030 ms (calls 3.0) + engine motion draw wrapper 0.000 ms (calls 0.0) + resolve 0.000 ms (calls 0.0) + "
-            "backend 0.000 ms (calls 0.0) + discovery 0.000 ms (calls 0.0) + state trackers 0.000 ms (calls 0.0) + "
-            "hdr route 0.000 ms (calls 0.0) + foreground capture 0.000 ms (calls 0.0) + camera inject 0.000 ms (calls 0.0) + offscreen fast path 0.000 ms (calls 0.0) + "
-            "engine motion hooks 0.000 ms (calls 0.0)";
+            "camera witness 0.030 ms (calls 3.0)";
         expect(std::string(lines.line[0]).compare(0, promised.size(), promised) == 0,
                "the first line has the promised shape, in the promised order, with the figures the frames spent");
         expect(has(text, "camera witness 10.00 us/write (" + std::to_string(3u * K) + " writes clocked)"),
                "the witness prints its cost per write, and how many writes it clocked");
         expect(has(text, "engine motion hooks 0.000 ms (calls 0.0)"), "engine motion's hooks print as zero when they never ran");
+        expect(has(text, "draw issue callbacks 0.000 ms (calls 0.0)"),
+               "the previously unmeasured draw callbacks appear as their own zero family");
         expect(lines.count >= 1 && !lines.truncated, "a window fits the lines the log holds");
         expect(std::strncmp(lines.line[0], "flat cpu 5s:", 12) == 0, "the first line is the flat cpu 5s line");
         for (int i = 1; i < lines.count; ++i)
@@ -629,8 +652,10 @@ inline int flatCpuTests() {
                has(copyText,"raw depth-state OM Gets=18446744073709551615")&&
                has(copyText,"raw depth-state description hits=18446744073709551615")&&
                has(copyText,"raw depth-state description misses=18446744073709551615")&&
-               has(copyText,"raw depth-state defaults=18446744073709551615"),
-               "all new raw-binding counters survive worst-width line packing");
+                has(copyText,"raw depth-state defaults=18446744073709551615")&&
+                has(copyText,"issue geometry DSV Gets=18446744073709551615")&&
+                has(copyText,"issue light DSV Gets=18446744073709551615"),
+                "raw-binding and issue snapshot counters survive worst-width line packing");
         for (unsigned i = 0; i < flatcpu::kEmNameCount; ++i) named = named && has(text, flatcpu::kEmNames[i].name);
         named = named && has(text, "engine motion hooks") && has(text, "GPU frame") && has(text, "GPU resolve") &&
                 has(text, "clock floor") && has(text, "camera witness") && has(text, "engine motion wrapper D3D calls") &&

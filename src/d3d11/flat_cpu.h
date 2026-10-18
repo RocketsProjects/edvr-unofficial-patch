@@ -110,6 +110,7 @@ enum Family : unsigned {
     kForegroundCapture, // foreground identity/certificate and original-VS stream-output capture
     kInject,        // the camera inject callback (refreshPre / refreshPost): game threads
     kOffscreenFast, // the offscreen fast path's own time (flat_offscreen_fast.h): the draws that skipped the draw scope's constructor, calls = those draws
+    kIssueCallbacks, // beginActualDraw/endActualDraw around the game's draw, not including the game draw itself
     // Exclusive children of copy checks; folded into its legacy headline.
     kCopyOutputs, kCopyDomain, kCopyConverter, kCopyForward, kCopyVerify, kCopyCapture, kCopyInactiveOutputs,
     kFamilies
@@ -122,6 +123,7 @@ enum CopyCount : unsigned {
     kCopyGuardChecks, kCopyGuardSkipped, kCopyGuardFallback,
     kCopyRawDsvGet, kCopyRawDsvHit, kCopyRawDsvMiss,
     kCopyRawDepthGet, kCopyRawDepthHit, kCopyRawDepthMiss, kCopyRawDepthDefault,
+    kCopyIssueGeometryDsvGet, kCopyIssueLightDsvGet,
     kCopyCounts
 };
 struct FamilyInfo {
@@ -148,6 +150,7 @@ inline constexpr FamilyInfo kInfo[kFamilies] = {
     {"foreground capture", false},
     {"camera inject", true},
     {"offscreen fast path", false},
+    {"draw issue callbacks", false},
     {"output scan", false}, {"raw domain", false}, {"converter", false},
     {"forward admission", false}, {"copy verification", false}, {"manual/conflict", false},
     {"output inactive-ledger", false},
@@ -852,7 +855,8 @@ inline void formatCopyWindow(const WindowReport& r, uint64_t completedFrame, Lin
             "decision samples","decision unknown","inactive-ledger candidates",
             "actual guard checks","actual guard skips","actual full-scan fallbacks",
             "raw DSV OM Gets","raw DSV description hits","raw DSV description misses",
-            "raw depth-state OM Gets","raw depth-state description hits","raw depth-state description misses","raw depth-state defaults"};
+            "raw depth-state OM Gets","raw depth-state description hits","raw depth-state description misses","raw depth-state defaults",
+            "issue geometry DSV Gets","issue light DSV Gets"};
         for (unsigned c = 0; c < kCopyCounts; ++c)
             tk.add(c ? ", " : "; ", "%s=%llu", names[c], static_cast<unsigned long long>(r.copy[c]));
         tk.add("; ", "zero calls means not run in sampled frames; output scan includes guard CPU; inactive-ledger scan time is zero after guard (skips untimed, not measured savings); query counting not floor-corrected");

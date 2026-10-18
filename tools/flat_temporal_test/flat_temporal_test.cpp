@@ -2859,9 +2859,10 @@ void testFlatCpuWiring() {
     const std::string engineH = slurp("src/d3d11/engine_velocity.h");
     const std::string cpuH = slurp("src/d3d11/flat_cpu.h");
     const std::string forwardCpp = slurp("src/d3d11/flat_forward_light_runtime.inl");
+    const std::string vscreenCpp = slurp("src/d3d11/vscreen.cpp");
     const std::string menuCpp = slurp("src/d3d11/menu.cpp");
     check(!runtimeCpp.empty() && !resolveCpp.empty() && !resolveH.empty() && !injectCpp.empty() && !temporalCpp.empty() &&
-          !engineCpp.empty() && !engineH.empty() && !cpuH.empty() && !menuCpp.empty(),
+           !engineCpp.empty() && !engineH.empty() && !cpuH.empty() && !menuCpp.empty() && !vscreenCpp.empty(),
           "the census's sources are readable from the repo root");
     auto count = [](const std::string& text, const std::string& needle) {
         unsigned n = 0;
@@ -2899,6 +2900,26 @@ void testFlatCpuWiring() {
           runtimeCpp.find("flatcpu::Scope captureCost(flatcpu::kCopyCapture,s.projectionFrames!=0||lightLive(s));")!=std::string::npos&&
           count(runtimeCpp,"flatcpu::Scope verifyCost(flatcpu::kCopyVerify);")==4,
           "same completed window emits the partition and capture/filter scopes respect their work gates");
+    const auto beginAt=runtimeCpp.find("void FlatRuntimeDrawScope::beginActualDraw(");
+    const auto endAt=runtimeCpp.find("void FlatRuntimeDrawScope::endActualDraw()",beginAt);
+    const auto dtorAt=runtimeCpp.find("FlatRuntimeDrawScope::~FlatRuntimeDrawScope()",endAt);
+    const auto beginBody=beginAt!=std::string::npos&&endAt!=std::string::npos?runtimeCpp.substr(beginAt,endAt-beginAt):std::string{};
+    const auto endBody=endAt!=std::string::npos&&dtorAt!=std::string::npos?runtimeCpp.substr(endAt,dtorAt-endAt):std::string{};
+    bool drawOutsideCallbacks=true;size_t hookAt=0;
+    for(unsigned i=0;i<7;++i) {
+        const auto before=vscreenCpp.find("if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw",hookAt);
+        const auto draw=before==std::string::npos?std::string::npos:vscreenCpp.find("g_state->realDraw",before);
+        const auto after=before==std::string::npos?std::string::npos:vscreenCpp.find("if (flatDraw.needsActualDraw()) flatDraw.endActualDraw",before);
+        drawOutsideCallbacks=drawOutsideCallbacks&&before!=std::string::npos&&draw!=std::string::npos&&
+            after!=std::string::npos&&before<draw&&draw<after&&after-before<350;
+        hookAt=after==std::string::npos?vscreenCpp.size():after+1;
+    }
+    check(beginBody.find("if(!ctx)return;")<beginBody.find("flatcpu::Scope callbacks(flatcpu::kIssueCallbacks);")&&
+          beginBody.find("flatcpu::Scope callbacks(flatcpu::kIssueCallbacks);")<beginBody.find("if(drawPacketOnly)")&&
+          endBody.find("flatcpu::Scope callbacks(flatcpu::kIssueCallbacks,ctx!=nullptr);")<endBody.find("forwardReturn(state(),forwardIssue)")&&
+          drawOutsideCallbacks&&count(vscreenCpp,"if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw") == 7&&
+          count(vscreenCpp,"if (flatDraw.needsActualDraw()) flatDraw.endActualDraw") == 7,
+          "both callback scopes wrap optional pre/post issue work, while all seven hooks call the game draw between them");
     struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
     const Pin pins[] = {
         // Every family the census names has its scope at the entry points that family stands for.

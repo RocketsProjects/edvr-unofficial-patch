@@ -31,6 +31,28 @@ struct Surface {
     uint64_t resource=0;uint32_t width=0,height=0,mip=0,slice=0,slices=0,samples=0;
     bool known=false;
 };
+// Keep the actual binding acquisition adjacent to its inspection. Each call
+// observes one current view; callers must call again on the other side of Draw.
+template<class View,class Get,class Inspect>
+inline bool observeCurrentDsv(View& view,Get&& get,Inspect&& inspect) {
+    get(view);
+    return !view?false:inspect(view);
+}
+struct DsvObservationProof {
+    Surface surface{};uint64_t resource=0;
+    uint32_t viewDimension=0,resourceFormat=0,viewFormat=0;
+    bool depthEnabled=false,writeAll=false,readOnlyDepth=false;
+};
+struct DsvRequirement {
+    uint64_t resource=0;uint32_t width=0,height=0;
+    uint32_t viewDimension=0,resourceFormat=0,viewFormat=0;
+};
+inline bool dsvObservationMatches(const DsvObservationProof& actual,const DsvRequirement& expected,bool& writes) {
+    writes=actual.depthEnabled&&actual.writeAll&&!actual.readOnlyDepth;
+    return actual.surface.known&&actual.viewDimension==expected.viewDimension&&
+        actual.resourceFormat==expected.resourceFormat&&actual.viewFormat==expected.viewFormat&&
+        actual.resource==expected.resource&&actual.surface.width==expected.width&&actual.surface.height==expected.height;
+}
 // One immutable resource description supplies both the structural surface
 // and its format. The caller still reads actual mutable bindings/state.
 struct TextureDescription {
