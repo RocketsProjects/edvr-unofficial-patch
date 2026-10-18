@@ -2,7 +2,7 @@
 
 ## Status
 
-State (2026-10-18 remaining per-draw audit): `709ba499` installed/verified Steam flat (`rc.4-19`), query-once Geometry/Light DSV validation plus exclusive callback timing. Sol full build PASS (172.8 s), clean promotion PASS, Astra evidence review PASS, settings unchanged; main unmerged, probe off. Previous roughly 6.3-ms CPU total omitted callbacks: expanded totals need coverage-aware comparison. Historical Frontier `208ea3e8` to Steam `ee68d075` adds broad writer/Issue proof at `44a8ef1a`. New Frontier DLSS run did treat 601 earlier flat frames, then all 1306 recent carrier frames fell back on foreground-contract-unqualified; its FPS is not active-AA performance for that interval. Next Steam capture: callbacks, reached-Issue snapshots, existing raw/cache counters and AA continuity. Phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (last entry).
+State (2026-10-18 remaining per-draw audit): `709ba499` installed/verified Steam flat (`rc.4-19`), query-once Geometry/Light DSV validation plus exclusive callback timing. Sol full build/promotion PASS, Astra evidence review PASS, settings unchanged; main unmerged, probe off. Latest Frontier `208ea3e8` fresh-flat `043900` DOES run DLSS (3209/3209 clean frames); prior `043544` fallback is session-specific. Frontier native 3840 HDR and Steam 2496 copy routes/draw loads differ, CPU timing Frontier off: no isolated regression size. Historical diff adds broad writer/Issue proof at `44a8ef1a`. Prior roughly 6.3-ms Steam CPU total omitted callbacks, so expanded totals need coverage-aware comparison. Next Steam capture: callbacks, reached-Issue snapshots, raw/cache counters and AA continuity. Phase bootstrap remains unvalidated. Temporary Ctrl+NumLock shortcut has an ingress issue (Windows Pause equivalence); do not repeat that test (last entry).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
@@ -1943,3 +1943,48 @@ not run, not a proven zero cost. Keep raw OM Get counters' historical scope
 separate from the eliminated pre-gets. Compare legacy families and new
 coverage explicitly, plus reset/refusal/history/backend continuity. No
 measured FPS claim for this patch until that capture.
+
+User repeats Frontier with a 300-Hz frame limit: slow view holds about 90,
+fast view exceeds it. This rules out a fixed 90-FPS cap as the whole
+explanation. A reported 90 versus earlier Steam roughly 73 corresponds to
+11.11 versus 13.70 ms/frame, a descriptive difference around 2.6 ms; it is
+not an isolated measured code-regression size.
+
+Crucial new run: sanctioned reader verifies `edvr_gfx_20261018_043900.log`
+as the same old `208ea3e8`/PE `6AD27EAB`, launching directly flat at
+04:39:00.016. DLSS now genuinely works in the sampled carrier frames.
+Five consecutive runtime windows ending 04:41:05.490-04:41:25.491 have
+762/668/653/578/548 treated/prepped/backend and accepted-history frames:
+3209/3209, no new refusal/reset/jitter failure, backend failure cumulative
+zero. Foreground captures 14916/14916, query rejects 0/14916, H qualified
+3728/3728, treated streak 3728. Ruled out: extending the prior session's
+fallback conclusion to old Frontier flat generally, because this clean
+flat launch sustains DLSS and history. The earlier `043544` interval really
+did refuse all 1306 frames; keep that finding scoped to that run. Their
+different outcomes follow the foreground query-safety gate, without proof
+that the VR transition alone caused its previous unsafe state.
+
+This is a valid active-AA older-code reference, with remaining workload
+differences: Frontier uses `treated-jittered-hdr` at native 3840x2160;
+Steam `ee68d075` used the copy route at 2496x1404, HDR refusing because
+render was below output. During these Frontier windows substituted draws
+rise 1399/2637/3234/4322/4762, while approximate FPS inferred from adjacent
+CPU report intervals falls 151.3/135.1/129.0/115.6/109.6. These are changing
+views/load, not a held 90-FPS benchmark. Earlier 300-FPS blank/no-3D windows
+and the partial exit window ending 04:41:30 are excluded. CPU timing is off,
+so no EDVR CPU milliseconds are available. Steam slow2 had about 6545
+substituted draws/frame. The comparison supports view-dependent load and
+active AA on both builds, not a causal storefront/forward-adapter share of
+the difference. Avoid claiming that GPU span is GPU busy time or inverting
+Present p50 as average FPS.
+
+CPU companion cutoff is 04:41:25.568; AA cutoff is 04:41:25.491. Frozen
+evidence: `build/frontier_208ea3e8_043900_summary.json` and `.md`, plus
+`build/frontier_dlss_active_208ea3e8_frozen.md`. Sol normalized the logs and
+traced routes; Astra evidence-only review PASS, no arithmetic blocker.
+AA-window frames total 3209 and adjacent CPU-window frames total 3207;
+independent report boundaries explain the difference. Keep these populations
+separate. No new source/build/install change from this read; Steam
+`709ba499` remains installed and main unmerged. Use the user's 300-FPS limit
+for the next Steam slow/fast/slow check, keeping the comparison conditions
+steady; no new settings-file edit is needed.
