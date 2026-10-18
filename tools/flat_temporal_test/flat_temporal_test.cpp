@@ -2896,7 +2896,20 @@ void testFlatCpuWiring() {
           scan.find("if(blend){counts.add(flatcpu::kCopyBlendDesc);blend->GetDesc")!=std::string::npos&&
           count(scan,"counts.add(flatcpu::kCopyGetResource)")==2,
           "query counters name actual Gets, requested 8/64 slots, nullable GetDesc and writable-resource queries");
+    {
+        const auto ctorAt=runtimeCpp.find("FlatRuntimeDrawScope::FlatRuntimeDrawScope(");
+        const auto ctorEnd=runtimeCpp.find("FlatRuntimeDrawScope::~FlatRuntimeDrawScope()", ctorAt);
+        const auto ctorBody=ctorAt!=std::string::npos&&ctorEnd!=std::string::npos?runtimeCpp.substr(ctorAt,ctorEnd-ctorAt):std::string{};
+        const auto dtorBody=ctorEnd!=std::string::npos?runtimeCpp.substr(ctorEnd, 4000):std::string{};
+        check(ctorBody.find("flatcpu::DrawSplitCtor splitCtor;")<ctorBody.find("flatcpu::Scope shell(flatcpu::kOther);")&&
+              ctorBody.find("flatcpu::kCopyChecks")<ctorBody.find("const bool continuesRun")&&
+              ctorBody.find("const bool continuesRun")<ctorBody.find("flatcpu::drawSplitSetContinued(continuesRun);"),
+              "the constructor arms the shell split before its scope and classes the draw after copy checks");
+        check(dtorBody.find("flatcpu::DrawSplitDtor splitDtor(splitContinued);")<dtorBody.find("flatcpu::Scope shell(flatcpu::kOther);"),
+              "the destructor shell is classed with the constructor's continuesRun");
+    }
     check(runtimeCpp.find("flatcpu::formatCopyWindow(window,frame,&lines);")!=std::string::npos&&
+          runtimeCpp.find("flatcpu::formatDrawSplit(window, splitLine, sizeof splitLine);")!=std::string::npos&&
           runtimeCpp.find("flatcpu::Scope captureCost(flatcpu::kCopyCapture,s.projectionFrames!=0||lightLive(s));")!=std::string::npos&&
           count(runtimeCpp,"flatcpu::Scope verifyCost(flatcpu::kCopyVerify);")==4,
           "same completed window emits the partition and capture/filter scopes respect their work gates");

@@ -4121,6 +4121,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             for (int i = 0; i < lines.count; ++i) Log::get().note("%s", lines.line[i]);
             flatcpu::formatCopyWindow(window,frame,&lines);
             for (int i = 0; i < lines.count; ++i) Log::get().note("%s", lines.line[i]);
+            char splitLine[1100];
+            flatcpu::formatDrawSplit(window, splitLine, sizeof splitLine);
+            Log::get().note("%s", splitLine);
         }
         s.gpuFrameTried = false;
     }
@@ -5564,6 +5567,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if (flatOffscreenTry(s, context, offscreenArgs, auditing)) return;
     const uint32_t offscreenTargetsBefore = s.prefix.targetsUsed;
     const bool offscreenUncertainBefore = s.prefix.uncertain;
+    flatcpu::DrawSplitCtor splitCtor;
     flatcpu::Scope shell(flatcpu::kOther);   // the scope's own time; the named families below are carved out of it
     ctx = context;
     drawPacketJitterBefore=s.jitterRefusals;drawPacketOverlayBefore=s.overlayRefusedWindow;
@@ -6269,6 +6273,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // (qualifyProjection reads the shaders, the viewport and the constant buffers, and is skipped under Upstream).
     const bool continuesRun = sourceCandidate && s.namedDepth == k.depth && s.namedConstants == k.b1 &&
         std::memcmp(s.namedCamera, d.camera, sizeof(d.camera)) == 0;
+    splitContinued = continuesRun;
+    flatcpu::drawSplitSetContinued(continuesRun);
     const bool coverageReads = s.projection && sceneExtent && k.color != s.prefix.output &&
         (k.format==9 || k.format==23 || k.format==26 || k.format==60) &&
         (s.projectionFrames != 0 || !flatCameraInjectUpstreamOwns());
@@ -7476,6 +7482,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
         engineVelocityFlatDomainEndDraw(ctx);domainStarted=false;
         if(auto* candidate=domainCandidate(state(),domainDepth))candidate->motion.fail("foreground-abandoned-writer");
     }
+    flatcpu::DrawSplitDtor splitDtor(splitContinued);
     flatcpu::Scope shell(flatcpu::kOther);
     if(untrustedStarted) {state().untrusted.endDraw(ctx,false);untrustedStarted=false;}
     if(untrustedPlanned && !untrustedEnded)state().untrusted.abandon();

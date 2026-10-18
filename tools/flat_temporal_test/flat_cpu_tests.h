@@ -21,6 +21,9 @@
 //     draws they belong to; a GPU span nobody timed prints "-", never 0.00
 //   - the census stops when asked (both gates close, nothing more is clocked) and starts afresh
 //   - the clock floor is measured once, at the end of the first window
+//   - the draw-shell split attributes the constructor shell and the copy-check residual by
+//     continuesRun, leaves a nested shell and a copy child out of those buckets, and the
+//     destructor shell uses the same class. An unclocked shell records nothing
 //   - a window with more to say than a log line holds goes out as continuation lines, none over
 //     the limit, none dropped, at the worst values the counters can hold
 //
@@ -1136,6 +1139,105 @@ inline int flatCpuTests() {
         flatcpu::cutFrame(cut);
         expect(cut.copy[flatcpu::kCopyGuardChecks]==0&&cut.copy[flatcpu::kCopyOmGet]==0,
             "functional execution with timing off never advertises sampled counts");
+    }
+    // The draw-shell split. Ticks are the fake clock: 1000 ticks is 1 ms at the census frequency.
+    {
+        flatcpu::resetForTest();
+        fake(0);
+        Run run(1);
+        for (int i = 0; i < 60; ++i) {
+            const bool continued = i % 2 == 0;
+            run.frame(100000, false, [&] {
+                {
+                    flatcpu::DrawSplitCtor ctor;
+                    flatcpu::Scope shell(flatcpu::kOther);
+                    t_now += 1000;
+                    { flatcpu::Scope copy(flatcpu::kCopyChecks); t_now += 300; }
+                    t_now += 300;
+                    flatcpu::drawSplitSetContinued(continued);
+                }
+                {
+                    flatcpu::DrawSplitDtor dtor(continued);
+                    flatcpu::Scope shell(flatcpu::kOther);
+                    t_now += 50;
+                }
+            });
+        }
+        flatcpu::WindowReport r;
+        expect(run.census->take(run.now, false, r) && r.renderClockedFrames == 60,
+               "shell split: every frame of a period-1 window is clocked");
+        const double k = r.renderClockedFrames;
+        expect(nearly(r.splitMs[flatcpu::kSplitCtorContinued] / k, 0.650) &&
+               nearly(r.splitMs[flatcpu::kSplitCtorRest] / k, 0.650) &&
+               r.splitCalls[flatcpu::kSplitCtorContinued] == 30 &&
+               r.splitCalls[flatcpu::kSplitCtorRest] == 30,
+               "constructor shell: 1.300 ms on half the frames, so 0.650 ms a frame in each class");
+        expect(nearly(r.splitMs[flatcpu::kSplitCopyContinued] / k, 0.150) &&
+               nearly(r.splitMs[flatcpu::kSplitCopyRest] / k, 0.150) &&
+               r.splitCalls[flatcpu::kSplitCopyContinued] == 30 &&
+               r.splitCalls[flatcpu::kSplitCopyRest] == 30,
+               "copy-check residual follows the same class and excludes nothing it timed itself");
+        expect(nearly(r.splitMs[flatcpu::kSplitDtorContinued] / k, 0.025) &&
+               nearly(r.splitMs[flatcpu::kSplitDtorRest] / k, 0.025) &&
+               r.splitCalls[flatcpu::kSplitDtorContinued] == 30 &&
+               r.splitCalls[flatcpu::kSplitDtorRest] == 30,
+               "destructor shell uses the class the constructor recorded");
+        expect(nearly((r.splitMs[flatcpu::kSplitCtorContinued] + r.splitMs[flatcpu::kSplitCtorRest] +
+                       r.splitMs[flatcpu::kSplitDtorContinued] + r.splitMs[flatcpu::kSplitDtorRest]) / k,
+                      r.renderMs[flatcpu::kOther] / k),
+               "constructor plus destructor shells are the whole of other when no other shell ran");
+        char line[1100];
+        flatcpu::formatDrawSplit(r, line, sizeof line);
+        expect(has(line, "ctor-continued=0.650 ms/frame (calls 0.5)") &&
+               has(line, "copy-residual-rest=0.150 ms/frame (calls 0.5)") &&
+               has(line, "clocked=60 frames=60"),
+               "the split line is per clocked frame and names both classes");
+        r.clocksOff = true;
+        flatcpu::formatDrawSplit(r, line, sizeof line);
+        expect(has(line, "CPU timing is off"), "timing off is not a zero split");
+        r.clocksOff = false;
+        r.renderClockedFrames = 0;
+        flatcpu::formatDrawSplit(r, line, sizeof line);
+        expect(has(line, "no clocked frame, not a zero"), "no clocked frame is not a zero split");
+    }
+    {
+        flatcpu::resetForTest();
+        fake(0);
+        t_now = 0;
+        {
+            flatcpu::DrawSplitCtor ctor;
+            flatcpu::Scope shell(flatcpu::kOther);
+            t_now = 100;
+            { flatcpu::Scope nested(flatcpu::kOther); t_now = 140; }
+            t_now = 180;
+            {
+                flatcpu::Scope copy(flatcpu::kCopyChecks);
+                t_now = 195;
+                { flatcpu::Scope domain(flatcpu::kCopyDomain); t_now = 220; }
+                t_now = 230;
+            }
+            t_now = 300;
+            flatcpu::drawSplitSetContinued(true);
+        }
+        const flatcpu::Slot* slot = flatcpu::t_ctx.slot;
+        expect(slot && slot->splitTicks[flatcpu::kSplitCtorContinued].load() == 210 &&
+               slot->splitCalls[flatcpu::kSplitCtorContinued].load() == 1 &&
+               slot->splitTicks[flatcpu::kSplitCopyContinued].load() == 25 &&
+               slot->splitCalls[flatcpu::kSplitCopyContinued].load() == 1 &&
+               slot->splitTicks[flatcpu::kSplitCtorRest].load() == 0 &&
+               slot->cell[flatcpu::kOther].ticks.load() == 250 &&
+               slot->cell[flatcpu::kCopyDomain].ticks.load() == 25,
+               "a nested shell and a copy child stay out of the constructor and residual buckets");
+        flatcpu::g_gate.store(flatcpu::kNoThread, std::memory_order_relaxed);
+        {
+            flatcpu::DrawSplitCtor ctor;
+            flatcpu::Scope shell(flatcpu::kOther);
+            t_now += 1000;
+            flatcpu::drawSplitSetContinued(true);
+        }
+        expect(slot && slot->splitCalls[flatcpu::kSplitCtorContinued].load() == 1 &&
+               flatcpu::t_drawSplit.phase == flatcpu::DrawSplitState::Idle,
+               "an unclocked shell adds nothing and leaves the split disarmed");
     }
     fake(0);
     t_fake = false;

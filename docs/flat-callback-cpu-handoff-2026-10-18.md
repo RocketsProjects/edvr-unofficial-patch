@@ -26,12 +26,16 @@
   calls were 0, so the verify functions returned before their own scope.
   Coverage is 0.686 ms over 8126 scene draws. Issue residual 0.548 ms
   over 14500 calls sits near the clock floor.
-- One flight, no behaviour change: split `other` and the copy-check scope
-  into continued producers versus every other slow draw. Continued
-  producers are the reuse hits, about 7000 draws against about 200 fresh.
-  If they own the shell, the change is a continuation path that does not
-  rebuild the draw record or enter copy checks. If the other draws own
-  it, that bypass will not move the frame rate.
+- The split is in the tree. Full build PASS. Not flown. No behaviour
+  change and no new config key. Line: `flat draw shell split:`. Figures
+  are per clocked frame, same denominator as `flat cpu 5s`. `continued`
+  is `continuesRun`. `ctor-continued` plus `ctor-rest` is the constructor
+  shell. `dtor-*` is the destructor shell. Their sum is this draw's share
+  of `other`; the rest of `other` is the dispatch shell. `copy-residual-*`
+  sums to the copy-check residual. If `ctor-continued` is most of that
+  shell, the next change is a continuation path that does not rebuild the
+  draw record or enter copy checks. If `ctor-rest` owns it, that bypass
+  will not move the frame rate.
 - The upper-60s dip stays open and is not this gap. 06:38:16 was 73.4 fps
   at the same draw count, certificate still hit. Other-thread engine
   merge was 2.435 ms over 1727 calls and clear 1.567 ms over 948, against
