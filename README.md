@@ -14,6 +14,12 @@ the cause. The [Discord](https://discord.gg/ynkdf6Gdua) is for setup questions,
 "is this normal", or just talking about it; chat loses attachments and threads,
 so bug reports belong in an issue.
 
+To contribute code, start with [the build and validation guide](docs/building.md),
+make the change in your fork, and open a pull request with the checks you ran.
+C++ changes need a full native Windows validation build. For rendering changes,
+say which headset and VR runtime you tested, or say that a headset flight is
+still needed. The maintainer handles merging and releases.
+
 EDVR is free and stays free. If it improves your VR experience, [tips are
 welcome](https://ko-fi.com/seancharacterecho), but please do not feel any
 obligation.
