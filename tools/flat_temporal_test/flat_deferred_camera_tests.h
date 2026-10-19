@@ -6,6 +6,7 @@
 #include "../../src/d3d11/flat_projection_bindings.h"
 #include "../../src/d3d11/flat_standdown.h"
 #include "flat_laser_scene_tone_tests.h"
+#include "flat_deferred_rc5_camera_captures.h"
 namespace deferred_camera_test {
 using namespace edvr;
 inline unsigned run(){
@@ -159,6 +160,14 @@ inline unsigned run(){
      else expect(!selected.selected() && wake!=FlatStandDownEvent::Resumed && sleep.standing,"stale partial mapped ambiguous foreign inverse creation later short or no-consumer probe cannot wake");
  };
  coldProbe(0);for(unsigned n=1;n<=10;++n)coldProbe(n);
+ failures+=deferred_rc5_camera::run();
+ std::ifstream cameraHeader("src/d3d11/flat_deferred_camera.h");std::string cameraSource,cameraLine;
+ while(std::getline(cameraHeader,cameraLine))cameraSource+=cameraLine+'\n';
+ const auto repairFn=cameraSource.find("inline bool flatRepairDeferredMissingPhase(");
+ const auto dephased=cameraSource.find("flatDeferredDephasedOmission(",repairFn);
+ const auto corrected=cameraSource.find("flatMatchDeferredCamera(cameraBytes,reinterpret_cast<unsigned char*>(rows))!=FlatDeferredCameraMatch::Match",repairFn);
+ expect(repairFn!=std::string::npos&&dephased!=std::string::npos&&corrected!=std::string::npos&&dephased<corrected,
+        "missing-phase repair proves the dephased omission before the strict corrected certificate");
  std::printf("flat deferred camera: %u failure(s)\n",failures);return failures;
 }
 }

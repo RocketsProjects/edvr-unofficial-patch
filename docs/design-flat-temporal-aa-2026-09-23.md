@@ -2,6 +2,7 @@
 
 ## Status
 
+- **State (2026-10-19 rc.5 flight):** `edvr_gfx_20261019_062037` (build 6AD4E0C0, RTX 3070 Ti Laptop, DLSS 1920×810 to 2560×1080) has 2,117 spatial fallbacks, 2,124 history resets and zero DLSS backend failures. All 35 complete deferred-camera captures are inverse-mismatch, and the strict matcher accepts them after the existing inverse-ray correction. The repair rejected them because its float reverse proof bounded the cancelled value. That proof now carries the reversed madd's pre-cancellation magnitude. Mouse timing and the delayed shipyard preview are not in this log. Confirmation flight of the Wine compile `v0.20.0-rc.5-10-gcb642cd0-dirty` passed.
 - **State (2026-10-17 RC4):** Steam `a4a4e751` menu engagement/mode-switch fix visually PASS; carrier history and functional output guard PASS. External deferred-camera refusal remains open; paired witness awaits reproduction.
   Astra release-history review separates the two proven RC3 regressions from the older RC2 deferred matcher; no new FPS regression established. No admission-bound change; main remains unmerged (last entries).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
@@ -17795,3 +17796,33 @@ new broad observers. A coherent proof-transfer helper could prevent partial
 copy omissions, but no refactor is made here. These checks reuse existing
 captures rather than require a separate flight per hypothesis. Main remains
 unmerged pending Sean's decision; the external paired capture remains open.
+
+## 2026-10-19: rc.5 deferred inverse proof
+
+`edvr_gfx_20261019_062037` is v0.20.0-rc.5, build 6AD4E0C0, on an RTX 3070 Ti
+Laptop GPU. DLSS upscales 1920×810 to 2560×1080. The session ends at 2,117
+spatial fallbacks, 2,124 accepted history resets and zero DLSS backend
+failures. Every logged deferred-camera failure with both matrices present is
+`deferred-inverse-unproven` and `inverse-mismatch`: 35 captures. Frame 17258
+has no donor bytes and is not one of them.
+
+Replaying those 35 through `flatRepairDeferredMissingPhase` shows the inverse
+rows lack the requested jitter. Applying `flatJitterInverseUvRay` makes every
+capture pass `flatMatchDeferredCamera`. The repair still returned false. Its
+intermediate step undid the jitter in float32 and required the strict matcher
+on that cancelled matrix. Forward rows still agreed. Translation missed
+gamma(8) by 1.05× to 2.1× after the cancellation, and some inverse-product
+entries missed gamma(12) by orders of magnitude because the bound had collapsed
+with the cancelled coefficient. The residuals themselves stayed at the scale of
+one reversed madd.
+
+`flatDeferredDephasedOmission` reverses that madd in double and charges
+gamma(2) on `|stored| + 2*|phase*w|`, so the removed term stays in the bound
+after cancellation. The corrected upload still has to pass the strict matcher,
+including the nonsingularity test. Wrong-sign, half-phase, double-correction,
+mismatched-camera and unrelated inverse edits stay rejected. The captured
+cases are `tools/flat_temporal_test/flat_deferred_rc5_camera_captures.h`.
+The repair has been in `flat_deferred_camera.h` since `82dbf1b0`, after
+v0.19.1 and present in rc.2. This flight does not time the mouse, and it does
+not show whether the delayed shipyard preview is the same refusal. The
+confirmation flight of Wine compile `v0.20.0-rc.5-10-gcb642cd0-dirty` passed.
