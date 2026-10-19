@@ -5,22 +5,21 @@
 - State: current `main` is `de80be5d`. Prior full validation and packaging run
   `39134563542` at `8d5d25c` remains valid prior proof; the flat draw collision
   is resolved.
-- Latest run `39138326218` and retry attempt 2 failed the same H6
-  `heartbeat_writer_test` late-close assertion. One of 46 heartbeat checks
-  failed on each attempt; the build stopped after 49 of 176 jobs had run. H5
-  scheduling measured 821 ms and 829 ms.
-- The heartbeat writer, its test, and `build.bat` are unchanged between
-  `8d5d25c` and `de80be5d`. Failure logs and diagnostics are retained under
-  `.toolchains/windows/ci-39138326218/`.
-- Evidence: H6's fixed 300 ms sleep can assert before its worker runs. A
-  temporary 700 ms hook delay reproduced the old failure; waiting for the hook
-  and worker exit passed the delayed case and caught a mutant that ignored the
-  close. The logs expose no counters, so the state of the native failures
-  remains unproven.
-- Candidate: synchronize only the H6 test and report its counters on failure.
-  The edited rig passed all 46 checks under local MSVC/Wine; production code
-  remains unchanged. The exact new commit still requires full native Windows CI
-  validation.
+- Native candidate run `39179472024` at `c4bf683a` passed all 46 heartbeat
+  checks, then stopped in `flat_temporal_test` after 73 of 176 jobs. Its only
+  failing assertion searched a source file for a literal LF newline.
+- Confirmed cause: `.gitattributes` omitted `*.inl` from its LF source rules. A
+  scratch checkout with `core.autocrlf=true` reproduced CRLF in the scanned
+  file and the failed match. Adding `*.inl text eol=lf` made all three inline
+  sources LF and the unchanged assertion matched in that same checkout.
+- The production guard and its ordering are present. Neither this line-ending
+  correction nor the prior heartbeat synchronization changes production logic
+  or weakens assertions. The exact new candidate still needs full native CI.
+- Prior heartbeat evidence: fixed 300 ms sampling failed with a temporary 700
+  ms hook delay; synchronized sampling passed and caught a write-after-close
+  mutant. Original failures and diagnostics are retained under
+  `.toolchains/windows/ci-39138326218/`; the next failure is under
+  `.toolchains/windows/ci-39179472024/`.
 - Next: validate the corrected commit and retain its verified artifact paths;
   then install flat + XeSS on the Linux device without `--ini` and verify it.
   Preserve the existing flat settings and device setup. No public release is
@@ -127,3 +126,21 @@ write after close. The repository rig compiled with local MSVC and passed all
 46 checks under Wine; `mutants.py --self-test` passed its 25 source anchors.
 Production code is unchanged. Full native Windows validation of the candidate
 commit is still required before installing its artifacts for flat XeSS testing.
+
+## October 18: native checkout line endings
+
+Run `39179472024` passed the corrected heartbeat gate (`PASS: 46 heartbeat
+writer checks`) and stopped at the source-contract assertion in
+`flat_temporal_test.cpp:2883`. It searched `flat_forward_light_runtime.inl` in
+binary mode for `counts.add(flatcpu::kCopyGuardSkipped);` followed by an LF and
+`return;`. The production demand guard, skipped counter and return precede the
+actual output queries as expected. The other policy checks passed.
+
+Unlike `.cpp` and `.h`, `.inl` lacked an explicit LF rule. A scratch `git -c
+core.autocrlf=true checkout-index` produced 485 CRLF lines in the inline source
+while preserving LF in the test source; the exact literal needle did not match.
+Adding `*.inl text eol=lf` produced LF-only checkouts for all three tracked
+inline sources and made the unchanged needle match. The scratch proof is
+retained under `/tmp/edvr-line-proof-fixed-39179472024/`. No production source
+or test assertion was changed for this correction. Full native validation
+remains required before merge and installation.
