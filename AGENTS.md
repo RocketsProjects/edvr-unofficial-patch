@@ -2,6 +2,15 @@
 
 This is the only instructions file in the repo. CLAUDE.md is a one-line @AGENTS.md import because Claude Code reads only CLAUDE.md; do not add content there.
 
+These notes include the maintainer's workflow. In a fork or contributor's
+clone, follow the project rules for tools, build validation, diagnosis and
+config editing. Use your own shell and Git workflow, and submit changes by
+pull request. The Git section, release-notes rules, and maintainer-only
+merge, push-to-main, tag, release and workflow-dispatch steps elsewhere in
+this file do not apply to contributors. The host-specific validation paths
+still apply: native Windows uses the full local build, and other hosts use
+the full Windows workflow for C++ changes.
+
 Unofficial VR fixes for Elite Dangerous: Odyssey. A proxy DLL
 (`d3d11.dll` beside the game) and EDVR's own OpenXR runtime for
 Elite (`openvr_api.dll` in `Openvr\win64`), a config file, and an
@@ -279,6 +288,24 @@ minutes after a flight finally reproduced the effect being chased.
   stash stack with the main checkout. Never use bare `git stash` / `git
   stash pop`.
 
+## Agent material
+
+Text addressed to agents rather than people stays where anyone can strip it
+from a clone without reading it: `AGENTS.md` and `CLAUDE.md` at the root,
+where the tools look for them, and everything else agent-only (handoff
+prompts, plans, task lists) under `.agents\`. All of it is `export-ignore`
+in `.gitattributes`, so `git archive` and GitHub's source zips leave it out.
+`tools\check_agent_material.py` checks recognized agent instruction and
+prompt paths for `export-ignore`, and rejects zero-width, bidi or tag
+characters in repository text. Placement of other agent-only material under
+`.agents\` is a rule for authors; filenames alone cannot identify every such
+file.
+
+- `docs\` is written for people and is not agent material, even where an
+  agent wrote it.
+- No agent-addressed text in source comments, commit messages or release
+  notes: none of them can be stripped.
+
 ## Layout
 
 | Path | What |
@@ -290,5 +317,6 @@ minutes after a flight finally reproduced the effect being chased.
 | `src\common\` | config, logging, the crash sentinel |
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
 | `docs\` | one investigation doc per arc — read its `## Status` block first |
+| `.agents\` | agent-only material: handoff prompts, plans; `export-ignore`, never in an archive |
 | `build.bat` | full build, all gates; `--dll-only` is the receipt-guarded promotion path |
 | `package.bat <version>` | packages a release from the last full build; it does not build, and refuses unless the build's receipt matches the tree (run `build.bat --wait-lock` first) |

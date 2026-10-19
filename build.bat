@@ -217,6 +217,8 @@ python tools\run_jobs.py ^
     --gate "tools\flash_patch_residual.py --self-test" ^
     --gate "tools\check_status_blocks.py --self-test" ^
     --gate "tools\check_status_blocks.py" ^
+    --gate "tools\check_agent_material.py --self-test" ^
+    --gate "tools\check_agent_material.py" ^
     --gate "tools\layer_fixtures.py --self-test" ^
     --gate "tools\blackhole_optics.py --self-test" ^
     --gate "tools\sgra_optics.py --self-test" ^
