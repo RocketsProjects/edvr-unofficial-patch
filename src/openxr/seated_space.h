@@ -46,6 +46,7 @@ class SeatedSpace {
     return XR_SUCCESS;
   }
   XrSpace space() const {return usable_?(owned_?owned_:local_):XR_NULL_HANDLE;}
+  XrReferenceSpaceType naturalType() const {return type_;}
   XrResult shutdown() {
     XrResult first=XR_SUCCESS;
     for(XrSpace space:{pending_,owned_})if(space) {

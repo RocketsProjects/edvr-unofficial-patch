@@ -22,8 +22,7 @@ struct Rig {
   unsigned answers() const {return f.fake.creates-armedCreates;}     // seated spaces made since the rig was armed: one per answer
   explicit Rig(bool active,bool stage=false):f(stage) {
     using namespace launch_fixture;
-    if(stage){h.seatLoaded=true;h.seatKeyText="stage-fixture";} // the fixture has no SessionBinding
-    else h.seatEnsureLoaded();
+    h.seatEnsureLoaded();
     SeatContext c{};
     if(active)c.published=c.keep=c.gameplay=c.seatedKnown=c.seated=true;
     h.seat.setSeat(SeatPose{1,0,0,0});
@@ -133,6 +132,27 @@ template<class Check> void runSeatOrderCases(Check&& check) {
           "stage seat order: current head in STAGE becomes the remembered player seat");
     check(r.frame(210)==Step::Ok&&r.poseX(210)==0.0,
           "stage seat order: next STAGE frame uses the new dashboard-recentered seat");
+    check(h.seatKeyText.size()>=6&&h.seatKeyText.substr(h.seatKeyText.size()-6)=="-stage",
+          "stage seat order: persisted seat remains keyed to STAGE coordinates");
+  }
+  {   // Without head tracking, the newly recentered LOCAL origin is a seat in STAGE coordinates.
+    Rig r(true,true);auto& h=r.h;
+    r.f.fake.flags=0;r.f.fake.localOriginInStage.position.x=2;
+    r.note(200);
+    check(r.frame(200)==Step::Withheld&&h.localHandled==1&&h.seat.seat().x==2.0&&h.seat.applyPending(),
+          "stage seat order: untracked dashboard recenter stores LOCAL origin in STAGE, not STAGE identity");
+    check(r.f.fake.argumentsValid,"stage seat order: LOCAL origin was located against STAGE");
+  }
+  {   // If neither the head nor LOCAL origin can be related to STAGE, keep the old seat for a retry.
+    Rig r(true,true);auto& h=r.h;
+    r.f.fake.flags=0;r.f.fake.localOriginFlags=0;
+    r.note(200);
+    check(r.frame(200)==Step::Withheld&&h.localHandled==0&&h.seat.seat().x==1.0,
+          "stage seat order: unavailable LOCAL-in-STAGE pose cannot overwrite the saved seat");
+    r.f.fake.flags=launch_fixture::tracked;r.f.fake.head.position.x=3;
+    h.seatProcessRuntimeRecentre();
+    check(h.localHandled==1&&h.seat.seat().x==3.0&&h.currentOrigin.x==3.0,
+          "stage seat order: deferred dashboard recenter lands when tracking returns");
   }
   {   // two events with different change times: each answered by its own frame
     Rig r(true);auto& h=r.h;

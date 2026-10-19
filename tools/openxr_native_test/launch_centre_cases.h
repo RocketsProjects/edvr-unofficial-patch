@@ -18,6 +18,8 @@ struct Fake {
   bool shouldRender=false;
   XrReferenceSpaceType naturalType=XR_REFERENCE_SPACE_TYPE_LOCAL;
   XrSpace naturalSpace=reinterpret_cast<XrSpace>(3); // the default LOCAL fixture handle
+  XrPosef localOriginInStage{{0,0,0,1},{0,0,0}};
+  XrSpaceLocationFlags localOriginFlags=tracked;
   XrTime sampleTime=0,verifyTime=0;
   XrTime lastTime=0;   // the instant of the most recent locate, whichever space it was against (the pose-time cases)
   XrTime rejectTime=-1;XrResult rejectResult=XR_ERROR_TIME_INVALID;   // a locate at exactly this instant answers rejectResult (the pose-time cases)
@@ -61,6 +63,11 @@ inline XrResult XRAPI_PTR destroy(XrSpace space) {
   ++active->destroys;active->lastDestroyed=space;return XR_SUCCESS;
 }
 inline XrResult XRAPI_PTR locate(XrSpace target,XrSpace base,XrTime time,XrSpaceLocation* out) {
+  if(target==local()&&base==stage()) {
+    ++active->locates;active->lastTime=time;
+    if(active->locateResult!=XR_SUCCESS)return active->locateResult;
+    out->locationFlags=active->localOriginFlags;out->pose=active->localOriginInStage;return XR_SUCCESS;
+  }
   ++active->locates;active->lastTime=time;active->argumentsValid&=target==view()&&(base==active->naturalSpace||base==owned());
   if(time==active->rejectTime)return active->rejectResult;
   if(active->locateResult!=XR_SUCCESS)return active->locateResult;
@@ -104,7 +111,7 @@ struct Fixture {
   explicit Fixture(bool useStage=false) {
     active=&fake;fake.naturalType=useStage?XR_REFERENCE_SPACE_TYPE_STAGE:XR_REFERENCE_SPACE_TYPE_LOCAL;
     fake.naturalSpace=useStage?stage():local();
-    host.instance=instance();host.session=session();host.local=fake.naturalSpace;host.view=view();
+    host.instance=instance();host.session=session();host.local=fake.naturalSpace;host.xrLocal=local();host.view=view();
     host.api.convertTime=convert;host.api.locateSpace=locate;
     const Dispatch dispatch{poll,beginSession,endSession,wait,beginFrame,endFrame};
     SystemRead metadata{};metadata.connected=true;
@@ -129,7 +136,7 @@ struct Fixture {
     host.boundary.clear();host.seated.shutdown();host.state.abandonAfterOwnerDestruction();
     host.gate.requestStop(host.runtimeGeneration);host.gate.finishGeneration(host.runtimeGeneration);
     host.runtimeGeneration=0;host.instance=XR_NULL_HANDLE;host.session=XR_NULL_HANDLE;
-    host.local=host.view=XR_NULL_HANDLE;host.api={};active=nullptr;
+    host.local=host.xrLocal=host.view=XR_NULL_HANDLE;host.api={};active=nullptr;
   }
 };
 } // namespace launch_fixture
