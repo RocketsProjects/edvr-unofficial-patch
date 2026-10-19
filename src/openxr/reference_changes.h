@@ -19,7 +19,10 @@ class ReferenceChanges final {
 
   bool note(const XrEventDataReferenceSpaceChangePending& event) noexcept {
     if (!active_) return false;
-    if (event.session != session_ || event.referenceSpaceType != type_)
+    // A dashboard recenter can move LOCAL alone while STAGE stays fixed. In
+    // STAGE mode both events cut cached poses and can redefine the player seat.
+    if (event.session != session_ || (event.referenceSpaceType != type_ &&
+        !(type_==XR_REFERENCE_SPACE_TYPE_STAGE&&event.referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL)))
       return true;
     if (event.type != XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING || event.next != nullptr ||
         (event.poseValid != XR_FALSE && event.poseValid != XR_TRUE)) { retire(); return false; }

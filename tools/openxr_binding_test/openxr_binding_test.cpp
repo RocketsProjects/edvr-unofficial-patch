@@ -24,6 +24,7 @@ struct Fake {
   bool live=false,localLive=false,viewLive=false,stageLive=false,wrongAdapter=false,wrongLevel=false;
   bool supportsStage=false;
   bool missingSpace=false,grow=false,badCount=false,hugeCount=false,neverFits=false,invalidTracking=false;
+  bool probeDualOrigin=false,stagePoseUnavailable=false;
   bool expectVelocity=false,badVelocityChain=false;
   XrSpace expectedOrigin=local;
   uint32_t viewCount=2;XrTime lastTime=0;unsigned enumCalls=0;
@@ -74,17 +75,21 @@ XrResult XRAPI_PTR destroySpace(XrSpace space){
   check(space==local&&fake->localLive&&!fake->viewLive,"destroy local after view");fake->localLive=false;return call("destroyLocal");
 }
 XrResult XRAPI_PTR locateViews(XrSession s,const XrViewLocateInfo* info,XrViewState* state,uint32_t capacity,uint32_t* count,XrView* views){
-  check(s==session&&info->type==XR_TYPE_VIEW_LOCATE_INFO&&!info->next&&info->viewConfigurationType==XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO&&info->space==fake->expectedOrigin&&capacity==2,"locate view ABI/space");
+  check(s==session&&info->type==XR_TYPE_VIEW_LOCATE_INFO&&!info->next&&info->viewConfigurationType==XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO&&
+        (fake->probeDualOrigin?(info->space==stage||info->space==local):info->space==fake->expectedOrigin)&&capacity==2,"locate view ABI/space");
   check(state->type==XR_TYPE_VIEW_STATE&&!state->next,"view state initialized");
   fake->lastTime=info->displayTime;const XrResult r=call("locateViews");if(r!=XR_SUCCESS)return r;
-  *count=fake->viewCount;state->viewStateFlags=fake->invalidTracking?0:XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT;
+  *count=fake->viewCount;state->viewStateFlags=fake->invalidTracking||(fake->stagePoseUnavailable&&info->space==stage)?0:
+      XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT;
   for(unsigned eye=0;eye<2;++eye){check(views[eye].type==XR_TYPE_VIEW&&!views[eye].next,"typed view output");views[eye].pose={{0,0,0,1},{float(eye),2,3}};views[eye].fov={-.7f,.8f,.9f,-1.f};}
   return XR_SUCCESS;
 }
 XrResult XRAPI_PTR locateSpace(XrSpace from,XrSpace base,XrTime time,XrSpaceLocation* out){
-  check(from==view&&base==fake->expectedOrigin&&time==fake->lastTime&&out->type==XR_TYPE_SPACE_LOCATION&&bool(out->next)==fake->expectVelocity,"head shares exact time/base with eye views");
+  check(from==view&&(fake->probeDualOrigin?(base==stage||base==local):base==fake->expectedOrigin)&&
+        time==fake->lastTime&&out->type==XR_TYPE_SPACE_LOCATION&&bool(out->next)==fake->expectVelocity,"head shares exact time/base with eye views");
   const XrResult r=call("locateHead");if(r!=XR_SUCCESS)return r;
-  out->locationFlags=fake->invalidTracking?0:XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+  out->locationFlags=fake->invalidTracking||(fake->stagePoseUnavailable&&base==stage)?0:
+      XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
   out->pose={{0,0,0,1},{10,20,30}};
   if(fake->expectVelocity) {
     auto* velocity=static_cast<XrSpaceVelocity*>(out->next);
@@ -136,6 +141,46 @@ int selfTest(){
     f.runtime.trace.clear();check(f.binding.shutdown()==XR_SUCCESS,"stage binding shutdown");
     check(f.runtime.trace==std::vector<std::string>({"destroyView","destroyStage","destroyLocal","destroySession"}),
           "stage destroyed before local and session");
+  }
+  {Fixture f;f.runtime.supportsStage=true;f.runtime.probeDualOrigin=true;f.runtime.stagePoseUnavailable=true;
+    check(f.init(XR_REFERENCE_SPACE_TYPE_STAGE)==XR_SUCCESS,"unlocatable-stage fixture advertises and creates STAGE");
+    Frame frame{};frame.status=FrameStatus::NoRender;frame.sequence=11;frame.predictedDisplayTime=123456789;
+    XrViewConfigurationView sizes[2]{};for(auto& s:sizes){s.recommendedImageRectWidth=100;s.recommendedImageRectHeight=101;}
+    NaturalSpaceProbe choice=NaturalSpaceProbe::Pending;f.runtime.trace.clear();
+    check(probeNaturalSpace({locateViews,locateSpace},f.binding,frame,5,sizes,choice)==XR_SUCCESS&&
+          choice==NaturalSpaceProbe::LocalFallback,"invalid STAGE eye/head poses with valid LOCAL poses select LOCAL");
+    check(f.runtime.trace==std::vector<std::string>({"locateViews","locateHead","locateViews","locateHead"}),
+          "both reference spaces are probed at the same frame time");
+    check(f.binding.useLocalFallback()&&f.binding.naturalType()==XR_REFERENCE_SPACE_TYPE_LOCAL&&f.binding.naturalSpace()==local,
+          "fallback retains the usable LOCAL binding and leaves STAGE owned for shutdown");
+    f.runtime.expectedOrigin=local;f.runtime.probeDualOrigin=false;
+    GeometryInput located{};
+    check(locateGeometry({locateViews,locateSpace},f.binding,frame,5,sizes,located,nullptr,f.binding.naturalSpace())==XR_SUCCESS&&
+          (located.viewFlags&(XR_VIEW_STATE_POSITION_VALID_BIT|XR_VIEW_STATE_ORIENTATION_VALID_BIT))==
+              (XR_VIEW_STATE_POSITION_VALID_BIT|XR_VIEW_STATE_ORIENTATION_VALID_BIT)&&
+          (located.headFlags&(XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))==
+              (XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT),
+          "fallback produces usable LOCAL stereo and head poses");
+  }
+  {Fixture f;f.runtime.supportsStage=true;f.runtime.probeDualOrigin=true;
+    check(f.init(XR_REFERENCE_SPACE_TYPE_STAGE)==XR_SUCCESS,"locatable-stage fixture initializes");
+    Frame frame{};frame.status=FrameStatus::NoRender;frame.sequence=12;frame.predictedDisplayTime=123456790;
+    XrViewConfigurationView sizes[2]{};for(auto& s:sizes){s.recommendedImageRectWidth=100;s.recommendedImageRectHeight=101;}
+    NaturalSpaceProbe choice=NaturalSpaceProbe::Pending;f.runtime.trace.clear();
+    check(probeNaturalSpace({locateViews,locateSpace},f.binding,frame,5,sizes,choice)==XR_SUCCESS&&
+          choice==NaturalSpaceProbe::Stage&&f.binding.naturalSpace()==stage,
+          "valid STAGE poses preserve the tested upright route");
+    check(f.runtime.trace==std::vector<std::string>({"locateViews","locateHead"}),
+          "valid STAGE route does not probe or select LOCAL");
+  }
+  {Fixture f;f.runtime.supportsStage=true;f.runtime.probeDualOrigin=true;f.runtime.invalidTracking=true;
+    check(f.init(XR_REFERENCE_SPACE_TYPE_STAGE)==XR_SUCCESS,"untracked startup fixture initializes both spaces");
+    Frame frame{};frame.status=FrameStatus::NoRender;frame.sequence=13;frame.predictedDisplayTime=123456791;
+    XrViewConfigurationView sizes[2]{};for(auto& s:sizes){s.recommendedImageRectWidth=100;s.recommendedImageRectHeight=101;}
+    NaturalSpaceProbe choice=NaturalSpaceProbe::Stage;
+    check(probeNaturalSpace({locateViews,locateSpace},f.binding,frame,5,sizes,choice)==XR_SUCCESS&&
+          choice==NaturalSpaceProbe::Pending&&f.binding.naturalSpace()==stage,
+          "when neither route has valid poses startup waits without choosing an untracked LOCAL space");
   }
   {Fixture f;check(f.init(XR_REFERENCE_SPACE_TYPE_STAGE)==XR_SUCCESS,
       "stage request keeps LOCAL when the runtime does not enumerate STAGE");

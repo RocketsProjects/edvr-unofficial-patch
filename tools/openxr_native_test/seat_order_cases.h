@@ -20,9 +20,10 @@ struct Rig {
   NativeRuntimeHost& h=f.host;
   unsigned armedCreates=0;
   unsigned answers() const {return f.fake.creates-armedCreates;}     // seated spaces made since the rig was armed: one per answer
-  explicit Rig(bool active) {
+  explicit Rig(bool active,bool stage=false):f(stage) {
     using namespace launch_fixture;
-    h.seatEnsureLoaded();
+    if(stage){h.seatLoaded=true;h.seatKeyText="stage-fixture";} // the fixture has no SessionBinding
+    else h.seatEnsureLoaded();
     SeatContext c{};
     if(active)c.published=c.keep=c.gameplay=c.seatedKnown=c.seated=true;
     h.seat.setSeat(SeatPose{1,0,0,0});
@@ -118,6 +119,20 @@ template<class Check> void runSeatOrderCases(Check&& check) {
     check(r.frame(350)==Step::Withheld,"seat order: two changes due at once give up one frame");
     check(h.referenceChanges==2&&h.localHandled==2&&r.answers()==1,"seat order: ...answered once, both counted as answered");
     check(r.frame(360)==Step::Ok&&r.poseX(360)==0.0,"seat order: ...and the next frame is in the new space");
+  }
+  {   // SteamVR's dashboard changes LOCAL only while the seated renderer uses STAGE.
+    Rig r(true,true);auto& h=r.h;
+    check(r.f.initialized&&r.f.fake.naturalType==XR_REFERENCE_SPACE_TYPE_STAGE&&
+          h.seated.space()!=XR_NULL_HANDLE,"stage seat order: STAGE-based seated route is armed");
+    r.f.fake.head.position.x=2;
+    r.note(200); // LOCAL event; no STAGE event follows
+    check(r.frame(150)==Step::Ok&&r.poseX(150)==1.0,"stage seat order: old seat remains before LOCAL change time");
+    check(r.frame(200)==Step::Withheld&&h.referenceChanges==1&&h.localHandled==1&&r.answers()==1,
+          "stage seat order: LOCAL-only dashboard change withholds stale STAGE frame and replaces origin");
+    check(h.seat.seat().x==2.0&&h.seat.originIsSeat()&&h.currentOrigin.x==2.0&&r.f.fake.argumentsValid,
+          "stage seat order: current head in STAGE becomes the remembered player seat");
+    check(r.frame(210)==Step::Ok&&r.poseX(210)==0.0,
+          "stage seat order: next STAGE frame uses the new dashboard-recentered seat");
   }
   {   // two events with different change times: each answered by its own frame
     Rig r(true);auto& h=r.h;

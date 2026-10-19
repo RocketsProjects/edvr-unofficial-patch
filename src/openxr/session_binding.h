@@ -35,6 +35,11 @@ class SessionBinding {
   XrSpace localSpace()const{return local_;}
   XrSpace naturalSpace()const{return naturalType_==XR_REFERENCE_SPACE_TYPE_STAGE?stage_:local_;}
   XrReferenceSpaceType naturalType()const{return naturalType_;}
+  // Only before any caller has published or retained a frame/seated child.
+  bool useLocalFallback() noexcept {
+    if(!session_||naturalType_!=XR_REFERENCE_SPACE_TYPE_STAGE||!local_)return false;
+    naturalType_=XR_REFERENCE_SPACE_TYPE_LOCAL;return true;
+  }
   XrSpace viewSpace()const{return view_;}
   ID3D11Device* device()const{return device_.Get();}
   XrResult validateTexture(ID3D11Texture2D*)const;

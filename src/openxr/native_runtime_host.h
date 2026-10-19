@@ -209,6 +209,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   BridgeCounts bridgeCounts=nullptr;
   RuntimeOptions startupOptions;
   uint64_t starts=0,stops=0,startupFrames=0;
+  bool startupNaturalProbed=false;
   // VR_InitInternal's cost by step, wall ms, for the runtime_startup_steps
   // trace: open()'s stretches (instance/system, device, session, the stereo
   // renderer, everything after it) and start()'s loop (zero-layer frames,
@@ -799,6 +800,34 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("hidden_mesh_query,eye=%u,revision=%llu,triangles=%u,dropped=%u,reason=%s,game_frames=%u,game_rvas=%s\n",
       eye,(unsigned long long)revision,triangles,dropped,reason,stack.gameFrames,stack.rvas);
   }
+  // With the session running, a real zero-layer frame supplies the time for
+  // both pose probes. No seat has been loaded or published yet, so choosing
+  // LOCAL here cannot reinterpret a persisted STAGE seat or strand a frame.
+  XrResult probeStartupNaturalSpace(bool& ready) {
+    ready=true;
+    if(startupNaturalProbed||binding.naturalType()!=XR_REFERENCE_SPACE_TYPE_STAGE){startupNaturalProbed=true;return XR_SUCCESS;}
+    XrResult r=boundary.waitAndBegin();
+    if(r!=XR_SUCCESS&&r!=XR_FRAME_DISCARDED&&r!=XR_SESSION_LOSS_PENDING)return r;
+    Frame frame=boundary.frame();
+    if(!applyFrameSequence(frame)){boundary.clear();return XR_ERROR_LIMIT_REACHED;}
+    NaturalSpaceProbe choice=NaturalSpaceProbe::Pending;
+    r=probeNaturalSpace({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,choice);
+    const XrResult ended=boundary.clear();
+    if(ended!=XR_SUCCESS)return ended;
+    ++startupFrames;
+    if(r!=XR_SUCCESS)return r;
+    if(choice==NaturalSpaceProbe::Pending){ready=false;return XR_SUCCESS;}
+    if(choice==NaturalSpaceProbe::LocalFallback) {
+      r=seated.shutdown();if(r!=XR_SUCCESS)return r;
+      if(!binding.useLocalFallback())return XR_ERROR_CALL_ORDER_INVALID;
+      local=binding.naturalSpace();
+      changes.clear();
+      if(!seated.begin({api.createSpace,api.destroySpace},session,local,XR_REFERENCE_SPACE_TYPE_LOCAL)||
+         !changes.begin(session,XR_REFERENCE_SPACE_TYPE_LOCAL))return XR_ERROR_RUNTIME_FAILURE;
+      nativeTracePuts("natural_reference_space,type=LOCAL,reason=steamvr_stage_poses_unavailable");
+    } else nativeTracePuts("natural_reference_space,type=STAGE,reason=steamvr_stage_poses_valid");
+    startupNaturalProbed=true;return XR_SUCCESS;
+  }
   vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out) override {
     ++starts;
     // Constructed on the service thread with its thread-bound frame/device
@@ -833,6 +862,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         enablePerformanceMetrics();
       }
       if(!state.running()){operation=RuntimeGate::Lease{};Sleep(10);continue;}
+      bool naturalReady=false;
+      r=probeStartupNaturalSpace(naturalReady);
+      if(r!=XR_SUCCESS)return vr::VRInitError_Init_Internal;
+      if(!naturalReady){operation=RuntimeGate::Lease{};Sleep(10);continue;}
       operation=RuntimeGate::Lease{};
       CompositorRead initial{};
       if(waitPoses(compositorGeneration,initial)!=vr::VRCompositorError_None)return vr::VRInitError_Init_Internal;
