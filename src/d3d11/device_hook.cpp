@@ -65,6 +65,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../common/proxy.h"
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
+#include "swapchain_probe.h"
 #include "binding_shadow.h"
 #include "draw_census.h"
 #include "eye_draw_snapshot.h"
@@ -3084,11 +3085,16 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
             reinterpret_cast<void**>(&s.realResizeBuffers));
         IDXGISwapChain3* third = nullptr;
         bool resize1 = false;
-        if (SUCCEEDED(swapChain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&third)))) {
+        const bool safeToProbeResize1 = s.swapChainHook.executablePrefix() > kSwapResizeBuffers1 &&
+            swapChainResize1ProbeSafe(s.swapChainHook.originalVTable()[kSwapPresent]);
+        if (safeToProbeResize1 &&
+            SUCCEEDED(swapChain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&third)))) {
             if (static_cast<IDXGISwapChain*>(third) == swapChain && s.swapChainHook.executablePrefix() > kSwapResizeBuffers1)
                 resize1 = s.swapChainHook.replace(kSwapResizeBuffers1, &hookedFlatResizeBuffers1, reinterpret_cast<void**>(&s.realResizeBuffers1));
             third->Release();
         }
+        if (!safeToProbeResize1)
+            Log::get().note("flat runtime resize hooks: skipped optional IDXGISwapChain3 probe on a non-system swap-chain wrapper");
         Log::get().note("flat runtime resize hooks: ResizeBuffers=%u ResizeBuffers1=%u; release owned backbuffer references before forwarding", resize?1u:0u, resize1?1u:0u);
         if (!resize) {
             // The abort also takes the Present hook down. A VR launch keeps it: the flat hooks are only missing, and a switch into

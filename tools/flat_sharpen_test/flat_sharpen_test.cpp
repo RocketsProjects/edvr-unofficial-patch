@@ -28,6 +28,7 @@
 #include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/flat_sharpen.h"
 #include "../../src/d3d11/menu_flat_rows.h"
+#include "../../src/d3d11/swapchain_probe.h"
 
 using namespace rig;
 
@@ -616,6 +617,21 @@ void wrapperContract() {
 
 }  // namespace
 
+void swapChainProbeGuard() {
+    HMODULE systemDxgi = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    check(systemDxgi != nullptr, "the system DXGI module is available for the swap-chain probe test");
+    if (systemDxgi) {
+        void* factoryExport = reinterpret_cast<void*>(GetProcAddress(systemDxgi, "CreateDXGIFactory"));
+        check(factoryExport && edvr::swapChainResize1ProbeSafe(factoryExport),
+              "the optional interface probe is allowed for a system DXGI method");
+        FreeLibrary(systemDxgi);
+    }
+    check(!edvr::swapChainResize1ProbeSafe(reinterpret_cast<void*>(&swapChainProbeGuard)),
+          "the optional interface probe is refused for a third-party wrapper");
+    check(!edvr::swapChainResize1ProbeSafe(nullptr),
+          "the optional interface probe is refused for an unknown method");
+}
+
 int main(int argc, char** argv) {
     SetErrorMode(3);
     if (argc >= 2 && !std::strcmp(argv[1], "--dry-run")) {
@@ -627,6 +643,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     panelTable(argv[2], argv[3]);
+    swapChainProbeGuard();
     sharpenRowDim();
     wrapperContract();
     std::printf("flat_sharpen_test: %u checks, %u failures\n", g_checks, g_failures);
